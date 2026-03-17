@@ -1,3 +1,10 @@
+## [1.0.4-dev.3](https://github.com/hectorvent/floci/compare/1.0.4-dev.2...1.0.4-dev.3) (2026-03-17)
+
+
+### Bug Fixes
+
+* update workflow to download artifact into target ([4c18934](https://github.com/hectorvent/floci/commit/4c1893459579a6e5e1fa37145ace2a8433cd56e2))
+
 ## [1.0.4-dev.2](https://github.com/hectorvent/floci/compare/1.0.4-dev.1...1.0.4-dev.2) (2026-03-17)
 
 
