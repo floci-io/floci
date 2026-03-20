@@ -23,7 +23,7 @@
 
 ---
 
-> LocalStack's community edition [sunset in March 2026](https://blog.localstack.cloud/the-road-ahead-for-localstack/) — requiring auth tokens, dropping CI support, and freezing security updates. Floci is the no-strings-attached alternative.
+> LocalStack's community edition [sunset in March 2026](https://blog.localstack.cloud/the-road-ahead-for-localstack/) — requiring auth tokens, and freezing security updates. Floci is the no-strings-attached alternative.
 
 ## Why Floci?
 
