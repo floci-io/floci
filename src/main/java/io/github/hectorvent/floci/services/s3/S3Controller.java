@@ -723,12 +723,16 @@ public class S3Controller {
     private Response handleGetBucketLocation(String bucket) {
         s3Service.headBucket(bucket);
         String region = regionResolver.getDefaultRegion();
-        String xml = new XmlBuilder()
+        // Serverless Framework expects empty LocationConstraint for us-east-1.
+        // Returning the literal string causes a deployment bucket region mismatch.
+        String effectiveRegion = "us-east-1".equals(region) ? "" : region;
+        XmlBuilder xb = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-                .start("LocationConstraint", AwsNamespaces.S3)
-                .raw(XmlBuilder.escape(region))
-                .end("LocationConstraint")
-                .build();
+                .start("LocationConstraint", AwsNamespaces.S3);
+        if (!effectiveRegion.isEmpty()) {
+            xb.raw(XmlBuilder.escape(effectiveRegion));
+        }
+        String xml = xb.end("LocationConstraint").build();
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
