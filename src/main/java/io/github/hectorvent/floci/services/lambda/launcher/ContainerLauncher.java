@@ -13,6 +13,8 @@ import com.github.dockerjava.api.command.CreateContainerCmd;
 import com.github.dockerjava.api.command.CreateContainerResponse;
 import com.github.dockerjava.api.model.Frame;
 import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.Bind;
+import com.github.dockerjava.api.model.Volume;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -75,10 +77,9 @@ public class ContainerLauncher {
         LOG.infov("Launching container for function: {0}", fn.getFunctionName());
 
         // For Zip functions, verify code exists before allocating any resources.
-        // Without this check, a container could start with an empty /var/task if the
-        // function was deleted (or code was replaced) between the invocation being
-        // enqueued and the container being launched.
-        if (fn.getCodeLocalPath() != null) {
+        // Skip this check for hot-reload functions — the codeLocalPath is a Docker
+        // HOST path (for bind mounts) that isn’t visible inside this container.
+        if (fn.getCodeLocalPath() != null && !fn.isHotReload()) {
             Path codePath = Path.of(fn.getCodeLocalPath());
             if (!Files.exists(codePath)) {
                 throw new RuntimeException("Code directory not found for function '"
@@ -121,6 +122,18 @@ public class ContainerLauncher {
         HostConfig hostConfig = HostConfig.newHostConfig()
                 .withMemory(fn.getMemorySize() * 1024 * 1024L);
 
+        // Hot-reload: bind-mount host code directory directly into the container.
+        // The codeLocalPath is a Docker HOST path — the Docker daemon resolves it
+        // on the host filesystem when creating the bind mount. This means file edits
+        // on the host are instantly visible inside the Lambda container.
+        if (fn.isHotReload() && fn.getCodeLocalPath() != null) {
+            hostConfig.withBinds(new Bind(
+                    fn.getCodeLocalPath(),
+                    new Volume(TASK_DIR),
+                    com.github.dockerjava.api.model.AccessMode.ro));
+            LOG.infov("Hot-reload bind mount: {0} -> {1}", fn.getCodeLocalPath(), TASK_DIR);
+        }
+
         // Attach to a specific Docker network if configured
         config.services().lambda().dockerNetwork()
                 .or(() -> config.services().dockerNetwork())
@@ -146,7 +159,9 @@ public class ContainerLauncher {
         String containerId = container.getId();
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
 
-        // Copy code into container via Docker API tar stream (works inside Docker too)
+        // Copy code into container via Docker API tar stream (works inside Docker too).
+        // For hot-reload functions the code is already bind-mounted, so skip the TAR copy.
+        if (!fn.isHotReload()) {
         if (fn.getCodeLocalPath() != null) {
             Path codePath = Path.of(fn.getCodeLocalPath());
             try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
@@ -180,6 +195,7 @@ public class ContainerLauncher {
                 LOG.warnv("Failed to copy code into container {0}: {1}", containerId, e.getMessage());
             }
         }
+        } // end !hotReload
 
         // Start container
         dockerClient.startContainerCmd(containerId).exec();

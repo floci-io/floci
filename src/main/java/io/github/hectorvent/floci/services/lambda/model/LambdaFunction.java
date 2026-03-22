@@ -26,6 +26,7 @@ public class LambdaFunction {
     private String packageType = "Zip";
     private String imageUri;
     private String codeLocalPath;
+    private boolean hotReload;
     private Map<String, String> environment = new HashMap<>();
     private Map<String, String> tags = new HashMap<>();
     private long lastModified;
@@ -82,6 +83,9 @@ public class LambdaFunction {
 
     public String getCodeLocalPath() { return codeLocalPath; }
     public void setCodeLocalPath(String codeLocalPath) { this.codeLocalPath = codeLocalPath; }
+
+    public boolean isHotReload() { return hotReload; }
+    public void setHotReload(boolean hotReload) { this.hotReload = hotReload; }
 
     public Map<String, String> getEnvironment() { return environment; }
     public void setEnvironment(Map<String, String> environment) { this.environment = environment; }

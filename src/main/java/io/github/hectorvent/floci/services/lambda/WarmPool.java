@@ -87,6 +87,13 @@ public class WarmPool {
      * Otherwise returns a warm container from the pool, or cold-starts a new one.
      */
     public ContainerHandle acquire(LambdaFunction fn) {
+        // Hot-reload functions always get a fresh container so they see
+        // the latest code from the bind-mounted directory. Reusing a warm
+        // container would serve stale code cached in the overlay filesystem.
+        if (fn.isHotReload() && config != null && config.services().lambda().ephemeral()) {
+            return containerLauncher.launch(fn);
+        }
+
         boolean ephemeral = config != null && config.services().lambda().ephemeral();
         ContainerHandle handle = null;
 

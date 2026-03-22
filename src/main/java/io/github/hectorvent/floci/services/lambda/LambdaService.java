@@ -167,6 +167,23 @@ public class LambdaService {
             if (imageUri != null) {
                 fn.setImageUri(imageUri);
             }
+
+            // Hot-reload support: S3Bucket=hot-reload,S3Key=<host-path>
+            // This mirrors LocalStack’s convention — the S3Key is treated as a
+            // host filesystem path that gets bind-mounted into Lambda containers.
+            // The path is a Docker HOST path (not a container path) because the
+            // Docker daemon resolves bind mounts on the host filesystem.
+            String s3Bucket = (String) code.get("S3Bucket");
+            String s3Key = (String) code.get("S3Key");
+            if ("hot-reload".equals(s3Bucket) && s3Key != null && !s3Key.isBlank()) {
+                // Strip surrounding quotes that the AWS CLI may add
+                String cleanPath = s3Key.replaceAll("^['\"]|['\"]$", "");
+                fn.setCodeLocalPath(cleanPath);
+                fn.setHotReload(true);
+                LOG.infov("Hot-reload enabled for function {0}: host code path = {1}",
+                        functionName, cleanPath);
+            }
+
             String zipFileBase64 = (String) code.get("ZipFile");
             if (zipFileBase64 != null) {
                 extractZipCode(fn, zipFileBase64);
@@ -193,6 +210,17 @@ public class LambdaService {
 
         String zipFileBase64 = (String) request.get("ZipFile");
         String imageUri = (String) request.get("ImageUri");
+
+        // Hot-reload support for code updates
+        String s3Bucket = (String) request.get("S3Bucket");
+        String s3Key = (String) request.get("S3Key");
+        if ("hot-reload".equals(s3Bucket) && s3Key != null && !s3Key.isBlank()) {
+            String cleanPath = s3Key.replaceAll("^['\"]|['\"]$", "");
+            fn.setCodeLocalPath(cleanPath);
+            fn.setHotReload(true);
+            LOG.infov("Hot-reload updated for function {0}: host code path = {1}",
+                    functionName, cleanPath);
+        }
 
         if (zipFileBase64 != null) {
             extractZipCode(fn, zipFileBase64);
