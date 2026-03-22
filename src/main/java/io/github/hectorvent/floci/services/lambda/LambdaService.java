@@ -606,7 +606,27 @@ public class LambdaService {
     }
 
     private void extractZipCode(LambdaFunction fn, String zipFileBase64) {
-        byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
+        byte[] zipBytes;
+        try {
+            zipBytes = Base64.getDecoder().decode(zipFileBase64);
+        } catch (IllegalArgumentException e) {
+            // ZipFile content is not valid base64 (e.g., raw JS stub from CF provisioner).
+            // Treat it as inline source code: wrap it in a zip and proceed.
+            LOG.warnv("ZipFile for {0} is not base64, treating as inline source", fn.getFunctionName());
+            try {
+                var buf = new java.io.ByteArrayOutputStream();
+                var zos = new java.util.zip.ZipOutputStream(buf);
+                String handler = fn.getHandler() != null ? fn.getHandler().split("\\.")[0] + ".js" : "index.js";
+                zos.putNextEntry(new java.util.zip.ZipEntry(handler));
+                zos.write(zipFileBase64.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                zos.closeEntry();
+                zos.close();
+                zipBytes = buf.toByteArray();
+            } catch (java.io.IOException ioe) {
+                LOG.warnv("Failed to wrap inline source for {0}: {1}", fn.getFunctionName(), ioe.getMessage());
+                return;
+            }
+        }
         Path codePath = codeStore.getCodePath(fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);

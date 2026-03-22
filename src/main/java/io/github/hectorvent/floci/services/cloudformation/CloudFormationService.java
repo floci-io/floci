@@ -48,7 +48,15 @@ public class CloudFormationService {
 
     public List<Stack> describeStacks(String stackName, String region) {
         if (stackName != null && !stackName.isBlank()) {
-            Stack stack = stacks.get(key(stackName, region));
+            // Support lookup by ARN: arn:aws:cloudformation:REGION:ACCOUNT:stack/NAME/UUID
+            String resolvedName = stackName;
+            if (stackName.startsWith("arn:")) {
+                String[] parts = stackName.split("/");
+                if (parts.length >= 2) {
+                    resolvedName = parts[1];
+                }
+            }
+            Stack stack = stacks.get(key(resolvedName, region));
             if (stack == null) {
                 throw new AwsException("ValidationError",
                         "Stack with id " + stackName + " does not exist", 400);

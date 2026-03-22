@@ -231,7 +231,16 @@ public class CloudFormationResourceProvisioner {
         req.put("Handler", props != null && props.has("Handler") ? engine.resolve(props.get("Handler")) : "index.handler");
         req.put("Role", props != null && props.has("Role") ? engine.resolve(props.get("Role")) : "arn:aws:iam::" + accountId + ":role/default");
         if (props != null && props.has("Code")) {
-            req.put("Code", Map.of("ZipFile", "exports.handler=async(e)=>({statusCode:200})"));
+            JsonNode codeNode = props.get("Code");
+            String s3Bucket = codeNode.has("S3Bucket") ? engine.resolve(codeNode.get("S3Bucket")) : null;
+            String s3Key = codeNode.has("S3Key") ? engine.resolve(codeNode.get("S3Key")) : null;
+            if ("hot-reload".equals(s3Bucket) && s3Key != null) {
+                // Hot-reload: pass S3Bucket/S3Key through so LambdaService sets up bind mounts
+                req.put("Code", Map.of("S3Bucket", s3Bucket, "S3Key", s3Key));
+            } else {
+                // Stub handler for non-hot-reload CF-provisioned functions
+                req.put("Code", Map.of("ZipFile", "exports.handler=async(e)=>({statusCode:200})"));
+            }
         } else {
             req.put("Code", Map.of("ZipFile", "exports.handler=async(e)=>({statusCode:200})"));
         }
