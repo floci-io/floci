@@ -1,5 +1,7 @@
 *
 !docker/entrypoint.sh
+!pom.xml
+!src/**
 !target/*.so
 !target/*.properties
 !target/*-runner
