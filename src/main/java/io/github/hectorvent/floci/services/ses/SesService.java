@@ -163,6 +163,20 @@ public class SesService {
         return emails;
     }
 
+    public List<SentEmail> getEmails(String region) {
+        String prefix = "email::" + region + "::";
+        return emailStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public void clearEmails(String region) {
+        String prefix = "email::" + region + "::";
+        List<String> keys = new ArrayList<>(emailStore.keys().stream()
+                .filter(k -> k.startsWith(prefix))
+                .toList());
+        keys.forEach(emailStore::delete);
+        LOG.infov("Cleared all SES emails in region {0}", region);
+    }
+
     private static String identityKey(String region, String identity) {
         return "identity::" + region + "::" + identity;
     }
