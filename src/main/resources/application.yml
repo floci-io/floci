@@ -108,3 +108,6 @@ floci:
       enabled: true
     cloudformation:
       enabled: true
+    acm:
+      enabled: true
+      validation-wait-seconds: 0

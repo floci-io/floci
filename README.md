@@ -47,7 +47,7 @@
 | KMS (sign, verify, re-encrypt) | ✅ | ⚠️ Partial |
 | Native binary | ✅ ~40 MB | ❌ |
 
-**20+ services. 408/408 SDK tests passing. Free forever.**
+**21+ services. 408/408 SDK tests passing. Free forever.**
 
 ## Quick Start
 

@@ -150,6 +150,7 @@ public interface EmulatorConfig {
         CognitoServiceConfig cognito();
         StepFunctionsServiceConfig stepfunctions();
         CloudFormationServiceConfig cloudformation();
+        AcmServiceConfig acm();
     }
 
     interface SsmServiceConfig {
@@ -293,6 +294,15 @@ public interface EmulatorConfig {
     interface CloudFormationServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface AcmServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** Seconds to wait before transitioning from PENDING_VALIDATION to ISSUED (0 = immediate) */
+        @WithDefault("0")
+        int validationWaitSeconds();
     }
 
     interface LambdaServiceConfig {

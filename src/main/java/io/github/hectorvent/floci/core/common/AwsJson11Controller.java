@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -40,6 +41,7 @@ public class AwsJson11Controller {
     private static final String APIGW_V2_TARGET_PREFIX = "AmazonApiGatewayV2.";
     private static final String KMS_TARGET_PREFIX = "TrentService.";
     private static final String COGNITO_TARGET_PREFIX = "AWSCognitoIdentityProviderService.";
+    private static final String ACM_TARGET_PREFIX = "CertificateManager.";
 
     private final ObjectMapper objectMapper;
     private final RegionResolver regionResolver;
@@ -51,6 +53,7 @@ public class AwsJson11Controller {
     private final ApiGatewayV2JsonHandler apigwV2JsonHandler;
     private final KmsJsonHandler kmsJsonHandler;
     private final CognitoJsonHandler cognitoJsonHandler;
+    private final AcmJsonHandler acmJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, RegionResolver regionResolver,
@@ -59,7 +62,8 @@ public class AwsJson11Controller {
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
                                KinesisJsonHandler kinesisJsonHandler,
                                ApiGatewayV2JsonHandler apigwV2JsonHandler,
-                               KmsJsonHandler kmsJsonHandler, CognitoJsonHandler cognitoJsonHandler) {
+                               KmsJsonHandler kmsJsonHandler, CognitoJsonHandler cognitoJsonHandler,
+                               AcmJsonHandler acmJsonHandler) {
         this.objectMapper = objectMapper;
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
@@ -70,6 +74,7 @@ public class AwsJson11Controller {
         this.apigwV2JsonHandler = apigwV2JsonHandler;
         this.kmsJsonHandler = kmsJsonHandler;
         this.cognitoJsonHandler = cognitoJsonHandler;
+        this.acmJsonHandler = acmJsonHandler;
     }
 
     @POST
@@ -111,6 +116,9 @@ public class AwsJson11Controller {
         } else if (target.startsWith(COGNITO_TARGET_PREFIX)) {
             prefix = COGNITO_TARGET_PREFIX;
             serviceName = "Cognito";
+        } else if (target.startsWith(ACM_TARGET_PREFIX)) {
+            prefix = ACM_TARGET_PREFIX;
+            serviceName = "ACM";
         } else {
             return Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException",
@@ -134,6 +142,7 @@ public class AwsJson11Controller {
                 case "ApiGatewayV2" -> apigwV2JsonHandler.handle(action, request, region);
                 case "KMS" -> kmsJsonHandler.handle(action, request, region);
                 case "Cognito" -> cognitoJsonHandler.handle(action, request, region);
+                case "ACM" -> acmJsonHandler.handle(action, request, region);
                 default -> null;
             };
         } catch (AwsException e) {
