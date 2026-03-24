@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -569,10 +570,15 @@ public class SnsService {
                         region = extractRegionFromArn(topicArn);
                     }
                     String queueUrl = sqsArnToUrl(sub.getEndpoint());
-                    String envelope = buildSnsEnvelope(message, subject, messageAttributes, topicArn, messageId);
-                    sqsService.sendMessage(queueUrl, envelope, 0, messageGroupId, null, region);
-                    LOG.debugv("Delivered SNS message to SQS: {0} ({1}) in {2}",
-                            sub.getEndpoint(), queueUrl, region);
+                    boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
+                    String body = rawDelivery
+                            ? message
+                            : buildSnsEnvelope(message, subject, messageAttributes, topicArn, messageId);
+                    Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
+                            ? toSqsMessageAttributes(messageAttributes)
+                            : null;
+                    sqsService.sendMessage(queueUrl, body, 0, messageGroupId, null, sqsAttributes, region);
+                    LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}", sub.getEndpoint(), queueUrl, rawDelivery);
                 }
                 case "lambda" -> {
                     String fnName = extractFunctionName(sub.getEndpoint());
@@ -645,6 +651,21 @@ public class SnsService {
         if (arn == null || !arn.startsWith("arn:aws:")) return null;
         String[] parts = arn.split(":");
         return parts.length >= 4 ? parts[3] : null;
+    }
+
+    /**
+     * Converts SNS message attributes (simple String map) to SQS MessageAttributeValue objects
+     * for forwarding when RawMessageDelivery is enabled.
+     */
+    private Map<String, MessageAttributeValue> toSqsMessageAttributes(Map<String, String> snsAttributes) {
+        if (snsAttributes == null || snsAttributes.isEmpty()) {
+            return null;
+        }
+        Map<String, MessageAttributeValue> sqsAttrs = new java.util.HashMap<>();
+        for (var entry : snsAttributes.entrySet()) {
+            sqsAttrs.put(entry.getKey(), new MessageAttributeValue(entry.getValue(), "String"));
+        }
+        return sqsAttrs;
     }
 
     private String buildSnsEnvelope(String message, String subject,

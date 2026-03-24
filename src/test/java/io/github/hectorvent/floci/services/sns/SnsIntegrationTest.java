@@ -32,6 +32,10 @@ class SnsIntegrationTest {
     private static String topicArn;
     private static String subscriptionArn;
     private static String sqsQueueUrl;
+    private static String rawDeliveryQueueUrl;
+    private static String rawDeliverySubArn;
+    private static String envelopeQueueUrl;
+    private static String envelopeSubArn;
 
     @Test
     @Order(1)
@@ -585,6 +589,157 @@ class SnsIntegrationTest {
         given().contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DeleteQueue").formParam("QueueUrl", filterQueueUrlB)
             .when().post("/");
+    }
+
+    @Test
+    @Order(50)
+    void rawDelivery_createQueuesAndSubscribe() {
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/sns-raw-delivery-queue")
+            .when().post("/");
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/sns-envelope-delivery-queue")
+            .when().post("/");
+
+        rawDeliveryQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "sns-raw-delivery-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        envelopeQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "sns-envelope-delivery-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        rawDeliverySubArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "sqs")
+            .formParam("Endpoint", rawDeliveryQueueUrl)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+
+        envelopeSubArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "sqs")
+            .formParam("Endpoint", envelopeQueueUrl)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+    }
+
+    @Test
+    @Order(51)
+    void rawDelivery_setSubscriptionAttribute() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetSubscriptionAttributes")
+            .formParam("SubscriptionArn", rawDeliverySubArn)
+            .formParam("AttributeName", "RawMessageDelivery")
+            .formParam("AttributeValue", "true")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(52)
+    void rawDelivery_publishAndVerifyRawMessage() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "Raw delivery test message")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", rawDeliveryQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("Raw delivery test message"))
+            .body(not(containsString("Notification")));
+    }
+
+    @Test
+    @Order(53)
+    void rawDelivery_defaultSubscriptionWrapsInEnvelope() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", envelopeQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("Raw delivery test message"))
+            .body(containsString("Notification"));
+    }
+
+    @Test
+    @Order(54)
+    void rawDelivery_cleanup() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Unsubscribe")
+            .formParam("SubscriptionArn", rawDeliverySubArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Unsubscribe")
+            .formParam("SubscriptionArn", envelopeSubArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", rawDeliveryQueueUrl)
+        .when()
+            .post("/");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", envelopeQueueUrl)
+        .when()
+            .post("/");
     }
 
     @Test
