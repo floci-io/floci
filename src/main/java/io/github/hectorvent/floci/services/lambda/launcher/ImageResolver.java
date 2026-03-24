@@ -24,6 +24,8 @@ public class ImageResolver {
             Map.entry("nodejs22.x", "public.ecr.aws/lambda/nodejs:22"),
             Map.entry("nodejs20.x", "public.ecr.aws/lambda/nodejs:20"),
             Map.entry("nodejs18.x", "public.ecr.aws/lambda/nodejs:18"),
+            Map.entry("ruby3.3", "public.ecr.aws/lambda/ruby:3.3"),
+            Map.entry("ruby3.2", "public.ecr.aws/lambda/ruby:3.2"),
             Map.entry("provided.al2023", "public.ecr.aws/lambda/provided:al2023"),
             Map.entry("provided.al2", "public.ecr.aws/lambda/provided:al2")
     );
