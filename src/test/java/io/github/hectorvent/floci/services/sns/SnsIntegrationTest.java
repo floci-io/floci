@@ -294,6 +294,11 @@ class SnsIntegrationTest {
             .statusCode(200);
     }
 
+    private static String filterQueueUrlA;
+    private static String filterQueueUrlB;
+    private static String filterSubArnA;
+    private static String filterSubArnB;
+
     @Test
     @Order(22)
     void getSubscriptionAttributes_jsonProtocol() {
@@ -359,6 +364,230 @@ class SnsIntegrationTest {
     }
 
     @Test
+    @Order(13)
+    void filterPolicy_createQueuesAndSubscribe() {
+        filterQueueUrlA = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "filter-queue-sports")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        filterQueueUrlB = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "filter-queue-weather")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        String sportsQueueArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", filterQueueUrlA)
+            .formParam("AttributeName.1", "QueueArn")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("**.find { it.Name == 'QueueArn' }.Value");
+
+        String weatherQueueArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", filterQueueUrlB)
+            .formParam("AttributeName.1", "QueueArn")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("**.find { it.Name == 'QueueArn' }.Value");
+
+        filterSubArnA = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "sqs")
+            .formParam("Endpoint", sportsQueueArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetSubscriptionAttributes")
+            .formParam("SubscriptionArn", filterSubArnA)
+            .formParam("AttributeName", "FilterPolicy")
+            .formParam("AttributeValue", "{\"category\":[\"sports\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        filterSubArnB = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "sqs")
+            .formParam("Endpoint", weatherQueueArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetSubscriptionAttributes")
+            .formParam("SubscriptionArn", filterSubArnB)
+            .formParam("AttributeName", "FilterPolicy")
+            .formParam("AttributeValue", "{\"category\":[\"weather\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(14)
+    void filterPolicy_routesMessageToMatchingSubscription() {
+        drainQueue(filterQueueUrlA);
+        drainQueue(filterQueueUrlB);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "Goal scored!")
+            .formParam("MessageAttributes.entry.1.Name", "category")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "String")
+            .formParam("MessageAttributes.entry.1.Value.StringValue", "sports")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", filterQueueUrlA)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("Goal scored!"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", filterQueueUrlB)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Message>")));
+    }
+
+    @Test
+    @Order(15)
+    void filterPolicy_noFilterPolicyReceivesAllMessages() {
+        drainQueue(sqsQueueUrl);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "Unfiltered broadcast")
+            .formParam("MessageAttributes.entry.1.Name", "category")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "String")
+            .formParam("MessageAttributes.entry.1.Value.StringValue", "weather")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", sqsQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("Unfiltered broadcast"));
+    }
+
+    @Test
+    @Order(16)
+    void filterPolicy_nonMatchingMessageNotDelivered() {
+        drainQueue(filterQueueUrlA);
+        drainQueue(filterQueueUrlB);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "Stock update")
+            .formParam("MessageAttributes.entry.1.Name", "category")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "String")
+            .formParam("MessageAttributes.entry.1.Value.StringValue", "finance")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", filterQueueUrlA)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Message>")));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", filterQueueUrlB)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("<Message>")));
+    }
+
+    @Test
+    @Order(17)
+    void filterPolicy_cleanup() {
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Unsubscribe").formParam("SubscriptionArn", filterSubArnA)
+            .when().post("/");
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Unsubscribe").formParam("SubscriptionArn", filterSubArnB)
+            .when().post("/");
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue").formParam("QueueUrl", filterQueueUrlA)
+            .when().post("/");
+        given().contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue").formParam("QueueUrl", filterQueueUrlB)
+            .when().post("/");
+    }
+
+    @Test
     @Order(100)
     void unsubscribe() {
         given()
@@ -404,7 +633,7 @@ class SnsIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(102)
     void unsupportedAction_returns400() {
         given()
             .contentType("application/x-www-form-urlencoded")
@@ -414,5 +643,19 @@ class SnsIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("UnsupportedOperation"));
+    }
+
+    /**
+     * Drains all pending messages from the given SQS queue using PurgeQueue.
+     */
+    private void drainQueue(String queueUrl) {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "PurgeQueue")
+            .formParam("QueueUrl", queueUrl)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }
