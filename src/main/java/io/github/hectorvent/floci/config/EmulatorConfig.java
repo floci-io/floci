@@ -44,6 +44,7 @@ public interface EmulatorConfig {
         CloudWatchLogsStorageConfig cloudwatchlogs();
         CloudWatchMetricsStorageConfig cloudwatchmetrics();
         SecretsManagerStorageConfig secretsmanager();
+        AcmStorageConfig acm();
     }
 
     interface SsmStorageConfig {
@@ -105,6 +106,14 @@ public interface EmulatorConfig {
     }
 
     interface SecretsManagerStorageConfig {
+        @WithDefault("memory")
+        String mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface AcmStorageConfig {
         @WithDefault("memory")
         String mode();
 

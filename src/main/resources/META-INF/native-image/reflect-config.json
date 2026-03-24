@@ -2341,5 +2341,61 @@
     "allDeclaredConstructors": true,
     "allDeclaredMethods": true,
     "allDeclaredFields": true
+  },
+  {
+    "name": "org.bouncycastle.jce.provider.BouncyCastleProvider",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true,
+    "allDeclaredFields": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.asymmetric.rsa.KeyFactorySpi",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.asymmetric.ec.KeyFactorySpi$EC",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.asymmetric.rsa.KeyPairGeneratorSpi",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.asymmetric.ec.KeyPairGeneratorSpi$EC",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.digest.SHA256$Digest",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.digest.SHA384$Digest",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.asymmetric.rsa.DigestSignatureSpi$SHA256",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.asymmetric.ec.SignatureSpi$ecDSA256",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.symmetric.AES$ECB",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
+  },
+  {
+    "name": "org.bouncycastle.jcajce.provider.symmetric.PBEPBKDF2$PBKDF2withSHA256",
+    "allDeclaredConstructors": true,
+    "allDeclaredMethods": true
   }
 ]

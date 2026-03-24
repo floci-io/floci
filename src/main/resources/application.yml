@@ -3,7 +3,15 @@ quarkus:
     port: 4566
     host: 0.0.0.0
   native:
-    additional-build-args: "--initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,--initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32"
+    additional-build-args: >-
+      --initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,
+      --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32,
+      --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$Default,
+      --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV,
+      --initialize-at-run-time=org.bouncycastle.crypto.prng.SP800SecureRandom,
+      --initialize-at-run-time=org.bouncycastle.jce.provider.BouncyCastleProvider,
+      --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService,
+      --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
 
 floci:
   base-url: "http://localhost:4566"
@@ -39,6 +47,9 @@ floci:
         mode: memory
         flush-interval-ms: 5000
       secretsmanager:
+        mode: memory
+        flush-interval-ms: 5000
+      acm:
         mode: memory
         flush-interval-ms: 5000
 

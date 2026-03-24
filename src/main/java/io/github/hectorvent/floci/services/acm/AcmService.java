@@ -21,6 +21,7 @@ import java.util.*;
 import java.util.LinkedHashSet;
 import java.util.HexFormat;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
@@ -48,6 +49,7 @@ public class AcmService {
     private final RegionResolver regionResolver;
     private final int validationWaitSeconds;
     private final AtomicInteger accountDaysBeforeExpiry = new AtomicInteger(45);
+    private final AtomicBoolean securityWarningLogged = new AtomicBoolean(false);
 
     /**
      * Idempotency token cache using lazy expiration (1-hour TTL).
@@ -78,12 +80,19 @@ public class AcmService {
         this.regionResolver = regionResolver;
         this.validationWaitSeconds = validationWaitSeconds;
 
-        // Security warning: Private keys are stored in plaintext
-        LOG.warn("SECURITY WARNING: ACM emulator stores private keys in plaintext. " +
-                 "This is acceptable for local development but NOT for production use.");
-
         // Validate Root CA resource availability
         validateRootCaResource();
+    }
+
+    /**
+     * Log security warning once on first certificate creation/import.
+     * Uses AtomicBoolean to ensure thread-safe single logging.
+     */
+    private void logSecurityWarningOnce() {
+        if (securityWarningLogged.compareAndSet(false, true)) {
+            LOG.warn("SECURITY WARNING: ACM emulator stores private keys in plaintext. " +
+                     "This is acceptable for local development but NOT for production use.");
+        }
     }
 
     private void validateRootCaResource() {
@@ -105,6 +114,7 @@ public class AcmService {
                                           String idempotencyToken, KeyAlgorithm keyAlgorithm,
                                           String certAuthorityArn, CertificateOptions options,
                                           Map<String, String> tags, String region) {
+        logSecurityWarningOnce();
         validateDomainName(domainName);
         validateSans(sans);
         if (tags != null) {
@@ -313,6 +323,7 @@ public class AcmService {
 
     public Certificate importCertificate(String certificatePem, String privateKeyPem, String chainPem,
                                           String existingArn, Map<String, String> tags, String region) {
+        logSecurityWarningOnce();
         // Parse and validate certificate
         X509Certificate x509Cert;
         try {
