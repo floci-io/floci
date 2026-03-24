@@ -282,4 +282,5 @@ class S3IntegrationTest {
         // Cleanup
         given().delete("/large-object-bucket/large-file.bin");
         given().delete("/large-object-bucket");
+    }
 }
