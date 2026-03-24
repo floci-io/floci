@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 @RegisterForReflection
 public class Part {
@@ -18,7 +19,7 @@ public class Part {
         this.partNumber = partNumber;
         this.eTag = eTag;
         this.size = size;
-        this.lastModified = Instant.now();
+        this.lastModified = Instant.now().truncatedTo(ChronoUnit.SECONDS);
     }
 
     public int getPartNumber() { return partNumber; }

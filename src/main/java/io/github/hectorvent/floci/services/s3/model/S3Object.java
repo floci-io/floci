@@ -5,6 +5,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -42,7 +43,7 @@ public class S3Object {
         this.data = data;
         this.contentType = contentType != null ? contentType : "application/octet-stream";
         this.size = data.length;
-        this.lastModified = Instant.now();
+        this.lastModified = Instant.now().truncatedTo(ChronoUnit.SECONDS);
         this.eTag = computeETag(data);
         this.metadata = new HashMap<>();
         this.tags = new HashMap<>();
