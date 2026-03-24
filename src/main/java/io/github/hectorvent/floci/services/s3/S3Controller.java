@@ -368,6 +368,7 @@ public class S3Controller {
                               @HeaderParam("If-None-Match") String ifNoneMatch,
                               @HeaderParam("If-Modified-Since") String ifModifiedSince,
                               @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
+                              @HeaderParam("Range") String rangeHeader,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders) {
         try {
@@ -399,11 +400,17 @@ public class S3Controller {
                 }
             }
             S3Object obj = s3Service.getObject(bucket, key, versionId);
+
+            if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+                return handleRangeRequest(obj, rangeHeader);
+            }
+
             var resp = Response.ok(obj.getData())
                     .header("Content-Type", obj.getContentType())
                     .header("Content-Length", obj.getSize())
                     .header("ETag", obj.getETag())
-                    .header("Last-Modified", RFC_822.format(obj.getLastModified()));
+                    .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                    .header("Accept-Ranges", "bytes");
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
@@ -412,6 +419,69 @@ public class S3Controller {
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    private Response handleRangeRequest(S3Object obj, String rangeHeader) {
+        byte[] data = obj.getData();
+        int totalSize = data.length;
+        String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
+
+        int start, end;
+        try {
+            int dash = rangeSpec.indexOf('-');
+            if (dash < 0) {
+                return invalidRangeResponse(totalSize);
+            }
+            String before = rangeSpec.substring(0, dash);
+            String after = rangeSpec.substring(dash + 1);
+            if (before.isEmpty() && after.isEmpty()) {
+                return invalidRangeResponse(totalSize);
+            }
+            if (before.isEmpty()) {
+                int suffix = Integer.parseInt(after);
+                if (suffix <= 0) {
+                    return invalidRangeResponse(totalSize);
+                }
+                start = Math.max(0, totalSize - suffix);
+                end = totalSize - 1;
+            } else {
+                start = Integer.parseInt(before);
+                end = after.isEmpty() ? totalSize - 1 : Math.min(Integer.parseInt(after), totalSize - 1);
+            }
+        } catch (NumberFormatException e) {
+            return invalidRangeResponse(totalSize);
+        }
+
+        if (start < 0 || start >= totalSize || start > end) {
+            return invalidRangeResponse(totalSize);
+        }
+
+        byte[] rangeData = java.util.Arrays.copyOfRange(data, start, end + 1);
+        return Response.status(206)
+                .entity(rangeData)
+                .header("Content-Type", obj.getContentType())
+                .header("Content-Length", rangeData.length)
+                .header("Content-Range", "bytes " + start + "-" + end + "/" + totalSize)
+                .header("ETag", obj.getETag())
+                .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                .header("Accept-Ranges", "bytes")
+                .build();
+    }
+
+    private Response invalidRangeResponse(int totalSize) {
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("Error")
+                .elem("Code", "InvalidRange")
+                .elem("Message", "The requested range is not satisfiable.")
+                .elem("RequestId", java.util.UUID.randomUUID().toString())
+                .end("Error")
+                .build();
+        return Response.status(416)
+                .entity(xml)
+                .type(MediaType.APPLICATION_XML)
+                .header("Content-Range", "bytes */" + totalSize)
+                .build();
     }
 
     @HEAD
@@ -433,7 +503,8 @@ public class S3Controller {
                     .header("Content-Type", obj.getContentType())
                     .header("Content-Length", obj.getSize())
                     .header("ETag", obj.getETag())
-                    .header("Last-Modified", RFC_822.format(obj.getLastModified()));
+                    .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                    .header("Accept-Ranges", "bytes");
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }

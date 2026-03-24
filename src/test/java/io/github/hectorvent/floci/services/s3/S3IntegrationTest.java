@@ -212,6 +212,130 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(30)
+    void getObjectWithFullRange() {
+        given()
+            .header("Range", "bytes=0-4")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(206)
+            .header("Content-Range", equalTo("bytes 0-4/20"))
+            .header("Content-Length", equalTo("5"))
+            .header("Accept-Ranges", equalTo("bytes"))
+            .body(equalTo("Hello"));
+    }
+
+    @Test
+    @Order(31)
+    void getObjectWithOpenEndedRange() {
+        given()
+            .header("Range", "bytes=15-")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(206)
+            .header("Content-Range", equalTo("bytes 15-19/20"))
+            .body(equalTo("m S3!"));
+    }
+
+    @Test
+    @Order(32)
+    void getObjectWithSuffixRange() {
+        given()
+            .header("Range", "bytes=-4")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(206)
+            .header("Content-Range", equalTo("bytes 16-19/20"))
+            .body(equalTo(" S3!"));
+    }
+
+    @Test
+    @Order(33)
+    void getObjectWithInvalidRange() {
+        given()
+            .header("Range", "bytes=50-100")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(416)
+            .header("Content-Range", equalTo("bytes */20"))
+            .body(containsString("InvalidRange"));
+    }
+
+    @Test
+    @Order(34)
+    void getObjectWithMalformedRangeNoDash() {
+        given()
+            .header("Range", "bytes=0")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(416)
+            .body(containsString("InvalidRange"));
+    }
+
+    @Test
+    @Order(35)
+    void getObjectWithMalformedRangeEmptySuffix() {
+        given()
+            .header("Range", "bytes=-")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(416)
+            .body(containsString("InvalidRange"));
+    }
+
+    @Test
+    @Order(36)
+    void getObjectWithMalformedRangeNonNumeric() {
+        given()
+            .header("Range", "bytes=abc-def")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(416)
+            .body(containsString("InvalidRange"));
+    }
+
+    @Test
+    @Order(37)
+    void getObjectWithMalformedRangeNegativeStart() {
+        given()
+            .header("Range", "bytes=-1-4")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(416)
+            .body(containsString("InvalidRange"));
+    }
+
+    @Test
+    @Order(38)
+    void getObjectWithoutRangeReturnsAcceptRanges() {
+        given()
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("Accept-Ranges", equalTo("bytes"));
+    }
+
+    @Test
+    @Order(39)
+    void headObjectReturnsAcceptRanges() {
+        given()
+        .when()
+            .head("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("Accept-Ranges", equalTo("bytes"));
+    }
+
+    @Test
     @Order(50)
     void getObjectIfNoneMatchReturns304() {
         String eTag = given()
