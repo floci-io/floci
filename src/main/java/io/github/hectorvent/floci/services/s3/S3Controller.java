@@ -349,7 +349,7 @@ public class S3Controller {
                               @HeaderParam("x-amz-object-attributes") String objectAttributesHeader,
                               @QueryParam("max-parts") Integer maxParts,
                               @QueryParam("part-number-marker") Integer partNumberMarker,
-                              @HeaderParam("Range") String rangeHeader,
+                              @HeaderParam("range") String rangeHeader,
                               @Context UriInfo uriInfo) {
         try {
             if (hasQueryParam(uriInfo, "tagging")) {
@@ -369,16 +369,16 @@ public class S3Controller {
                         objectAttributesHeader, maxParts, partNumberMarker);
             }
             S3Object obj = s3Service.getObject(bucket, key, versionId);
-            byte[] data = obj.getData();
+            var data = obj.getData();
             long totalSize = data.length;
 
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                String rangeSpec = rangeHeader.substring(6);
+                var rangeSpec = rangeHeader.substring(6);
                 long start, end;
                 try {
                     if (rangeSpec.startsWith("-")) {
                         // suffix range: bytes=-N (last N bytes)
-                        long suffixLen = Long.parseLong(rangeSpec.substring(1));
+                        var suffixLen = Long.parseLong(rangeSpec.substring(1));
                         if (suffixLen <= 0) {
                             throw new AwsException("InvalidRange",
                                     "The requested range is not satisfiable.", 416);
@@ -391,7 +391,7 @@ public class S3Controller {
                         end = totalSize - 1;
                     } else {
                         // explicit: bytes=N-M
-                        String[] parts = rangeSpec.split("-");
+                        var parts = rangeSpec.split("-");
                         if (parts.length != 2) {
                             throw new AwsException("InvalidRange",
                                     "The requested range is not satisfiable.", 416);
@@ -413,7 +413,7 @@ public class S3Controller {
                             "The requested range is not satisfiable.", 416);
                 }
                 long length = end - start + 1;
-                byte[] slice = java.util.Arrays.copyOfRange(data, (int) start, (int) (start + length));
+                var slice = java.util.Arrays.copyOfRange(data, (int) start, (int) (start + length));
                 var resp = Response.status(206)
                         .entity(slice)
                         .header("Content-Type", obj.getContentType())
