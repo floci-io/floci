@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.sqs;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.RestAssured;
+import io.restassured.config.EncoderConfig;
+import io.restassured.http.ContentType;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -214,5 +217,93 @@ class SqsIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("UnsupportedOperation"));
+    }
+
+    @Test
+    void createQueue_idempotent_sameAttributes() {
+        String queueName = "idempotent-test-queue";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+            .formParam("Attribute.1.Name", "VisibilityTimeout")
+            .formParam("Attribute.1.Value", "60")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString(queueName));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+            .formParam("Attribute.1.Name", "VisibilityTimeout")
+            .formParam("Attribute.1.Value", "60")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString(queueName));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/" + queueName)
+        .when()
+            .post("/");
+    }
+
+    @Test
+    void createQueue_conflictingAttributes_returns400() {
+        String queueName = "conflict-test-queue";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+            .formParam("Attribute.1.Name", "VisibilityTimeout")
+            .formParam("Attribute.1.Value", "30")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+            .formParam("Attribute.1.Name", "VisibilityTimeout")
+            .formParam("Attribute.1.Value", "60")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("QueueNameExists"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteQueue")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/" + queueName)
+        .when()
+            .post("/");
+    }
+
+    @Test
+    void jsonProtocol_nonExistentQueue_returnsQueueDoesNotExist() {
+        given()
+            .config(RestAssured.config().encoderConfig(
+                EncoderConfig.encoderConfig()
+                    .encodeContentTypeAs("application/x-amz-json-1.0", ContentType.TEXT)))
+            .contentType("application/x-amz-json-1.0")
+            .header("X-Amz-Target", "AmazonSQS.GetQueueUrl")
+            .body("{\"QueueName\": \"no-such-queue-xyz\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("QueueDoesNotExist"))
+            .body(not(containsString("AWS.SimpleQueueService.NonExistentQueue")));
     }
 }

@@ -18,8 +18,8 @@ public class AwsExceptionMapper implements ExceptionMapper<AwsException> {
     public Response toResponse(AwsException exception) {
         LOG.debugv("Mapping exception: {0} - {1}", exception.getErrorCode(), exception.getMessage());
         return Response.status(exception.getHttpStatus())
-                .entity(new AwsErrorResponse(exception.getErrorCode(), exception.getMessage()))
                 .type(MediaType.APPLICATION_JSON)
+                .entity(new AwsErrorResponse(exception.jsonType(), exception.getMessage()))
                 .build();
     }
 }
