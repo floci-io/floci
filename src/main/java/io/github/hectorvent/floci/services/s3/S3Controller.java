@@ -352,29 +352,29 @@ public class S3Controller {
             }
             S3Object obj = s3Service.getObject(bucket, key, versionId);
             byte[] data = obj.getData();
-            int totalSize = data.length;
+            long totalSize = data.length;
 
             String rangeHeader = httpHeaders.getHeaderString("Range");
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
                 String rangeSpec = rangeHeader.substring(6);
-                int start, end;
+                long start, end;
                 if (rangeSpec.startsWith("-")) {
                     // suffix range: bytes=-N (last N bytes)
-                    int suffixLen = Integer.parseInt(rangeSpec.substring(1));
+                    long suffixLen = Long.parseLong(rangeSpec.substring(1));
                     start = Math.max(0, totalSize - suffixLen);
                     end = totalSize - 1;
                 } else if (rangeSpec.endsWith("-")) {
                     // open-ended: bytes=N-
-                    start = Integer.parseInt(rangeSpec.substring(0, rangeSpec.length() - 1));
+                    start = Long.parseLong(rangeSpec.substring(0, rangeSpec.length() - 1));
                     end = totalSize - 1;
                 } else {
                     // explicit: bytes=N-M
                     String[] parts = rangeSpec.split("-");
-                    start = Integer.parseInt(parts[0]);
-                    end = Math.min(Integer.parseInt(parts[1]), totalSize - 1);
+                    start = Long.parseLong(parts[0]);
+                    end = Math.min(Long.parseLong(parts[1]), totalSize - 1);
                 }
-                int length = end - start + 1;
-                byte[] slice = java.util.Arrays.copyOfRange(data, start, start + length);
+                long length = end - start + 1;
+                byte[] slice = java.util.Arrays.copyOfRange(data, (int) start, (int) (start + length));
                 var resp = Response.status(206)
                         .entity(slice)
                         .header("Content-Type", obj.getContentType())
