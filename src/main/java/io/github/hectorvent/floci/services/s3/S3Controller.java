@@ -358,20 +358,42 @@ public class S3Controller {
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
                 String rangeSpec = rangeHeader.substring(6);
                 long start, end;
-                if (rangeSpec.startsWith("-")) {
-                    // suffix range: bytes=-N (last N bytes)
-                    long suffixLen = Long.parseLong(rangeSpec.substring(1));
-                    start = Math.max(0, totalSize - suffixLen);
-                    end = totalSize - 1;
-                } else if (rangeSpec.endsWith("-")) {
-                    // open-ended: bytes=N-
-                    start = Long.parseLong(rangeSpec.substring(0, rangeSpec.length() - 1));
-                    end = totalSize - 1;
-                } else {
-                    // explicit: bytes=N-M
-                    String[] parts = rangeSpec.split("-");
-                    start = Long.parseLong(parts[0]);
-                    end = Math.min(Long.parseLong(parts[1]), totalSize - 1);
+                try {
+                    if (rangeSpec.startsWith("-")) {
+                        // suffix range: bytes=-N (last N bytes)
+                        long suffixLen = Long.parseLong(rangeSpec.substring(1));
+                        if (suffixLen <= 0) {
+                            throw new AwsException("InvalidRange",
+                                    "The requested range is not satisfiable.", 416);
+                        }
+                        start = Math.max(0, totalSize - suffixLen);
+                        end = totalSize - 1;
+                    } else if (rangeSpec.endsWith("-")) {
+                        // open-ended: bytes=N-
+                        start = Long.parseLong(rangeSpec.substring(0, rangeSpec.length() - 1));
+                        end = totalSize - 1;
+                    } else {
+                        // explicit: bytes=N-M
+                        String[] parts = rangeSpec.split("-");
+                        if (parts.length != 2) {
+                            throw new AwsException("InvalidRange",
+                                    "The requested range is not satisfiable.", 416);
+                        }
+                        start = Long.parseLong(parts[0]);
+                        end = Long.parseLong(parts[1]);
+                        if (start > end) {
+                            throw new AwsException("InvalidRange",
+                                    "The requested range is not satisfiable.", 416);
+                        }
+                        end = Math.min(end, totalSize - 1);
+                    }
+                } catch (NumberFormatException e) {
+                    throw new AwsException("InvalidRange",
+                            "The requested range is not satisfiable.", 416);
+                }
+                if (start < 0 || start >= totalSize) {
+                    throw new AwsException("InvalidRange",
+                            "The requested range is not satisfiable.", 416);
                 }
                 long length = end - start + 1;
                 byte[] slice = java.util.Arrays.copyOfRange(data, (int) start, (int) (start + length));
