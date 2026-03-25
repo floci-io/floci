@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.core.common;
 
+import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
+import jakarta.ws.rs.container.ResourceInfo;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.Provider;
@@ -15,6 +18,9 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
 
     private static final Pattern AUTH_SERVICE_PATTERN =
             Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
+
+    @Context
+    ResourceInfo resourceInfo;
 
     private final ServiceRegistry serviceRegistry;
 
@@ -48,7 +54,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
             }
         }
 
-        return null;
+        return serviceKeyFromMatchedResource();
     }
 
     private String serviceKeyFromTarget(String target) {
@@ -75,12 +81,24 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
         };
     }
 
+    private String serviceKeyFromMatchedResource() {
+        Class<?> resourceClass = resourceInfo != null ? resourceInfo.getResourceClass() : null;
+        if (resourceClass == null) {
+            return null;
+        }
+        if (CognitoWellKnownController.class.equals(resourceClass)) {
+            return "cognito-idp";
+        }
+        return null;
+    }
+
     private Response disabledResponse(ContainerRequestContext ctx, String serviceKey) {
         String message = "Service " + serviceKey + " is not enabled.";
         String target = ctx.getHeaderString("X-Amz-Target");
         String contentType = ctx.getMediaType() != null ? ctx.getMediaType().toString() : "";
+        boolean jsonEndpoint = serviceKeyFromMatchedResource() != null;
 
-        if (target != null || contentType.contains("json")) {
+        if (target != null || contentType.contains("json") || jsonEndpoint) {
             return Response.status(400)
                     .type(MediaType.APPLICATION_JSON)
                     .entity(new AwsErrorResponse("ServiceNotAvailableException", message))

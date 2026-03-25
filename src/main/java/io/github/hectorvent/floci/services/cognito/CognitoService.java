@@ -11,10 +11,17 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 
 @ApplicationScoped
@@ -43,14 +50,17 @@ public class CognitoService {
         UserPool pool = new UserPool();
         pool.setId(id);
         pool.setName(name);
+        ensureJwtSigningKeys(pool);
         poolStore.put(id, pool);
         LOG.infov("Created User Pool: {0}", id);
         return pool;
     }
 
     public UserPool describeUserPool(String id) {
-        return poolStore.get(id)
+        UserPool pool = poolStore.get(id)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
+        ensureJwtSigningKeys(pool);
+        return pool;
     }
 
     public List<UserPool> listUserPools() {
@@ -385,7 +395,9 @@ public class CognitoService {
     }
 
     private String generateSignedJwt(CognitoUser user, UserPool pool, String type) {
-        String headerJson = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+        String headerJson = String.format(
+                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
+                escapeJson(getSigningKeyId(pool)));
         String header = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
 
@@ -401,15 +413,14 @@ public class CognitoService {
         );
         String payload = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
-
-        String signingInput = header + "." + payload;
-        String signature = hmacSha256(signingInput, pool.getSigningSecret());
-        return signingInput + "." + signature;
+        return signJwt(header, payload, getSigningPrivateKey(pool));
     }
 
     private String generateTokenString(String type, String username, UserPool pool) {
         long now = System.currentTimeMillis() / 1000L;
-        String headerJson = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+        String headerJson = String.format(
+                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
+                escapeJson(getSigningKeyId(pool)));
         String header = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
         String payloadJson = String.format(
@@ -419,19 +430,87 @@ public class CognitoService {
         );
         String payload = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
+        return signJwt(header, payload, getSigningPrivateKey(pool));
+    }
+
+    private String signJwt(String header, String payload, PrivateKey signingKey) {
         String signingInput = header + "." + payload;
-        String signature = hmacSha256(signingInput, pool.getSigningSecret());
+        String signature = rsaSha256(signingInput, signingKey);
         return signingInput + "." + signature;
     }
 
-    private String hmacSha256(String data, String key) {
+    private String rsaSha256(String data, PrivateKey signingKey) {
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] sig = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+            Signature signature = Signature.getInstance("SHA256withRSA");
+            signature.initSign(signingKey);
+            signature.update(data.getBytes(StandardCharsets.UTF_8));
+            byte[] sig = signature.sign();
             return Base64.getUrlEncoder().withoutPadding().encodeToString(sig);
         } catch (Exception e) {
             throw new RuntimeException("JWT signing failed", e);
+        }
+    }
+
+    String getSigningKeyId(UserPool pool) {
+        ensureJwtSigningKeys(pool);
+        return pool.getSigningKeyId();
+    }
+
+    RSAPublicKey getSigningPublicKey(UserPool pool) {
+        ensureJwtSigningKeys(pool);
+
+        try {
+            byte[] encoded = Base64.getDecoder().decode(pool.getSigningPublicKey());
+            X509EncodedKeySpec keySpec = new X509EncodedKeySpec(encoded);
+            PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(keySpec);
+            return (RSAPublicKey) publicKey;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load Cognito RSA public key", e);
+        }
+    }
+
+    private PrivateKey getSigningPrivateKey(UserPool pool) {
+        ensureJwtSigningKeys(pool);
+
+        try {
+            byte[] encoded = Base64.getDecoder().decode(pool.getSigningPrivateKey());
+            PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
+            return KeyFactory.getInstance("RSA").generatePrivate(keySpec);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load Cognito RSA private key", e);
+        }
+    }
+
+    private void ensureJwtSigningKeys(UserPool pool) {
+        synchronized (pool) {
+            boolean changed = false;
+
+            if (pool.getSigningKeyId() == null || pool.getSigningKeyId().isBlank()) {
+                pool.setSigningKeyId(pool.getId());
+                changed = true;
+            }
+
+            if (pool.getSigningPrivateKey() == null || pool.getSigningPrivateKey().isBlank()
+                    || pool.getSigningPublicKey() == null || pool.getSigningPublicKey().isBlank()) {
+                try {
+                    KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+                    generator.initialize(2048);
+                    KeyPair keyPair = generator.generateKeyPair();
+
+                    pool.setSigningPrivateKey(
+                            Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
+                    pool.setSigningPublicKey(
+                            Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded()));
+                    changed = true;
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to generate Cognito RSA signing keypair", e);
+                }
+            }
+
+            if (changed && pool.getId() != null) {
+                pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+                poolStore.put(pool.getId(), pool);
+            }
         }
     }
 
@@ -493,5 +572,11 @@ public class CognitoService {
 
     private String userKey(String poolId, String username) {
         return poolId + "::" + username;
+    }
+
+    private String escapeJson(String value) {
+        return value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"");
     }
 }

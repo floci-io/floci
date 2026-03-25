@@ -3,7 +3,7 @@
 **Protocol:** JSON 1.1 (`X-Amz-Target: AWSCognitoIdentityProviderService.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
-Floci also serves OIDC well-known endpoints, making it compatible with JWT validation libraries.
+Floci serves pool-specific discovery and JWKS endpoints so local clients can validate Cognito-like JWTs against RS256 signing keys.
 
 ## Supported Actions
 
@@ -16,12 +16,12 @@ Floci also serves OIDC well-known endpoints, making it compatible with JWT valid
 | **Authentication** | InitiateAuth, AdminInitiateAuth, RespondToAuthChallenge |
 | **User Listing** | ListUsers |
 
-## OIDC Well-Known Endpoints
+## Well-Known Endpoints
 
 | Endpoint | Description |
 |---|---|
-| `GET /.well-known/openid-configuration` | OIDC discovery document |
-| `GET /.well-known/jwks.json` | JSON Web Key Set for JWT validation |
+| `GET /{userPoolId}/.well-known/openid-configuration` | OpenID discovery document |
+| `GET /{userPoolId}/.well-known/jwks.json` | JSON Web Key Set for JWT validation |
 
 ## Examples
 
@@ -63,20 +63,27 @@ aws cognito-idp initiate-auth \
   --client-id $CLIENT_ID \
   --auth-parameters USERNAME=alice@example.com,PASSWORD=Perm1234! \
   --endpoint-url $AWS_ENDPOINT
+
+# Fetch the pool discovery document
+curl -s "$AWS_ENDPOINT/$POOL_ID/.well-known/openid-configuration"
 ```
 
 ## JWT Validation
 
-Tokens issued by Floci can be validated using the JWKS endpoint:
+Tokens issued by Floci can be validated using the discovery and JWKS endpoints:
 
 ```
-http://localhost:4566/.well-known/jwks.json
+http://localhost:4566/$POOL_ID/.well-known/openid-configuration
 ```
 
-The OIDC discovery endpoint returns:
-
 ```
-http://localhost:4566/.well-known/openid-configuration
+http://localhost:4566/$POOL_ID/.well-known/jwks.json
 ```
 
-This allows libraries like `jsonwebtoken`, `jose`, or Spring Security to validate tokens against Floci the same way they would against real Cognito.
+Tokens issued by Cognito auth flows keep the emulator issuer format:
+
+```
+https://cognito-idp.local/$POOL_ID
+```
+
+This allows libraries like `jsonwebtoken`, `jose`, or Spring Security to validate tokens against Floci using the emulator's published issuer, discovery, and JWKS endpoints.

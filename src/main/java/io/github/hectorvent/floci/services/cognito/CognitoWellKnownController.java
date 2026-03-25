@@ -6,10 +6,12 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.UriInfo;
 
-import java.nio.charset.StandardCharsets;
+import java.math.BigInteger;
 import java.util.Base64;
 
 /**
@@ -32,14 +34,40 @@ public class CognitoWellKnownController {
     @Path("/{poolId}/.well-known/jwks.json")
     public Response getJwks(@PathParam("poolId") String poolId) {
         UserPool pool = cognitoService.describeUserPool(poolId);
-        String kid = pool.getId();
-        // Encode signing secret bytes as Base64URL (no padding) for the JWK "k" parameter
-        byte[] secretBytes = pool.getSigningSecret().getBytes(StandardCharsets.UTF_8);
-        String k = Base64.getUrlEncoder().withoutPadding().encodeToString(secretBytes);
+        String kid = cognitoService.getSigningKeyId(pool);
+        var publicKey = cognitoService.getSigningPublicKey(pool);
+        String modulus = base64UrlEncodeUnsigned(publicKey.getModulus());
+        String exponent = base64UrlEncodeUnsigned(publicKey.getPublicExponent());
 
         String body = """
-                {"keys":[{"kty":"oct","kid":"%s","alg":"HS256","k":"%s","use":"sig"}]}
-                """.formatted(kid, k).strip();
+                {"keys":[{"kty":"RSA","kid":"%s","alg":"RS256","n":"%s","e":"%s","use":"sig"}]}
+                """.formatted(kid, modulus, exponent).strip();
         return Response.ok(body).build();
+    }
+
+    @GET
+    @Path("/{poolId}/.well-known/openid-configuration")
+    public Response getOpenIdConfiguration(@PathParam("poolId") String poolId, @Context UriInfo uriInfo) {
+        UserPool pool = cognitoService.describeUserPool(poolId);
+        String issuer = "https://cognito-idp.local/" + pool.getId();
+        String jwksUri = uriInfo.getBaseUriBuilder()
+                .path(pool.getId())
+                .path(".well-known")
+                .path("jwks.json")
+                .build()
+                .toString();
+
+        String body = """
+                {"issuer":"%s","jwks_uri":"%s","subject_types_supported":["public"],"response_types_supported":["code","token","id_token"],"id_token_signing_alg_values_supported":["RS256"]}
+                """.formatted(issuer, jwksUri).strip();
+        return Response.ok(body).build();
+    }
+
+    private String base64UrlEncodeUnsigned(BigInteger value) {
+        byte[] bytes = value.toByteArray();
+        if (bytes.length > 1 && bytes[0] == 0) {
+            bytes = java.util.Arrays.copyOfRange(bytes, 1, bytes.length);
+        }
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(bytes);
     }
 }
