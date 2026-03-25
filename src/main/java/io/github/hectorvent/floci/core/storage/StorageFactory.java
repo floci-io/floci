@@ -65,6 +65,9 @@ public class StorageFactory {
             default -> throw new IllegalArgumentException("Unknown storage mode: " + mode);
         };
 
+        // load because loadAll() may run before the service is initialized
+        backend.load();
+
         allBackends.add(backend);
         return backend;
     }
