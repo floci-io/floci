@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+.eggs/
+*.egg
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# TypeScript / Node.js
+node_modules/
+dist/
+*.js.map
+*.tsbuildinfo
+.npm
+coverage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+
+# Bash / bats-core (cloned via `just setup-bash`)
+bash/lib/

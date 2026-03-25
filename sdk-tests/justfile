@@ -1,0 +1,72 @@
+# SDK Integration Tests - Task Runner Configuration
+# Run `just` to see available commands
+
+set export
+set dotenv-load
+
+# Environment defaults
+FLOCI_ENDPOINT := env('FLOCI_ENDPOINT', 'http://localhost:4566')
+AWS_ACCESS_KEY_ID := env('AWS_ACCESS_KEY_ID', 'test')
+AWS_SECRET_ACCESS_KEY := env('AWS_SECRET_ACCESS_KEY', 'test')
+AWS_DEFAULT_REGION := env('AWS_DEFAULT_REGION', 'us-east-1')
+
+# Default recipe - list all available commands
+default:
+    @just --list
+
+# Run all SDK tests sequentially
+test-all: test-python test-typescript test-bash
+
+# Run Python SDK tests
+[working-directory: 'python']
+test-python:
+    pytest tests/ -v
+
+# Run TypeScript SDK tests
+[working-directory: 'typescript']
+test-typescript:
+    npm test
+
+# Run Bash SDK tests (using bats-core)
+[working-directory: 'bash']
+test-bash:
+    ./lib/bats-core/bin/bats test/
+
+# Install all test dependencies
+setup: setup-python setup-typescript setup-bash
+
+# Install Python test dependencies
+[working-directory: 'python']
+setup-python:
+    pip install -r requirements.txt
+
+# Install TypeScript test dependencies
+[working-directory: 'typescript']
+setup-typescript:
+    npm install
+
+# Install Bash test dependencies (bats-core and helpers)
+[working-directory: 'bash']
+setup-bash:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mkdir -p lib
+    if [ ! -d "lib/bats-core" ]; then
+        echo "Cloning bats-core..."
+        git clone --depth 1 https://github.com/bats-core/bats-core.git lib/bats-core
+    fi
+    if [ ! -d "lib/bats-support" ]; then
+        echo "Cloning bats-support..."
+        git clone --depth 1 https://github.com/bats-core/bats-support.git lib/bats-support
+    fi
+    if [ ! -d "lib/bats-assert" ]; then
+        echo "Cloning bats-assert..."
+        git clone --depth 1 https://github.com/bats-core/bats-assert.git lib/bats-assert
+    fi
+    echo "Bash test dependencies installed!"
+
+# Remove build artifacts and dependencies
+clean:
+    rm -rf python/__pycache__ python/.pytest_cache python/.venv
+    rm -rf typescript/node_modules typescript/dist
+    rm -rf bash/lib

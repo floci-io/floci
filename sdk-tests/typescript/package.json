@@ -1,0 +1,14 @@
+{
+  "name": "floci-sdk-tests-typescript",
+  "version": "1.0.0",
+  "description": "TypeScript SDK integration tests for floci",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.500.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  }
+}

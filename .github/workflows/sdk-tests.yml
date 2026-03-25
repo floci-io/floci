@@ -1,0 +1,138 @@
+name: SDK Integration Tests
+
+on:
+  pull_request:
+    paths:
+      - 'sdk-tests/**'
+      - 'src/**'
+      - '.github/workflows/sdk-tests.yml'
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - 'sdk-tests/**'
+      - 'src/**'
+      - '.github/workflows/sdk-tests.yml'
+
+jobs:
+  build-floci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build floci
+        run: ./mvnw package -DskipTests -q
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: floci-jar
+          path: target/quarkus-app/
+          retention-days: 1
+
+  sdk-tests:
+    needs: build-floci
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk: [python, typescript, bash]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: floci-jar
+          path: target/quarkus-app/
+
+      - name: Start floci
+        run: |
+          java -jar target/quarkus-app/quarkus-run.jar &
+          echo "Waiting for floci to start..."
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:4566 > /dev/null 2>&1; then
+              echo "floci is ready!"
+              exit 0
+            fi
+            echo "Attempt $i: floci not ready yet..."
+            sleep 1
+          done
+          echo "floci failed to start"
+          exit 1
+
+      # Python setup
+      - name: Set up Python
+        if: matrix.sdk == 'python'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: 'sdk-tests/python/requirements.txt'
+
+      - name: Install Python dependencies
+        if: matrix.sdk == 'python'
+        working-directory: sdk-tests/python
+        run: pip install -r requirements.txt
+
+      # TypeScript setup
+      - name: Set up Node.js
+        if: matrix.sdk == 'typescript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'sdk-tests/typescript/package-lock.json'
+
+      - name: Install TypeScript dependencies
+        if: matrix.sdk == 'typescript'
+        working-directory: sdk-tests/typescript
+        run: npm install
+
+      # Install Just (needed for setup and test commands)
+      - uses: extractions/setup-just@v2
+
+      # Bash setup - install bats dependencies
+      - name: Setup Bash test dependencies
+        if: matrix.sdk == 'bash'
+        working-directory: sdk-tests
+        run: just setup-bash
+
+      - name: Verify Bash prerequisites
+        if: matrix.sdk == 'bash'
+        run: |
+          aws --version
+          jq --version
+
+      # Run tests
+      - name: Run ${{ matrix.sdk }} SDK tests
+        working-directory: sdk-tests
+        env:
+          FLOCI_ENDPOINT: http://localhost:4566
+          AWS_ACCESS_KEY_ID: test
+          AWS_SECRET_ACCESS_KEY: test
+          AWS_DEFAULT_REGION: us-east-1
+        run: just test-${{ matrix.sdk }}
+
+      # Upload test results
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.sdk }}
+          path: |
+            sdk-tests/${{ matrix.sdk }}/test-results/
+            sdk-tests/${{ matrix.sdk }}/.pytest_cache/
+          retention-days: 30
+          if-no-files-found: ignore
