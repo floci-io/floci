@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.sns;
 import io.github.hectorvent.floci.core.common.*;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -181,12 +182,13 @@ public class SnsQueryHandler {
         String messageGroupId = getParam(params, "MessageGroupId");
         String messageDeduplicationId = getParam(params, "MessageDeduplicationId");
 
-        Map<String, String> attributes = new HashMap<>();
+        Map<String, MessageAttributeValue> attributes = new HashMap<>();
         for (int i = 1; ; i++) {
             String name = params.getFirst("MessageAttributes.entry." + i + ".Name");
             if (name == null) break;
             String value = params.getFirst("MessageAttributes.entry." + i + ".Value.StringValue");
-            if (value != null) attributes.put(name, value);
+            String dataType = params.getFirst("MessageAttributes.entry." + i + ".Value.DataType");
+            if (value != null) attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
         }
 
         try {

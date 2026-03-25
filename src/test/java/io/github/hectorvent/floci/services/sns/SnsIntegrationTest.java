@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.UUID;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -594,19 +596,12 @@ class SnsIntegrationTest {
     @Test
     @Order(50)
     void rawDelivery_createQueuesAndSubscribe() {
-        given().contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DeleteQueue")
-            .formParam("QueueUrl", "http://localhost:4566/000000000000/sns-raw-delivery-queue")
-            .when().post("/");
-        given().contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DeleteQueue")
-            .formParam("QueueUrl", "http://localhost:4566/000000000000/sns-envelope-delivery-queue")
-            .when().post("/");
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
 
         rawDeliveryQueueUrl = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateQueue")
-            .formParam("QueueName", "sns-raw-delivery-queue")
+            .formParam("QueueName", "sns-raw-delivery-" + suffix)
         .when()
             .post("/")
         .then()
@@ -616,7 +611,7 @@ class SnsIntegrationTest {
         envelopeQueueUrl = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateQueue")
-            .formParam("QueueName", "sns-envelope-delivery-queue")
+            .formParam("QueueName", "sns-envelope-delivery-" + suffix)
         .when()
             .post("/")
         .then()
@@ -708,6 +703,43 @@ class SnsIntegrationTest {
 
     @Test
     @Order(54)
+    void rawDelivery_messageAttributesForwardedOnRawDelivery() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "Attribute forwarding test")
+            .formParam("MessageAttributes.entry.1.Name", "color")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "String")
+            .formParam("MessageAttributes.entry.1.Value.StringValue", "blue")
+            .formParam("MessageAttributes.entry.2.Name", "count")
+            .formParam("MessageAttributes.entry.2.Value.DataType", "Number")
+            .formParam("MessageAttributes.entry.2.Value.StringValue", "42")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", rawDeliveryQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("MessageAttributeNames.member.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("Attribute forwarding test"))
+            .body(containsString("color"))
+            .body(containsString("blue"))
+            .body(containsString("count"))
+            .body(containsString("Number"));
+    }
+
+    @Test
+    @Order(55)
     void rawDelivery_cleanup() {
         given()
             .contentType("application/x-www-form-urlencoded")

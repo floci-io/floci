@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.sns;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -154,11 +155,13 @@ public class SnsJsonHandler {
         String message = request.path("Message").asText(null);
         String subject = request.path("Subject").asText(null);
 
-        Map<String, String> attributes = new HashMap<>();
+        Map<String, MessageAttributeValue> attributes = new HashMap<>();
         JsonNode attrsNode = request.path("MessageAttributes");
         if (attrsNode.isObject()) {
             attrsNode.fields().forEachRemaining(entry -> {
-                attributes.put(entry.getKey(), entry.getValue().path("StringValue").asText());
+                String dataType = entry.getValue().path("DataType").asText("String");
+                String stringValue = entry.getValue().path("StringValue").asText();
+                attributes.put(entry.getKey(), new MessageAttributeValue(stringValue, dataType));
             });
         }
 

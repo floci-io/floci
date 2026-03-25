@@ -28,6 +28,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -248,12 +249,12 @@ public class SnsService {
     }
 
     public String publish(String topicArn, String targetArn, String phoneNumber, String message,
-                          String subject, Map<String, String> messageAttributes, String region) {
+                          String subject, Map<String, MessageAttributeValue> messageAttributes, String region) {
         return publish(topicArn, targetArn, phoneNumber, message, subject, messageAttributes, null, null, region);
     }
 
     public String publish(String topicArn, String targetArn, String phoneNumber, String message,
-                          String subject, Map<String, String> messageAttributes,
+                          String subject, Map<String, MessageAttributeValue> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
         // Send SMS
         if (phoneNumber != null) {
@@ -362,7 +363,7 @@ public class SnsService {
 
             String messageId = UUID.randomUUID().toString();
             @SuppressWarnings("unchecked")
-            Map<String, String> attrs = (Map<String, String>) entry.get("MessageAttributes");
+            Map<String, MessageAttributeValue> attrs = (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
             for (Subscription sub : subscriptionsByTopic(topicArn, region)) {
                 if ("true".equals(sub.getAttributes().get("PendingConfirmation"))) continue;
                 if (!matchesFilterPolicy(sub, attrs)) continue;
@@ -412,7 +413,7 @@ public class SnsService {
      * All keys in the policy must match (AND logic). Within each key's rule array,
      * any matching element is sufficient (OR logic).
      */
-    private boolean matchesFilterPolicy(Subscription sub, Map<String, String> messageAttributes) {
+    private boolean matchesFilterPolicy(Subscription sub, Map<String, MessageAttributeValue> messageAttributes) {
         String filterPolicyJson = sub.getAttributes().get("FilterPolicy");
         if (filterPolicyJson == null || filterPolicyJson.isBlank()) {
             return true;
@@ -427,13 +428,14 @@ public class SnsService {
                 LOG.warnv("Invalid FilterPolicy (not a JSON object) for {0}", sub.getSubscriptionArn());
                 return false;
             }
-            Map<String, String> attrs = messageAttributes != null ? messageAttributes : Map.of();
+            Map<String, MessageAttributeValue> attrs = messageAttributes != null ? messageAttributes : Map.of();
             var fields = filterPolicy.fields();
             while (fields.hasNext()) {
                 var entry = fields.next();
                 String key = entry.getKey();
                 JsonNode rules = entry.getValue();
-                String actualValue = attrs.get(key);
+                MessageAttributeValue attr = attrs.get(key);
+                String actualValue = attr != null ? attr.getStringValue() : null;
                 if (!matchesAttributeRules(actualValue, rules)) {
                     return false;
                 }
@@ -560,7 +562,7 @@ public class SnsService {
     }
 
     private void deliverMessage(Subscription sub, String message, String subject,
-                                Map<String, String> messageAttributes, String messageId,
+                                Map<String, MessageAttributeValue> messageAttributes, String messageId,
                                 String topicArn, String messageGroupId) {
         try {
             switch (sub.getProtocol()) {
@@ -576,7 +578,7 @@ public class SnsService {
                             : buildSnsEnvelope(message, subject, messageAttributes, topicArn, messageId);
                     Map<String, MessageAttributeValue> sqsAttributes = rawDelivery
                             ? toSqsMessageAttributes(messageAttributes)
-                            : null;
+                            : Collections.emptyMap();
                     sqsService.sendMessage(queueUrl, body, 0, messageGroupId, null, sqsAttributes, region);
                     LOG.debugv("Delivered SNS message to SQS: {0} ({1}) raw={2}", sub.getEndpoint(), queueUrl, rawDelivery);
                 }
@@ -602,7 +604,7 @@ public class SnsService {
     }
 
     private String buildSnsLambdaEvent(String topicArn, String messageId, String message,
-                                       String subject, Map<String, String> messageAttributes,
+                                       String subject, Map<String, MessageAttributeValue> messageAttributes,
                                        String subscriptionArn) {
         try {
             String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
@@ -625,8 +627,8 @@ public class SnsService {
             if (messageAttributes != null) {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
-                    attr.put("Type", "String");
-                    attr.put("Value", entry.getValue());
+                    attr.put("Type", entry.getValue().getDataType());
+                    attr.put("Value", entry.getValue().getStringValue());
                 }
             }
             ObjectNode record = objectMapper.createObjectNode();
@@ -654,22 +656,18 @@ public class SnsService {
     }
 
     /**
-     * Converts SNS message attributes (simple String map) to SQS MessageAttributeValue objects
-     * for forwarding when RawMessageDelivery is enabled.
+     * Forwards SNS message attributes as SQS MessageAttributeValue objects
+     * when RawMessageDelivery is enabled, preserving the original DataType.
      */
-    private Map<String, MessageAttributeValue> toSqsMessageAttributes(Map<String, String> snsAttributes) {
+    private Map<String, MessageAttributeValue> toSqsMessageAttributes(Map<String, MessageAttributeValue> snsAttributes) {
         if (snsAttributes == null || snsAttributes.isEmpty()) {
-            return null;
+            return Collections.emptyMap();
         }
-        Map<String, MessageAttributeValue> sqsAttrs = new java.util.HashMap<>();
-        for (var entry : snsAttributes.entrySet()) {
-            sqsAttrs.put(entry.getKey(), new MessageAttributeValue(entry.getValue(), "String"));
-        }
-        return sqsAttrs;
+        return new java.util.HashMap<>(snsAttributes);
     }
 
     private String buildSnsEnvelope(String message, String subject,
-                                    Map<String, String> messageAttributes,
+                                    Map<String, MessageAttributeValue> messageAttributes,
                                     String topicArn, String messageId) {
         try {
             ObjectNode node = objectMapper.createObjectNode();
@@ -684,8 +682,8 @@ public class SnsService {
             if (messageAttributes != null) {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
-                    attr.put("Type", "String");
-                    attr.put("Value", entry.getValue());
+                    attr.put("Type", entry.getValue().getDataType());
+                    attr.put("Value", entry.getValue().getStringValue());
                 }
             }
             return objectMapper.writeValueAsString(node);
