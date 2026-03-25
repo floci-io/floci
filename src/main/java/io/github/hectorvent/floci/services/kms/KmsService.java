@@ -109,9 +109,9 @@ public class KmsService {
     // ──────────────────────────── Crypto Ops (Mocks) ────────────────────────────
 
     public byte[] encrypt(String keyId, byte[] plaintext, String region) {
-        resolveKey(keyId, region);
+        KmsKey kmsKey = resolveKey(keyId, region);
         // Local mock: prefix with keyId and base64
-        String mock = "kms:" + keyId + ":" + Base64.getEncoder().encodeToString(plaintext);
+        String mock = "kms:" + kmsKey.getKeyId() + ":" + Base64.getEncoder().encodeToString(plaintext);
         return mock.getBytes(StandardCharsets.UTF_8);
     }
 

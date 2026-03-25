@@ -127,11 +127,35 @@ class KmsServiceTest {
     }
 
     @Test
-    void encryptAndDecrypt() {
+    void encryptAndDecryptWithId() {
         KmsKey key = kmsService.createKey(null, REGION);
         byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);
 
         byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+        byte[] decrypted = kmsService.decrypt(ciphertext, REGION);
+
+        assertArrayEquals(plaintext, decrypted);
+    }
+
+    @Test
+    void encryptAndDecryptWithArn() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);
+
+        byte[] ciphertext = kmsService.encrypt(key.getArn(), plaintext, REGION);
+        byte[] decrypted = kmsService.decrypt(ciphertext, REGION);
+
+        assertArrayEquals(plaintext, decrypted);
+    }
+
+    @Test
+    void encryptAndDecryptWithAlias() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        String aliasName = "alias/my-alias";
+        kmsService.createAlias(aliasName, key.getKeyId(), REGION);
+        byte[] plaintext = "hello world".getBytes(StandardCharsets.UTF_8);
+
+        byte[] ciphertext = kmsService.encrypt(aliasName, plaintext, REGION);
         byte[] decrypted = kmsService.decrypt(ciphertext, REGION);
 
         assertArrayEquals(plaintext, decrypted);
