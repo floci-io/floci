@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
@@ -13,9 +14,8 @@ import org.junit.jupiter.api.io.TempDir;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
+import java.util.function.Predicate;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -343,23 +343,22 @@ class S3ServiceTest {
     }
 
     @Test
-    void listObjectsDirectoryBucketPreservesInsertionOrder() {
-        // Directory buckets (--x-s3 suffix) do not guarantee lexicographic order
-        s3Service.createBucket("my-bucket--x-s3", "us-east-1");
-        s3Service.putObject("my-bucket--x-s3", "c.txt", "c".getBytes(), null, null);
-        s3Service.putObject("my-bucket--x-s3", "a.txt", "a".getBytes(), null, null);
-        s3Service.putObject("my-bucket--x-s3", "b.txt", "b".getBytes(), null, null);
+    void listObjectsDirectoryBucketDoesNotSort() {
+        // Use a LinkedHashMap-backed storage that preserves insertion order
+        OrderedStorage<String, S3Object> objectStore = new OrderedStorage<>();
+        S3Service orderedService = new S3Service(new InMemoryStorage<>(), objectStore, tempDir.resolve("s3-ordered"));
+        orderedService.createBucket("my-bucket--x-s3", "us-east-1");
+        // Insert in reverse lexicographic order
+        orderedService.putObject("my-bucket--x-s3", "c.txt", "c".getBytes(), null, null);
+        orderedService.putObject("my-bucket--x-s3", "b.txt", "b".getBytes(), null, null);
+        orderedService.putObject("my-bucket--x-s3", "a.txt", "a".getBytes(), null, null);
 
-        List<S3Object> objects = s3Service.listObjects("my-bucket--x-s3", null, null, 1000);
+        List<S3Object> objects = orderedService.listObjects("my-bucket--x-s3", null, null, 1000);
         assertEquals(3, objects.size());
-        // Should NOT be sorted — order depends on storage backend, not lexicographic
-        List<String> keys = objects.stream().map(S3Object::getKey).toList();
-        // Verify that the result is NOT necessarily sorted (i.e. sorting was skipped)
-        // We can't assert exact order since it depends on the storage backend,
-        // but we can verify all keys are present
-        assertTrue(keys.contains("a.txt"));
-        assertTrue(keys.contains("b.txt"));
-        assertTrue(keys.contains("c.txt"));
+        // Directory bucket: sorting is skipped, so insertion order (c, b, a) is preserved
+        assertEquals("c.txt", objects.get(0).getKey());
+        assertEquals("b.txt", objects.get(1).getKey());
+        assertEquals("a.txt", objects.get(2).getKey());
     }
 
     @Test
@@ -367,5 +366,25 @@ class S3ServiceTest {
         assertTrue(S3Service.isDirectoryBucket("my-bucket--x-s3"));
         assertFalse(S3Service.isDirectoryBucket("my-bucket"));
         assertFalse(S3Service.isDirectoryBucket(null));
+    }
+
+    /**
+     * A storage backend backed by LinkedHashMap to preserve insertion order in scan().
+     */
+    static class OrderedStorage<K, V> implements StorageBackend<K, V> {
+        private final LinkedHashMap<K, V> store = new LinkedHashMap<>();
+
+        @Override public void put(K key, V value) { store.put(key, value); }
+        @Override public Optional<V> get(K key) { return Optional.ofNullable(store.get(key)); }
+        @Override public void delete(K key) { store.remove(key); }
+        @Override public List<V> scan(Predicate<K> keyFilter) {
+            List<V> result = new ArrayList<>();
+            store.forEach((k, v) -> { if (keyFilter.test(k)) result.add(v); });
+            return result;
+        }
+        @Override public Set<K> keys() { return Collections.unmodifiableSet(store.keySet()); }
+        @Override public void flush() { }
+        @Override public void load() { }
+        @Override public void clear() { store.clear(); }
     }
 }
