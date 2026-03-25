@@ -98,8 +98,12 @@ public class S3Controller {
     public Response headBucket(@PathParam("bucket") String bucket) {
         try {
             s3Service.headBucket(bucket);
+            String bucketRegion = s3Service.getBucketRegion(bucket);
+            if (bucketRegion == null || bucketRegion.isBlank()) {
+                bucketRegion = regionResolver.getDefaultRegion();
+            }
             return Response.ok()
-                    .header("x-amz-bucket-region", regionResolver.getDefaultRegion())
+                    .header("x-amz-bucket-region", bucketRegion)
                     .build();
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus()).build();
@@ -151,14 +155,25 @@ public class S3Controller {
                 locationConstraint = XmlParser.extractFirst(new String(body, StandardCharsets.UTF_8),
                         "LocationConstraint", null);
             }
-            String region = locationConstraint != null ? locationConstraint : regionResolver.getDefaultRegion();
+            if (locationConstraint != null) {
+                locationConstraint = locationConstraint.trim();
+                if (locationConstraint.isEmpty()) {
+                    locationConstraint = null;
+                } else if ("us-east-1".equalsIgnoreCase(locationConstraint)) {
+                    throw new AwsException("InvalidLocationConstraint",
+                            "The specified location-constraint is not valid.", 400);
+                }
+            }
+            String region = locationConstraint != null ? locationConstraint : regionResolver.resolveRegion(httpHeaders);
             s3Service.createBucket(bucket, region);
             String lockEnabled = httpHeaders.getHeaderString("x-amz-bucket-object-lock-enabled");
             if ("true".equalsIgnoreCase(lockEnabled)) {
                 s3Service.putBucketVersioning(bucket, "Enabled");
                 s3Service.setBucketObjectLockEnabled(bucket);
             }
-            return Response.ok().build();
+            return Response.ok()
+                    .header("Location", "/" + bucket)
+                    .build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }

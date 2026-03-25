@@ -20,7 +20,8 @@ class S3IntegrationTest {
         .when()
             .put("/test-bucket")
         .then()
-            .statusCode(200);
+            .statusCode(200)
+            .header("Location", equalTo("/test-bucket"));
     }
 
     @Test
@@ -243,5 +244,85 @@ class S3IntegrationTest {
         .then()
             .statusCode(404)
             .body(containsString("NoSuchBucket"));
+    }
+
+    @Test
+    @Order(17)
+    void headBucketReturnsStoredRegionForLocationConstraintBucket() {
+        String bucket = "eu-head-bucket";
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>eu-central-1</LocationConstraint>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("Location", equalTo("/" + bucket));
+
+        given()
+        .when()
+            .head("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("x-amz-bucket-region", equalTo("eu-central-1"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(18)
+    void createBucketUsesSigningRegionWhenBodyEmpty() {
+        String bucket = "signed-region-bucket";
+
+        given()
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("Location", equalTo("/" + bucket));
+
+        given()
+        .when()
+            .head("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("x-amz-bucket-region", equalTo("eu-west-1"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(19)
+    void createBucketRejectsUsEast1LocationConstraint() {
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>us-east-1</LocationConstraint>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/invalid-location-bucket")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidLocationConstraint"));
     }
 }
