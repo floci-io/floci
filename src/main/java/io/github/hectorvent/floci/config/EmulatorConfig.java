@@ -15,20 +15,20 @@ public interface EmulatorConfig {
      * (e.g. SQS QueueUrl, SNS TopicArn). This is needed in multi-container Docker setups
      * where "localhost" in the response URL would resolve to the wrong container.
      *
-     * Example: FLOCI_HOSTNAME_EXTERNAL=floci makes SQS return
+     * Example: FLOCI_HOSTNAME=floci makes SQS return
      * http://floci:4566/000000000000/my-queue instead of http://localhost:4566/...
      *
-     * Equivalent to LocalStack's HOSTNAME_EXTERNAL.
+     * Equivalent to LocalStack's LOCALSTACK_HOSTNAME.
      */
-    Optional<String> hostnameExternal();
+    Optional<String> hostname();
 
     /**
-     * Returns the effective base URL, taking hostnameExternal into account.
-     * If hostnameExternal is set, replaces the host in baseUrl with it.
+     * Returns the effective base URL, taking hostname into account.
+     * If hostname is set, replaces the host in baseUrl with it.
      */
     default String effectiveBaseUrl() {
-        return hostnameExternal()
-                .map(hostname -> baseUrl().replaceFirst("://[^:/]+(:\\d+)?", "://" + hostname + "$1"))
+        return hostname()
+                .map(h -> baseUrl().replaceFirst("://[^:/]+(:\\d+)?", "://" + h + "$1"))
                 .orElse(baseUrl());
     }
 

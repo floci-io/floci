@@ -153,14 +153,14 @@ All settings are overridable via environment variables (`FLOCI_` prefix).
 | `FLOCI_DEFAULT_REGION` | `us-east-1` | Default AWS region |
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Default AWS account ID |
 | `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL used in API responses (e.g. SQS QueueUrl) |
-| `FLOCI_HOSTNAME_EXTERNAL` | *(unset)* | Override hostname in response URLs (for Docker Compose) |
+| `FLOCI_HOSTNAME` | *(unset)* | Override hostname in response URLs (for Docker Compose) |
 | `FLOCI_STORAGE_MODE` | `hybrid` | `memory` · `persistent` · `hybrid` · `wal` |
 | `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Data directory |
 
 → Full reference: [configuration docs](https://hectorvent.dev/floci/configuration/application-yml/)
 → Per-service storage overrides: [storage docs](https://hectorvent.dev/floci/configuration/storage/#per-service-storage-overrides)
 
-**Multi-container Docker Compose:** When your application runs in a separate container from Floci, set `FLOCI_HOSTNAME_EXTERNAL` to the Floci service name so that returned URLs (e.g. SQS QueueUrl) resolve correctly:
+**Multi-container Docker Compose:** When your application runs in a separate container from Floci, set `FLOCI_HOSTNAME` to the Floci service name so that returned URLs (e.g. SQS QueueUrl) resolve correctly:
 
 ```yaml
 services:
@@ -169,7 +169,7 @@ services:
     ports:
       - "4566:4566"
     environment:
-      - FLOCI_HOSTNAME_EXTERNAL=floci  # URLs will use http://floci:4566/...
+      - FLOCI_HOSTNAME=floci  # URLs will use http://floci:4566/...
   my-app:
     environment:
       - AWS_ENDPOINT_URL=http://floci:4566

@@ -15,8 +15,8 @@ quarkus:
 
 floci:
   base-url: "http://localhost:4566"
-  # hostname-external: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
-                            # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME_EXTERNAL=floci
+  # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
+                   # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
   default-region: us-east-1
   default-account-id: "000000000000"
   storage:
