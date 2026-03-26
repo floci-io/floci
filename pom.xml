@@ -95,6 +95,13 @@
             <version>1.83</version>
         </dependency>
 
+        <!-- JSONata expression engine (Step Functions) -->
+        <dependency>
+            <groupId>com.dashjoin</groupId>
+            <artifactId>jsonata</artifactId>
+            <version>0.9.9</version>
+        </dependency>
+
         <!-- Testing -->
         <dependency>
             <groupId>io.quarkus</groupId>

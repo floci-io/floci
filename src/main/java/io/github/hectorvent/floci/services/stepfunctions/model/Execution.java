@@ -14,6 +14,8 @@ public class Execution {
     private String output;
     private long startDate;
     private Long stopDate;
+    private String error;
+    private String cause;
 
     public Execution() {
         this.startDate = System.currentTimeMillis() / 1000L;
@@ -42,4 +44,10 @@ public class Execution {
 
     public Long getStopDate() { return stopDate; }
     public void setStopDate(Long stopDate) { this.stopDate = stopDate; }
+
+    public String getError() { return error; }
+    public void setError(String error) { this.error = error; }
+
+    public String getCause() { return cause; }
+    public void setCause(String cause) { this.cause = cause; }
 }

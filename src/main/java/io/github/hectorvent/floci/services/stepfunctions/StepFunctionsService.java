@@ -5,6 +5,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
@@ -25,16 +27,21 @@ public class StepFunctionsService {
     private final Map<String, List<HistoryEvent>> historyCache = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
     private final AslExecutor aslExecutor;
+    private final ObjectMapper objectMapper;
+
+    private static final Set<String> JSONPATH_ONLY_FIELDS = Set.of(
+            "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath");
 
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,
-                                AslExecutor aslExecutor) {
+                                AslExecutor aslExecutor, ObjectMapper objectMapper) {
         this.stateMachineStore = storageFactory.create("stepfunctions", "sfn-state-machines.json",
                 new TypeReference<Map<String, StateMachine>>() {});
         this.executionStore = storageFactory.create("stepfunctions", "sfn-executions.json",
                 new TypeReference<Map<String, Execution>>() {});
         this.regionResolver = regionResolver;
         this.aslExecutor = aslExecutor;
+        this.objectMapper = objectMapper;
     }
 
     // ──────────────────────────── State Machines ────────────────────────────
@@ -44,6 +51,8 @@ public class StepFunctionsService {
         if (stateMachineStore.get(arn).isPresent()) {
             throw new AwsException("StateMachineAlreadyExists", "State machine already exists: " + arn, 400);
         }
+
+        validateDefinition(definition);
 
         StateMachine sm = new StateMachine();
         sm.setStateMachineArn(arn);
@@ -160,5 +169,55 @@ public class StepFunctionsService {
 
     public void sendTaskHeartbeat(String taskToken) {
         LOG.debugv("Task heartbeat for token {0}", taskToken);
+    }
+
+    // ──────────────────────────── Validation ────────────────────────────
+
+    private void validateDefinition(String definition) {
+        JsonNode def;
+        try {
+            def = objectMapper.readTree(definition);
+        } catch (Exception e) {
+            throw new AwsException("InvalidDefinition",
+                    "Invalid State Machine Definition: '" + e.getMessage() + "'", 400);
+        }
+
+        String topLevelQL = def.path("QueryLanguage").asText("JSONPath");
+        boolean topLevelJsonata = "JSONata".equals(topLevelQL);
+        JsonNode states = def.path("States");
+
+        if (states.isObject()) {
+            var fields = states.fields();
+            List<String> errors = new ArrayList<>();
+            while (fields.hasNext()) {
+                var entry = fields.next();
+                validateState(entry.getKey(), entry.getValue(), topLevelJsonata, errors);
+            }
+            if (!errors.isEmpty()) {
+                throw new AwsException("InvalidDefinition",
+                        "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: "
+                                + String.join(", ", errors) + "'", 400);
+            }
+        }
+    }
+
+    private void validateState(String stateName, JsonNode stateDef, boolean topLevelJsonata, List<String> errors) {
+        String stateQL = stateDef.path("QueryLanguage").asText(null);
+        boolean stateIsJsonata = stateQL != null ? "JSONata".equals(stateQL) : topLevelJsonata;
+
+        // Cannot override to JSONPath when top-level is JSONata
+        if (topLevelJsonata && "JSONPath".equals(stateQL)) {
+            errors.add("'QueryLanguage' can not be 'JSONPath' if set to 'JSONata' for whole state machine at /States/" + stateName);
+        }
+
+        // JSONPath-only fields are not allowed when the state uses JSONata
+        if (stateIsJsonata) {
+            for (String field : JSONPATH_ONLY_FIELDS) {
+                if (stateDef.has(field)) {
+                    errors.add("The QueryLanguage is set to 'JSONata', but field '" + field
+                            + "' is only supported for the 'JSONPath' QueryLanguage at /States/" + stateName);
+                }
+            }
+        }
     }
 }

@@ -116,6 +116,8 @@ public class StepFunctionsJsonHandler {
         if (exec.getStopDate() != null) response.put("stopDate", exec.getStopDate());
         if (exec.getInput() != null) response.put("input", exec.getInput());
         if (exec.getOutput() != null) response.put("output", exec.getOutput());
+        if (exec.getError() != null) response.put("error", exec.getError());
+        if (exec.getCause() != null) response.put("cause", exec.getCause());
         return Response.ok(response).build();
     }
 
