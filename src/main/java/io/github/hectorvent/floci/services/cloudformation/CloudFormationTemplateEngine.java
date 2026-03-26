@@ -27,6 +27,7 @@ public class CloudFormationTemplateEngine {
     private final Map<String, String> physicalIds;
     private final Map<String, Map<String, String>> resourceAttributes;
     private final Map<String, Boolean> conditions;
+    private final Map<String, JsonNode> mappings;
     private final ObjectMapper objectMapper;
 
     CloudFormationTemplateEngine(String accountId, String region, String stackName, String stackId,
@@ -34,6 +35,7 @@ public class CloudFormationTemplateEngine {
                                  Map<String, String> physicalIds,
                                  Map<String, Map<String, String>> resourceAttributes,
                                  Map<String, Boolean> conditions,
+                                 Map<String, JsonNode> mappings,
                                  ObjectMapper objectMapper) {
         this.accountId = accountId;
         this.region = region;
@@ -43,6 +45,7 @@ public class CloudFormationTemplateEngine {
         this.physicalIds = physicalIds;
         this.resourceAttributes = resourceAttributes;
         this.conditions = conditions;
+        this.mappings = mappings;
         this.objectMapper = objectMapper;
     }
 
@@ -86,6 +89,9 @@ public class CloudFormationTemplateEngine {
             }
             if (node.has("Fn::ImportValue")) {
                 return resolve(node.get("Fn::ImportValue"));
+            }
+            if (node.has("Fn::FindInMap")) {
+                return resolveFindInMap(node.get("Fn::FindInMap"));
             }
         }
         return node.asText();
@@ -244,5 +250,25 @@ public class CloudFormationTemplateEngine {
         }
         LOG.debugv("Unresolved GetAtt: {0}.{1}", logicalId, attrName);
         return logicalId + "." + attrName;
+    }
+
+    private String resolveFindInMap(JsonNode node) {
+        if (node.isArray()) {
+            String mapName = resolve(node.get(0));
+            String topLvlName = resolve(node.get(1));
+            String secondLvlName = resolve(node.get(2));
+
+            JsonNode map = mappings.get(mapName);
+            if (map != null && map.isObject()) {
+                JsonNode topLvl = map.get(topLvlName);
+                if (topLvl != null && topLvl.isObject()) {
+                    JsonNode secondLvl = topLvl.get(secondLvlName);
+                    if (secondLvl != null) {
+                        return resolve(secondLvl);
+                    }
+                }
+            }
+        }
+        return "";
     }
 }

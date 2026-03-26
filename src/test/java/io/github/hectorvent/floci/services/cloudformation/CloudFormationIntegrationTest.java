@@ -14,11 +14,24 @@ class CloudFormationIntegrationTest {
     void createStack_withS3AndSqs() {
         String template = """
             {
+              "Mappings": {
+                "Env": {
+                  "us-east-1": {
+                    "Name": "test"
+                  }
+                }
+              },
               "Resources": {
                 "MyBucket": {
                   "Type": "AWS::S3::Bucket",
                   "Properties": {
-                    "BucketName": "cf-test-bucket"
+                    "BucketName": {
+                       "Fn::Sub": ["cf-${env}-bucket", {
+                         "env": {
+                            "Fn::FindInMap": ["Env", { "Ref" : "AWS::Region" }, "Name"]
+                         }
+                       }]
+                    }
                   }
                 },
                 "MyQueue": {
