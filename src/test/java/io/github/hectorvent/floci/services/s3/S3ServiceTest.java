@@ -1,11 +1,16 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
+import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
+import io.github.hectorvent.floci.services.s3.model.QueueNotification;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -277,5 +282,77 @@ class S3ServiceTest {
         assertEquals("application/json", copy.getContentType());
         assertEquals("STANDARD_IA", copy.getStorageClass());
         assertEquals("dest", copy.getMetadata().get("owner"));
+    }
+
+    // ──────────────────────────── S3 → SQS Cross-Region Notification ────────────────────────────
+
+    @Test
+    void s3NotificationDeliveresToCrossRegionSqsQueue() {
+        String defaultRegion = "us-east-1";
+        String crossRegion = "eu-west-1";
+        String queueName = "s3-notification-queue";
+        String sqsArn = "arn:aws:sqs:" + crossRegion + ":000000000000:" + queueName;
+
+        RegionResolver regionResolver = new RegionResolver(defaultRegion, "000000000000");
+        SqsService sqsService = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                30, 262144, "http://localhost:4566", regionResolver);
+
+        sqsService.createQueue(queueName, null, crossRegion);
+
+        Path dataRoot = tempDir.resolve("s3-cross-region");
+        S3Service s3WithSqs = new S3Service(
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                dataRoot, sqsService, regionResolver);
+
+        s3WithSqs.createBucket("notify-bucket", defaultRegion);
+
+        NotificationConfiguration notifConfig = new NotificationConfiguration();
+        notifConfig.setQueueConfigurations(List.of(
+                new QueueNotification("notif-1", sqsArn, List.of("s3:ObjectCreated:*"))
+        ));
+        s3WithSqs.putBucketNotificationConfiguration("notify-bucket", notifConfig);
+
+        s3WithSqs.putObject("notify-bucket", "test-key.txt", "hello".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null, "STANDARD", null, null, null);
+
+        String queueUrl = "http://localhost:4566/000000000000/" + queueName;
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, crossRegion);
+        assertEquals(1, messages.size());
+        assertTrue(messages.getFirst().getBody().contains("test-key.txt"));
+    }
+
+    @Test
+    void s3NotificationDeliveresToSameRegionSqsQueue() {
+        String region = "us-east-1";
+        String queueName = "s3-same-region-queue";
+        String sqsArn = "arn:aws:sqs:" + region + ":000000000000:" + queueName;
+
+        RegionResolver regionResolver = new RegionResolver(region, "000000000000");
+        SqsService sqsService = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                30, 262144, "http://localhost:4566", regionResolver);
+
+        sqsService.createQueue(queueName, null, region);
+
+        Path dataRoot = tempDir.resolve("s3-same-region");
+        S3Service s3WithSqs = new S3Service(
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                dataRoot, sqsService, regionResolver);
+
+        s3WithSqs.createBucket("same-region-bucket", region);
+
+        NotificationConfiguration notifConfig = new NotificationConfiguration();
+        notifConfig.setQueueConfigurations(List.of(
+                new QueueNotification("notif-1", sqsArn, List.of("s3:ObjectCreated:*"))
+        ));
+        s3WithSqs.putBucketNotificationConfiguration("same-region-bucket", notifConfig);
+
+        s3WithSqs.putObject("same-region-bucket", "file.txt", "data".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null, "STANDARD", null, null, null);
+
+        String queueUrl = "http://localhost:4566/000000000000/" + queueName;
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, region);
+        assertEquals(1, messages.size());
     }
 }

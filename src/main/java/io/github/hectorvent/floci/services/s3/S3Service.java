@@ -71,6 +71,16 @@ public class S3Service {
                 new ObjectMapper());
     }
 
+    /**
+     * Package-private constructor for testing with SQS integration.
+     */
+    S3Service(StorageBackend<String, Bucket> bucketStore,
+              StorageBackend<String, S3Object> objectStore,
+              Path dataRoot, SqsService sqsService, RegionResolver regionResolver) {
+        this(bucketStore, objectStore, dataRoot, sqsService, null, regionResolver, "http://localhost:4566",
+                new ObjectMapper());
+    }
+
     private S3Service(StorageBackend<String, Bucket> bucketStore,
                       StorageBackend<String, S3Object> objectStore,
                       Path dataRoot, SqsService sqsService, SnsService snsService,
@@ -1024,7 +1034,8 @@ public class S3Service {
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName))) {
                 try {
-                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0);
+                    String queueRegion = extractRegionFromArn(qn.queueArn(), region);
+                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0, null, null, queueRegion);
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
                 } catch (Exception e) {
                     LOG.warnv("Failed to deliver S3 event to SQS {0}: {1}", qn.queueArn(), e.getMessage());
@@ -1050,6 +1061,11 @@ public class S3Service {
             return full.startsWith(pattern.substring(0, pattern.length() - 1));
         }
         return full.equals(pattern);
+    }
+
+    private static String extractRegionFromArn(String arn, String defaultRegion) {
+        String[] parts = arn.split(":");
+        return parts.length >= 4 && !parts[3].isEmpty() ? parts[3] : defaultRegion;
     }
 
     private String sqsUrlFromArn(String arn) {

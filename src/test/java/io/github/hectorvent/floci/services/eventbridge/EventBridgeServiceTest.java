@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -313,5 +315,80 @@ class EventBridgeServiceTest {
 
         EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
         assertEquals(1, result.failedCount());
+    }
+
+    // ──────────────────────────── Cross-Region SQS Delivery ────────────────────────────
+
+    @Test
+    void putEventsDeliversToCrossRegionSqsTarget() {
+        String crossRegion = "eu-west-1";
+        String queueName = "cross-region-queue";
+        String sqsArn = "arn:aws:sqs:" + crossRegion + ":000000000000:" + queueName;
+
+        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+        SqsService sqsService = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                30, 262144, "http://localhost:4566", regionResolver);
+
+        sqsService.createQueue(queueName, null, crossRegion);
+
+        EventBridgeService ebWithSqs = new EventBridgeService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, null, sqsService, null, new ObjectMapper());
+
+        ebWithSqs.putRule("test-rule", null,
+                "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+
+        Target target = new Target();
+        target.setId("sqs-target");
+        target.setArn(sqsArn);
+        ebWithSqs.putTargets("test-rule", null, List.of(target), REGION);
+
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{\"key\":\"value\"}")
+        );
+        EventBridgeService.PutEventsResult result = ebWithSqs.putEvents(entries, REGION);
+        assertEquals(0, result.failedCount());
+
+        String queueUrl = "http://localhost:4566/000000000000/" + queueName;
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, crossRegion);
+        assertEquals(1, messages.size());
+    }
+
+    @Test
+    void putEventsDeliversToSameRegionSqsTarget() {
+        String queueName = "same-region-queue";
+        String sqsArn = "arn:aws:sqs:" + REGION + ":000000000000:" + queueName;
+
+        RegionResolver regionResolver = new RegionResolver(REGION, "000000000000");
+        SqsService sqsService = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                30, 262144, "http://localhost:4566", regionResolver);
+
+        sqsService.createQueue(queueName, null, REGION);
+
+        EventBridgeService ebWithSqs = new EventBridgeService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                regionResolver, null, sqsService, null, new ObjectMapper());
+
+        ebWithSqs.putRule("test-rule", null,
+                "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+
+        Target target = new Target();
+        target.setId("sqs-target");
+        target.setArn(sqsArn);
+        ebWithSqs.putTargets("test-rule", null, List.of(target), REGION);
+
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")
+        );
+        EventBridgeService.PutEventsResult result = ebWithSqs.putEvents(entries, REGION);
+        assertEquals(0, result.failedCount());
+
+        String queueUrl = "http://localhost:4566/000000000000/" + queueName;
+        List<Message> messages = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(1, messages.size());
     }
 }

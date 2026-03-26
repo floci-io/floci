@@ -68,7 +68,7 @@ public class SqsService {
                 new RegionResolver("us-east-1", "000000000000"));
     }
 
-    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+    public SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
                StorageBackend<String, Map<String, Long>> dedupStore,
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver) {

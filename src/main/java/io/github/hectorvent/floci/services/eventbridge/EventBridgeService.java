@@ -418,8 +418,9 @@ public class EventBridgeService {
                 lambdaService.invoke(fnRegion, fnName, payload.getBytes(), InvocationType.Event);
                 LOG.debugv("EventBridge delivered to Lambda: {0}", arn);
             } else if (arn.contains(":sqs:")) {
+                String sqsRegion = extractRegionFromArn(arn, region);
                 String queueUrl = sqsArnToUrl(arn);
-                sqsService.sendMessage(queueUrl, payload, 0);
+                sqsService.sendMessage(queueUrl, payload, 0, null, null, sqsRegion);
                 LOG.debugv("EventBridge delivered to SQS: {0}", arn);
             } else if (arn.contains(":sns:")) {
                 String topicRegion = extractRegionFromArn(arn, region);
