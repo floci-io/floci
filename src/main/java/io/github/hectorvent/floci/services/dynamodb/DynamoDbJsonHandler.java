@@ -114,8 +114,27 @@ public class DynamoDbJsonHandler {
             }
         }
 
+        String billingMode = request.has("BillingMode")
+                ? request.get("BillingMode").asText() : null;
+
         TableDefinition table = dynamoDbService.createTable(tableName, keySchema, attrDefs,
                 readCapacity, writeCapacity, gsis, lsis, region);
+
+        if ("PAY_PER_REQUEST".equals(billingMode)) {
+            table.setBillingMode("PAY_PER_REQUEST");
+            table.getProvisionedThroughput().setReadCapacityUnits(0L);
+            table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+        } else {
+            table.setBillingMode("PROVISIONED");
+        }
+
+        // Store tags from CreateTable request
+        JsonNode tagsNode = request.path("Tags");
+        if (tagsNode.isArray()) {
+            for (JsonNode tag : tagsNode) {
+                table.getTags().put(tag.path("Key").asText(), tag.path("Value").asText());
+            }
+        }
 
         JsonNode streamSpec = request.path("StreamSpecification");
         if (!streamSpec.isMissingNode() && streamSpec.path("StreamEnabled").asBoolean(false)) {
@@ -375,6 +394,16 @@ public class DynamoDbJsonHandler {
 
         TableDefinition table = dynamoDbService.updateTable(tableName, readCapacity, writeCapacity, region);
 
+        String billingMode = request.has("BillingMode")
+                ? request.get("BillingMode").asText() : null;
+        if (billingMode != null) {
+            table.setBillingMode(billingMode);
+            if ("PAY_PER_REQUEST".equals(billingMode)) {
+                table.getProvisionedThroughput().setReadCapacityUnits(0L);
+                table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+            }
+        }
+
         JsonNode streamSpec = request.path("StreamSpecification");
         if (!streamSpec.isMissingNode()) {
             boolean streamEnabled = streamSpec.path("StreamEnabled").asBoolean(false);
@@ -525,6 +554,21 @@ public class DynamoDbJsonHandler {
         node.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
         node.put("ItemCount", table.getItemCount());
         node.put("TableSizeBytes", table.getTableSizeBytes());
+        node.put("DeletionProtectionEnabled", false);
+
+        if ("PAY_PER_REQUEST".equals(table.getBillingMode())) {
+            ObjectNode billing = objectMapper.createObjectNode();
+            billing.put("BillingMode", "PAY_PER_REQUEST");
+            billing.put("LastUpdateToPayPerRequestDateTime",
+                    table.getCreationDateTime().getEpochSecond());
+            node.set("BillingModeSummary", billing);
+        }
+
+        ObjectNode warmThroughput = objectMapper.createObjectNode();
+        warmThroughput.put("Status", "ACTIVE");
+        warmThroughput.put("ReadUnitsPerSecond", 0);
+        warmThroughput.put("WriteUnitsPerSecond", 0);
+        node.set("WarmThroughput", warmThroughput);
 
         ArrayNode keySchemaArray = objectMapper.createArrayNode();
         for (var ks : table.getKeySchema()) {

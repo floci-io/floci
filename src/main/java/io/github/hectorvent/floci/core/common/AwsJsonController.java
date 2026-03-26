@@ -195,8 +195,9 @@ public class AwsJsonController {
 
     /**
      * Handles AWS smithy-rpc-v2-cbor protocol requests.
-     * Go SDK CloudWatch v1.55.1+ sends to POST /service/{serviceId}/operation/{op}
+     * AWS SDK v2 sends to POST /service/{sdkId}/operation/{op}
      * with Content-Type: application/cbor and no X-Amz-Target header.
+     * Supported services: DynamoDB, SQS, SNS, StepFunctions, CloudWatch.
      */
     @POST
     @Path("service/{serviceId}/operation/{operation}")
@@ -208,11 +209,7 @@ public class AwsJsonController {
             @Context HttpHeaders httpHeaders,
             byte[] body) {
 
-        if (!CLOUDWATCH_SERVICE_ID.equals(serviceId)) {
-            return Response.status(404).build();
-        }
-
-        LOG.debugv("CloudWatch RPC v2 CBOR action: {0}", operation);
+        LOG.debugv("Smithy RPC v2 CBOR: service={0}, operation={1}", serviceId, operation);
 
         try {
             JsonNode request = (body != null && body.length > 0)
@@ -220,28 +217,21 @@ public class AwsJsonController {
                     : objectMapper.createObjectNode();
             String region = regionResolver.resolveRegion(httpHeaders);
 
-            Response delegated = cloudWatchMetricsJsonHandler.handle(operation, request, region);
-            byte[] cborBytes = nodeToSmithyCbor((JsonNode) delegated.getEntity());
+            Response delegated = dispatchCbor(serviceId, operation, request, region);
+            if (delegated == null) {
+                return Response.status(404).build();
+            }
 
+            byte[] cborBytes = nodeToSmithyCbor((JsonNode) delegated.getEntity());
             return Response.status(delegated.getStatus())
                     .header("Smithy-Protocol", "rpc-v2-cbor")
                     .type("application/cbor")
                     .entity(cborBytes)
                     .build();
         } catch (AwsException e) {
-            try {
-                byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
-                        new AwsErrorResponse(e.getErrorCode(), e.getMessage()));
-                return Response.status(e.getHttpStatus())
-                        .header("Smithy-Protocol", "rpc-v2-cbor")
-                        .type("application/cbor")
-                        .entity(errBytes)
-                        .build();
-            } catch (Exception ex) {
-                return Response.status(e.getHttpStatus()).build();
-            }
+            return cborErrorResponse(e, "Smithy-Protocol");
         } catch (Exception e) {
-            LOG.error("Error processing CloudWatch CBOR request", e);
+            LOG.error("Error processing Smithy CBOR request: " + serviceId + "." + operation, e);
             return Response.status(500).build();
         }
     }
@@ -258,12 +248,37 @@ public class AwsJsonController {
             @Context HttpHeaders httpHeaders,
             byte[] body) {
 
-        if (target == null || !target.startsWith(CLOUDWATCH_TARGET_PREFIX)) {
+        if (target == null) {
             return null;
         }
 
-        String action = target.substring(CLOUDWATCH_TARGET_PREFIX.length());
-        LOG.debugv("CloudWatch CBOR action: {0}", action);
+        String prefix;
+        String serviceName;
+
+        if (target.startsWith(DYNAMODB_STREAMS_TARGET_PREFIX)) {
+            prefix = DYNAMODB_STREAMS_TARGET_PREFIX;
+            serviceName = "DynamoDBStreams";
+        } else if (target.startsWith(DYNAMODB_TARGET_PREFIX)) {
+            prefix = DYNAMODB_TARGET_PREFIX;
+            serviceName = "DynamoDB";
+        } else if (target.startsWith(SQS_TARGET_PREFIX)) {
+            prefix = SQS_TARGET_PREFIX;
+            serviceName = "SQS";
+        } else if (target.startsWith(SNS_TARGET_PREFIX)) {
+            prefix = SNS_TARGET_PREFIX;
+            serviceName = "SNS";
+        } else if (target.startsWith(STEPFUNCTIONS_TARGET_PREFIX)) {
+            prefix = STEPFUNCTIONS_TARGET_PREFIX;
+            serviceName = "StepFunctions";
+        } else if (target.startsWith(CLOUDWATCH_TARGET_PREFIX)) {
+            prefix = CLOUDWATCH_TARGET_PREFIX;
+            serviceName = "CloudWatch";
+        } else {
+            return null;
+        }
+
+        String action = target.substring(prefix.length());
+        LOG.debugv("{0} CBOR action: {1}", serviceName, action);
 
         try {
             JsonNode request = (body != null && body.length > 0)
@@ -271,29 +286,57 @@ public class AwsJsonController {
                     : objectMapper.createObjectNode();
             String region = regionResolver.resolveRegion(httpHeaders);
 
-            Response delegated = cloudWatchMetricsJsonHandler.handle(action, request, region);
-            byte[] cborBytes = nodeToSmithyCbor((JsonNode) delegated.getEntity());
+            Response delegated = switch (serviceName) {
+                case "DynamoDB" -> dynamoDbJsonHandler.handle(action, request, region);
+                case "DynamoDBStreams" -> dynamoDbStreamsJsonHandler.handle(action, request, region);
+                case "SQS" -> sqsJsonHandler.handle(action, request, region);
+                case "SNS" -> snsJsonHandler.handle(action, request, region);
+                case "StepFunctions" -> sfnJsonHandler.handle(action, request, region);
+                case "CloudWatch" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
+                default -> null;
+            };
+            if (delegated == null) {
+                return null;
+            }
 
+            byte[] cborBytes = nodeToSmithyCbor((JsonNode) delegated.getEntity());
             return Response.status(delegated.getStatus())
                     .header("smithy-protocol", "rpc-v2-cbor")
                     .type("application/cbor")
                     .entity(cborBytes)
                     .build();
         } catch (AwsException e) {
-            try {
-                byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
-                        new AwsErrorResponse(e.getErrorCode(), e.getMessage()));
-                return Response.status(e.getHttpStatus())
-                        .header("smithy-protocol", "rpc-v2-cbor")
-                        .type("application/cbor")
-                        .entity(errBytes)
-                        .build();
-            } catch (Exception ex) {
-                return Response.status(e.getHttpStatus()).build();
-            }
+            return cborErrorResponse(e, "smithy-protocol");
         } catch (Exception e) {
-            LOG.error("Error processing CloudWatch CBOR request", e);
+            LOG.error("Error processing CBOR request: " + serviceName + "." + action, e);
             return Response.status(500).build();
+        }
+    }
+
+    /** Dispatches a CBOR request to the appropriate service handler by SDK service ID. */
+    private Response dispatchCbor(String serviceId, String operation, JsonNode request, String region) throws Exception {
+        return switch (serviceId) {
+            case "DynamoDB" -> dynamoDbJsonHandler.handle(operation, request, region);
+            case "DynamoDB Streams" -> dynamoDbStreamsJsonHandler.handle(operation, request, region);
+            case "SQS" -> sqsJsonHandler.handle(operation, request, region);
+            case "SNS" -> snsJsonHandler.handle(operation, request, region);
+            case "SFN" -> sfnJsonHandler.handle(operation, request, region);
+            case CLOUDWATCH_SERVICE_ID -> cloudWatchMetricsJsonHandler.handle(operation, request, region);
+            default -> null;
+        };
+    }
+
+    private Response cborErrorResponse(AwsException e, String protocolHeader) {
+        try {
+            byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
+                    new AwsErrorResponse(e.getErrorCode(), e.getMessage()));
+            return Response.status(e.getHttpStatus())
+                    .header(protocolHeader, "rpc-v2-cbor")
+                    .type("application/cbor")
+                    .entity(errBytes)
+                    .build();
+        } catch (Exception ex) {
+            return Response.status(e.getHttpStatus()).build();
         }
     }
 }

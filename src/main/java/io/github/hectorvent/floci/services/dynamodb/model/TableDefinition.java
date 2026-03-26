@@ -29,6 +29,7 @@ public class TableDefinition {
     private Map<String, String> tags;
     private List<GlobalSecondaryIndex> globalSecondaryIndexes;
     private List<LocalSecondaryIndex> localSecondaryIndexes;
+    private String billingMode; // "PROVISIONED" or "PAY_PER_REQUEST"
     private String ttlAttributeName;
     private boolean ttlEnabled;
     private boolean streamEnabled;
@@ -106,6 +107,9 @@ public class TableDefinition {
     public void setLocalSecondaryIndexes(List<LocalSecondaryIndex> localSecondaryIndexes) {
         this.localSecondaryIndexes = localSecondaryIndexes != null ? localSecondaryIndexes : new ArrayList<>();
     }
+
+    public String getBillingMode() { return billingMode; }
+    public void setBillingMode(String billingMode) { this.billingMode = billingMode; }
 
     public String getTtlAttributeName() { return ttlAttributeName; }
     public void setTtlAttributeName(String ttlAttributeName) { this.ttlAttributeName = ttlAttributeName; }
