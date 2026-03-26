@@ -178,8 +178,73 @@ class S3MultipartIntegrationTest {
 
     @Test
     @Order(11)
+    void uploadPartCopy() {
+        // Put a source object
+        given()
+            .body("ABCDEFGHIJ")
+        .when()
+            .put("/" + BUCKET + "/source-for-copy.bin")
+        .then()
+            .statusCode(200);
+
+        // Initiate multipart upload for destination
+        String copyUploadId = given()
+            .when()
+                .post("/" + BUCKET + "/copy-dest.bin?uploads")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        // UploadPartCopy full source
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/source-for-copy.bin")
+        .when()
+            .put("/" + BUCKET + "/copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CopyPartResult"))
+            .body(containsString("<ETag>"));
+
+        // UploadPartCopy with range (bytes 2-5 → "CDEF")
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/source-for-copy.bin")
+            .header("x-amz-copy-source-range", "bytes=2-5")
+        .when()
+            .put("/" + BUCKET + "/copy-dest.bin?uploadId=" + copyUploadId + "&partNumber=2")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CopyPartResult"))
+            .body(containsString("<ETag>"));
+
+        // Complete the upload
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>etag1</ETag></Part>
+                    <Part><PartNumber>2</PartNumber><ETag>etag2</ETag></Part>
+                </CompleteMultipartUpload>""";
+        given()
+            .contentType("application/xml")
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/copy-dest.bin?uploadId=" + copyUploadId)
+        .then()
+            .statusCode(200);
+
+        // Verify contents: full source + ranged slice
+        given()
+        .when()
+            .get("/" + BUCKET + "/copy-dest.bin")
+        .then()
+            .statusCode(200)
+            .body(equalTo("ABCDEFGHIJCDEF"));
+    }
+
+    @Test
+    @Order(12)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/source-for-copy.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/copy-dest.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 }

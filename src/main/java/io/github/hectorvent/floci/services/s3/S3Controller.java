@@ -327,6 +327,9 @@ public class S3Controller {
             }
 
             if (uploadId != null && partNumber != null) {
+                if (copySource != null && !copySource.isEmpty()) {
+                    return handleUploadPartCopy(copySource, bucket, key, uploadId, partNumber, httpHeaders);
+                }
                 byte[] partData = decodeAwsChunked(body, contentEncoding, contentSha256);
                 validateChecksumHeaders(httpHeaders, partData);
                 String eTag = s3Service.uploadPart(bucket, key, uploadId, partNumber, partData);
@@ -1069,6 +1072,28 @@ public class S3Controller {
                 .end("CopyObjectResult")
                 .build();
         return Response.ok(xml).build();
+    }
+
+    private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
+                                           String uploadId, int partNumber, HttpHeaders httpHeaders) {
+        String source = copySource.startsWith("/") ? copySource.substring(1) : copySource;
+        int slashIndex = source.indexOf('/');
+        if (slashIndex < 0) {
+            throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
+        }
+        String sourceBucket = source.substring(0, slashIndex);
+        String sourceKey = source.substring(slashIndex + 1);
+        String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
+        String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
+                sourceBucket, sourceKey, copySourceRange);
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("CopyPartResult", AwsNamespaces.S3)
+                .elem("LastModified", ISO_FORMAT.format(java.time.Instant.now()))
+                .elem("ETag", eTag)
+                .end("CopyPartResult")
+                .build();
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
     private Response handleGetObjectAttributes(String bucket, String key, String versionId,

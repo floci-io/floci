@@ -786,6 +786,26 @@ public class S3Service {
         return eTag;
     }
 
+    public String uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
+                                  String sourceBucket, String sourceKey, String copySourceRange) {
+        S3Object source = getObject(sourceBucket, sourceKey);
+        byte[] data = source.getData();
+
+        if (copySourceRange != null && !copySourceRange.isBlank()) {
+            // format: "bytes=START-END" (inclusive on both ends)
+            String range = copySourceRange.startsWith("bytes=") ? copySourceRange.substring(6) : copySourceRange;
+            int dash = range.indexOf('-');
+            if (dash < 0) {
+                throw new AwsException("InvalidArgument", "Invalid x-amz-copy-source-range: " + copySourceRange, 400);
+            }
+            int start = Integer.parseInt(range.substring(0, dash).trim());
+            int end = Integer.parseInt(range.substring(dash + 1).trim());
+            data = Arrays.copyOfRange(data, start, end + 1);
+        }
+
+        return uploadPart(destBucket, destKey, uploadId, partNumber, data);
+    }
+
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)) {
