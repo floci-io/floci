@@ -31,7 +31,6 @@ public class SqsQueueUrlFilter implements ContainerRequestFilter {
                 && "x-amz-json-1.0".equals(mt.getSubtype())) {
             URI rewritten = UriBuilder.fromUri(ctx.getUriInfo().getRequestUri())
                     .replacePath("/")
-                    .replaceQuery(null)
                     .build();
             ctx.setRequestUri(rewritten);
         }
