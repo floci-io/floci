@@ -1,0 +1,115 @@
+name: Compatibility Tests
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build floci image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '25'
+          distribution: 'temurin'
+          cache: maven
+
+      - name: Build JVM artifact
+        run: mvn clean package -DskipTests -q
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.jvm-package
+          tags: floci:test
+          outputs: type=docker,dest=/tmp/floci-image.tar
+          cache-from: type=gha,scope=floci
+          cache-to: type=gha,scope=floci,mode=max
+
+      - name: Compress image
+        run: gzip /tmp/floci-image.tar
+
+      - name: Upload floci image
+        uses: actions/upload-artifact@v4
+        with:
+          name: floci-image
+          path: /tmp/floci-image.tar.gz
+          retention-days: 1
+
+  compat-test:
+    name: ${{ matrix.test }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - sdk-test-node
+          - sdk-test-python
+          - sdk-test-java
+          - sdk-test-go
+          - sdk-test-rust
+          - sdk-test-awscli
+          - compat-cdk
+          - compat-terraform
+          - compat-opentofu
+
+    steps:
+      - name: Download floci image
+        uses: actions/download-artifact@v4
+        with:
+          name: floci-image
+          path: /tmp
+
+      - name: Load floci image
+        run: gunzip -c /tmp/floci-image.tar.gz | docker load
+
+      - name: Create Docker network
+        run: docker network create compat-net
+
+      - name: Start floci
+        run: |
+          docker run -d --name floci --network compat-net \
+            -p 4566:4566 \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -e FLOCI_SERVICES_DOCKER_NETWORK=compat-net \
+            floci:test
+
+      - name: Wait for floci to be ready
+        run: timeout 60 bash -c 'until curl -sf http://localhost:4566/ >/dev/null 2>&1; do sleep 1; done'
+
+      - name: Checkout compatibility tests
+        uses: actions/checkout@v4
+        with:
+          repository: hectorvent/floci-compatibility-tests
+          path: compat-tests
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build test image
+        uses: docker/build-push-action@v6
+        with:
+          context: compat-tests/${{ matrix.test }}
+          load: true
+          tags: compat-${{ matrix.test }}
+          cache-from: type=gha,scope=${{ matrix.test }}
+          cache-to: type=gha,scope=${{ matrix.test }},mode=max
+
+      - name: Run tests
+        run: |
+          docker run --rm --network compat-net \
+            -e FLOCI_ENDPOINT=http://floci:4566 \
+            compat-${{ matrix.test }}
+
+      - name: Dump floci logs
+        if: failure()
+        run: docker logs floci
