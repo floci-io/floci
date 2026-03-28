@@ -269,7 +269,11 @@ public class AslExecutor {
         if (resource.startsWith("arn:aws:states:::dynamodb:")) {
             String operation = resource.substring("arn:aws:states:::dynamodb:".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeDynamoDb(operation, input, region);
+            try {
+                return invokeDynamoDb(operation, input, region);
+            } catch (AwsException e) {
+                throw new FailStateException("DynamoDB." + e.getErrorCode(), e.getMessage());
+            }
         }
 
         // AWS SDK service integrations: DynamoDB
@@ -345,9 +349,9 @@ public class AslExecutor {
         try {
             response = dynamoDbJsonHandler.handle(pascalAction, input, region);
         } catch (AwsException e) {
-            throw new FailStateException("DynamoDb." + e.getErrorCode() + "Exception", e.getMessage());
+            throw new FailStateException("DynamoDb." + e.getErrorCode(), e.getMessage());
         } catch (Exception e) {
-            throw new FailStateException("DynamoDb.InternalServerErrorException",
+            throw new FailStateException("DynamoDb.InternalServerError",
                     e.getMessage() != null ? e.getMessage() : "DynamoDB error");
         }
 
@@ -356,7 +360,7 @@ public class AslExecutor {
 
         if (status >= 400) {
             if (entity instanceof AwsErrorResponse err) {
-                throw new FailStateException("DynamoDb." + err.type() + "Exception", err.message());
+                throw new FailStateException("DynamoDb." + err.type(), err.message());
             }
             if (entity instanceof JsonNode errorNode) {
                 String errorName = errorNode.path("__type").asText("UnknownError");
