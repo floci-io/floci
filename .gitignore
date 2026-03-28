@@ -10,6 +10,7 @@ data/
 .classpath
 .vscode/
 .DS_Store
+.zed/settings.json
 
 CLAUDE.md
 .claude
