@@ -247,13 +247,6 @@ class DynamoDbServiceTest {
         assertThrows(AwsException.class, () -> service.scan("NoTable", null, null, null, null, null));
     }
 
-    // --- if_not_exists tests ---
-
-    /**
-     * Bug: UpdateItem with "SET attr = if_not_exists(attr, :val)" on a non-existent item
-     * used to create the item with key attributes only, silently dropping the SET clause.
-     * Expected (real AWS): the item is created with both key and the fallback attribute.
-     */
     @Test
     void updateItemSetIfNotExistsOnNonExistentItemCreatesAttribute() {
         createOrdersTable();
