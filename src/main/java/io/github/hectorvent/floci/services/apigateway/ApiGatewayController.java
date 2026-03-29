@@ -152,8 +152,14 @@ public class ApiGatewayController {
 
     @POST
     @Path("/restapis")
-    public Response createRestApi(@Context HttpHeaders headers, String body) {
+    public Response createRestApi(@Context HttpHeaders headers,
+                                  @QueryParam("mode") String mode,
+                                  String body) {
         String region = regionResolver.resolveRegion(headers);
+        if ("import".equals(mode)) {
+            RestApi api = service.importRestApi(region, body);
+            return Response.status(201).entity(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
+        }
         try {
             @SuppressWarnings("unchecked")
             Map<String, Object> request = objectMapper.readValue(body, Map.class);
@@ -162,6 +168,17 @@ public class ApiGatewayController {
         } catch (IOException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    @PUT
+    @Path("/restapis/{apiId}")
+    public Response putRestApi(@Context HttpHeaders headers,
+                               @PathParam("apiId") String apiId,
+                               @QueryParam("mode") String mode,
+                               String body) {
+        String region = regionResolver.resolveRegion(headers);
+        RestApi api = service.putRestApi(region, apiId, mode, body);
+        return Response.ok(toApiNode(api).toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
     @GET
@@ -628,6 +645,52 @@ public class ApiGatewayController {
         return Response.accepted().build();
     }
 
+    // ──────────────────────────── Models (v1) ────────────────────────────
+
+    @POST
+    @Path("/restapis/{apiId}/models")
+    public Response createModel(@Context HttpHeaders headers, @PathParam("apiId") String apiId, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            io.github.hectorvent.floci.services.apigateway.model.Model model = service.createModel(region, apiId, request);
+            return Response.status(201).entity(toModelNode(model).toString()).type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/models")
+    public Response getModels(@Context HttpHeaders headers, @PathParam("apiId") String apiId) {
+        String region = regionResolver.resolveRegion(headers);
+        List<io.github.hectorvent.floci.services.apigateway.model.Model> models = service.getModels(region, apiId);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("item");
+        models.forEach(m -> items.add(toModelNode(m)));
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/restapis/{apiId}/models/{modelName}")
+    public Response getModel(@Context HttpHeaders headers,
+                             @PathParam("apiId") String apiId,
+                             @PathParam("modelName") String modelName) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(toModelNode(service.getModel(region, apiId, modelName)).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/restapis/{apiId}/models/{modelName}")
+    public Response deleteModel(@Context HttpHeaders headers,
+                                @PathParam("apiId") String apiId,
+                                @PathParam("modelName") String modelName) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteModel(region, apiId, modelName);
+        return Response.accepted().build();
+    }
+
     // ──────────────────────────── Custom Domains (v1) ────────────────────────────
 
     @POST
@@ -843,6 +906,12 @@ public class ApiGatewayController {
         node.put("httpMethod", m.getHttpMethod());
         node.put("authorizationType", m.getAuthorizationType());
         if (m.getAuthorizerId() != null) node.put("authorizerId", m.getAuthorizerId());
+        if (m.getRequestValidatorId() != null) node.put("requestValidatorId", m.getRequestValidatorId());
+        if (m.getRequestModels() != null && !m.getRequestModels().isEmpty()) {
+            ObjectNode models = objectMapper.createObjectNode();
+            m.getRequestModels().forEach(models::put);
+            node.set("requestModels", models);
+        }
         if (m.getMethodIntegration() != null) {
             node.set("methodIntegration", toIntegrationNode(m.getMethodIntegration()));
         }
@@ -860,6 +929,7 @@ public class ApiGatewayController {
         node.put("type", i.getType());
         node.put("httpMethod", i.getHttpMethod());
         node.put("uri", i.getUri());
+        node.put("passthroughBehavior", i.getPassthroughBehavior());
         return node;
     }
 
@@ -945,6 +1015,16 @@ public class ApiGatewayController {
         node.put("basePath", m.getBasePath());
         node.put("restApiId", m.getRestApiId());
         node.put("stage", m.getStage());
+        return node;
+    }
+
+    private ObjectNode toModelNode(io.github.hectorvent.floci.services.apigateway.model.Model m) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("id", m.getId());
+        node.put("name", m.getName());
+        if (m.getDescription() != null) node.put("description", m.getDescription());
+        node.put("contentType", m.getContentType());
+        if (m.getSchema() != null) node.put("schema", m.getSchema());
         return node;
     }
 

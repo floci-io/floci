@@ -7,14 +7,14 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.apigateway.model.*;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.PathItem;
+import io.swagger.v3.parser.core.models.SwaggerParseResult;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 @ApplicationScoped
 public class ApiGatewayService {
@@ -30,6 +30,7 @@ public class ApiGatewayService {
     private final StorageBackend<String, UsagePlan> usagePlanStore;
     private final StorageBackend<String, UsagePlanKey> usagePlanKeyStore;
     private final StorageBackend<String, RequestValidator> requestValidatorStore;
+    private final StorageBackend<String, Model> modelStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
     private final RegionResolver regionResolver;
@@ -61,6 +62,9 @@ public class ApiGatewayService {
                 new TypeReference<>() {
                 });
         this.requestValidatorStore = storageFactory.create("apigateway", "apigateway-validators.json",
+                new TypeReference<>() {
+                });
+        this.modelStore = storageFactory.create("apigateway", "apigateway-models.json",
                 new TypeReference<>() {
                 });
         this.domainStore = storageFactory.create("apigateway", "apigateway-domains.json",
@@ -114,6 +118,8 @@ public class ApiGatewayService {
         resourceStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(resourceStore::delete);
         deploymentStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(deploymentStore::delete);
         stageStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(stageStore::delete);
+        modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
+        requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
         LOG.infov("Deleted REST API: {0} in {1}", apiId, region);
     }
 
@@ -160,10 +166,15 @@ public class ApiGatewayService {
         method.setHttpMethod(httpMethod.toUpperCase());
         method.setAuthorizationType((String) request.getOrDefault("authorizationType", "NONE"));
         method.setAuthorizerId((String) request.get("authorizerId"));
+        method.setRequestValidatorId((String) request.get("requestValidatorId"));
 
         @SuppressWarnings("unchecked")
         Map<String, Boolean> reqParams = (Map<String, Boolean>) request.get("requestParameters");
         if (reqParams != null) method.setRequestParameters(reqParams);
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> reqModels = (Map<String, String>) request.get("requestModels");
+        if (reqModels != null) method.setRequestModels(reqModels);
 
         resource.getResourceMethods().put(httpMethod.toUpperCase(), method);
         resourceStore.put(resourceKey(region, apiId, resourceId), resource);
@@ -552,6 +563,38 @@ public class ApiGatewayService {
         requestValidatorStore.delete(requestValidatorKey(region, apiId, validatorId));
     }
 
+    // ──────────────────────────── Models ────────────────────────────
+
+    public Model createModel(String region, String apiId, Map<String, Object> request) {
+        getRestApi(region, apiId);
+        Model model = new Model();
+        model.setId(shortId(6));
+        model.setName((String) request.get("name"));
+        model.setDescription((String) request.get("description"));
+        model.setContentType((String) request.getOrDefault("contentType", "application/json"));
+        model.setSchema((String) request.get("schema"));
+
+        modelStore.put(modelKey(region, apiId, model.getName()), model);
+        LOG.infov("Created model {0} for API {1}", model.getName(), apiId);
+        return model;
+    }
+
+    public Model getModel(String region, String apiId, String modelName) {
+        return modelStore.get(modelKey(region, apiId, modelName))
+                .orElseThrow(() -> new AwsException("NotFoundException", "Invalid model name specified", 404));
+    }
+
+    public List<Model> getModels(String region, String apiId) {
+        getRestApi(region, apiId);
+        String prefix = region + "::" + apiId + "::";
+        return modelStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public void deleteModel(String region, String apiId, String modelName) {
+        getModel(region, apiId, modelName);
+        modelStore.delete(modelKey(region, apiId, modelName));
+    }
+
     // ──────────────────────────── Custom Domains ────────────────────────────
 
     public CustomDomain createDomainName(String region, Map<String, Object> request) {
@@ -693,6 +736,295 @@ public class ApiGatewayService {
         apiStore.put(apiKey(region, apiId), api);
     }
 
+    // ──────────────────────────── OpenAPI Import ────────────────────────────
+
+    public RestApi importRestApi(String region, String specBody) {
+        OpenAPI openAPI = parseOpenApiSpec(specBody);
+
+        String name = openAPI.getInfo() != null ? openAPI.getInfo().getTitle() : "Imported API";
+        String description = openAPI.getInfo() != null ? openAPI.getInfo().getDescription() : null;
+
+        Map<String, Object> request = new HashMap<>();
+        request.put("name", name);
+        request.put("description", description);
+        RestApi api = createRestApi(region, request);
+
+        applyOpenApiSpec(region, api.getId(), openAPI);
+        LOG.infov("Imported REST API from OpenAPI spec: {0} ({1})", name, api.getId());
+        return api;
+    }
+
+    public RestApi putRestApi(String region, String apiId, String mode, String specBody) {
+        if ("merge".equalsIgnoreCase(mode)) {
+            throw new AwsException("BadRequestException",
+                    "mode=merge is not supported. Use mode=overwrite instead.", 400);
+        }
+        RestApi api = getRestApi(region, apiId);
+        OpenAPI openAPI = parseOpenApiSpec(specBody);
+
+        // Delete all non-root resources
+        List<ApiGatewayResource> existing = getResources(region, apiId);
+        for (ApiGatewayResource r : existing) {
+            if (!"/".equals(r.getPath())) {
+                deleteResource(region, apiId, r.getId());
+            }
+        }
+        // Clear methods on root resource
+        ApiGatewayResource root = existing.stream()
+                .filter(r -> "/".equals(r.getPath())).findFirst().orElse(null);
+        if (root != null) {
+            root.setResourceMethods(new HashMap<>());
+            resourceStore.put(resourceKey(region, apiId, root.getId()), root);
+        }
+
+        // Clear existing models and validators
+        String prefix = region + "::" + apiId + "::";
+        modelStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(modelStore::delete);
+        requestValidatorStore.keys().stream().filter(k -> k.startsWith(prefix)).forEach(requestValidatorStore::delete);
+
+        // Update API metadata from spec
+        if (openAPI.getInfo() != null) {
+            if (openAPI.getInfo().getTitle() != null) api.setName(openAPI.getInfo().getTitle());
+            if (openAPI.getInfo().getDescription() != null) api.setDescription(openAPI.getInfo().getDescription());
+            apiStore.put(apiKey(region, apiId), api);
+        }
+
+        applyOpenApiSpec(region, apiId, openAPI);
+        LOG.infov("Updated REST API from OpenAPI spec: {0} ({1})", api.getName(), apiId);
+        return api;
+    }
+
+    private OpenAPI parseOpenApiSpec(String specBody) {
+        SwaggerParseResult result = new io.swagger.parser.OpenAPIParser().readContents(specBody, null, null);
+        if (result.getOpenAPI() == null) {
+            String errors = result.getMessages() != null ? String.join(", ", result.getMessages()) : "unknown error";
+            throw new AwsException("BadRequestException", "Failed to parse OpenAPI spec: " + errors, 400);
+        }
+        return result.getOpenAPI();
+    }
+
+    @SuppressWarnings("unchecked")
+    private void applyOpenApiSpec(String region, String apiId, OpenAPI openAPI) {
+        // Import schemas as Models
+        if (openAPI.getComponents() != null && openAPI.getComponents().getSchemas() != null) {
+            for (var schemaEntry : openAPI.getComponents().getSchemas().entrySet()) {
+                String schemaName = schemaEntry.getKey();
+                var schema = schemaEntry.getValue();
+                Map<String, Object> modelReq = new HashMap<>();
+                modelReq.put("name", schemaName);
+                modelReq.put("contentType", "application/json");
+                try {
+                    // Use swagger's own JSON serializer to produce clean JSON Schema
+                    modelReq.put("schema", io.swagger.v3.core.util.Json.mapper().writeValueAsString(schema));
+                } catch (Exception e) {
+                    modelReq.put("schema", "{}");
+                }
+                createModel(region, apiId, modelReq);
+            }
+        }
+
+        // Import x-amazon-apigateway-request-validators as RequestValidators
+        Map<String, String> validatorNameToId = new HashMap<>();
+        Map<String, Object> topExtensions = openAPI.getExtensions();
+        if (topExtensions != null) {
+            Map<String, Object> validators = (Map<String, Object>) topExtensions
+                    .get("x-amazon-apigateway-request-validators");
+            if (validators != null) {
+                for (var entry : validators.entrySet()) {
+                    String validatorName = entry.getKey();
+                    Map<String, Object> validatorDef = (Map<String, Object>) entry.getValue();
+                    Map<String, Object> valReq = new HashMap<>();
+                    valReq.put("name", validatorName);
+                    valReq.put("validateRequestBody",
+                            Boolean.TRUE.equals(validatorDef.get("validateRequestBody")));
+                    valReq.put("validateRequestParameters",
+                            Boolean.TRUE.equals(validatorDef.get("validateRequestParameters")));
+                    RequestValidator rv = createRequestValidator(region, apiId, valReq);
+                    validatorNameToId.put(validatorName, rv.getId());
+                }
+            }
+
+            // API-level default validator
+            String defaultValidator = (String) topExtensions.get("x-amazon-apigateway-request-validator");
+            if (defaultValidator != null && validatorNameToId.containsKey(defaultValidator)) {
+                validatorNameToId.put("__default__", validatorNameToId.get(defaultValidator));
+            }
+        }
+
+        if (openAPI.getPaths() == null) return;
+
+        // Find the root resource
+        List<ApiGatewayResource> resources = getResources(region, apiId);
+        ApiGatewayResource rootResource = resources.stream()
+                .filter(r -> "/".equals(r.getPath())).findFirst().orElse(null);
+        if (rootResource == null) return;
+
+        // Map of full path → resource ID for creating nested resources
+        Map<String, String> pathToResourceId = new HashMap<>();
+        pathToResourceId.put("/", rootResource.getId());
+
+        for (Map.Entry<String, PathItem> pathEntry : openAPI.getPaths().entrySet()) {
+            String path = pathEntry.getKey();
+            PathItem pathItem = pathEntry.getValue();
+
+            // Ensure all intermediate path segments exist
+            String resourceId = ensureResourcePath(region, apiId, path, pathToResourceId);
+
+            // Check for path-level validator
+            String pathValidator = null;
+            if (pathItem.getExtensions() != null) {
+                pathValidator = (String) pathItem.getExtensions()
+                        .get("x-amazon-apigateway-request-validator");
+            }
+
+            // Create methods for each operation on this path
+            var operations = pathItem.readOperationsMap();
+            if (operations == null) continue;
+
+            for (var opEntry : operations.entrySet()) {
+                String httpMethod = opEntry.getKey().name().toUpperCase();
+                var operation = opEntry.getValue();
+
+                // Create the method
+                Map<String, Object> methodRequest = new HashMap<>();
+                methodRequest.put("authorizationType", "NONE");
+
+                // Link request models from operation requestBody
+                if (operation.getRequestBody() != null && operation.getRequestBody().getContent() != null) {
+                    Map<String, String> requestModels = new HashMap<>();
+                    for (var contentEntry : operation.getRequestBody().getContent().entrySet()) {
+                        String contentType = contentEntry.getKey();
+                        var mediaType = contentEntry.getValue();
+                        if (mediaType.getSchema() != null && mediaType.getSchema().get$ref() != null) {
+                            String ref = mediaType.getSchema().get$ref();
+                            // Extract model name from #/components/schemas/ModelName
+                            String modelName = ref.substring(ref.lastIndexOf('/') + 1);
+                            requestModels.put(contentType, modelName);
+                        }
+                    }
+                    if (!requestModels.isEmpty()) {
+                        methodRequest.put("requestModels", requestModels);
+                    }
+                }
+
+                // Map OpenAPI parameters to requestParameters
+                if (operation.getParameters() != null && !operation.getParameters().isEmpty()) {
+                    Map<String, Boolean> requestParameters = new HashMap<>();
+                    for (var param : operation.getParameters()) {
+                        String location = switch (param.getIn()) {
+                            case "query" -> "method.request.querystring." + param.getName();
+                            case "header" -> "method.request.header." + param.getName();
+                            case "path" -> "method.request.path." + param.getName();
+                            default -> null;
+                        };
+                        if (location != null) {
+                            requestParameters.put(location, param.getRequired() != null && param.getRequired());
+                        }
+                    }
+                    if (!requestParameters.isEmpty()) {
+                        methodRequest.put("requestParameters", requestParameters);
+                    }
+                }
+
+                // Link request validator (operation > path > API-level default)
+                String opValidator = null;
+                if (operation.getExtensions() != null) {
+                    opValidator = (String) operation.getExtensions()
+                            .get("x-amazon-apigateway-request-validator");
+                }
+                if (opValidator != null && validatorNameToId.containsKey(opValidator)) {
+                    methodRequest.put("requestValidatorId", validatorNameToId.get(opValidator));
+                } else if (pathValidator != null && validatorNameToId.containsKey(pathValidator)) {
+                    methodRequest.put("requestValidatorId", validatorNameToId.get(pathValidator));
+                } else if (validatorNameToId.containsKey("__default__")) {
+                    methodRequest.put("requestValidatorId", validatorNameToId.get("__default__"));
+                }
+
+                putMethod(region, apiId, resourceId, httpMethod, methodRequest);
+
+                // Extract x-amazon-apigateway-integration extension
+                Map<String, Object> integrationExt = null;
+                if (operation.getExtensions() != null) {
+                    integrationExt = (Map<String, Object>) operation.getExtensions()
+                            .get("x-amazon-apigateway-integration");
+                }
+
+                if (integrationExt != null) {
+                    applyIntegration(region, apiId, resourceId, httpMethod, integrationExt);
+                }
+            }
+        }
+    }
+
+    private String ensureResourcePath(String region, String apiId, String path,
+                                      Map<String, String> pathToResourceId) {
+        if (pathToResourceId.containsKey(path)) {
+            return pathToResourceId.get(path);
+        }
+
+        // Split path into segments and create each one
+        String[] segments = path.split("/");
+        StringBuilder currentPath = new StringBuilder();
+        String parentId = pathToResourceId.get("/");
+
+        for (int i = 1; i < segments.length; i++) {
+            String segment = segments[i];
+            if (segment.isEmpty()) continue;
+            currentPath.append("/").append(segment);
+            String fullPath = currentPath.toString();
+
+            if (!pathToResourceId.containsKey(fullPath)) {
+                Map<String, Object> request = new HashMap<>();
+                request.put("pathPart", segment);
+                ApiGatewayResource resource = createResource(region, apiId, parentId, request);
+                pathToResourceId.put(fullPath, resource.getId());
+            }
+            parentId = pathToResourceId.get(fullPath);
+        }
+
+        return parentId;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void applyIntegration(String region, String apiId, String resourceId,
+                                  String httpMethod, Map<String, Object> integrationExt) {
+        Map<String, Object> integrationRequest = new HashMap<>();
+        integrationRequest.put("type", integrationExt.get("type"));
+        integrationRequest.put("httpMethod", integrationExt.get("httpMethod"));
+        integrationRequest.put("uri", integrationExt.get("uri"));
+        integrationRequest.put("passthroughBehavior", integrationExt.get("passthroughBehavior"));
+
+        Map<String, String> reqParams = (Map<String, String>) integrationExt.get("requestParameters");
+        if (reqParams != null) integrationRequest.put("requestParameters", reqParams);
+
+        Map<String, String> reqTemplates = (Map<String, String>) integrationExt.get("requestTemplates");
+        if (reqTemplates != null) integrationRequest.put("requestTemplates", reqTemplates);
+
+        putIntegration(region, apiId, resourceId, httpMethod, integrationRequest);
+
+        // Process integration responses
+        Map<String, Object> responses = (Map<String, Object>) integrationExt.get("responses");
+        if (responses != null) {
+            for (Map.Entry<String, Object> respEntry : responses.entrySet()) {
+                String selectionPattern = respEntry.getKey();
+                Map<String, Object> respDef = (Map<String, Object>) respEntry.getValue();
+
+                String statusCode = String.valueOf(respDef.getOrDefault("statusCode", "200"));
+                String pattern = "default".equals(selectionPattern) ? "" : selectionPattern;
+
+                Map<String, Object> irRequest = new HashMap<>();
+                irRequest.put("selectionPattern", pattern);
+                irRequest.put("responseParameters", respDef.get("responseParameters"));
+                irRequest.put("responseTemplates", respDef.get("responseTemplates"));
+
+                putIntegrationResponse(region, apiId, resourceId, httpMethod, statusCode, irRequest);
+
+                // Ensure method response exists for this status code
+                putMethodResponse(region, apiId, resourceId, httpMethod, statusCode, new HashMap<>());
+            }
+        }
+    }
+
     // ──────────────────────────── Key helpers ────────────────────────────
 
     private String apiKey(String region, String apiId) {
@@ -717,6 +1049,10 @@ public class ApiGatewayService {
 
     private String requestValidatorKey(String region, String apiId, String validatorId) {
         return region + "::" + apiId + "::" + validatorId;
+    }
+
+    private String modelKey(String region, String apiId, String modelName) {
+        return region + "::" + apiId + "::" + modelName;
     }
 
     private String apiKeyGlobalKey(String region, String apiKeyId) {

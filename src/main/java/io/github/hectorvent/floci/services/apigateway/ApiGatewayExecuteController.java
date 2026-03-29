@@ -164,6 +164,10 @@ public class ApiGatewayExecuteController {
         Response authResponse = invokeAuthorizer(region, apiId, method, headers, uriInfo);
         if (authResponse != null) return authResponse;
 
+        // 2. Request validation
+        Response validationResponse = validateRequest(region, apiId, method, headers, uriInfo, body);
+        if (validationResponse != null) return validationResponse;
+
         Integration integration = method.getMethodIntegration();
         if (integration == null) {
             return Response.status(500)
@@ -248,6 +252,97 @@ public class ApiGatewayExecuteController {
                 return Response.status(500).build();
             }
         }
+        return null;
+    }
+
+    private Response validateRequest(String region, String apiId, MethodConfig method,
+                                      HttpHeaders headers, UriInfo uriInfo, byte[] body) {
+        String validatorId = method.getRequestValidatorId();
+        if (validatorId == null) return null;
+
+        io.github.hectorvent.floci.services.apigateway.model.RequestValidator validator;
+        try {
+            validator = apiGatewayService.getRequestValidator(region, apiId, validatorId);
+        } catch (AwsException e) {
+            return null; // Validator not found — skip validation
+        }
+
+        // Validate request parameters
+        if (validator.isValidateRequestParameters()) {
+            Map<String, Boolean> requiredParams = method.getRequestParameters();
+            if (requiredParams != null) {
+                MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+                for (Map.Entry<String, Boolean> entry : requiredParams.entrySet()) {
+                    if (!Boolean.TRUE.equals(entry.getValue())) continue;
+                    String paramKey = entry.getKey();
+                    // Format: method.request.querystring.name or method.request.header.name
+                    if (paramKey.startsWith("method.request.querystring.")) {
+                        String name = paramKey.substring("method.request.querystring.".length());
+                        if (!queryParams.containsKey(name) || queryParams.getFirst(name) == null) {
+                            return Response.status(400)
+                                    .entity(jsonMessage("Missing required request parameter in QUERY_STRING: '" + name + "'"))
+                                    .type(MediaType.APPLICATION_JSON).build();
+                        }
+                    } else if (paramKey.startsWith("method.request.header.")) {
+                        String name = paramKey.substring("method.request.header.".length());
+                        if (headers.getHeaderString(name) == null) {
+                            return Response.status(400)
+                                    .entity(jsonMessage("Missing required request parameter in HEADER: '" + name + "'"))
+                                    .type(MediaType.APPLICATION_JSON).build();
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate request body against model schema
+        if (validator.isValidateRequestBody()) {
+            Map<String, String> requestModels = method.getRequestModels();
+            if (requestModels != null && !requestModels.isEmpty()) {
+                String contentType = headers.getMediaType() != null
+                        ? headers.getMediaType().getType() + "/" + headers.getMediaType().getSubtype()
+                        : "application/json";
+                String modelName = requestModels.get(contentType);
+                if (modelName == null) modelName = requestModels.get("application/json");
+
+                if (modelName != null) {
+                    try {
+                        io.github.hectorvent.floci.services.apigateway.model.Model model =
+                                apiGatewayService.getModel(region, apiId, modelName);
+                        String schemaStr = model.getSchema();
+                        if (schemaStr != null && !schemaStr.isBlank()) {
+                            String bodyStr = body != null ? new String(body, StandardCharsets.UTF_8) : "";
+                            if (bodyStr.isBlank()) {
+                                return Response.status(400)
+                                        .entity(jsonMessage("Invalid request body"))
+                                        .type(MediaType.APPLICATION_JSON).build();
+                            }
+                            JsonNode schemaNode = objectMapper.readTree(schemaStr);
+                            JsonNode bodyNode = objectMapper.readTree(bodyStr);
+
+                            com.networknt.schema.JsonSchemaFactory factory =
+                                    com.networknt.schema.JsonSchemaFactory.getInstance(
+                                            com.networknt.schema.SpecVersion.VersionFlag.V4);
+                            com.networknt.schema.JsonSchema schema = factory.getSchema(schemaNode);
+                            var errors = schema.validate(bodyNode);
+                            if (!errors.isEmpty()) {
+                                String errorMsg = errors.iterator().next().getMessage();
+                                return Response.status(400)
+                                        .entity(jsonMessage("Invalid request body: " + errorMsg))
+                                        .type(MediaType.APPLICATION_JSON).build();
+                            }
+                        }
+                    } catch (AwsException e) {
+                        // Model not found — skip body validation
+                    } catch (Exception e) {
+                        return Response.status(400)
+                                .entity(jsonMessage("Invalid request body"))
+                                .type(MediaType.APPLICATION_JSON).build();
+                    }
+                }
+            }
+        }
+
         return null;
     }
 

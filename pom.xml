@@ -109,6 +109,20 @@
             <version>2.4.1</version>
         </dependency>
 
+        <!-- JSON Schema validation (API Gateway request validation) -->
+        <dependency>
+            <groupId>com.networknt</groupId>
+            <artifactId>json-schema-validator</artifactId>
+            <version>1.5.8</version>
+        </dependency>
+
+        <!-- OpenAPI/Swagger parser (API Gateway ImportRestApi) -->
+        <dependency>
+            <groupId>io.swagger.parser.v3</groupId>
+            <artifactId>swagger-parser</artifactId>
+            <version>2.1.38</version>
+        </dependency>
+
         <!-- Testing -->
         <dependency>
             <groupId>io.quarkus</groupId>
