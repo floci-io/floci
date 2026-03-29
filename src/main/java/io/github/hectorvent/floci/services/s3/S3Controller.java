@@ -368,7 +368,8 @@ public class S3Controller {
                               @HeaderParam("If-None-Match") String ifNoneMatch,
                               @HeaderParam("If-Modified-Since") String ifModifiedSince,
                               @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
-                              @Context UriInfo uriInfo) {
+                              @Context UriInfo uriInfo,
+                              @Context HttpHeaders httpHeaders) {
         try {
             if (hasQueryParam(uriInfo, "tagging")) {
                 return handleGetObjectTagging(bucket, key);
@@ -383,8 +384,11 @@ public class S3Controller {
                 return Response.ok(s3Service.getObjectAcl(bucket, key, versionId)).build();
             }
             if (hasQueryParam(uriInfo, "attributes")) {
+                // Merge all x-amz-object-attributes header values (SDK may send multiple lines)
+                List<String> attrHeaders = httpHeaders.getRequestHeader("x-amz-object-attributes");
+                String mergedAttributes = attrHeaders != null ? String.join(",", attrHeaders) : objectAttributesHeader;
                 return handleGetObjectAttributes(bucket, key, versionId,
-                        objectAttributesHeader, maxParts, partNumberMarker);
+                        mergedAttributes, maxParts, partNumberMarker);
             }
             if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
                 // Fetch metadata only to evaluate preconditions, avoiding loading the full object unnecessarily.

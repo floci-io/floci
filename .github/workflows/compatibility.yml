@@ -91,10 +91,13 @@ jobs:
 
       - name: Start floci
         run: |
+          DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
           docker run -d --name floci --network compat-net \
             -p 4566:4566 \
             -v /var/run/docker.sock:/var/run/docker.sock \
+            --group-add "$DOCKER_GID" \
             -e FLOCI_SERVICES_DOCKER_NETWORK=compat-net \
+            -e FLOCI_HOSTNAME=floci \
             floci:test
 
       - name: Wait for floci to be ready
@@ -119,8 +122,10 @@ jobs:
 
       - name: Run tests
         run: |
+          FLOCI_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "compat-net").IPAddress}}' floci)
           docker run --rm --network compat-net \
             -e FLOCI_ENDPOINT=http://floci:4566 \
+            --add-host "sdk-vhost-bucket.floci:${FLOCI_IP}" \
             compat-${{ matrix.test }}
 
       - name: Dump floci logs

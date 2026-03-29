@@ -111,7 +111,7 @@ public class RuntimeApiServer {
         });
 
         httpServer = vertx.createHttpServer();
-        httpServer.requestHandler(router).listen(port, result -> {
+        httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
             if (result.succeeded()) {
                 LOG.debugv("RuntimeApiServer started on port {0}", port);
                 started.complete(null);

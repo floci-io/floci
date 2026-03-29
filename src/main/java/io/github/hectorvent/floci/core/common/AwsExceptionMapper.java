@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.core.common;
 
+import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.ext.ExceptionMapper;
 import jakarta.ws.rs.ext.Provider;
@@ -18,6 +19,7 @@ public class AwsExceptionMapper implements ExceptionMapper<AwsException> {
         LOG.debugv("Mapping exception: {0} - {1}", exception.getErrorCode(), exception.getMessage());
         return Response.status(exception.getHttpStatus())
                 .entity(new AwsErrorResponse(exception.getErrorCode(), exception.getMessage()))
+                .type(MediaType.APPLICATION_JSON)
                 .build();
     }
 }
