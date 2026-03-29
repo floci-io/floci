@@ -364,6 +364,10 @@ public class S3Controller {
                               @HeaderParam("x-amz-object-attributes") String objectAttributesHeader,
                               @HeaderParam("x-amz-max-parts") Integer maxParts,
                               @HeaderParam("x-amz-part-number-marker") Integer partNumberMarker,
+                              @HeaderParam("If-Match") String ifMatch,
+                              @HeaderParam("If-None-Match") String ifNoneMatch,
+                              @HeaderParam("If-Modified-Since") String ifModifiedSince,
+                              @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders) {
         try {
@@ -386,6 +390,14 @@ public class S3Controller {
                 return handleGetObjectAttributes(bucket, key, versionId,
                         mergedAttributes, maxParts, partNumberMarker);
             }
+            if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
+                // Fetch metadata only to evaluate preconditions, avoiding loading the full object unnecessarily.
+                S3Object metadata = s3Service.headObject(bucket, key, versionId);
+                Response preconditionResponse = checkPreconditions(metadata, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
+                if (preconditionResponse != null) {
+                    return preconditionResponse;
+                }
+            }
             S3Object obj = s3Service.getObject(bucket, key, versionId);
             var resp = Response.ok(obj.getData())
                     .header("Content-Type", obj.getContentType())
@@ -406,9 +418,17 @@ public class S3Controller {
     @Path("/{bucket}/{key:.+}")
     public Response headObject(@PathParam("bucket") String bucket,
                                @PathParam("key") String key,
-                               @QueryParam("versionId") String versionId) {
+                               @QueryParam("versionId") String versionId,
+                               @HeaderParam("If-Match") String ifMatch,
+                               @HeaderParam("If-None-Match") String ifNoneMatch,
+                               @HeaderParam("If-Modified-Since") String ifModifiedSince,
+                               @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince) {
         try {
             S3Object obj = s3Service.headObject(bucket, key, versionId);
+            Response preconditionResponse = checkPreconditions(obj, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
+            if (preconditionResponse != null) {
+                return preconditionResponse;
+            }
             var resp = Response.ok()
                     .header("Content-Type", obj.getContentType())
                     .header("Content-Length", obj.getSize())
@@ -1092,6 +1112,77 @@ public class S3Controller {
                 .end("Error")
                 .build();
         return Response.status(e.getHttpStatus()).entity(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
+                                         String ifModifiedSince, String ifUnmodifiedSince) {
+        String eTag = obj.getETag();
+        Instant lastModified = obj.getLastModified();
+
+        if (ifMatch != null && !eTagMatches(ifMatch, eTag)) {
+            return preconditionFailedResponse();
+        }
+
+        if (ifUnmodifiedSince != null && ifMatch == null) {
+            Instant since = parseHttpDate(ifUnmodifiedSince);
+            if (since != null && lastModified.isAfter(since)) {
+                return preconditionFailedResponse();
+            }
+        }
+
+        if (ifNoneMatch != null && eTagMatches(ifNoneMatch, eTag)) {
+            return notModifiedResponse(eTag, lastModified);
+        }
+
+        if (ifModifiedSince != null && ifNoneMatch == null) {
+            Instant since = parseHttpDate(ifModifiedSince);
+            if (since != null && !lastModified.isAfter(since)) {
+                return notModifiedResponse(eTag, lastModified);
+            }
+        }
+
+        return null;
+    }
+
+    private boolean hasPreconditions(String ifMatch, String ifNoneMatch,
+                                      String ifModifiedSince, String ifUnmodifiedSince) {
+        return ifMatch != null || ifNoneMatch != null || ifModifiedSince != null || ifUnmodifiedSince != null;
+    }
+
+    private Response notModifiedResponse(String eTag, Instant lastModified) {
+        return Response.notModified()
+                .header("ETag", eTag)
+                .header("Last-Modified", RFC_822.format(lastModified))
+                .build();
+    }
+
+    private Response preconditionFailedResponse() {
+        return xmlErrorResponse(new AwsException("PreconditionFailed",
+                "At least one of the pre-conditions you specified did not hold.", 412));
+    }
+
+    private boolean eTagMatches(String headerValue, String eTag) {
+        if ("*".equals(headerValue.trim())) {
+            return true;
+        }
+        for (String candidate : headerValue.split(",")) {
+            if (candidate.trim().equals(eTag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Instant parseHttpDate(String dateStr) {
+        try {
+            return RFC_822.parse(dateStr.trim(), Instant::from);
+        } catch (Exception e) {
+            try {
+                return Instant.parse(dateStr.trim());
+            } catch (Exception e2) {
+                return null;
+            }
+        }
     }
 
     private boolean hasQueryParam(UriInfo uriInfo, String param) {

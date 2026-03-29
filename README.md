@@ -9,7 +9,9 @@
   <a href="https://hub.docker.com/r/hectorvent/floci"><img src="https://img.shields.io/docker/image-size/hectorvent/floci/latest?label=image%20size" alt="Docker Image Size"></a>
   <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
   <a href="https://github.com/hectorvent/floci/stargazers"><img src="https://img.shields.io/github/stars/hectorvent/floci?style=flat" alt="GitHub Stars"></a>
+  <a href="https://github.com/hectorvent/floci/graphs/contributors"><img src="https://img.shields.io/github/contributors/hectorvent/floci" alt="GitHub Contributors"></a>
   <a href="https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw"><img src="https://img.shields.io/badge/Slack-Join%20the%20community-4A154B?logo=slack&logoColor=white" alt="Join Floci on Slack"></a>
+  
 </p>
 
 <h3 align="center">🍿☁️ Light, fluffy, and always free</h3>
@@ -183,6 +185,12 @@ services:
 ```
 
 Without this, SQS returns `http://localhost:4566/...` in QueueUrl responses, which resolves to the wrong container.
+
+## Contributors
+
+<a href="https://github.com/hectorvent/floci/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=hectorvent/floci" />
+</a>
 
 ## License
 
