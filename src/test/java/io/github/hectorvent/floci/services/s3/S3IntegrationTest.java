@@ -325,4 +325,42 @@ class S3IntegrationTest {
             .statusCode(400)
             .body(containsString("InvalidLocationConstraint"));
     }
+
+    @Test
+    @Order(20)
+    void copyObjectWithNonAsciiKeySucceeds() {
+        String bucket = "copy-nonascii-bucket";
+        String srcKey = "src/テスト画像.png";
+        String dstKey = "dst/テスト画像.png";
+        String encodedSrcKey = "src/%E3%83%86%E3%82%B9%E3%83%88%E7%94%BB%E5%83%8F.png";
+
+        given().put("/" + bucket).then().statusCode(200);
+
+        given()
+            .contentType("application/octet-stream")
+            .body("hello".getBytes())
+        .when()
+            .put("/" + bucket + "/" + srcKey)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-copy-source", "/" + bucket + "/" + encodedSrcKey)
+        .when()
+            .put("/" + bucket + "/" + dstKey)
+        .then()
+            .statusCode(200)
+            .body(containsString("ETag"));
+
+        given()
+        .when()
+            .get("/" + bucket + "/" + dstKey)
+        .then()
+            .statusCode(200)
+            .body(equalTo("hello"));
+
+        given().delete("/" + bucket + "/" + srcKey);
+        given().delete("/" + bucket + "/" + dstKey);
+        given().delete("/" + bucket);
+    }
 }
