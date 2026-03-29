@@ -372,6 +372,7 @@ public class S3Controller {
                         objectAttributesHeader, maxParts, partNumberMarker);
             }
             if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
+                // Fetch metadata only to evaluate preconditions, avoiding loading the full object unnecessarily.
                 S3Object metadata = s3Service.headObject(bucket, key, versionId);
                 Response preconditionResponse = checkPreconditions(metadata, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
                 if (preconditionResponse != null) {
@@ -1094,18 +1095,6 @@ public class S3Controller {
         return Response.status(e.getHttpStatus()).entity(xml).type(MediaType.APPLICATION_XML).build();
     }
 
-    /**
-     * Evaluates S3 conditional request headers against the target object.
-     * Returns an error/redirect response if a precondition fails, or {@code null} if all pass.
-     * <p>
-     * Evaluation order per HTTP/S3 spec:
-     * <ol>
-     *   <li>If-Match → 412 Precondition Failed when ETag does not match</li>
-     *   <li>If-Unmodified-Since → 412 when object was modified after the date (skipped if If-Match present)</li>
-     *   <li>If-None-Match → 304 Not Modified when ETag matches</li>
-     *   <li>If-Modified-Since → 304 when object was not modified after the date (skipped if If-None-Match present)</li>
-     * </ol>
-     */
     private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
                                          String ifModifiedSince, String ifUnmodifiedSince) {
         String eTag = obj.getETag();
@@ -1153,10 +1142,6 @@ public class S3Controller {
                 "At least one of the pre-conditions you specified did not hold.", 412));
     }
 
-    /**
-     * Checks whether an ETag matches a conditional header value.
-     * Supports the wildcard {@code *} and comma-separated ETag lists per RFC 7232.
-     */
     private boolean eTagMatches(String headerValue, String eTag) {
         if ("*".equals(headerValue.trim())) {
             return true;
@@ -1169,10 +1154,6 @@ public class S3Controller {
         return false;
     }
 
-    /**
-     * Parses an HTTP date string, trying RFC 822 format first, then ISO 8601 as fallback.
-     * Returns {@code null} if the date cannot be parsed.
-     */
     private Instant parseHttpDate(String dateStr) {
         try {
             return RFC_822.parse(dateStr.trim(), Instant::from);

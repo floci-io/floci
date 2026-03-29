@@ -284,6 +284,55 @@ class S3IntegrationTest {
 
     @Test
     @Order(55)
+    void headObjectIfMatchReturns200() {
+        String eTag = given()
+            .when().head("/test-bucket/greeting.txt")
+            .then().statusCode(200)
+            .extract().header("ETag");
+
+        given()
+            .header("If-Match", eTag)
+        .when()
+            .head("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(56)
+    void headObjectIfMatchWrongEtagReturns412() {
+        given()
+            .header("If-Match", "\"wrong-etag\"")
+        .when()
+            .head("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(412);
+    }
+
+    @Test
+    @Order(57)
+    void headObjectIfModifiedSinceReturns304() {
+        given()
+            .header("If-Modified-Since", "Sun, 24 Mar 2030 00:00:00 GMT")
+        .when()
+            .head("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(304);
+    }
+
+    @Test
+    @Order(58)
+    void headObjectIfUnmodifiedSinceReturns412() {
+        given()
+            .header("If-Unmodified-Since", "Tue, 24 Mar 2020 00:00:00 GMT")
+        .when()
+            .head("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(412);
+    }
+
+    @Test
+    @Order(61)
     void getObjectIfModifiedSinceReturns304() {
         given()
             .header("If-Modified-Since", "Sun, 24 Mar 2030 00:00:00 GMT")
@@ -294,7 +343,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(56)
+    @Order(62)
     void getObjectIfUnmodifiedSinceReturns412() {
         given()
             .header("If-Unmodified-Since", "Tue, 24 Mar 2020 00:00:00 GMT")
@@ -306,7 +355,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(57)
+    @Order(63)
     void getObjectIfMatchWildcardReturns200() {
         given()
             .header("If-Match", "*")
@@ -318,7 +367,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(58)
+    @Order(64)
     void getObjectIfNoneMatchCommaListReturns304() {
         String eTag = given()
             .when().head("/test-bucket/greeting.txt")
@@ -334,7 +383,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(59)
+    @Order(65)
     void ifNoneMatchTakesPrecedenceOverIfModifiedSince() {
         String eTag = given()
             .when().head("/test-bucket/greeting.txt")
@@ -351,7 +400,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(60)
+    @Order(66)
     void notModifiedResponseIncludesLastModified() {
         String eTag = given()
             .when().head("/test-bucket/greeting.txt")
@@ -369,7 +418,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(100)
+    @Order(70)
     void cleanupAndDeleteBucket() {
         // Delete all objects
         given().delete("/test-bucket/greeting.txt");
