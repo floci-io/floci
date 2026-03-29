@@ -755,10 +755,7 @@ public class ApiGatewayService {
     }
 
     public RestApi putRestApi(String region, String apiId, String mode, String specBody) {
-        if ("merge".equalsIgnoreCase(mode)) {
-            throw new AwsException("BadRequestException",
-                    "mode=merge is not supported. Use mode=overwrite instead.", 400);
-        }
+        // Note: mode=merge is accepted but treated as overwrite (merge semantics not yet implemented)
         RestApi api = getRestApi(region, apiId);
         OpenAPI openAPI = parseOpenApiSpec(specBody);
 
@@ -870,13 +867,6 @@ public class ApiGatewayService {
             // Ensure all intermediate path segments exist
             String resourceId = ensureResourcePath(region, apiId, path, pathToResourceId);
 
-            // Check for path-level validator
-            String pathValidator = null;
-            if (pathItem.getExtensions() != null) {
-                pathValidator = (String) pathItem.getExtensions()
-                        .get("x-amazon-apigateway-request-validator");
-            }
-
             // Create methods for each operation on this path
             var operations = pathItem.readOperationsMap();
             if (operations == null) continue;
@@ -926,7 +916,7 @@ public class ApiGatewayService {
                     }
                 }
 
-                // Link request validator (operation > path > API-level default)
+                // Link request validator (operation-level overrides API-level default)
                 String opValidator = null;
                 if (operation.getExtensions() != null) {
                     opValidator = (String) operation.getExtensions()
@@ -934,8 +924,6 @@ public class ApiGatewayService {
                 }
                 if (opValidator != null && validatorNameToId.containsKey(opValidator)) {
                     methodRequest.put("requestValidatorId", validatorNameToId.get(opValidator));
-                } else if (pathValidator != null && validatorNameToId.containsKey(pathValidator)) {
-                    methodRequest.put("requestValidatorId", validatorNameToId.get(pathValidator));
                 } else if (validatorNameToId.containsKey("__default__")) {
                     methodRequest.put("requestValidatorId", validatorNameToId.get("__default__"));
                 }

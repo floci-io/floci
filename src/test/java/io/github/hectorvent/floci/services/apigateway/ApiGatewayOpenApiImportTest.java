@@ -471,8 +471,8 @@ class ApiGatewayOpenApiImportTest {
 
     @Test
     @Order(52)
-    void putRestApi_modeMergeReturnsError() throws Exception {
-        // Create an API first
+    void putRestApi_modeMergeAccepted() throws Exception {
+        // mode=merge is accepted (treated as overwrite — merge semantics not yet implemented)
         String apiBody = given()
                 .contentType(ContentType.JSON)
                 .body("{\"name\": \"MergeTest\"}")
@@ -481,7 +481,7 @@ class ApiGatewayOpenApiImportTest {
         String apiId = mapper.readTree(apiBody).get("id").asText();
 
         String spec = """
-                {"openapi": "3.0.1", "info": {"title": "Test", "version": "1.0"}, "paths": {}}
+                {"openapi": "3.0.1", "info": {"title": "Merged", "version": "1.0"}, "paths": {}}
                 """;
         given()
                 .contentType(ContentType.JSON)
@@ -490,7 +490,8 @@ class ApiGatewayOpenApiImportTest {
                 .when()
                 .put("/restapis/" + apiId)
                 .then()
-                .statusCode(400);
+                .statusCode(200)
+                .body("name", equalTo("Merged"));
 
         given().delete("/restapis/" + apiId);
     }
@@ -918,11 +919,12 @@ class ApiGatewayOpenApiImportTest {
 
     @Test
     @Order(91)
-    void importRestApi_pathLevelValidator() throws Exception {
+    void importRestApi_validatorPrecedence() throws Exception {
+        // AWS only supports operation-level > API-level default (no path-level)
         String spec = """
                 {
                   "openapi": "3.0.1",
-                  "info": { "title": "PathValidatorAPI", "version": "1.0" },
+                  "info": { "title": "ValidatorPrecedenceAPI", "version": "1.0" },
                   "x-amazon-apigateway-request-validators": {
                     "full": { "validateRequestBody": true, "validateRequestParameters": true },
                     "body-only": { "validateRequestBody": true, "validateRequestParameters": false }
@@ -936,15 +938,14 @@ class ApiGatewayOpenApiImportTest {
                           "responses": {"default": {"statusCode": "200"}} }
                       }
                     },
-                    "/path-validated": {
-                      "x-amazon-apigateway-request-validator": "body-only",
+                    "/op-override": {
                       "get": {
                         "x-amazon-apigateway-integration": { "type": "MOCK",
                           "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
                           "responses": {"default": {"statusCode": "200"}} }
                       },
                       "post": {
-                        "x-amazon-apigateway-request-validator": "full",
+                        "x-amazon-apigateway-request-validator": "body-only",
                         "x-amazon-apigateway-integration": { "type": "MOCK",
                           "requestTemplates": {"application/json": "{\\"statusCode\\": 200}"},
                           "responses": {"default": {"statusCode": "200"}} }
@@ -983,10 +984,10 @@ class ApiGatewayOpenApiImportTest {
         // Find resources
         String resourcesBody = given().get("/restapis/" + apiId + "/resources")
                 .then().extract().body().asString();
-        String defaultResourceId = null, pathResourceId = null;
+        String defaultResourceId = null, opOverrideResourceId = null;
         for (JsonNode r : mapper.readTree(resourcesBody).get("item")) {
             if ("/default-validated".equals(r.get("path").asText())) defaultResourceId = r.get("id").asText();
-            if ("/path-validated".equals(r.get("path").asText())) pathResourceId = r.get("id").asText();
+            if ("/op-override".equals(r.get("path").asText())) opOverrideResourceId = r.get("id").asText();
         }
 
         // /default-validated GET should use API-level default "full"
@@ -995,17 +996,17 @@ class ApiGatewayOpenApiImportTest {
                 .then().statusCode(200)
                 .body("requestValidatorId", equalTo(fullId));
 
-        // /path-validated GET should use path-level "body-only"
+        // /op-override GET should also use API-level default "full"
         given().contentType(ContentType.JSON)
-                .get("/restapis/" + apiId + "/resources/" + pathResourceId + "/methods/GET")
-                .then().statusCode(200)
-                .body("requestValidatorId", equalTo(bodyOnlyId));
-
-        // /path-validated POST should use operation-level "full" (overrides path-level)
-        given().contentType(ContentType.JSON)
-                .get("/restapis/" + apiId + "/resources/" + pathResourceId + "/methods/POST")
+                .get("/restapis/" + apiId + "/resources/" + opOverrideResourceId + "/methods/GET")
                 .then().statusCode(200)
                 .body("requestValidatorId", equalTo(fullId));
+
+        // /op-override POST should use operation-level "body-only"
+        given().contentType(ContentType.JSON)
+                .get("/restapis/" + apiId + "/resources/" + opOverrideResourceId + "/methods/POST")
+                .then().statusCode(200)
+                .body("requestValidatorId", equalTo(bodyOnlyId));
 
         given().delete("/restapis/" + apiId);
     }
