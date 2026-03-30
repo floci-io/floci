@@ -461,10 +461,20 @@ public class S3Controller {
                 s3Service.evaluateCors(bucket, origin, requestMethod, requestHeaders);
 
         if (evalResult.isEmpty()) {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            XmlBuilder xml = new XmlBuilder(baos, AwsNamespaces.S3_ERROR);
+            xml.startDocument();
+            xml.startElement("Error");
+            xml.element("Code", "CORSResponse");
+            xml.element("Message", "This CORS request is not allowed.");
+            xml.endElement(); // Error
+            xml.endDocument();
+
+            String body = baos.toString(StandardCharsets.UTF_8);
+
             return Response.status(403)
-                    .entity("<Error><Code>CORSResponse</Code>"
-                            + "<Message>This CORS request is not allowed.</Message></Error>")
-                    .type("application/xml")
+                    .entity(body)
+                    .type(MediaType.APPLICATION_XML)
                     .build();
         }
 
