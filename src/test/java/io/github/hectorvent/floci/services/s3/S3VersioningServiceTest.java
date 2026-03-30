@@ -8,6 +8,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -164,6 +165,20 @@ class S3VersioningServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 s3Service.getObject("versioned-bucket", "test.txt", "fake-version-id"));
         assertEquals("NoSuchVersion", ex.getErrorCode());
+    }
+
+    @Test
+    void versionedFileUsesS3dataSuffixOnDisk() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "test.txt",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        Path versionedPath = tempDir.resolve(".versions")
+                .resolve("versioned-bucket")
+                .resolve("test.txt")
+                .resolve(v1.getVersionId() + ".s3data");
+        assertTrue(Files.exists(versionedPath),
+                "versioned file should be stored with .s3data suffix");
     }
 
     @Test

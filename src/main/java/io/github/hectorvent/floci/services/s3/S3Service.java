@@ -1283,12 +1283,14 @@ public class S3Service {
         return bucketName + "/" + key + "#v#" + versionId;
     }
 
+    private static final String DATA_SUFFIX = ".s3data";
+
     private Path resolveObjectPath(String bucketName, String key) {
-        return dataRoot.resolve(bucketName).resolve(key);
+        return dataRoot.resolve(bucketName).resolve(key + DATA_SUFFIX);
     }
 
     private Path resolveVersionedPath(String bucketName, String key, String versionId) {
-        return dataRoot.resolve(".versions").resolve(bucketName).resolve(key).resolve(versionId);
+        return dataRoot.resolve(".versions").resolve(bucketName).resolve(key).resolve(versionId + DATA_SUFFIX);
     }
 
     private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {
