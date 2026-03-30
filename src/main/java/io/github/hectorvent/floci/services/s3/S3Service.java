@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.s3.model.*;
@@ -891,6 +892,68 @@ public class S3Service {
             throw new AwsException("NoSuchCORSConfiguration", "The CORS configuration does not exist", 404);
         }
         return bucket.getCorsConfiguration();
+    }
+
+    public record CorsEvalResult(
+        String allowedOrigin,
+        List<String> allowedMethods,
+        List<String> allowedHeaders,
+        List<String> exposeHeaders,
+        int maxAgeSeconds
+    ) {}
+
+    /**
+     * Evaluates a CORS request (preflight or actual) against the bucket's CORS configuration.
+     *
+     * @param bucketName     the bucket to check
+     * @param origin         the Origin header value from the browser request
+     * @param requestMethod  the Access-Control-Request-Method (for preflight) or the HTTP method (for actual requests)
+     * @param requestHeaders the Access-Control-Request-Headers values (may be empty for actual requests)
+     * @return the matching CORS rule details, or empty if no rule matches
+     */
+    public Optional<CorsEvalResult> evaluateCors(String bucketName, String origin,
+                                                  String requestMethod, List<String> requestHeaders) {
+        Bucket bucket = bucketStore.get(bucketName).orElse(null);
+        if (bucket == null || bucket.getCorsConfiguration() == null) return Optional.empty();
+
+        String corsXml = bucket.getCorsConfiguration();
+        List<Map<String, List<String>>> rules = XmlParser.extractGroupsMulti(corsXml, "CORSRule");
+
+        for (Map<String, List<String>> rule : rules) {
+            List<String> allowedOrigins = rule.getOrDefault("AllowedOrigin", List.of());
+            List<String> allowedMethods = rule.getOrDefault("AllowedMethod", List.of());
+            List<String> allowedHeaders = rule.getOrDefault("AllowedHeader", List.of());
+            List<String> exposeHeaders  = rule.getOrDefault("ExposeHeader",  List.of());
+            List<String> maxAgeList     = rule.getOrDefault("MaxAgeSeconds", List.of());
+            int maxAge = maxAgeList.isEmpty() ? 0 : Integer.parseInt(maxAgeList.get(0));
+
+            boolean originMatches = allowedOrigins.contains("*")
+                || (origin != null && allowedOrigins.stream().anyMatch(ao -> matchesCorsOrigin(ao, origin)));
+            if (!originMatches) continue;
+
+            if (requestMethod != null
+                    && allowedMethods.stream().noneMatch(m -> m.equalsIgnoreCase(requestMethod))) continue;
+
+            if (requestHeaders != null && !requestHeaders.isEmpty()) {
+                boolean headersOk = allowedHeaders.contains("*")
+                    || requestHeaders.stream().allMatch(rh ->
+                        allowedHeaders.stream().anyMatch(ah -> ah.equalsIgnoreCase(rh)));
+                if (!headersOk) continue;
+            }
+
+            String echoOrigin = allowedOrigins.contains("*") ? "*" : origin;
+            return Optional.of(new CorsEvalResult(echoOrigin, allowedMethods, allowedHeaders, exposeHeaders, maxAge));
+        }
+        return Optional.empty();
+    }
+
+    private static boolean matchesCorsOrigin(String pattern, String origin) {
+        if ("*".equals(pattern)) return true;
+        if (pattern.startsWith("*.")) {
+            String suffix = pattern.substring(1); // includes leading dot
+            return origin.endsWith(suffix);
+        }
+        return pattern.equals(origin);
     }
 
     public void putBucketCors(String bucketName, String cors) {
