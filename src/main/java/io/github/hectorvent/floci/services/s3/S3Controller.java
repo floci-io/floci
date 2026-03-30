@@ -481,9 +481,11 @@ public class S3Controller {
         S3Service.CorsEvalResult cors = evalResult.get();
         var builder = Response.ok()
                 .header("Access-Control-Allow-Origin", cors.allowedOrigin())
-                .header("Access-Control-Allow-Methods", String.join(", ", cors.allowedMethods()))
-                .header("Access-Control-Max-Age", cors.maxAgeSeconds());
+                .header("Access-Control-Allow-Methods", String.join(", ", cors.allowedMethods()));
 
+        if (cors.maxAgeSeconds() > 0) {
+            builder.header("Access-Control-Max-Age", cors.maxAgeSeconds());
+        }
         if (!cors.allowedHeaders().isEmpty()) {
             String hdrs = cors.allowedHeaders().contains("*")
                     ? "*"
