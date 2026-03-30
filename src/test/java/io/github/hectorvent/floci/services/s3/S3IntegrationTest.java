@@ -158,6 +158,22 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(11)
+    void listObjectsWithDelimiterReturnsCommonPrefixes() {
+        given()
+            .queryParam("delimiter", "/")
+            .queryParam("list-type", "2")
+        .when()
+            .get("/test-bucket")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CommonPrefixes>"))
+            .body(containsString("<Prefix>data/</Prefix>"))
+            .body(containsString("<Key>greeting.txt</Key>"))
+            .body(containsString("<KeyCount>2</KeyCount>"));
+    }
+
+    @Test
     @Order(12)
     void copyObject() {
         given()

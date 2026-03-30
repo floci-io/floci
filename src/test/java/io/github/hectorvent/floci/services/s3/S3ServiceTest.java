@@ -178,6 +178,28 @@ class S3ServiceTest {
     }
 
     @Test
+    void listObjectsWithDelimiterReturnsCommonPrefixes() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        s3Service.putObject("test-bucket", "docs/a.txt", "a".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "docs/sub/deep.txt", "d".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "images/pic.jpg", "img".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "root.txt", "r".getBytes(), null, null);
+
+        S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes("test-bucket", null, "/", 1000);
+        assertEquals(1, result.objects().size(), "only root.txt has no delimiter in its key");
+        assertEquals("root.txt", result.objects().get(0).getKey());
+        assertEquals(2, result.commonPrefixes().size());
+        assertTrue(result.commonPrefixes().contains("docs/"));
+        assertTrue(result.commonPrefixes().contains("images/"));
+
+        S3Service.ListObjectsResult docsResult = s3Service.listObjectsWithPrefixes("test-bucket", "docs/", "/", 1000);
+        assertEquals(1, docsResult.objects().size(), "only docs/a.txt is at this level");
+        assertEquals("docs/a.txt", docsResult.objects().get(0).getKey());
+        assertEquals(1, docsResult.commonPrefixes().size());
+        assertTrue(docsResult.commonPrefixes().contains("docs/sub/"));
+    }
+
+    @Test
     void listObjectsInNonExistentBucketThrows() {
         assertThrows(AwsException.class, () ->
                 s3Service.listObjects("nonexistent", null, null, 100));
