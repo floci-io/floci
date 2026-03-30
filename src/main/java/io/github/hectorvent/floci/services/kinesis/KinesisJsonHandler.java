@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kinesis;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
@@ -53,6 +54,7 @@ public class KinesisJsonHandler {
             case "PutRecords" -> handlePutRecords(request, region);
             case "GetShardIterator" -> handleGetShardIterator(request, region);
             case "GetRecords" -> handleGetRecords(request, region);
+            case "ListShards" -> handleListShards(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -323,6 +325,62 @@ public class KinesisJsonHandler {
         }
         response.put("NextShardIterator", (String) result.get("NextShardIterator"));
         response.put("MillisBehindLatest", ((Number) result.get("MillisBehindLatest")).longValue());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListShards(JsonNode request, String region) {
+        String streamName = request.has("StreamName") ? request.path("StreamName").asText(null) : null;
+        String streamArn = request.has("StreamARN") ? request.path("StreamARN").asText(null) : null;
+
+        String resolvedStreamName = streamName;
+        if (resolvedStreamName == null && streamArn != null) {
+            int idx = streamArn.lastIndexOf("/");
+            if (idx >= 0) {
+                resolvedStreamName = streamArn.substring(idx + 1);
+            }
+        }
+        if (resolvedStreamName == null) {
+            throw new AwsException("InvalidArgumentException",
+                    "StreamName or StreamARN must be provided", 400);
+        }
+
+        KinesisStream stream = service.describeStream(resolvedStreamName, region);
+
+        List<KinesisShard> shards = stream.getShards();
+        if (request.has("ShardFilter")) {
+            JsonNode filter = request.path("ShardFilter");
+            String filterType = filter.path("Type").asText(null);
+            if ("AT_LATEST".equals(filterType)) {
+                shards = shards.stream().filter(s -> !s.isClosed()).toList();
+            }
+        }
+
+        int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt(1000) : 1000;
+        List<KinesisShard> page = shards.size() > maxResults ? shards.subList(0, maxResults) : shards;
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode shardsArray = response.putArray("Shards");
+        for (KinesisShard shard : page) {
+            ObjectNode sNode = shardsArray.addObject();
+            sNode.put("ShardId", shard.getShardId());
+            if (shard.getParentShardId() != null) {
+                sNode.put("ParentShardId", shard.getParentShardId());
+            }
+            if (shard.getAdjacentParentShardId() != null) {
+                sNode.put("AdjacentParentShardId", shard.getAdjacentParentShardId());
+            }
+            sNode.putObject("HashKeyRange")
+                    .put("StartingHashKey", shard.getHashKeyRange().startingHashKey())
+                    .put("EndingHashKey", shard.getHashKeyRange().endingHashKey());
+            ObjectNode seqRange = sNode.putObject("SequenceNumberRange");
+            seqRange.put("StartingSequenceNumber", shard.getSequenceNumberRange().startingSequenceNumber());
+            if (shard.getSequenceNumberRange().endingSequenceNumber() != null) {
+                seqRange.put("EndingSequenceNumber", shard.getSequenceNumberRange().endingSequenceNumber());
+            }
+        }
+
+        response.putNull("NextToken");
+
         return Response.ok(response).build();
     }
 

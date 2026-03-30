@@ -47,6 +47,8 @@ public interface EmulatorConfig {
 
     ServicesConfig services();
 
+    InitHooksConfig initHooks();
+
     interface StorageConfig {
         @WithDefault("hybrid")
         String mode();
@@ -408,5 +410,16 @@ public interface EmulatorConfig {
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+    }
+
+    interface InitHooksConfig {
+        @WithDefault("/bin/bash")
+        String shellExecutable();
+
+        @WithDefault("2")
+        long shutdownGracePeriodSeconds();
+
+        @WithDefault("30")
+        long timeoutSeconds();
     }
 }
