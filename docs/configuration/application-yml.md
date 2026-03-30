@@ -14,6 +14,11 @@ floci:
     validate-signatures: false        # Set to true to enforce AWS request signing
     presign-secret: local-emulator-secret  # HMAC secret for S3 pre-signed URL verification
 
+  init-hooks:
+    shell-executable: /bin/bash
+    timeout-seconds: 30
+    shutdown-grace-period-seconds: 2
+
   storage:
     mode: memory                      # memory | persistent | hybrid | wal
     persistent-path: ./data
