@@ -238,19 +238,26 @@ public class SnsService {
         return subscriptionsByTopic(topicArn, region);
     }
 
+    // Since this method is called by S3 and EventBridge, this doesn't need "phoneNumber" parameter.
     public String publish(String topicArn, String targetArn, String message,
                           String subject, String region) {
-        return publish(topicArn, targetArn, message, subject, null, null, null, region);
+        return publish(topicArn, targetArn, null, message, subject, null, null, null, region);
     }
 
-    public String publish(String topicArn, String targetArn, String message,
+    public String publish(String topicArn, String targetArn, String phoneNumber, String message,
                           String subject, Map<String, String> messageAttributes, String region) {
-        return publish(topicArn, targetArn, message, subject, messageAttributes, null, null, region);
+        return publish(topicArn, targetArn, phoneNumber, message, subject, messageAttributes, null, null, region);
     }
 
-    public String publish(String topicArn, String targetArn, String message,
+    public String publish(String topicArn, String targetArn, String phoneNumber, String message,
                           String subject, Map<String, String> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
+        // Send SMS
+        if (phoneNumber != null) {
+            return UUID.randomUUID().toString();
+        }
+
+        // Send a message to topic or directly to a target ARN
         String effectiveArn = topicArn != null ? topicArn : targetArn;
         if (effectiveArn == null) {
             throw new AwsException("InvalidParameter", "TopicArn or TargetArn is required.", 400);
