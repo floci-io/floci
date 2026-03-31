@@ -70,8 +70,8 @@ public class S3Service {
      */
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
-              Path dataRoot) {
-        this(bucketStore, objectStore, dataRoot, true, null, null, null, "http://localhost:4566",
+              Path dataRoot, boolean inMemory) {
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, "http://localhost:4566",
                 new ObjectMapper());
     }
 

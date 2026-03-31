@@ -29,7 +29,7 @@ class S3ServiceTest {
     @BeforeEach
     void setUp() {
         Path dataRoot = tempDir.resolve("s3");
-        s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot);
+        s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), dataRoot, false);
     }
 
     @Test

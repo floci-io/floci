@@ -22,7 +22,7 @@ class S3VersioningServiceTest {
 
     @BeforeEach
     void setUp() {
-        s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir);
+        s3Service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, true);
         s3Service.createBucket("versioned-bucket", "us-east-1");
     }
 
