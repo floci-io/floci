@@ -433,22 +433,26 @@ public class S3Service {
         List<String> commonPrefixes = List.of();
 
         if (delimiter != null && !delimiter.isEmpty()) {
-            Set<String> prefixSet = new LinkedHashSet<>();
-            List<S3Object> directObjects = new ArrayList<>();
-
-            for (S3Object obj : allObjects) {
-                String remainder = obj.getKey().substring(prefix != null ? prefix.length() : 0);
-                int delimIdx = remainder.indexOf(delimiter);
-                if (delimIdx >= 0) {
-                    String cp = (prefix != null ? prefix : "") + remainder.substring(0, delimIdx + delimiter.length());
-                    prefixSet.add(cp);
-                } else {
-                    directObjects.add(obj);
+            
+            if (maxKeys > 0) {
+                List<S3Object> limitedObjects = new ArrayList<>();
+                List<String> limitedPrefixes = new ArrayList<>();
+                int count = 0;
+                int commonPrefixCount = 0;
+                int directObjectCount = 0;
+                while (count < maxKeys && (directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size())) {
+                    String objectKey = directObjectCount < allObjects.size() ? allObjects.get(directObjectCount).getKey() : null;
+                    String prefixKey = commonPrefixCount < commonPrefixes.size() ? commonPrefixes.get(commonPrefixCount) : null;
+                    if (objectKey != null && (prefixKey == null || objectKey.compareTo(prefixKey) <= 0)) {
+                        limitedObjects.add(allObjects.get(directObjectCount++));
+                    } else {
+                        limitedPrefixes.add(commonPrefixes.get(commonPrefixCount++));
+                    }
+                    count++;
                 }
+                allObjects = limitedObjects;
+                commonPrefixes = limitedPrefixes;
             }
-
-            allObjects = directObjects;
-            commonPrefixes = new ArrayList<>(prefixSet);
             Collections.sort(commonPrefixes);
         }
 

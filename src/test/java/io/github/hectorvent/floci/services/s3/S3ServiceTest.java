@@ -197,6 +197,21 @@ class S3ServiceTest {
     }
 
     @Test
+    void listObjectsWithDelimiterRespectsMaxKeysAcrossObjectsAndPrefixes() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        s3Service.putObject("test-bucket", "a.txt", "a".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "b.txt", "b".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "dir1/file.txt", "f1".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "dir2/file.txt", "f2".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "dir3/file.txt", "f3".getBytes(), null, null);
+
+        S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes("test-bucket", null, "/", 3);
+
+        int totalReturned = result.objects().size() + result.commonPrefixes().size();
+        assertEquals(3, totalReturned, "combined objects + commonPrefixes must not exceed maxKeys");
+    }
+
+    @Test
     void listObjectsInNonExistentBucketThrows() {
         assertThrows(AwsException.class, () ->
                 s3Service.listObjects("nonexistent", null, null, 100));
