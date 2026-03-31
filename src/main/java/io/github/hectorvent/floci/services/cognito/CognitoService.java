@@ -151,6 +151,7 @@ public class CognitoService {
         for (String groupName : new ArrayList<>(user.getGroupNames())) {
             groupStore.get(groupKey(userPoolId, groupName)).ifPresent(group -> {
                 group.removeUserName(username);
+                group.setLastModifiedDate(System.currentTimeMillis() / 1000L);
                 groupStore.put(groupKey(userPoolId, groupName), group);
             });
         }
@@ -231,11 +232,14 @@ public class CognitoService {
     public void adminAddUserToGroup(String userPoolId, String groupName, String username) {
         CognitoGroup group = getGroup(userPoolId, groupName);
         CognitoUser user = adminGetUser(userPoolId, username);
+        long now = System.currentTimeMillis() / 1000L;
         if (group.addUserName(username)) {
+            group.setLastModifiedDate(now);
             groupStore.put(groupKey(userPoolId, groupName), group);
         }
         if (!user.getGroupNames().contains(groupName)) {
             user.getGroupNames().add(groupName);
+            user.setLastModifiedDate(now);
             userStore.put(userKey(userPoolId, username), user);
         }
     }
@@ -243,10 +247,13 @@ public class CognitoService {
     public void adminRemoveUserFromGroup(String userPoolId, String groupName, String username) {
         CognitoGroup group = getGroup(userPoolId, groupName);
         CognitoUser user = adminGetUser(userPoolId, username);
+        long now = System.currentTimeMillis() / 1000L;
         if (group.removeUserName(username)) {
+            group.setLastModifiedDate(now);
             groupStore.put(groupKey(userPoolId, groupName), group);
         }
         if (user.getGroupNames().remove(groupName)) {
+            user.setLastModifiedDate(now);
             userStore.put(userKey(userPoolId, username), user);
         }
     }

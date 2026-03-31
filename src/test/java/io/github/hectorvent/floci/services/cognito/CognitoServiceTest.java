@@ -19,14 +19,16 @@ import static org.junit.jupiter.api.Assertions.*;
 class CognitoServiceTest {
 
     private CognitoService service;
+    private InMemoryStorage<String, CognitoGroup> groupStore;
 
     @BeforeEach
     void setUp() {
+        groupStore = new InMemoryStorage<>();
         service = new CognitoService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>()
+                groupStore
         );
     }
 
@@ -268,17 +270,11 @@ class CognitoServiceTest {
         service.createGroup(pool.getId(), "admins", "Admin group", 1, null);
         service.createGroup(pool.getId(), "editors", "Editor group", 2, null);
 
-        // Verify groups exist before deletion
-        assertEquals(2, service.listGroups(pool.getId()).size());
+        String prefix = pool.getId() + "::";
+        assertEquals(2, groupStore.scan(k -> k.startsWith(prefix)).size());
 
         service.deleteUserPool(pool.getId());
 
-        // Re-create pool with same ID is not possible, so verify by re-creating
-        // the pool and confirming no groups carry over
-        UserPool newPool = service.createUserPool("TestPool2", "us-east-1");
-        // The original pool's groups should be gone — listing on the deleted pool
-        // should throw since the pool no longer exists
-        assertThrows(AwsException.class, () ->
-                service.listGroups(pool.getId()));
+        assertEquals(0, groupStore.scan(k -> k.startsWith(prefix)).size());
     }
 }

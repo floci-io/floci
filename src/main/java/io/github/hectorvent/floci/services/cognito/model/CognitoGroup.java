@@ -48,7 +48,7 @@ public class CognitoGroup {
     public void setLastModifiedDate(long lastModifiedDate) { this.lastModifiedDate = lastModifiedDate; }
 
     public List<String> getUserNames() { return Collections.unmodifiableList(userNames); }
-    public void setUserNames(List<String> userNames) { this.userNames = userNames; }
+    public void setUserNames(List<String> userNames) { this.userNames = userNames == null ? new ArrayList<>() : new ArrayList<>(userNames); }
 
     public boolean addUserName(String name) {
         if (userNames.contains(name)) return false;

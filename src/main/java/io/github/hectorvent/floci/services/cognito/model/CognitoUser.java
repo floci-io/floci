@@ -58,5 +58,5 @@ public class CognitoUser {
     public void setTemporaryPassword(boolean temporaryPassword) { this.temporaryPassword = temporaryPassword; }
 
     public List<String> getGroupNames() { return groupNames; }
-    public void setGroupNames(List<String> groupNames) { this.groupNames = groupNames; }
+    public void setGroupNames(List<String> groupNames) { this.groupNames = groupNames == null ? new ArrayList<>() : new ArrayList<>(groupNames); }
 }
