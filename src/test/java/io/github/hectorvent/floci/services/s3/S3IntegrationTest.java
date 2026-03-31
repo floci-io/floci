@@ -170,7 +170,8 @@ class S3IntegrationTest {
             .body(containsString("<CommonPrefixes>"))
             .body(containsString("<Prefix>data/</Prefix>"))
             .body(containsString("<Key>greeting.txt</Key>"))
-            .body(containsString("<KeyCount>2</KeyCount>"));
+            .body(containsString("<KeyCount>2</KeyCount>"))
+            .body(containsString("<IsTruncated>false</IsTruncated>"));
     }
 
     @Test

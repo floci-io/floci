@@ -276,7 +276,7 @@ public class S3Controller {
             if (v2) {
                 xml.elem("KeyCount", objects.size() + commonPrefixes.size());
             }
-            xml.elem("IsTruncated", false);
+            xml.elem("IsTruncated", result.isTruncated());
             for (S3Object obj : objects) {
                 xml.start("Contents")
                    .elem("Key", obj.getKey())

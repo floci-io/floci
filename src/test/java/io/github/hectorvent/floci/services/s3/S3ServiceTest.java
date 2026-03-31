@@ -189,11 +189,13 @@ class S3ServiceTest {
         List<String> rootKeys = result.objects().stream().map(S3Object::getKey).toList();
         assertEquals(List.of("root.txt"), rootKeys);
         assertEquals(List.of("docs/", "images/"), result.commonPrefixes());
+        assertFalse(result.isTruncated());
 
         S3Service.ListObjectsResult docsResult = s3Service.listObjectsWithPrefixes("test-bucket", "docs/", "/", 1000);
         List<String> docKeys = docsResult.objects().stream().map(S3Object::getKey).toList();
         assertEquals(List.of("docs/a.txt"), docKeys);
         assertEquals(List.of("docs/sub/"), docsResult.commonPrefixes());
+        assertFalse(docsResult.isTruncated());
     }
 
     @Test
@@ -209,6 +211,7 @@ class S3ServiceTest {
 
         int totalReturned = result.objects().size() + result.commonPrefixes().size();
         assertEquals(3, totalReturned, "combined objects + commonPrefixes must not exceed maxKeys");
+        assertTrue(result.isTruncated(), "result should be truncated when maxKeys < total entries");
     }
 
     @Test

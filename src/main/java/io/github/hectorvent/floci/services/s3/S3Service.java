@@ -409,7 +409,7 @@ public class S3Service {
         }
     }
 
-    public record ListObjectsResult(List<S3Object> objects, List<String> commonPrefixes) {}
+    public record ListObjectsResult(List<S3Object> objects, List<String> commonPrefixes, boolean isTruncated) {}
 
     public List<S3Object> listObjects(String bucketName, String prefix, String delimiter, int maxKeys) {
         return listObjectsWithPrefixes(bucketName, prefix, delimiter, maxKeys).objects();
@@ -459,6 +459,7 @@ public class S3Service {
         // how many keys it contains. Merge both sorted lists lexicographically
         // and stop at maxKeys to try to match S3 ListObjectsV2 behavior.
         // see https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
+        boolean isTruncated = false;
         if (maxKeys > 0) {
             List<S3Object> limitedObjects = new ArrayList<>();
             List<String> limitedPrefixes = new ArrayList<>();
@@ -475,11 +476,12 @@ public class S3Service {
                 }
                 count++;
             }
+            isTruncated = directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size();
             allObjects = limitedObjects;
             commonPrefixes = limitedPrefixes;
         }
 
-        return new ListObjectsResult(allObjects, commonPrefixes);
+        return new ListObjectsResult(allObjects, commonPrefixes, isTruncated);
     }
 
     public S3Object copyObject(String sourceBucket, String sourceKey,
