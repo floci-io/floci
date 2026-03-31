@@ -475,4 +475,128 @@ class DynamoDbServiceTest {
         assertEquals("fallback", stored.get("target").get("S").asText(),
                 "target should receive the fallback value when source is absent");
     }
+
+    @Test
+    void scanWithBoolFilterExpression() {
+        createUsersTable();
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("deleted", boolAttributeValue(false));
+        service.putItem("Users", u1);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("deleted", boolAttributeValue(true));
+        service.putItem("Users", u2);
+
+        ObjectNode u3 = item("userId", "u3");
+        u3.set("deleted", boolAttributeValue(false));
+        service.putItem("Users", u3);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":d", boolAttributeValue(true));
+
+        DynamoDbService.ScanResult result = service.scan("Users", "deleted <> :d", null, exprValues, null, null);
+        assertEquals(2, result.items().size());
+    }
+
+    @Test
+    void scanContainsOnListAttribute() {
+        createUsersTable();
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("tags", listAttributeValue("a", "b"));
+        service.putItem("Users", u1);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("tags", listAttributeValue("a", "c"));
+        service.putItem("Users", u2);
+
+        ObjectNode u3 = item("userId", "u3");
+        u3.set("tags", listAttributeValue("b", "c"));
+        service.putItem("Users", u3);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v", attributeValue("S", "a"));
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(tags, :v)", null, exprValues, null, null);
+        assertEquals(2, result.items().size());
+    }
+
+    @Test
+    void scanContainsOnStringSetAttribute() {
+        createUsersTable();
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("roles", stringSetAttributeValue("admin", "user"));
+        service.putItem("Users", u1);
+
+        ObjectNode u2 = item("userId", "u2");
+        u2.set("roles", stringSetAttributeValue("user"));
+        service.putItem("Users", u2);
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":r", attributeValue("S", "admin"));
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(roles, :r)", null, exprValues, null, null);
+        assertEquals(1, result.items().size());
+    }
+
+    @Test
+    void scanAttributeExistsOnNestedMapPath() {
+        createUsersTable();
+        ObjectNode u1 = item("userId", "u1");
+        u1.set("info", mapAttributeValue("name", "Alice"));
+        service.putItem("Users", u1);
+
+        ObjectNode u2 = item("userId", "u2");
+        ObjectNode emptyMap = mapper.createObjectNode();
+        ObjectNode mapWrapper = mapper.createObjectNode();
+        mapWrapper.set("M", emptyMap);
+        u2.set("info", mapWrapper);
+        service.putItem("Users", u2);
+
+        ObjectNode u3 = item("userId", "u3");
+        u3.set("info", mapAttributeValue("name", "Bob"));
+        service.putItem("Users", u3);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+
+        DynamoDbService.ScanResult result = service.scan("Users", "attribute_exists(info.#n)", exprNames, null, null, null);
+        assertEquals(2, result.items().size());
+
+        DynamoDbService.ScanResult result2 = service.scan("Users", "attribute_not_exists(info.#n)", exprNames, null, null, null);
+        assertEquals(1, result2.items().size());
+    }
+
+    private ObjectNode boolAttributeValue(boolean value) {
+        ObjectNode node = mapper.createObjectNode();
+        node.put("BOOL", value);
+        return node;
+    }
+
+    private ObjectNode listAttributeValue(String... values) {
+        ObjectNode node = mapper.createObjectNode();
+        var arrayNode = mapper.createArrayNode();
+        for (String v : values) {
+            arrayNode.add(attributeValue("S", v));
+        }
+        node.set("L", arrayNode);
+        return node;
+    }
+
+    private ObjectNode stringSetAttributeValue(String... values) {
+        ObjectNode node = mapper.createObjectNode();
+        var arrayNode = mapper.createArrayNode();
+        for (String v : values) {
+            arrayNode.add(v);
+        }
+        node.set("SS", arrayNode);
+        return node;
+    }
+
+    private ObjectNode mapAttributeValue(String key, String value) {
+        ObjectNode inner = mapper.createObjectNode();
+        inner.set(key, attributeValue("S", value));
+        ObjectNode node = mapper.createObjectNode();
+        node.set("M", inner);
+        return node;
+    }
 }

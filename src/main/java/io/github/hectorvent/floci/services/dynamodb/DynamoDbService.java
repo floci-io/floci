@@ -1120,6 +1120,13 @@ public class DynamoDbService {
                     }
                     return false;
                 }
+                // BS (Binary Set): check if the set contains the value (base64)
+                if (attrNode.has("BS")) {
+                    for (JsonNode element : attrNode.get("BS")) {
+                        if (searchValue.equals(element.asText())) return true;
+                    }
+                    return false;
+                }
                 // String type: check if the string contains the substring
                 String actual = extractScalarValue(attrNode);
                 return actual != null && actual.contains(searchValue);
@@ -1172,13 +1179,22 @@ public class DynamoDbService {
         }
     }
 
+    private static final String DOT_ESCAPE = "\uFF0E";
+
     private String resolveAttributePath(String path, JsonNode exprAttrNames) {
         // Resolve each segment of a dotted path, e.g. "passengerInformation.#name"
+        // ExpressionAttributeNames may resolve to names containing dots (e.g. "#a" -> "foo.bar").
+        // Escape those dots so resolveNestedAttribute treats them as single keys.
         String[] segments = path.split("\\.");
         StringBuilder resolved = new StringBuilder();
         for (int i = 0; i < segments.length; i++) {
             if (i > 0) resolved.append(".");
-            resolved.append(resolveAttributeName(segments[i], exprAttrNames));
+            String original = segments[i];
+            String resolvedSegment = resolveAttributeName(original, exprAttrNames);
+            if (original.startsWith("#") && resolvedSegment != null) {
+                resolvedSegment = resolvedSegment.replace(".", DOT_ESCAPE);
+            }
+            resolved.append(resolvedSegment);
         }
         return resolved.toString();
     }
@@ -1187,13 +1203,19 @@ public class DynamoDbService {
         // Navigate a dotted path through DynamoDB's {"M": {...}} structure
         String[] segments = path.split("\\.");
         JsonNode current = item;
-        for (String segment : segments) {
+        for (int i = 0; i < segments.length; i++) {
             if (current == null) return null;
-            // If the current node is a DynamoDB Map type, descend into it
-            if (current.has("M")) {
-                current = current.get("M").get(segment);
-            } else {
+            String segment = segments[i].replace(DOT_ESCAPE, ".");
+            if (i == 0) {
+                // First segment: resolve against the top-level item map
                 current = current.get(segment);
+            } else {
+                // Subsequent segments: descend into DynamoDB Map type
+                if (current.has("M")) {
+                    current = current.get("M").get(segment);
+                } else {
+                    current = current.get(segment);
+                }
             }
         }
         return current;
