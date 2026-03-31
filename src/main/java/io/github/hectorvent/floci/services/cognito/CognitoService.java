@@ -219,10 +219,13 @@ public class CognitoService {
 
     public void deleteGroup(String userPoolId, String groupName) {
         CognitoGroup group = getGroup(userPoolId, groupName);
+        long now = System.currentTimeMillis() / 1000L;
         for (String username : new ArrayList<>(group.getUserNames())) {
             userStore.get(userKey(userPoolId, username)).ifPresent(user -> {
-                user.getGroupNames().remove(groupName);
-                userStore.put(userKey(userPoolId, username), user);
+                if (user.getGroupNames().remove(groupName)) {
+                    user.setLastModifiedDate(now);
+                    userStore.put(userKey(userPoolId, username), user);
+                }
             });
         }
         groupStore.delete(groupKey(userPoolId, groupName));
