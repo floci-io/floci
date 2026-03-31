@@ -1072,15 +1072,13 @@ public class DynamoDbService {
 
         if (condLower.startsWith("attribute_exists")) {
             String attr = extractFunctionArg(condition);
-            String attrName = resolveAttributeName(attr, exprAttrNames);
-            // If item is null, attribute cannot exist
-            return item != null && item.has(attrName);
+            String resolvedPath = resolveAttributePath(attr, exprAttrNames);
+            return item != null && resolveNestedAttribute(item, resolvedPath) != null;
         }
         if (condLower.startsWith("attribute_not_exists")) {
             String attr = extractFunctionArg(condition);
-            String attrName = resolveAttributeName(attr, exprAttrNames);
-            // If item is null, attribute definitely doesn't exist
-            return item == null || !item.has(attrName);
+            String resolvedPath = resolveAttributePath(attr, exprAttrNames);
+            return item == null || resolveNestedAttribute(item, resolvedPath) == null;
         }
         if (condLower.startsWith("begins_with")) {
             String[] args = extractFunctionArgs(condition);
@@ -1096,9 +1094,35 @@ public class DynamoDbService {
             String[] args = extractFunctionArgs(condition);
             if (args.length == 2) {
                 String attrName = resolveAttributeName(args[0], exprAttrNames);
-                String substring = resolveExprValue(args[1], exprAttrValues);
-                String actual = item != null ? extractScalarValue(item.get(attrName)) : null;
-                return actual != null && substring != null && actual.contains(substring);
+                String searchValue = resolveExprValue(args[1], exprAttrValues);
+                if (item == null || searchValue == null) return false;
+                JsonNode attrNode = item.get(attrName);
+                if (attrNode == null) return false;
+                // List type: check if any element in the list matches the search value
+                if (attrNode.has("L")) {
+                    for (JsonNode element : attrNode.get("L")) {
+                        String elementValue = extractScalarValue(element);
+                        if (searchValue.equals(elementValue)) return true;
+                    }
+                    return false;
+                }
+                // SS (String Set): check if the set contains the value
+                if (attrNode.has("SS")) {
+                    for (JsonNode element : attrNode.get("SS")) {
+                        if (searchValue.equals(element.asText())) return true;
+                    }
+                    return false;
+                }
+                // NS (Number Set): check if the set contains the value
+                if (attrNode.has("NS")) {
+                    for (JsonNode element : attrNode.get("NS")) {
+                        if (searchValue.equals(element.asText())) return true;
+                    }
+                    return false;
+                }
+                // String type: check if the string contains the substring
+                String actual = extractScalarValue(attrNode);
+                return actual != null && actual.contains(searchValue);
             }
             return false;
         }
@@ -1146,6 +1170,33 @@ public class DynamoDbService {
         } catch (NumberFormatException e) {
             return a.compareTo(b);
         }
+    }
+
+    private String resolveAttributePath(String path, JsonNode exprAttrNames) {
+        // Resolve each segment of a dotted path, e.g. "passengerInformation.#name"
+        String[] segments = path.split("\\.");
+        StringBuilder resolved = new StringBuilder();
+        for (int i = 0; i < segments.length; i++) {
+            if (i > 0) resolved.append(".");
+            resolved.append(resolveAttributeName(segments[i], exprAttrNames));
+        }
+        return resolved.toString();
+    }
+
+    private JsonNode resolveNestedAttribute(JsonNode item, String path) {
+        // Navigate a dotted path through DynamoDB's {"M": {...}} structure
+        String[] segments = path.split("\\.");
+        JsonNode current = item;
+        for (String segment : segments) {
+            if (current == null) return null;
+            // If the current node is a DynamoDB Map type, descend into it
+            if (current.has("M")) {
+                current = current.get("M").get(segment);
+            } else {
+                current = current.get(segment);
+            }
+        }
+        return current;
     }
 
     private String extractFunctionArg(String funcCall) {
@@ -1230,6 +1281,7 @@ public class DynamoDbService {
         if (attrValue.has("S")) return attrValue.get("S").asText();
         if (attrValue.has("N")) return attrValue.get("N").asText();
         if (attrValue.has("B")) return attrValue.get("B").asText();
+        if (attrValue.has("BOOL")) return attrValue.get("BOOL").asText();
         return attrValue.asText();
     }
 
