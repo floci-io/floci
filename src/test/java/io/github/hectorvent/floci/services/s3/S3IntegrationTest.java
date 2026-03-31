@@ -212,6 +212,180 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(15)
+    void getObjectAttributesRejectsUnknownSelector() {
+        given()
+            .header("x-amz-object-attributes", "ETag,UnknownThing")
+        .when()
+            .get("/test-bucket/greeting.txt?attributes")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidArgument"));
+    }
+
+    @Test
+    @Order(16)
+    void getNonExistentBucket() {
+        given()
+        .when()
+            .get("/nonexistent-bucket")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchBucket"));
+    }
+
+    @Test
+    @Order(17)
+    void headBucketReturnsStoredRegionForLocationConstraintBucket() {
+        String bucket = "eu-head-bucket";
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>eu-central-1</LocationConstraint>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("Location", equalTo("/" + bucket));
+
+        given()
+        .when()
+            .head("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("x-amz-bucket-region", equalTo("eu-central-1"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(18)
+    void createBucketUsesSigningRegionWhenBodyEmpty() {
+        String bucket = "signed-region-bucket";
+
+        given()
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("Location", equalTo("/" + bucket));
+
+        given()
+        .when()
+            .head("/" + bucket)
+        .then()
+            .statusCode(200)
+            .header("x-amz-bucket-region", equalTo("eu-west-1"));
+
+        given()
+        .when()
+            .delete("/" + bucket)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(19)
+    void createBucketRejectsUsEast1LocationConstraint() {
+        String createBucketConfiguration = """
+                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                    <LocationConstraint>us-east-1</LocationConstraint>
+                </CreateBucketConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .body(createBucketConfiguration)
+        .when()
+            .put("/invalid-location-bucket")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidLocationConstraint"));
+    }
+
+    @Test
+    @Order(20)
+    void copyObjectWithNonAsciiKeySucceeds() {
+        String bucket = "copy-nonascii-bucket";
+        String srcKey = "src/テスト画像.png";
+        String dstKey = "dst/テスト画像.png";
+        String encodedSrcKey = "src/%E3%83%86%E3%82%B9%E3%83%88%E7%94%BB%E5%83%8F.png";
+
+        given().put("/" + bucket).then().statusCode(200);
+
+        given()
+            .contentType("application/octet-stream")
+            .body("hello".getBytes())
+        .when()
+            .put("/" + bucket + "/" + srcKey)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-copy-source", "/" + bucket + "/" + encodedSrcKey)
+        .when()
+            .put("/" + bucket + "/" + dstKey)
+        .then()
+            .statusCode(200)
+            .body(containsString("ETag"));
+
+        given()
+        .when()
+            .get("/" + bucket + "/" + dstKey)
+        .then()
+            .statusCode(200)
+            .body(equalTo("hello"));
+
+        given().delete("/" + bucket + "/" + srcKey);
+        given().delete("/" + bucket + "/" + dstKey);
+        given().delete("/" + bucket);
+    }
+
+    @Test
+    @Order(21)
+    void putLargeObject() {
+        // 22 MB – exceeds the old Jackson 20 MB maxStringLength default
+        byte[] largeBody = new byte[22 * 1024 * 1024];
+        Arrays.fill(largeBody, (byte) 'A');
+
+        given()
+        .when()
+            .put("/large-object-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/octet-stream")
+            .body(largeBody)
+        .when()
+            .put("/large-object-bucket/large-file.bin")
+        .then()
+            .statusCode(200)
+            .header("ETag", notNullValue());
+
+        given()
+        .when()
+            .get("/large-object-bucket/large-file.bin")
+        .then()
+            .statusCode(200)
+            .header("Content-Length", String.valueOf(largeBody.length));
+
+        given().delete("/large-object-bucket/large-file.bin");
+        given().delete("/large-object-bucket");
+    }
+
+    @Test
     @Order(30)
     void getObjectWithFullRange() {
         given()
@@ -557,179 +731,5 @@ class S3IntegrationTest {
             .delete("/test-bucket")
         .then()
             .statusCode(204);
-    }
-
-    @Test
-    @Order(16)
-    void getObjectAttributesRejectsUnknownSelector() {
-        given()
-            .header("x-amz-object-attributes", "ETag,UnknownThing")
-        .when()
-            .get("/test-bucket/greeting.txt?attributes")
-        .then()
-            .statusCode(400)
-            .body(containsString("InvalidArgument"));
-    }
-
-    @Test
-    @Order(17)
-    void getNonExistentBucket() {
-        given()
-        .when()
-            .get("/nonexistent-bucket")
-        .then()
-            .statusCode(404)
-            .body(containsString("NoSuchBucket"));
-    }
-
-    @Test
-    @Order(17)
-    void headBucketReturnsStoredRegionForLocationConstraintBucket() {
-        String bucket = "eu-head-bucket";
-        String createBucketConfiguration = """
-                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-                    <LocationConstraint>eu-central-1</LocationConstraint>
-                </CreateBucketConfiguration>
-                """;
-
-        given()
-            .contentType("application/xml")
-            .body(createBucketConfiguration)
-        .when()
-            .put("/" + bucket)
-        .then()
-            .statusCode(200)
-            .header("Location", equalTo("/" + bucket));
-
-        given()
-        .when()
-            .head("/" + bucket)
-        .then()
-            .statusCode(200)
-            .header("x-amz-bucket-region", equalTo("eu-central-1"));
-
-        given()
-        .when()
-            .delete("/" + bucket)
-        .then()
-            .statusCode(204);
-    }
-
-    @Test
-    @Order(18)
-    void createBucketUsesSigningRegionWhenBodyEmpty() {
-        String bucket = "signed-region-bucket";
-
-        given()
-            .header("Authorization",
-                    "AWS4-HMAC-SHA256 Credential=test/20260325/eu-west-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=test")
-        .when()
-            .put("/" + bucket)
-        .then()
-            .statusCode(200)
-            .header("Location", equalTo("/" + bucket));
-
-        given()
-        .when()
-            .head("/" + bucket)
-        .then()
-            .statusCode(200)
-            .header("x-amz-bucket-region", equalTo("eu-west-1"));
-
-        given()
-        .when()
-            .delete("/" + bucket)
-        .then()
-            .statusCode(204);
-    }
-
-    @Test
-    @Order(19)
-    void createBucketRejectsUsEast1LocationConstraint() {
-        String createBucketConfiguration = """
-                <CreateBucketConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
-                    <LocationConstraint>us-east-1</LocationConstraint>
-                </CreateBucketConfiguration>
-                """;
-
-        given()
-            .contentType("application/xml")
-            .body(createBucketConfiguration)
-        .when()
-            .put("/invalid-location-bucket")
-        .then()
-            .statusCode(400)
-            .body(containsString("InvalidLocationConstraint"));
-    }
-
-    @Test
-    @Order(20)
-    void copyObjectWithNonAsciiKeySucceeds() {
-        String bucket = "copy-nonascii-bucket";
-        String srcKey = "src/テスト画像.png";
-        String dstKey = "dst/テスト画像.png";
-        String encodedSrcKey = "src/%E3%83%86%E3%82%B9%E3%83%88%E7%94%BB%E5%83%8F.png";
-
-        given().put("/" + bucket).then().statusCode(200);
-
-        given()
-            .contentType("application/octet-stream")
-            .body("hello".getBytes())
-        .when()
-            .put("/" + bucket + "/" + srcKey)
-        .then()
-            .statusCode(200);
-
-        given()
-            .header("x-amz-copy-source", "/" + bucket + "/" + encodedSrcKey)
-        .when()
-            .put("/" + bucket + "/" + dstKey)
-        .then()
-            .statusCode(200)
-            .body(containsString("ETag"));
-
-        given()
-        .when()
-            .get("/" + bucket + "/" + dstKey)
-        .then()
-            .statusCode(200)
-            .body(equalTo("hello"));
-
-        given().delete("/" + bucket + "/" + srcKey);
-        given().delete("/" + bucket + "/" + dstKey);
-        given().delete("/" + bucket);
-    }
-
-    @Test
-    @Order(21)
-    void putLargeObject() {
-        // 22 MB – exceeds the old Jackson 20 MB maxStringLength default
-        byte[] largeBody = new byte[22 * 1024 * 1024];
-        Arrays.fill(largeBody, (byte) 'A');
-
-        given()
-        .when()
-            .put("/large-object-bucket")
-        .then()
-            .statusCode(200);
-
-        given()
-            .contentType("application/octet-stream")
-            .body(largeBody)
-        .when()
-            .put("/large-object-bucket/large-file.bin")
-        .then()
-            .statusCode(200)
-            .header("ETag", notNullValue());
-
-        given()
-        .when()
-            .get("/large-object-bucket/large-file.bin")
-        .then()
-            .statusCode(200)
-            .header("Content-Length", String.valueOf(largeBody.length));
-
-        given().delete("/large-object-bucket/large-file.bin");
-        given().delete("/large-object-bucket");
     }
 }
