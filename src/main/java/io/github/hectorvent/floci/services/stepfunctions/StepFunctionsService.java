@@ -138,7 +138,7 @@ public class StepFunctionsService {
             return;
         }
         exec.setStatus("ABORTED");
-        exec.setStopDate(System.currentTimeMillis() / 1000L);
+        exec.setStopDate(System.currentTimeMillis() / 1000.0);
         executionStore.put(arn, exec);
 
         List<HistoryEvent> history = historyCache.getOrDefault(arn, new ArrayList<>());

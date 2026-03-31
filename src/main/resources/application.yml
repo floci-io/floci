@@ -2,6 +2,8 @@ quarkus:
   http:
     port: 4566
     host: 0.0.0.0
+    limits:
+      max-body-size: ${floci.max-request-size}M
   native:
     additional-build-args: >-
       --initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,
@@ -14,6 +16,7 @@ quarkus:
       --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
 
 floci:
+  max-request-size: 512
   base-url: "http://localhost:4566"
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
@@ -27,32 +30,20 @@ floci:
       compaction-interval-ms: 30000
     services:
       ssm:
-        mode: memory
         flush-interval-ms: 5000
-      sqs:
-        mode: memory
-      s3:
-        mode: memory
       dynamodb:
-        mode: memory
         flush-interval-ms: 5000
       sns:
-        mode: memory
         flush-interval-ms: 5000
       lambda:
-        mode: memory
         flush-interval-ms: 5000
       cloudwatchlogs:
-        mode: memory
         flush-interval-ms: 5000
       cloudwatchmetrics:
-        mode: memory
         flush-interval-ms: 5000
       secretsmanager:
-        mode: memory
         flush-interval-ms: 5000
       acm:
-        mode: memory
         flush-interval-ms: 5000
 
   auth:

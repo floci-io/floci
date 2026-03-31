@@ -12,6 +12,8 @@ services:
       - "4566:4566"
     volumes:
       - ./data:/app/data
+      - ./init/start.d:/etc/floci/init/start.d:ro
+      - ./init/stop.d:/etc/floci/init/stop.d:ro
 ```
 
 ## Full Setup (with ElastiCache and RDS)
@@ -37,6 +39,23 @@ services:
 
 !!! warning "Docker socket"
     Lambda, ElastiCache, and RDS require access to the Docker socket (`/var/run/docker.sock`) to spawn and manage containers. If you don't use these services, you can omit that volume.
+
+## Initialization Hooks
+
+Hook scripts can be mounted into the container to run custom setup and teardown logic:
+
+```yaml
+services:
+  floci:
+    image: hectorvent/floci:latest
+    ports:
+      - "4566:4566"
+    volumes:
+      - ./init/start.d:/etc/floci/init/start.d:ro
+      - ./init/stop.d:/etc/floci/init/stop.d:ro
+```
+
+See [`initialization-hooks.md`](./initialization-hooks.md) for execution behavior and configuration details.
 
 ## Persistence
 

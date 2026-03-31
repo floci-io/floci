@@ -98,17 +98,18 @@ public class StorageFactory {
     }
 
     private String resolveMode(String serviceName) {
+        String globalMode = config.storage().mode();
         return switch (serviceName) {
-            case "ssm" -> config.storage().services().ssm().mode();
-            case "sqs" -> config.storage().services().sqs().mode();
-            case "s3" -> config.storage().services().s3().mode();
-            case "dynamodb" -> config.storage().services().dynamodb().mode();
-            case "sns" -> config.storage().services().sns().mode();
-            case "lambda" -> config.storage().services().lambda().mode();
-            case "cloudwatchlogs" -> config.storage().services().cloudwatchlogs().mode();
-            case "cloudwatchmetrics" -> config.storage().services().cloudwatchmetrics().mode();
-            case "secretsmanager" -> config.storage().services().secretsmanager().mode();
-            default -> config.storage().mode();
+            case "ssm" -> config.storage().services().ssm().mode().orElse(globalMode);
+            case "sqs" -> config.storage().services().sqs().mode().orElse(globalMode);
+            case "s3" -> config.storage().services().s3().mode().orElse(globalMode);
+            case "dynamodb" -> config.storage().services().dynamodb().mode().orElse(globalMode);
+            case "sns" -> config.storage().services().sns().mode().orElse(globalMode);
+            case "lambda" -> config.storage().services().lambda().mode().orElse(globalMode);
+            case "cloudwatchlogs" -> config.storage().services().cloudwatchlogs().mode().orElse(globalMode);
+            case "cloudwatchmetrics" -> config.storage().services().cloudwatchmetrics().mode().orElse(globalMode);
+            case "secretsmanager" -> config.storage().services().secretsmanager().mode().orElse(globalMode);
+            default -> globalMode;
         };
     }
 

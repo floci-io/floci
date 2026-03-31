@@ -13,25 +13,25 @@ import java.util.concurrent.atomic.AtomicInteger;
 public class PortAllocator {
 
     private final AtomicInteger counter;
-    private final int maxPort;
+    private final int basePort;
+    private final int range;
 
     @Inject
     public PortAllocator(EmulatorConfig config) {
-        this.counter = new AtomicInteger(config.services().lambda().runtimeApiBasePort());
-        this.maxPort = config.services().lambda().runtimeApiMaxPort();
+        this.basePort = config.services().lambda().runtimeApiBasePort();
+        int maxPort = config.services().lambda().runtimeApiMaxPort();
+        this.range = maxPort - basePort + 1;
+        this.counter = new AtomicInteger(0);
     }
 
     PortAllocator(int basePort, int maxPort) {
-        this.counter = new AtomicInteger(basePort);
-        this.maxPort = maxPort;
+        this.basePort = basePort;
+        this.range = maxPort - basePort + 1;
+        this.counter = new AtomicInteger(0);
     }
 
     public int allocate() {
-        int port = counter.getAndIncrement();
-        if (port > maxPort) {
-            counter.set(counter.get() - (maxPort - counter.get() + 1));
-            port = counter.getAndIncrement();
-        }
-        return port;
+        int offset = counter.getAndIncrement();
+        return basePort + (Math.abs(offset) % range);
     }
 }

@@ -1,5 +1,9 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -38,6 +42,8 @@ public class AslExecutor {
 
     private final LambdaExecutorService lambdaExecutor;
     private final LambdaFunctionStore functionStore;
+    private final DynamoDbService dynamoDbService;
+    private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
     private final ExecutorService executor = Executors.newCachedThreadPool(r -> {
@@ -48,9 +54,12 @@ public class AslExecutor {
 
     @Inject
     public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
+                       DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator) {
         this.lambdaExecutor = lambdaExecutor;
         this.functionStore = functionStore;
+        this.dynamoDbService = dynamoDbService;
+        this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
     }
@@ -99,7 +108,7 @@ public class AslExecutor {
                         }
                     } catch (FailStateException e) {
                         exec.setStatus("FAILED");
-                        exec.setStopDate(System.currentTimeMillis() / 1000L);
+                        exec.setStopDate(System.currentTimeMillis() / 1000.0);
                         String failError = e.error != null ? e.error : "States.Runtime";
                         String failCause = e.cause != null ? e.cause : "";
                         exec.setError(failError);
@@ -110,7 +119,7 @@ public class AslExecutor {
                         return;
                     } catch (Exception e) {
                         exec.setStatus("FAILED");
-                        exec.setStopDate(System.currentTimeMillis() / 1000L);
+                        exec.setStopDate(System.currentTimeMillis() / 1000.0);
                         String runtimeError = "States.Runtime";
                         String runtimeCause = e.getMessage() != null ? e.getMessage() : "Unknown error";
                         exec.setError(runtimeError);
@@ -124,7 +133,7 @@ public class AslExecutor {
 
                 exec.setStatus("SUCCEEDED");
                 exec.setOutput(currentInput.toString());
-                exec.setStopDate(System.currentTimeMillis() / 1000L);
+                exec.setStopDate(System.currentTimeMillis() / 1000.0);
                 addEvent(history, eventId, "ExecutionSucceeded", null,
                         Map.of("output", currentInput.toString()));
                 onUpdate.accept(exec, history);
@@ -132,7 +141,7 @@ public class AslExecutor {
             } catch (Exception e) {
                 LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
                 exec.setStatus("FAILED");
-                exec.setStopDate(System.currentTimeMillis() / 1000L);
+                exec.setStopDate(System.currentTimeMillis() / 1000.0);
                 onUpdate.accept(exec, history);
             }
         });
@@ -256,9 +265,116 @@ public class AslExecutor {
             return NullNode.getInstance();
         }
 
-        // Unsupported resource: return input as-is (stub)
-        LOG.warnv("Unsupported Task resource (stub passthrough): {0}", resource);
-        return input;
+        // DynamoDB optimized integrations (4 actions)
+        if (resource.startsWith("arn:aws:states:::dynamodb:")) {
+            String operation = resource.substring("arn:aws:states:::dynamodb:".length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            try {
+                return invokeDynamoDb(operation, input, region);
+            } catch (AwsException e) {
+                throw new FailStateException("DynamoDB." + e.getErrorCode(), e.getMessage());
+            }
+        }
+
+        // AWS SDK service integrations: DynamoDB
+        if (resource.startsWith("arn:aws:states:::aws-sdk:dynamodb:")) {
+            String camelCaseAction = resource.substring("arn:aws:states:::aws-sdk:dynamodb:".length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkDynamoDb(camelCaseAction, input, region);
+        }
+
+        throw new FailStateException("States.TaskFailed",
+                "Unsupported resource: " + resource);
+    }
+
+    private JsonNode invokeDynamoDb(String operation, JsonNode input, String region) {
+        String tableName = input.path("TableName").asText();
+        switch (operation) {
+            case "putItem" -> {
+                JsonNode item = input.path("Item");
+                dynamoDbService.putItem(tableName, item, region);
+                return objectMapper.createObjectNode();
+            }
+            case "getItem" -> {
+                JsonNode key = input.path("Key");
+                JsonNode item = dynamoDbService.getItem(tableName, key, region);
+                ObjectNode result = objectMapper.createObjectNode();
+                if (item != null) {
+                    result.set("Item", item);
+                }
+                return result;
+            }
+            case "deleteItem" -> {
+                JsonNode key = input.path("Key");
+                dynamoDbService.deleteItem(tableName, key, region);
+                return objectMapper.createObjectNode();
+            }
+            case "updateItem" -> {
+                JsonNode key = input.path("Key");
+                JsonNode attributeUpdates = input.has("AttributeUpdates")
+                        ? input.get("AttributeUpdates") : null;
+                String updateExpression = input.has("UpdateExpression")
+                        ? input.get("UpdateExpression").asText() : null;
+                JsonNode exprAttrNames = input.has("ExpressionAttributeNames")
+                        ? input.get("ExpressionAttributeNames") : null;
+                JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
+                        ? input.get("ExpressionAttributeValues") : null;
+                String conditionExpression = input.has("ConditionExpression")
+                        ? input.get("ConditionExpression").asText() : null;
+                String returnValues = input.path("ReturnValues").asText("NONE");
+
+                DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
+                        tableName, key, attributeUpdates, updateExpression,
+                        exprAttrNames, exprAttrValues, returnValues,
+                        conditionExpression, region);
+
+                ObjectNode response = objectMapper.createObjectNode();
+                if ("ALL_NEW".equals(returnValues) && result.newItem() != null) {
+                    response.set("Attributes", result.newItem());
+                } else if ("ALL_OLD".equals(returnValues) && result.oldItem() != null) {
+                    response.set("Attributes", result.oldItem());
+                }
+                return response;
+            }
+            default -> throw new FailStateException("States.TaskFailed",
+                    "Unsupported DynamoDB operation: " + operation);
+        }
+    }
+
+    private JsonNode invokeAwsSdkDynamoDb(String camelCaseAction, JsonNode input, String region) {
+        // Convert camelCase to PascalCase (e.g., putItem → PutItem)
+        String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
+
+        jakarta.ws.rs.core.Response response;
+        try {
+            response = dynamoDbJsonHandler.handle(pascalAction, input, region);
+        } catch (AwsException e) {
+            throw new FailStateException("DynamoDb." + e.getErrorCode(), e.getMessage());
+        } catch (Exception e) {
+            throw new FailStateException("DynamoDb.InternalServerError",
+                    e.getMessage() != null ? e.getMessage() : "DynamoDB error");
+        }
+
+        Object entity = response.getEntity();
+        int status = response.getStatus();
+
+        if (status >= 400) {
+            if (entity instanceof AwsErrorResponse err) {
+                throw new FailStateException("DynamoDb." + err.type(), err.message());
+            }
+            if (entity instanceof JsonNode errorNode) {
+                String errorName = errorNode.path("__type").asText("UnknownError");
+                String errorMessage = errorNode.path("message").asText(
+                        errorNode.path("Message").asText("DynamoDB operation failed"));
+                throw new FailStateException("DynamoDb." + errorName, errorMessage);
+            }
+            throw new FailStateException("DynamoDb.ServiceException", "DynamoDB operation failed");
+        }
+
+        if (entity instanceof JsonNode jsonNode) {
+            return jsonNode;
+        }
+        return objectMapper.createObjectNode();
     }
 
     private StateResult executeChoiceState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context) throws Exception {
@@ -553,7 +669,7 @@ public class AslExecutor {
         execution.put("Id", exec.getExecutionArn());
         execution.put("Name", exec.getName());
         execution.put("RoleArn", sm.getRoleArn());
-        execution.put("StartTime", java.time.Instant.ofEpochSecond(exec.getStartDate()).toString());
+        execution.put("StartTime", java.time.Instant.ofEpochMilli((long) (exec.getStartDate() * 1000)).toString());
         if (exec.getInput() != null) {
             execution.set("Input", parseInput(exec.getInput()));
         }

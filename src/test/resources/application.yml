@@ -2,6 +2,8 @@ quarkus:
   http:
     port: 0
     test-port: 0
+    limits:
+      max-body-size: ${floci.max-request-size}M
 
 floci:
   base-url: "http://localhost:4566"
@@ -14,34 +16,28 @@ floci:
       compaction-interval-ms: 60000
     services:
       ssm:
-        mode: memory
         flush-interval-ms: 60000
-      sqs:
-        mode: memory
-      s3:
-        mode: memory
       dynamodb:
-        mode: memory
         flush-interval-ms: 60000
       sns:
-        mode: memory
         flush-interval-ms: 60000
       lambda:
-        mode: memory
         flush-interval-ms: 60000
       cloudwatchlogs:
-        mode: memory
         flush-interval-ms: 60000
       cloudwatchmetrics:
-        mode: memory
         flush-interval-ms: 60000
       secretsmanager:
-        mode: memory
         flush-interval-ms: 60000
 
   auth:
     validate-signatures: false
     presign-secret: test-secret
+
+  init-hooks:
+    shell-executable: /bin/bash
+    timeout-seconds: 5
+    shutdown-grace-period-seconds: 2
 
   services:
     ssm:

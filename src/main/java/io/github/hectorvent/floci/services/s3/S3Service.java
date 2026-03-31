@@ -37,6 +37,9 @@ public class S3Service {
     private final StorageBackend<String, Bucket> bucketStore;
     private final StorageBackend<String, S3Object> objectStore;
     private final Path dataRoot;
+    private final boolean inMemory;
+    private final ConcurrentHashMap<String, byte[]> memoryDataStore = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Map<Integer, byte[]>> memoryMultipartStore = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, MultipartUpload> multipartUploads = new ConcurrentHashMap<>();
 
     private final SqsService sqsService;
@@ -57,6 +60,7 @@ public class S3Service {
                         new TypeReference<Map<String, S3Object>>() {
                         }),
                 Path.of(config.storage().persistentPath()).resolve("s3"),
+                "memory".equals(config.storage().services().s3().mode().orElse(config.storage().mode())),
                 sqsService, snsService, regionResolver, config.effectiveBaseUrl(), objectMapper
         );
     }
@@ -67,26 +71,29 @@ public class S3Service {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot) {
-        this(bucketStore, objectStore, dataRoot, null, null, null, "http://localhost:4566",
+        this(bucketStore, objectStore, dataRoot, true, null, null, null, "http://localhost:4566",
                 new ObjectMapper());
     }
 
     private S3Service(StorageBackend<String, Bucket> bucketStore,
                       StorageBackend<String, S3Object> objectStore,
-                      Path dataRoot, SqsService sqsService, SnsService snsService,
+                      Path dataRoot, boolean inMemory, SqsService sqsService, SnsService snsService,
                       RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
         this.dataRoot = dataRoot;
+        this.inMemory = inMemory;
         this.sqsService = sqsService;
         this.snsService = snsService;
         this.regionResolver = regionResolver;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
-        try {
-            Files.createDirectories(dataRoot);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to create S3 data directory: " + dataRoot, e);
+        if (!inMemory) {
+            try {
+                Files.createDirectories(dataRoot);
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to create S3 data directory: " + dataRoot, e);
+            }
         }
     }
 
@@ -115,7 +122,12 @@ public class S3Service {
         }
 
         bucketStore.delete(bucketName);
-        deleteDirectory(dataRoot.resolve(bucketName));
+        if (inMemory) {
+            String prefix = bucketName + "/";
+            memoryDataStore.keySet().removeIf(k -> k.startsWith(prefix));
+        } else {
+            deleteDirectory(dataRoot.resolve(bucketName));
+        }
         LOG.infov("Deleted bucket: {0}", bucketName);
     }
 
@@ -729,10 +741,14 @@ public class S3Service {
         }
         upload.setStorageClass(ObjectAttributeName.normalizeStorageClass(storageClass));
 
-        try {
-            Files.createDirectories(dataRoot.resolve(".multipart").resolve(upload.getUploadId()));
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to create multipart temp directory", e);
+        if (inMemory) {
+            memoryMultipartStore.put(upload.getUploadId(), new ConcurrentHashMap<>());
+        } else {
+            try {
+                Files.createDirectories(dataRoot.resolve(".multipart").resolve(upload.getUploadId()));
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to create multipart temp directory", e);
+            }
         }
 
         multipartUploads.put(upload.getUploadId(), upload);
@@ -751,12 +767,15 @@ public class S3Service {
                     "Part number must be between 1 and 10000.", 400);
         }
 
-        // Write part to temp directory
-        Path partPath = dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(partNumber));
-        try {
-            Files.write(partPath, data);
-        } catch (IOException e) {
-            throw new UncheckedIOException("Failed to write multipart part", e);
+        if (inMemory) {
+            memoryMultipartStore.get(uploadId).put(partNumber, data);
+        } else {
+            Path partPath = dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(partNumber));
+            try {
+                Files.write(partPath, data);
+            } catch (IOException e) {
+                throw new UncheckedIOException("Failed to write multipart part", e);
+            }
         }
 
         String eTag = computeETag(data);
@@ -788,8 +807,9 @@ public class S3Service {
             MessageDigest md = MessageDigest.getInstance("MD5");
 
             for (int num : partNumbers) {
-                Path partPath = dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(num));
-                byte[] partData = Files.readAllBytes(partPath);
+                byte[] partData = inMemory
+                        ? memoryMultipartStore.get(uploadId).get(num)
+                        : Files.readAllBytes(dataRoot.resolve(".multipart").resolve(uploadId).resolve(String.valueOf(num)));
                 combined.write(partData);
                 // For composite ETag: hash each part's MD5
                 md.update(computeETagBytes(partData));
@@ -1019,7 +1039,7 @@ public class S3Service {
         }
 
         String region = regionResolver != null ? regionResolver.getDefaultRegion() : "us-east-1";
-        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region);
+        String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled());
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName))) {
@@ -1058,7 +1078,7 @@ public class S3Service {
     }
 
     private String buildS3EventJson(String bucketName, String key, String eventName,
-                                    S3Object obj, String region) {
+                                    S3Object obj, String region, boolean isVersionEnabled) {
         try {
             String eventTime = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             long size = obj != null ? obj.getSize() : 0;
@@ -1073,7 +1093,10 @@ public class S3Service {
             objectNode.put("key", key);
             objectNode.put("size", size);
             objectNode.put("eTag", eTag);
-
+            if(isVersionEnabled) {
+                String versionId = obj !=null && obj.getVersionId()!=null ? obj.getVersionId() : "";
+                objectNode.put("versionId", versionId);
+            }
             ObjectNode s3Node = objectMapper.createObjectNode();
             s3Node.put("s3SchemaVersion", "1.0");
             s3Node.put("configurationId", "emulator");
@@ -1101,7 +1124,11 @@ public class S3Service {
 
     private void cleanupMultipart(String uploadId) {
         multipartUploads.remove(uploadId);
-        deleteDirectory(dataRoot.resolve(".multipart").resolve(uploadId));
+        if (inMemory) {
+            memoryMultipartStore.remove(uploadId);
+        } else {
+            deleteDirectory(dataRoot.resolve(".multipart").resolve(uploadId));
+        }
     }
 
     private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload) {
@@ -1216,6 +1243,10 @@ public class S3Service {
     }
 
     private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {
+        if (inMemory) {
+            memoryDataStore.put(versionedKey(bucketName, key, versionId), data);
+            return;
+        }
         try {
             Path filePath = resolveVersionedPath(bucketName, key, versionId);
             Files.createDirectories(filePath.getParent());
@@ -1226,6 +1257,9 @@ public class S3Service {
     }
 
     private byte[] readVersionedFile(String bucketName, String key, String versionId) {
+        if (inMemory) {
+            return memoryDataStore.get(versionedKey(bucketName, key, versionId));
+        }
         try {
             return Files.readAllBytes(resolveVersionedPath(bucketName, key, versionId));
         } catch (IOException e) {
@@ -1234,6 +1268,10 @@ public class S3Service {
     }
 
     private void writeFile(String bucketName, String key, byte[] data) {
+        if (inMemory) {
+            memoryDataStore.put(objectKey(bucketName, key), data);
+            return;
+        }
         try {
             Path filePath = resolveObjectPath(bucketName, key);
             Files.createDirectories(filePath.getParent());
@@ -1244,6 +1282,9 @@ public class S3Service {
     }
 
     private byte[] readFile(String bucketName, String key) {
+        if (inMemory) {
+            return memoryDataStore.get(objectKey(bucketName, key));
+        }
         try {
             return Files.readAllBytes(resolveObjectPath(bucketName, key));
         } catch (IOException e) {
@@ -1252,6 +1293,10 @@ public class S3Service {
     }
 
     private void deleteFile(String bucketName, String key) {
+        if (inMemory) {
+            memoryDataStore.remove(objectKey(bucketName, key));
+            return;
+        }
         try {
             Files.deleteIfExists(resolveObjectPath(bucketName, key));
         } catch (IOException e) {

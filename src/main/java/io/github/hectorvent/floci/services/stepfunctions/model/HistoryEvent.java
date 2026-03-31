@@ -9,20 +9,20 @@ import java.util.Map;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class HistoryEvent {
     private long id;
-    private long timestamp;
+    private double timestamp;
     private String type;
     private Long previousEventId;
     private Map<String, Object> details;
 
     public HistoryEvent() {
-        this.timestamp = System.currentTimeMillis() / 1000L;
+        this.timestamp = System.currentTimeMillis() / 1000.0;
     }
 
     public long getId() { return id; }
     public void setId(long id) { this.id = id; }
 
-    public long getTimestamp() { return timestamp; }
-    public void setTimestamp(long timestamp) { this.timestamp = timestamp; }
+    public double getTimestamp() { return timestamp; }
+    public void setTimestamp(double timestamp) { this.timestamp = timestamp; }
 
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }

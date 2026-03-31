@@ -38,11 +38,16 @@ public interface EmulatorConfig {
     @WithDefault("000000000000")
     String defaultAccountId();
 
+    @WithDefault("512")
+    int maxRequestSize();
+
     StorageConfig storage();
 
     AuthConfig auth();
 
     ServicesConfig services();
+
+    InitHooksConfig initHooks();
 
     interface StorageConfig {
         @WithDefault("hybrid")
@@ -70,74 +75,64 @@ public interface EmulatorConfig {
     }
 
     interface SsmStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
 
     interface SqsStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
     }
 
     interface S3StorageConfig {
-        @WithDefault("hybrid")
-        String mode();
+        Optional<String> mode();
     }
 
     interface DynamoDbStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
 
     interface SnsStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
 
     interface LambdaStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
 
     interface CloudWatchLogsStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
 
     interface CloudWatchMetricsStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
 
     interface SecretsManagerStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
     }
 
     interface AcmStorageConfig {
-        @WithDefault("memory")
-        String mode();
+        Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
@@ -377,5 +372,16 @@ public interface EmulatorConfig {
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+    }
+
+    interface InitHooksConfig {
+        @WithDefault("/bin/bash")
+        String shellExecutable();
+
+        @WithDefault("2")
+        long shutdownGracePeriodSeconds();
+
+        @WithDefault("30")
+        long timeoutSeconds();
     }
 }

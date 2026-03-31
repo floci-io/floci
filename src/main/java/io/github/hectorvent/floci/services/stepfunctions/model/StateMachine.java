@@ -12,10 +12,10 @@ public class StateMachine {
     private String roleArn;
     private String type = "STANDARD";
     private String status = "ACTIVE";
-    private long creationDate;
+    private double creationDate;
 
     public StateMachine() {
-        this.creationDate = System.currentTimeMillis() / 1000L;
+        this.creationDate = System.currentTimeMillis() / 1000.0;
     }
 
     public String getStateMachineArn() { return stateMachineArn; }
@@ -36,6 +36,6 @@ public class StateMachine {
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
 
-    public long getCreationDate() { return creationDate; }
-    public void setCreationDate(long creationDate) { this.creationDate = creationDate; }
+    public double getCreationDate() { return creationDate; }
+    public void setCreationDate(double creationDate) { this.creationDate = creationDate; }
 }

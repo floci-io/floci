@@ -365,7 +365,13 @@ public class S3Controller {
                               @HeaderParam("x-amz-object-attributes") String objectAttributesHeader,
                               @HeaderParam("x-amz-max-parts") Integer maxParts,
                               @HeaderParam("x-amz-part-number-marker") Integer partNumberMarker,
-                              @Context UriInfo uriInfo) {
+                              @HeaderParam("If-Match") String ifMatch,
+                              @HeaderParam("If-None-Match") String ifNoneMatch,
+                              @HeaderParam("If-Modified-Since") String ifModifiedSince,
+                              @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
+                              @HeaderParam("Range") String rangeHeader,
+                              @Context UriInfo uriInfo,
+                              @Context HttpHeaders httpHeaders) {
         try {
             if (hasQueryParam(uriInfo, "tagging")) {
                 return handleGetObjectTagging(bucket, key);
@@ -380,15 +386,32 @@ public class S3Controller {
                 return Response.ok(s3Service.getObjectAcl(bucket, key, versionId)).build();
             }
             if (hasQueryParam(uriInfo, "attributes")) {
+                // Merge all x-amz-object-attributes header values (SDK may send multiple lines)
+                List<String> attrHeaders = httpHeaders.getRequestHeader("x-amz-object-attributes");
+                String mergedAttributes = attrHeaders != null ? String.join(",", attrHeaders) : objectAttributesHeader;
                 return handleGetObjectAttributes(bucket, key, versionId,
-                        objectAttributesHeader, maxParts, partNumberMarker);
+                        mergedAttributes, maxParts, partNumberMarker);
+            }
+            if (hasPreconditions(ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince)) {
+                // Fetch metadata only to evaluate preconditions, avoiding loading the full object unnecessarily.
+                S3Object metadata = s3Service.headObject(bucket, key, versionId);
+                Response preconditionResponse = checkPreconditions(metadata, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
+                if (preconditionResponse != null) {
+                    return preconditionResponse;
+                }
             }
             S3Object obj = s3Service.getObject(bucket, key, versionId);
+
+            if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
+                return handleRangeRequest(obj, rangeHeader);
+            }
+
             var resp = Response.ok(obj.getData())
                     .header("Content-Type", obj.getContentType())
                     .header("Content-Length", obj.getSize())
                     .header("ETag", obj.getETag())
-                    .header("Last-Modified", RFC_822.format(obj.getLastModified()));
+                    .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                    .header("Accept-Ranges", "bytes");
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
@@ -399,18 +422,90 @@ public class S3Controller {
         }
     }
 
+    private Response handleRangeRequest(S3Object obj, String rangeHeader) {
+        byte[] data = obj.getData();
+        int totalSize = data.length;
+        String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
+
+        int start, end;
+        try {
+            int dash = rangeSpec.indexOf('-');
+            if (dash < 0) {
+                return invalidRangeResponse(totalSize);
+            }
+            String before = rangeSpec.substring(0, dash);
+            String after = rangeSpec.substring(dash + 1);
+            if (before.isEmpty() && after.isEmpty()) {
+                return invalidRangeResponse(totalSize);
+            }
+            if (before.isEmpty()) {
+                int suffix = Integer.parseInt(after);
+                if (suffix <= 0) {
+                    return invalidRangeResponse(totalSize);
+                }
+                start = Math.max(0, totalSize - suffix);
+                end = totalSize - 1;
+            } else {
+                start = Integer.parseInt(before);
+                end = after.isEmpty() ? totalSize - 1 : Math.min(Integer.parseInt(after), totalSize - 1);
+            }
+        } catch (NumberFormatException e) {
+            return invalidRangeResponse(totalSize);
+        }
+
+        if (start < 0 || start >= totalSize || start > end) {
+            return invalidRangeResponse(totalSize);
+        }
+
+        byte[] rangeData = java.util.Arrays.copyOfRange(data, start, end + 1);
+        return Response.status(206)
+                .entity(rangeData)
+                .header("Content-Type", obj.getContentType())
+                .header("Content-Length", rangeData.length)
+                .header("Content-Range", "bytes " + start + "-" + end + "/" + totalSize)
+                .header("ETag", obj.getETag())
+                .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                .header("Accept-Ranges", "bytes")
+                .build();
+    }
+
+    private Response invalidRangeResponse(int totalSize) {
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("Error")
+                .elem("Code", "InvalidRange")
+                .elem("Message", "The requested range is not satisfiable.")
+                .elem("RequestId", java.util.UUID.randomUUID().toString())
+                .end("Error")
+                .build();
+        return Response.status(416)
+                .entity(xml)
+                .type(MediaType.APPLICATION_XML)
+                .header("Content-Range", "bytes */" + totalSize)
+                .build();
+    }
+
     @HEAD
     @Path("/{bucket}/{key:.+}")
     public Response headObject(@PathParam("bucket") String bucket,
                                @PathParam("key") String key,
-                               @QueryParam("versionId") String versionId) {
+                               @QueryParam("versionId") String versionId,
+                               @HeaderParam("If-Match") String ifMatch,
+                               @HeaderParam("If-None-Match") String ifNoneMatch,
+                               @HeaderParam("If-Modified-Since") String ifModifiedSince,
+                               @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince) {
         try {
             S3Object obj = s3Service.headObject(bucket, key, versionId);
+            Response preconditionResponse = checkPreconditions(obj, ifMatch, ifNoneMatch, ifModifiedSince, ifUnmodifiedSince);
+            if (preconditionResponse != null) {
+                return preconditionResponse;
+            }
             var resp = Response.ok()
                     .header("Content-Type", obj.getContentType())
                     .header("Content-Length", obj.getSize())
                     .header("ETag", obj.getETag())
-                    .header("Last-Modified", RFC_822.format(obj.getLastModified()));
+                    .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                    .header("Accept-Ranges", "bytes");
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
@@ -1089,6 +1184,77 @@ public class S3Controller {
                 .end("Error")
                 .build();
         return Response.status(e.getHttpStatus()).entity(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private Response checkPreconditions(S3Object obj, String ifMatch, String ifNoneMatch,
+                                         String ifModifiedSince, String ifUnmodifiedSince) {
+        String eTag = obj.getETag();
+        Instant lastModified = obj.getLastModified();
+
+        if (ifMatch != null && !eTagMatches(ifMatch, eTag)) {
+            return preconditionFailedResponse();
+        }
+
+        if (ifUnmodifiedSince != null && ifMatch == null) {
+            Instant since = parseHttpDate(ifUnmodifiedSince);
+            if (since != null && lastModified.isAfter(since)) {
+                return preconditionFailedResponse();
+            }
+        }
+
+        if (ifNoneMatch != null && eTagMatches(ifNoneMatch, eTag)) {
+            return notModifiedResponse(eTag, lastModified);
+        }
+
+        if (ifModifiedSince != null && ifNoneMatch == null) {
+            Instant since = parseHttpDate(ifModifiedSince);
+            if (since != null && !lastModified.isAfter(since)) {
+                return notModifiedResponse(eTag, lastModified);
+            }
+        }
+
+        return null;
+    }
+
+    private boolean hasPreconditions(String ifMatch, String ifNoneMatch,
+                                      String ifModifiedSince, String ifUnmodifiedSince) {
+        return ifMatch != null || ifNoneMatch != null || ifModifiedSince != null || ifUnmodifiedSince != null;
+    }
+
+    private Response notModifiedResponse(String eTag, Instant lastModified) {
+        return Response.notModified()
+                .header("ETag", eTag)
+                .header("Last-Modified", RFC_822.format(lastModified))
+                .build();
+    }
+
+    private Response preconditionFailedResponse() {
+        return xmlErrorResponse(new AwsException("PreconditionFailed",
+                "At least one of the pre-conditions you specified did not hold.", 412));
+    }
+
+    private boolean eTagMatches(String headerValue, String eTag) {
+        if ("*".equals(headerValue.trim())) {
+            return true;
+        }
+        for (String candidate : headerValue.split(",")) {
+            if (candidate.trim().equals(eTag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private Instant parseHttpDate(String dateStr) {
+        try {
+            return RFC_822.parse(dateStr.trim(), Instant::from);
+        } catch (Exception e) {
+            try {
+                return Instant.parse(dateStr.trim());
+            } catch (Exception e2) {
+                return null;
+            }
+        }
     }
 
     private boolean hasQueryParam(UriInfo uriInfo, String param) {

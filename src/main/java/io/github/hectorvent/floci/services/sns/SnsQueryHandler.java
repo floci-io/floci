@@ -68,8 +68,12 @@ public class SnsQueryHandler {
 
     private Response handleDeleteTopic(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
-        snsService.deleteTopic(topicArn, region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteTopic", AwsNamespaces.SNS)).build();
+        try {
+            snsService.deleteTopic(topicArn, region);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteTopic", AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response handleListTopics(MultivaluedMap<String, String> params, String region) {
@@ -85,41 +89,57 @@ public class SnsQueryHandler {
 
     private Response handleGetTopicAttributes(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
-        Map<String, String> attrs = snsService.getTopicAttributes(topicArn, region);
+        try {
+            Map<String, String> attrs = snsService.getTopicAttributes(topicArn, region);
 
-        var xml = new XmlBuilder().start("Attributes");
-        for (var entry : attrs.entrySet()) {
-            xml.start("entry")
-               .elem("key", entry.getKey())
-               .elem("value", entry.getValue())
-               .end("entry");
+            var xml = new XmlBuilder().start("Attributes");
+            for (var entry : attrs.entrySet()) {
+                xml.start("entry")
+                   .elem("key", entry.getKey())
+                   .elem("value", entry.getValue())
+                   .end("entry");
+            }
+            xml.end("Attributes");
+            return Response.ok(AwsQueryResponse.envelope("GetTopicAttributes", AwsNamespaces.SNS, xml.build())).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
-        xml.end("Attributes");
-        return Response.ok(AwsQueryResponse.envelope("GetTopicAttributes", AwsNamespaces.SNS, xml.build())).build();
     }
 
     private Response handleSetTopicAttributes(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
         String attributeName = getParam(params, "AttributeName");
         String attributeValue = getParam(params, "AttributeValue");
-        snsService.setTopicAttributes(topicArn, attributeName, attributeValue, region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("SetTopicAttributes", AwsNamespaces.SNS)).build();
+        try {
+            snsService.setTopicAttributes(topicArn, attributeName, attributeValue, region);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("SetTopicAttributes", AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response handleSubscribe(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
         String protocol = getParam(params, "Protocol");
         String endpoint = getParam(params, "Endpoint");
-        Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, region);
+        try {
+            Subscription sub = snsService.subscribe(topicArn, protocol, endpoint, region);
 
-        String result = new XmlBuilder().elem("SubscriptionArn", sub.getSubscriptionArn()).build();
-        return Response.ok(AwsQueryResponse.envelope("Subscribe", AwsNamespaces.SNS, result)).build();
+            String result = new XmlBuilder().elem("SubscriptionArn", sub.getSubscriptionArn()).build();
+            return Response.ok(AwsQueryResponse.envelope("Subscribe", AwsNamespaces.SNS, result)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response handleUnsubscribe(MultivaluedMap<String, String> params, String region) {
         String subscriptionArn = getParam(params, "SubscriptionArn");
-        snsService.unsubscribe(subscriptionArn, region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("Unsubscribe", AwsNamespaces.SNS)).build();
+        try {
+            snsService.unsubscribe(subscriptionArn, region);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("Unsubscribe", AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response handleListSubscriptions(MultivaluedMap<String, String> params, String region) {
@@ -129,8 +149,12 @@ public class SnsQueryHandler {
 
     private Response handleListSubscriptionsByTopic(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
-        List<Subscription> subs = snsService.listSubscriptionsByTopic(topicArn, region);
-        return buildSubscriptionListResponse("ListSubscriptionsByTopic", subs);
+        try {
+            List<Subscription> subs = snsService.listSubscriptionsByTopic(topicArn, region);
+            return buildSubscriptionListResponse("ListSubscriptionsByTopic", subs);
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response buildSubscriptionListResponse(String action, List<Subscription> subs) {
@@ -164,11 +188,15 @@ public class SnsQueryHandler {
             if (value != null) attributes.put(name, value);
         }
 
-        String messageId = snsService.publish(topicArn, targetArn, message, subject,
-                attributes, messageGroupId, messageDeduplicationId, region);
+        try {
+            String messageId = snsService.publish(topicArn, targetArn, message, subject,
+                    attributes, messageGroupId, messageDeduplicationId, region);
 
-        String result = new XmlBuilder().elem("MessageId", messageId).build();
-        return Response.ok(AwsQueryResponse.envelope("Publish", AwsNamespaces.SNS, result)).build();
+            String result = new XmlBuilder().elem("MessageId", messageId).build();
+            return Response.ok(AwsQueryResponse.envelope("Publish", AwsNamespaces.SNS, result)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response handlePublishBatch(MultivaluedMap<String, String> params, String region) {
@@ -185,19 +213,23 @@ public class SnsQueryHandler {
             entry.put("MessageDeduplicationId", getParam(params, "PublishBatchRequestEntries.member." + i + ".MessageDeduplicationId"));
             entries.add(entry);
         }
-        SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, entries, region);
+        try {
+            SnsService.BatchPublishResult result = snsService.publishBatch(topicArn, entries, region);
 
-        var xml = new XmlBuilder().start("Successful");
-        for (String[] s : result.successful()) {
-            xml.start("member").elem("Id", s[0]).elem("MessageId", s[1]).end("member");
+            var xml = new XmlBuilder().start("Successful");
+            for (String[] s : result.successful()) {
+                xml.start("member").elem("Id", s[0]).elem("MessageId", s[1]).end("member");
+            }
+            xml.end("Successful").start("Failed");
+            for (String[] f : result.failed()) {
+                xml.start("member").elem("Id", f[0]).elem("Code", f[1])
+                   .elem("Message", f[2]).elem("SenderFault", f[3]).end("member");
+            }
+            xml.end("Failed");
+            return Response.ok(AwsQueryResponse.envelope("PublishBatch", AwsNamespaces.SNS, xml.build())).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
-        xml.end("Successful").start("Failed");
-        for (String[] f : result.failed()) {
-            xml.start("member").elem("Id", f[0]).elem("Code", f[1])
-               .elem("Message", f[2]).elem("SenderFault", f[3]).end("member");
-        }
-        xml.end("Failed");
-        return Response.ok(AwsQueryResponse.envelope("PublishBatch", AwsNamespaces.SNS, xml.build())).build();
     }
 
     private Response handleGetSubscriptionAttributes(MultivaluedMap<String, String> params, String region) {
@@ -242,8 +274,12 @@ public class SnsQueryHandler {
     private Response handleTagResource(MultivaluedMap<String, String> params, String region) {
         String resourceArn = getParam(params, "ResourceArn");
         Map<String, String> tags = extractSnsTags(params);
-        snsService.tagResource(resourceArn, tags, region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", AwsNamespaces.SNS)).build();
+        try {
+            snsService.tagResource(resourceArn, tags, region);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("TagResource", AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response handleUntagResource(MultivaluedMap<String, String> params, String region) {
@@ -254,23 +290,31 @@ public class SnsQueryHandler {
             if (key == null) break;
             tagKeys.add(key);
         }
-        snsService.untagResource(resourceArn, tagKeys, region);
-        return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", AwsNamespaces.SNS)).build();
+        try {
+            snsService.untagResource(resourceArn, tagKeys, region);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("UntagResource", AwsNamespaces.SNS)).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
     }
 
     private Response handleListTagsForResource(MultivaluedMap<String, String> params, String region) {
         String resourceArn = getParam(params, "ResourceArn");
-        Map<String, String> tags = snsService.listTagsForResource(resourceArn, region);
+        try {
+            Map<String, String> tags = snsService.listTagsForResource(resourceArn, region);
 
-        var xml = new XmlBuilder().start("Tags");
-        for (var entry : tags.entrySet()) {
-            xml.start("member")
-               .elem("Key", entry.getKey())
-               .elem("Value", entry.getValue())
-               .end("member");
+            var xml = new XmlBuilder().start("Tags");
+            for (var entry : tags.entrySet()) {
+                xml.start("member")
+                   .elem("Key", entry.getKey())
+                   .elem("Value", entry.getValue())
+                   .end("member");
+            }
+            xml.end("Tags");
+            return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.SNS, xml.build())).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
-        xml.end("Tags");
-        return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.SNS, xml.build())).build();
     }
 
     // --- Helpers ---

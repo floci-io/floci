@@ -1,0 +1,126 @@
+<svg width="1280" height="640" viewBox="0 0 1280 640" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0%" stop-color="#0d0f1a"/>
+      <stop offset="100%" stop-color="#12152b"/>
+    </linearGradient>
+    <radialGradient id="glow-amber" cx="50%" cy="34%" r="38%">
+      <stop offset="0%" stop-color="#f9a825" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#f9a825" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-indigo" cx="50%" cy="80%" r="50%">
+      <stop offset="0%" stop-color="#3949ab" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="#3949ab" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="pm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff8e1"/>
+      <stop offset="100%" stop-color="#ffe082"/>
+    </linearGradient>
+    <linearGradient id="ps" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffe082"/>
+      <stop offset="100%" stop-color="#e6ac00"/>
+    </linearGradient>
+    <linearGradient id="wm" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#fff8e1"/>
+      <stop offset="55%" stop-color="#ffe082"/>
+      <stop offset="100%" stop-color="#e6ac00"/>
+    </linearGradient>
+    <pattern id="grid" width="56" height="56" patternUnits="userSpaceOnUse">
+      <path d="M 56 0 L 0 0 0 56" fill="none" stroke="#3949ab" stroke-width="0.5" opacity="0.15"/>
+    </pattern>
+    <radialGradient id="gmask-g" cx="50%" cy="40%" r="65%">
+      <stop offset="0%" stop-color="white" stop-opacity="0.9"/>
+      <stop offset="100%" stop-color="white" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="gmask">
+      <rect width="1280" height="640" fill="url(#gmask-g)"/>
+    </mask>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1280" height="640" fill="url(#bg)"/>
+  <rect width="1280" height="640" fill="url(#grid)" mask="url(#gmask)"/>
+  <rect width="1280" height="640" fill="url(#glow-amber)"/>
+  <rect width="1280" height="640" fill="url(#glow-indigo)"/>
+
+  <!-- Decorative rings -->
+  <circle cx="640" cy="225" r="290" fill="none" stroke="#3949ab" stroke-width="1" opacity="0.12"/>
+  <circle cx="640" cy="225" r="360" fill="none" stroke="#3949ab" stroke-width="1" opacity="0.07"/>
+
+  <!-- Cloud centered at (640, 215) -->
+  <g transform="translate(640,215) scale(1.9)">
+    <rect x="-108" y="-20" width="216" height="60" rx="30" fill="url(#ps)"/>
+    <circle cx="-74" cy="-20" r="40" fill="url(#ps)"/>
+    <circle cx="-22" cy="-44" r="52" fill="url(#pm)"/>
+    <circle cx="36"  cy="-36" r="46" fill="url(#pm)"/>
+    <circle cx="86"  cy="-18" r="34" fill="url(#ps)"/>
+    <ellipse cx="8" cy="-30" rx="72" ry="28" fill="#fff8e1" opacity="0.55"/>
+    <circle cx="-58" cy="-34" r="7"   fill="#fff8e1" opacity="0.75"/>
+    <circle cx="-12" cy="-60" r="8.5" fill="#fff8e1" opacity="0.70"/>
+    <circle cx="38"  cy="-54" r="7.5" fill="#fff8e1" opacity="0.70"/>
+    <circle cx="82"  cy="-28" r="6"   fill="#fff8e1" opacity="0.65"/>
+    <ellipse cx="4" cy="42" rx="90" ry="9" fill="#000" opacity="0.12"/>
+  </g>
+
+  <!-- Wordmark -->
+  <text x="640" y="402"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="118" font-weight="800" fill="url(#wm)"
+        text-anchor="middle" letter-spacing="-3">floci</text>
+
+  <!-- Tagline -->
+  <text x="640" y="446"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="21" font-weight="300" font-style="italic"
+        fill="#7986cb" text-anchor="middle" letter-spacing="0.5">Light, fluffy, and always free — AWS Local Emulator</text>
+
+  <!-- Stats row -->
+  <line x1="120" y1="490" x2="1160" y2="490" stroke="#3949ab" stroke-width="1" opacity="0.3"/>
+
+  <!-- 4 stats centered within lines x=120–1160, col=260px, centers=250,510,770,1030 -->
+
+  <!-- Stat 1: Startup -->
+  <text x="250" y="548"
+        font-family="'Courier New', Courier, monospace"
+        font-size="42" font-weight="700" fill="#ffe082" text-anchor="middle">24ms</text>
+  <text x="250" y="574"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="14" fill="#5c6bc0" text-anchor="middle" letter-spacing="0.3">Startup time</text>
+
+  <line x1="380" y1="510" x2="380" y2="580" stroke="#3949ab" stroke-width="1" opacity="0.4"/>
+
+  <!-- Stat 2: Memory -->
+  <text x="510" y="548"
+        font-family="'Courier New', Courier, monospace"
+        font-size="42" font-weight="700" fill="#ffe082" text-anchor="middle">13 MiB</text>
+  <text x="510" y="574"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="14" fill="#5c6bc0" text-anchor="middle" letter-spacing="0.3">Idle memory</text>
+
+  <line x1="640" y1="510" x2="640" y2="580" stroke="#3949ab" stroke-width="1" opacity="0.4"/>
+
+  <!-- Stat 3: Services -->
+  <text x="770" y="548"
+        font-family="'Courier New', Courier, monospace"
+        font-size="42" font-weight="700" fill="#ffe082" text-anchor="middle">~24</text>
+  <text x="770" y="574"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="14" fill="#5c6bc0" text-anchor="middle" letter-spacing="0.3">AWS services supported</text>
+
+  <line x1="900" y1="510" x2="900" y2="580" stroke="#3949ab" stroke-width="1" opacity="0.4"/>
+
+  <!-- Stat 4: License -->
+  <text x="1030" y="548"
+        font-family="'Courier New', Courier, monospace"
+        font-size="42" font-weight="700" fill="#ffe082" text-anchor="middle">MIT</text>
+  <text x="1030" y="574"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="14" fill="#5c6bc0" text-anchor="middle" letter-spacing="0.3">Open source license</text>
+
+  <line x1="120" y1="596" x2="1160" y2="596" stroke="#3949ab" stroke-width="1" opacity="0.3"/>
+
+  <!-- URL -->
+  <text x="640" y="622"
+        font-family="'Helvetica Neue', Helvetica, Arial, sans-serif"
+        font-size="13" fill="#2a3160" text-anchor="middle" letter-spacing="2.5">floci.io  ·  github.com/hectorvent/floci</text>
+</svg>

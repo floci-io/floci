@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="logo.svg" alt="Floci" width="400" />
+  <img src="floci_banner.svg" alt="Floci"/>
 </p>
 
 <p align="center">
@@ -13,8 +13,6 @@
   <a href="https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw"><img src="https://img.shields.io/badge/Slack-Join%20the%20community-4A154B?logo=slack&logoColor=white" alt="Join Floci on Slack"></a>
   
 </p>
-
-<h3 align="center">🍿☁️ Light, fluffy, and always free</h3>
 
 <p align="center">
   <em>Named after <a href="https://en.wikipedia.org/wiki/Cirrocumulus_floccus">floccus</a> — the cloud formation that looks exactly like popcorn.</em>
@@ -54,7 +52,70 @@
 | KMS (sign, verify, re-encrypt) | ✅ | ⚠️ Partial |
 | Native binary | ✅ ~40 MB | ❌ |
 
-**21+ services. 408/408 SDK tests passing. Free forever.**
+**24 services. 408/408 SDK tests passing. Free forever.**
+
+## Architecture Overview
+
+```mermaid
+flowchart LR
+    Client["☁️ AWS SDK / CLI"]
+
+    subgraph Floci ["Floci — port 4566"]
+        Router["HTTP Router\n(JAX-RS / Vert.x)"]
+
+        subgraph Stateless ["Stateless Services"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · CloudWatch\nStep Functions · CloudFormation\nACM · API Gateway"]
+        end
+
+        subgraph Stateful ["Stateful Services"]
+            B["S3 · DynamoDB\nDynamoDB Streams"]
+        end
+
+        subgraph Containers ["Container Services  🐳"]
+            C["Lambda\nElastiCache\nRDS"]
+        end
+
+        Router --> Stateless
+        Router --> Stateful
+        Router --> Containers
+        Stateless & Stateful --> Store[("StorageBackend\nmemory · hybrid\npersistent · wal")]
+    end
+
+    Docker["🐳 Docker Engine"]
+    Client -->|"HTTP :4566\nAWS wire protocol"| Router
+    Containers -->|"Docker API\n+ IAM / SigV4 auth"| Docker
+```
+
+## Supported Services
+
+| Service | Ops | How it works | Notable features |
+|---|---|---|---|
+| **SSM Parameter Store** | 12 | In-process | Version history, labels, SecureString, tagging |
+| **SQS** | 17 | In-process | Standard & FIFO, DLQ, visibility timeout, batch, tagging |
+| **SNS** | 13 | In-process | Topics, subscriptions, SQS / Lambda / HTTP delivery, tagging |
+| **S3** | 30 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |
+| **DynamoDB** | 22 | In-process | GSI / LSI, Query, Scan, TTL, transactions, batch operations |
+| **DynamoDB Streams** | 5 | In-process | Shard iterators, records, Lambda ESM trigger |
+| **Lambda** | 25 | **Real Docker containers** | Warm pool, aliases, Function URLs, SQS / Kinesis / DDB Streams ESM |
+| **API Gateway REST** | 24 | In-process | Resources, methods, stages, Lambda proxy, MOCK integrations, AWS integrations |
+| **API Gateway v2 (HTTP)** | 16 | In-process | Routes, integrations, JWT authorizers, stages |
+| **IAM** | 65+ | In-process | Users, roles, groups, policies, instance profiles, access keys |
+| **STS** | 7 | In-process | AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
+| **Cognito** | 20 | In-process | User pools, app clients, auth flows, JWKS / OpenID well-known endpoints |
+| **KMS** | 15 | In-process | Encrypt / decrypt, sign / verify, data keys, aliases |
+| **Kinesis** | 15 | In-process | Streams, shards, enhanced fan-out, split / merge |
+| **Secrets Manager** | 10 | In-process | Versioning, resource policies, tagging |
+| **Step Functions** | 11 | In-process | ASL execution, task tokens, execution history |
+| **CloudFormation** | 12 | In-process | Stacks, change sets, resource provisioning |
+| **EventBridge** | 14 | In-process | Custom buses, rules, targets (SQS / SNS / Lambda) |
+| **CloudWatch Logs** | 14 | In-process | Log groups, streams, ingestion, filtering |
+| **CloudWatch Metrics** | 5 | In-process | Custom metrics, statistics, alarms |
+| **ElastiCache** | 9 | **Real Docker containers** | Redis / Valkey, IAM auth, SigV4 validation |
+| **RDS** | 14 | **Real Docker containers** | PostgreSQL & MySQL, IAM auth, JDBC-compatible |
+| **ACM** | 8 | In-process | Certificate issuance, validation lifecycle |
+| **SES** | 14 | In-process | Send email / raw email, identity verification, DKIM attributes |
+
+> **Lambda, ElastiCache, and RDS** spin up real Docker containers and support IAM authentication and SigV4 request signing — the same auth flow as production AWS.
 
 ## Quick Start
 
@@ -161,7 +222,7 @@ All settings are overridable via environment variables (`FLOCI_` prefix).
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Default AWS account ID |
 | `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL used in API responses (e.g. SQS QueueUrl) |
 | `FLOCI_HOSTNAME` | *(unset)* | Override hostname in response URLs (for Docker Compose) |
-| `FLOCI_STORAGE_MODE` | `hybrid` | `memory` · `persistent` · `hybrid` · `wal` |
+| `FLOCI_STORAGE_MODE` | `memory` | `memory` · `persistent` · `hybrid` · `wal` |
 | `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Data directory |
 
 → Full reference: [configuration docs](https://hectorvent.dev/floci/configuration/application-yml/)
