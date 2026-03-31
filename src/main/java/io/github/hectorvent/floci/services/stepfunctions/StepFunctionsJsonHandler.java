@@ -144,7 +144,7 @@ public class StepFunctionsJsonHandler {
                 request.path("error").asText(null)
         );
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("stopDate", System.currentTimeMillis() / 1000L);
+        response.put("stopDate", System.currentTimeMillis() / 1000.0);
         return Response.ok(response).build();
     }
 

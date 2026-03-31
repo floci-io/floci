@@ -12,13 +12,13 @@ public class Execution {
     private String status = "RUNNING"; // RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED
     private String input;
     private String output;
-    private long startDate;
-    private Long stopDate;
+    private double startDate;
+    private Double stopDate;
     private String error;
     private String cause;
 
     public Execution() {
-        this.startDate = System.currentTimeMillis() / 1000L;
+        this.startDate = System.currentTimeMillis() / 1000.0;
     }
 
     public String getExecutionArn() { return executionArn; }
@@ -39,11 +39,11 @@ public class Execution {
     public String getOutput() { return output; }
     public void setOutput(String output) { this.output = output; }
 
-    public long getStartDate() { return startDate; }
-    public void setStartDate(long startDate) { this.startDate = startDate; }
+    public double getStartDate() { return startDate; }
+    public void setStartDate(double startDate) { this.startDate = startDate; }
 
-    public Long getStopDate() { return stopDate; }
-    public void setStopDate(Long stopDate) { this.stopDate = stopDate; }
+    public Double getStopDate() { return stopDate; }
+    public void setStopDate(Double stopDate) { this.stopDate = stopDate; }
 
     public String getError() { return error; }
     public void setError(String error) { this.error = error; }

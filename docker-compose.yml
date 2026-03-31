@@ -9,6 +9,8 @@ services:
       - "7001-7099:7001-7099"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts:/etc/floci/init/start.d
+      - ./scripts:/etc/floci/init/stop.d
     environment:
       FLOCI_SERVICES_DOCKER_NETWORK: floci_default
       FLOCI_SERVICES_RDS_PROXY_BASE_PORT: "7001"

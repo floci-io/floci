@@ -11,6 +11,8 @@ public class Integration {
     private String type;          // MOCK, HTTP, AWS, HTTP_PROXY, AWS_PROXY
     private String uri;
     private String httpMethod;
+    private String passthroughBehavior = "WHEN_NO_MATCH"; // WHEN_NO_MATCH, WHEN_NO_TEMPLATES, NEVER
+    private Map<String, String> requestParameters = new HashMap<>(); // integration.request.* → method.request.*
     private Map<String, String> requestTemplates = new HashMap<>();
     private Map<String, IntegrationResponse> integrationResponses = new HashMap<>();
 
@@ -36,6 +38,22 @@ public class Integration {
 
     public void setHttpMethod(String httpMethod) {
         this.httpMethod = httpMethod;
+    }
+
+    public String getPassthroughBehavior() {
+        return passthroughBehavior;
+    }
+
+    public void setPassthroughBehavior(String passthroughBehavior) {
+        this.passthroughBehavior = passthroughBehavior != null ? passthroughBehavior : "WHEN_NO_MATCH";
+    }
+
+    public Map<String, String> getRequestParameters() {
+        return requestParameters;
+    }
+
+    public void setRequestParameters(Map<String, String> requestParameters) {
+        this.requestParameters = requestParameters != null ? requestParameters : new HashMap<>();
     }
 
     public Map<String, String> getRequestTemplates() {

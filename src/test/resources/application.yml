@@ -45,6 +45,11 @@ floci:
     validate-signatures: false
     presign-secret: test-secret
 
+  init-hooks:
+    shell-executable: /bin/bash
+    timeout-seconds: 5
+    shutdown-grace-period-seconds: 2
+
   services:
     ssm:
       enabled: true
