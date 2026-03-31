@@ -572,6 +572,7 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(17)
     void getNonExistentBucket() {
         given()
         .when()
