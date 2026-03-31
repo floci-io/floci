@@ -55,7 +55,7 @@ services:
       - ./init/stop.d:/etc/floci/init/stop.d:ro
 ```
 
-See [`initialization-hooks.md`](./initialization-hooks.md) for execution behavior and configuration details.
+See [Initialization Hooks](./initialization-hooks.md) for execution behavior and configuration details.
 
 ## Persistence
 
