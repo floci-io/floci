@@ -1094,47 +1094,54 @@ public class DynamoDbService {
             String[] args = extractFunctionArgs(condition);
             if (args.length == 2) {
                 String attrName = resolveAttributeName(args[0], exprAttrNames);
-                String searchValue = resolveExprValue(args[1], exprAttrValues);
-                if (item == null || searchValue == null) return false;
+                if (item == null) return false;
                 JsonNode attrNode = item.get(attrName);
                 if (attrNode == null) return false;
-                // List type: check if any element in the list matches the search value
-                // Use type-aware comparison to handle N, BOOL, NULL, and nested types correctly
+                // Resolve the raw AttributeValue node for type-aware comparisons
+                JsonNode searchAttrValue = exprAttrValues != null
+                        ? exprAttrValues.get(args[1].trim()) : null;
+                if (searchAttrValue == null) return false;
+                // List type: type-aware element membership check
                 if (attrNode.has("L")) {
-                    JsonNode searchAttrValue = exprAttrValues != null
-                            ? exprAttrValues.get(args[1].trim()) : null;
                     for (JsonNode element : attrNode.get("L")) {
                         if (attributeValuesEqual(element, searchAttrValue)) return true;
                     }
                     return false;
                 }
-                // SS (String Set): check if the set contains the value
+                // SS (String Set): operand must be S type
                 if (attrNode.has("SS")) {
+                    if (!searchAttrValue.has("S")) return false;
+                    String target = searchAttrValue.get("S").asText();
                     for (JsonNode element : attrNode.get("SS")) {
-                        if (searchValue.equals(element.asText())) return true;
+                        if (target.equals(element.asText())) return true;
                     }
                     return false;
                 }
-                // NS (Number Set): compare numerically for equivalence (e.g. "1" == "1.0")
+                // NS (Number Set): operand must be N type, compare numerically
                 if (attrNode.has("NS")) {
+                    if (!searchAttrValue.has("N")) return false;
                     try {
-                        java.math.BigDecimal target = new java.math.BigDecimal(searchValue);
+                        java.math.BigDecimal target = new java.math.BigDecimal(searchAttrValue.get("N").asText());
                         for (JsonNode element : attrNode.get("NS")) {
                             if (target.compareTo(new java.math.BigDecimal(element.asText())) == 0) return true;
                         }
                     } catch (NumberFormatException ignored) {}
                     return false;
                 }
-                // BS (Binary Set): check if the set contains the value (base64)
+                // BS (Binary Set): operand must be B type
                 if (attrNode.has("BS")) {
+                    if (!searchAttrValue.has("B")) return false;
+                    String target = searchAttrValue.get("B").asText();
                     for (JsonNode element : attrNode.get("BS")) {
-                        if (searchValue.equals(element.asText())) return true;
+                        if (target.equals(element.asText())) return true;
                     }
                     return false;
                 }
-                // String type: check if the string contains the substring
-                String actual = extractScalarValue(attrNode);
-                return actual != null && actual.contains(searchValue);
+                // String type: operand must be S type, check substring
+                if (attrNode.has("S") && searchAttrValue.has("S")) {
+                    return attrNode.get("S").asText().contains(searchAttrValue.get("S").asText());
+                }
+                return false;
             }
             return false;
         }
@@ -1177,13 +1184,14 @@ public class DynamoDbService {
 
     private boolean attributeValuesEqual(JsonNode a, JsonNode b) {
         if (a == null || b == null) return a == b;
-        // Compare by DynamoDB type
+        // Scalar types: S, B, BOOL, NULL
         for (String type : new String[]{"S", "B", "BOOL", "NULL"}) {
             if (a.has(type) && b.has(type)) {
                 return a.get(type).asText().equals(b.get(type).asText());
             }
+            if (a.has(type) || b.has(type)) return false; // type mismatch
         }
-        // Numeric comparison
+        // Numeric comparison with normalization
         if (a.has("N") && b.has("N")) {
             try {
                 return new java.math.BigDecimal(a.get("N").asText())
@@ -1191,6 +1199,30 @@ public class DynamoDbService {
             } catch (NumberFormatException e) {
                 return false;
             }
+        }
+        if (a.has("N") || b.has("N")) return false;
+        // Map type: compare all entries recursively
+        if (a.has("M") && b.has("M")) {
+            JsonNode aMap = a.get("M");
+            JsonNode bMap = b.get("M");
+            if (aMap.size() != bMap.size()) return false;
+            var fields = aMap.fields();
+            while (fields.hasNext()) {
+                var entry = fields.next();
+                if (!bMap.has(entry.getKey())) return false;
+                if (!attributeValuesEqual(entry.getValue(), bMap.get(entry.getKey()))) return false;
+            }
+            return true;
+        }
+        // List type: compare element by element
+        if (a.has("L") && b.has("L")) {
+            JsonNode aList = a.get("L");
+            JsonNode bList = b.get("L");
+            if (aList.size() != bList.size()) return false;
+            for (int i = 0; i < aList.size(); i++) {
+                if (!attributeValuesEqual(aList.get(i), bList.get(i))) return false;
+            }
+            return true;
         }
         // Different types are never equal
         return false;
