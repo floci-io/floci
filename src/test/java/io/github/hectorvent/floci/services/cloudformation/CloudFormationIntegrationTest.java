@@ -30,6 +30,20 @@ class CloudFormationIntegrationTest {
                         .encodeContentTypeAs(DYNAMODB_CONTENT_TYPE, ContentType.TEXT));
     }
 
+    private static byte[] buildHandlerZip() {
+        try {
+            var baos = new ByteArrayOutputStream();
+            try (var zos = new ZipOutputStream(baos)) {
+                zos.putNextEntry(new ZipEntry("index.js"));
+                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+            }
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     @Test
     void createStack_withS3AndSqs() {
         String template = """
@@ -319,18 +333,7 @@ class CloudFormationIntegrationTest {
             .body("Configuration.FunctionName", equalTo("cfn-zipfile-func"));
     }
 
-    private static byte[] buildHandlerZip() {
-        try {
-            var baos = new ByteArrayOutputStream();
-            try (var zos = new ZipOutputStream(baos)) {
-                zos.putNextEntry(new ZipEntry("index.js"));
-                zos.write("exports.handler=async(e)=>({statusCode:200})".getBytes(StandardCharsets.UTF_8));
-                zos.closeEntry();
-            }
-            return baos.toByteArray();
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+    @Test
     void createStack_withDynamoDbGsiAndLsi() {
         String template = """
             {

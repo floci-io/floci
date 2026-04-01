@@ -21,7 +21,7 @@ import java.util.regex.Pattern;
 @PreMatching
 public class SqsQueueUrlRouterFilter implements ContainerRequestFilter {
 
-    private static final Pattern QUEUE_PATH = Pattern.compile("^/([^/]+)/([^/]+)$");
+    private static final Pattern QUEUE_PATH = Pattern.compile("^/(\\d+)/([^/]+)$");
 
     @Override
     public void filter(ContainerRequestContext ctx) {
