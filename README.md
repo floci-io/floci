@@ -11,7 +11,7 @@
   <a href="https://github.com/hectorvent/floci/stargazers"><img src="https://img.shields.io/github/stars/hectorvent/floci?style=flat" alt="GitHub Stars"></a>
   <a href="https://github.com/hectorvent/floci/graphs/contributors"><img src="https://img.shields.io/github/contributors/hectorvent/floci" alt="GitHub Contributors"></a>
   <a href="https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw"><img src="https://img.shields.io/badge/Slack-Join%20the%20community-4A154B?logo=slack&logoColor=white" alt="Join Floci on Slack"></a>
-  
+
 </p>
 
 <p align="center">
@@ -88,33 +88,37 @@ flowchart LR
 
 ## Supported Services
 
-| Service | Ops | How it works | Notable features |
+- `Ops` shows the approximate number of supported API operations.
+- `Runtime` indicates whether the service is handled directly by Floci or backed by Docker.
+- `Notable features` highlights important capabilities and behaviors.
+
+| Service | Ops | Runtime | Notable features |
 |---|---|---|---|
-| **SSM Parameter Store** | 12 | In-process | Version history, labels, SecureString, tagging |
-| **SQS** | 17 | In-process | Standard & FIFO, DLQ, visibility timeout, batch, tagging |
-| **SNS** | 13 | In-process | Topics, subscriptions, SQS / Lambda / HTTP delivery, tagging |
-| **S3** | 30 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |
-| **DynamoDB** | 22 | In-process | GSI / LSI, Query, Scan, TTL, transactions, batch operations |
-| **DynamoDB Streams** | 5 | In-process | Shard iterators, records, Lambda ESM trigger |
-| **Lambda** | 25 | **Real Docker containers** | Warm pool, aliases, Function URLs, SQS / Kinesis / DDB Streams ESM |
-| **API Gateway REST** | 24 | In-process | Resources, methods, stages, Lambda proxy, MOCK integrations, AWS integrations |
-| **API Gateway v2 (HTTP)** | 16 | In-process | Routes, integrations, JWT authorizers, stages |
-| **IAM** | 65+ | In-process | Users, roles, groups, policies, instance profiles, access keys |
-| **STS** | 7 | In-process | AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
-| **Cognito** | 20 | In-process | User pools, app clients, auth flows, JWKS / OpenID well-known endpoints |
-| **KMS** | 15 | In-process | Encrypt / decrypt, sign / verify, data keys, aliases |
-| **Kinesis** | 15 | In-process | Streams, shards, enhanced fan-out, split / merge |
-| **Secrets Manager** | 10 | In-process | Versioning, resource policies, tagging |
-| **Step Functions** | 11 | In-process | ASL execution, task tokens, execution history |
-| **CloudFormation** | 12 | In-process | Stacks, change sets, resource provisioning |
-| **EventBridge** | 14 | In-process | Custom buses, rules, targets (SQS / SNS / Lambda) |
-| **CloudWatch Logs** | 14 | In-process | Log groups, streams, ingestion, filtering |
-| **CloudWatch Metrics** | 5 | In-process | Custom metrics, statistics, alarms |
-| **ElastiCache** | 9 | **Real Docker containers** | Redis / Valkey, IAM auth, SigV4 validation |
-| **RDS** | 14 | **Real Docker containers** | PostgreSQL & MySQL, IAM auth, JDBC-compatible |
-| **ACM** | 8 | In-process | Certificate issuance, validation lifecycle |
-| **SES** | 14 | In-process | Send email / raw email, identity verification, DKIM attributes |
-| **OpenSearch** | 24 | In-process | Domain CRUD, tags, versions, instance types, upgrade stubs |
+| **SSM Parameter Store** | 12 | Handled by Floci | Version history, labels, SecureString, tagging |
+| **SQS** | 17 | Handled by Floci | Standard & FIFO, DLQ, visibility timeout, batch, tagging |
+| **SNS** | 13 | Handled by Floci | Topics, subscriptions, SQS / Lambda / HTTP delivery, tagging |
+| **S3** | 30 | Handled by Floci | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |
+| **DynamoDB** | 22 | Handled by Floci | GSI / LSI, Query, Scan, TTL, transactions, batch operations |
+| **DynamoDB Streams** | 5 | Handled by Floci | Shard iterators, records, Lambda ESM trigger |
+| **Lambda** | 25 | Docker-backed | Warm pool, aliases, Function URLs, SQS / Kinesis / DDB Streams ESM |
+| **API Gateway REST** | 24 | Handled by Floci | Resources, methods, stages, Lambda proxy, MOCK integrations, AWS integrations |
+| **API Gateway v2 (HTTP)** | 16 | Handled by Floci | Routes, integrations, JWT authorizers, stages |
+| **IAM** | 65+ | Handled by Floci | Users, roles, groups, policies, instance profiles, access keys |
+| **STS** | 7 | Handled by Floci | AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
+| **Cognito** | 20 | Handled by Floci | User pools, app clients, auth flows, JWKS / OpenID well-known endpoints |
+| **KMS** | 15 | Handled by Floci | Encrypt / decrypt, sign / verify, data keys, aliases |
+| **Kinesis** | 15 | Handled by Floci | Streams, shards, enhanced fan-out, split / merge |
+| **Secrets Manager** | 10 | Handled by Floci | Versioning, resource policies, tagging |
+| **Step Functions** | 11 | Handled by Floci | ASL execution, task tokens, execution history |
+| **CloudFormation** | 12 | Handled by Floci | Stacks, change sets, resource provisioning |
+| **EventBridge** | 14 | Handled by Floci | Custom buses, rules, targets (SQS / SNS / Lambda) |
+| **CloudWatch Logs** | 14 | Handled by Floci | Log groups, streams, ingestion, filtering |
+| **CloudWatch Metrics** | 5 | Handled by Floci | Custom metrics, statistics, alarms |
+| **ElastiCache** | 9 | Docker-backed | Redis / Valkey, IAM auth, SigV4 validation |
+| **RDS** | 14 | Docker-backed | PostgreSQL & MySQL, IAM auth, JDBC-compatible |
+| **ACM** | 8 | Handled by Floci | Certificate issuance, validation lifecycle |
+| **SES** | 14 | Handled by Floci | Send email / raw email, identity verification, DKIM attributes |
+| **OpenSearch** | 24 | Handled by Floci | Domain CRUD, tags, versions, instance types, upgrade stubs |
 
 > **Lambda, ElastiCache, and RDS** spin up real Docker containers and support IAM authentication and SigV4 request signing — the same auth flow as production AWS.
 
@@ -156,11 +160,11 @@ Point your existing AWS SDK at `http://localhost:4566` — no other changes need
 ```java
 // Java (AWS SDK v2)
 DynamoDbClient client = DynamoDbClient.builder()
-    .endpointOverride(URI.create("http://localhost:4566"))
-    .region(Region.US_EAST_1)
-    .credentialsProvider(StaticCredentialsProvider.create(
-        AwsBasicCredentials.create("test", "test")))
-    .build();
+                .endpointOverride(URI.create("http://localhost:4566"))
+                .region(Region.US_EAST_1)
+                .credentialsProvider(StaticCredentialsProvider.create(
+                        AwsBasicCredentials.create("test", "test")))
+                .build();
 ```
 
 ```python
