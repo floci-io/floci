@@ -150,8 +150,16 @@ public class S3Service {
     public S3Object putObject(String bucketName, String key, byte[] data,
                               String contentType, Map<String, String> metadata, String storageClass,
                               String objectLockMode, Instant retainUntilDate, String legalHoldStatus) {
-        S3Object object = storeObject(bucketName, key, data, contentType, metadata, storageClass, null, null,
+        return putObject(bucketName, key, data, contentType, metadata, storageClass, null,
                 objectLockMode, retainUntilDate, legalHoldStatus);
+    }
+
+    public S3Object putObject(String bucketName, String key, byte[] data,
+                              String contentType, Map<String, String> metadata, String storageClass,
+                              String contentEncoding,
+                              String objectLockMode, Instant retainUntilDate, String legalHoldStatus) {
+        S3Object object = storeObject(bucketName, key, data, contentType, metadata, storageClass, null, null,
+                objectLockMode, retainUntilDate, legalHoldStatus, contentEncoding);
         fireNotifications(bucketName, key, "ObjectCreated:Put", object);
         return object;
     }
@@ -162,13 +170,22 @@ public class S3Service {
     private S3Object storeObject(String bucketName, String key, byte[] data,
                                  String contentType, Map<String, String> metadata) {
         return storeObject(bucketName, key, data, contentType, metadata, null, null, null,
-                null, null, null);
+                null, null, null, null);
     }
 
     private S3Object storeObject(String bucketName, String key, byte[] data,
                                  String contentType, Map<String, String> metadata, String storageClass,
                                  S3Checksum checksum, List<Part> parts,
                                  String objectLockMode, Instant retainUntilDate, String legalHoldStatus) {
+        return storeObject(bucketName, key, data, contentType, metadata, storageClass, checksum, parts,
+                objectLockMode, retainUntilDate, legalHoldStatus, null);
+    }
+
+    private S3Object storeObject(String bucketName, String key, byte[] data,
+                                 String contentType, Map<String, String> metadata, String storageClass,
+                                 S3Checksum checksum, List<Part> parts,
+                                 String objectLockMode, Instant retainUntilDate, String legalHoldStatus,
+                                 String contentEncoding) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
@@ -180,6 +197,7 @@ public class S3Service {
         object.setStorageClass(ObjectAttributeName.normalizeStorageClass(storageClass));
         object.setChecksum(checksum != null ? copyChecksum(checksum) : buildChecksum(data, parts, false));
         object.setParts(copyParts(parts));
+        object.setContentEncoding(contentEncoding);
 
         if (bucket.isVersioningEnabled()) {
             String versionId = UUID.randomUUID().toString();
@@ -462,6 +480,14 @@ public class S3Service {
                                String destBucket, String destKey,
                                String metadataDirective, Map<String, String> replacementMetadata,
                                String storageClass, String contentType) {
+        return copyObject(sourceBucket, sourceKey, destBucket, destKey, metadataDirective,
+                replacementMetadata, storageClass, contentType, null);
+    }
+
+    public S3Object copyObject(String sourceBucket, String sourceKey,
+                               String destBucket, String destKey,
+                               String metadataDirective, Map<String, String> replacementMetadata,
+                               String storageClass, String contentType, String contentEncoding) {
         S3Object source = getObject(sourceBucket, sourceKey);
         ensureBucketExists(destBucket);
 
@@ -473,8 +499,10 @@ public class S3Service {
 
         String effectiveContentType = replaceMetadata && contentType != null ? contentType : source.getContentType();
         String effectiveStorageClass = storageClass != null ? storageClass : source.getStorageClass();
+        String effectiveContentEncoding = replaceMetadata && contentEncoding != null ? contentEncoding : source.getContentEncoding();
         S3Object copy = storeObject(destBucket, destKey, source.getData(), effectiveContentType, metadata,
-                effectiveStorageClass, source.getChecksum(), source.getParts(), null, null, null);
+                effectiveStorageClass, source.getChecksum(), source.getParts(), null, null, null,
+                effectiveContentEncoding);
         copy.setETag(source.getETag());
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
         fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
@@ -1148,6 +1176,7 @@ public class S3Service {
         copy.setData(source.getData() != null ? Arrays.copyOf(source.getData(), source.getData().length) : null);
         copy.setMetadata(new HashMap<>(source.getMetadata()));
         copy.setContentType(source.getContentType());
+        copy.setContentEncoding(source.getContentEncoding());
         copy.setSize(source.getSize());
         copy.setLastModified(source.getLastModified());
         copy.setETag(source.getETag());

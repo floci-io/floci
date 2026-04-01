@@ -1,21 +1,31 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
+import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
+import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import javax.crypto.Mac;
-import javax.crypto.spec.SecretKeySpec;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
 import java.security.MessageDigest;
+import java.security.PrivateKey;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.interfaces.RSAPublicKey;
+import java.security.spec.PKCS8EncodedKeySpec;
+import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -26,31 +36,38 @@ public class CognitoService {
 
     private final StorageBackend<String, UserPool> poolStore;
     private final StorageBackend<String, UserPoolClient> clientStore;
+    private final StorageBackend<String, ResourceServer> resourceServerStore;
     private final StorageBackend<String, CognitoUser> userStore;
     private final StorageBackend<String, CognitoGroup> groupStore;
+    private final String baseUrl;
 
     @Inject
-    public CognitoService(StorageFactory storageFactory) {
-        this(
-            storageFactory.create("cognito", "cognito-pools.json",
-                    new TypeReference<Map<String, UserPool>>() {}),
-            storageFactory.create("cognito", "cognito-clients.json",
-                    new TypeReference<Map<String, UserPoolClient>>() {}),
-            storageFactory.create("cognito", "cognito-users.json",
-                    new TypeReference<Map<String, CognitoUser>>() {}),
-            storageFactory.create("cognito", "cognito-groups.json",
-                    new TypeReference<Map<String, CognitoGroup>>() {})
-        );
+    public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig) {
+        this.poolStore = storageFactory.create("cognito", "cognito-pools.json",
+                new TypeReference<Map<String, UserPool>>() {});
+        this.clientStore = storageFactory.create("cognito", "cognito-clients.json",
+                new TypeReference<Map<String, UserPoolClient>>() {});
+        this.resourceServerStore = storageFactory.create("cognito", "cognito-resource-servers.json",
+                new TypeReference<Map<String, ResourceServer>>() {});
+        this.userStore = storageFactory.create("cognito", "cognito-users.json",
+                new TypeReference<Map<String, CognitoUser>>() {});
+        this.groupStore = storageFactory.create("cognito", "cognito-groups.json",
+                new TypeReference<Map<String, CognitoGroup>>() {});
+        this.baseUrl = trimTrailingSlash(emulatorConfig.baseUrl());
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
                    StorageBackend<String, UserPoolClient> clientStore,
+                   StorageBackend<String, ResourceServer> resourceServerStore,
                    StorageBackend<String, CognitoUser> userStore,
-                   StorageBackend<String, CognitoGroup> groupStore) {
+                   StorageBackend<String, CognitoGroup> groupStore,
+                   String baseUrl) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
+        this.resourceServerStore = resourceServerStore;
         this.userStore = userStore;
         this.groupStore = groupStore;
+        this.baseUrl = baseUrl;
     }
 
     // ──────────────────────────── User Pools ────────────────────────────
@@ -60,14 +77,19 @@ public class CognitoService {
         UserPool pool = new UserPool();
         pool.setId(id);
         pool.setName(name);
+        ensureJwtSigningKeys(pool);
         poolStore.put(id, pool);
         LOG.infov("Created User Pool: {0}", id);
         return pool;
     }
 
     public UserPool describeUserPool(String id) {
-        return poolStore.get(id)
+        UserPool pool = poolStore.get(id)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
+        if (ensureJwtSigningKeys(pool)) {
+            poolStore.put(id, pool);
+        }
+        return pool;
     }
 
     public List<UserPool> listUserPools() {
@@ -83,13 +105,23 @@ public class CognitoService {
 
     // ──────────────────────────── User Pool Clients ────────────────────────────
 
-    public UserPoolClient createUserPoolClient(String userPoolId, String clientName) {
+    public UserPoolClient createUserPoolClient(String userPoolId, String clientName, boolean generateSecret,
+                                               boolean allowedOAuthFlowsUserPoolClient,
+                                               List<String> allowedOAuthFlows,
+                                               List<String> allowedOAuthScopes) {
         describeUserPool(userPoolId);
         String clientId = UUID.randomUUID().toString().replace("-", "").substring(0, 26);
         UserPoolClient client = new UserPoolClient();
         client.setClientId(clientId);
         client.setUserPoolId(userPoolId);
         client.setClientName(clientName);
+        client.setGenerateSecret(generateSecret);
+        client.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
+        client.setAllowedOAuthFlows(normalizeStringList(allowedOAuthFlows));
+        client.setAllowedOAuthScopes(normalizeStringList(allowedOAuthScopes));
+        if (generateSecret) {
+            client.setClientSecret(generateSecretValue());
+        }
         clientStore.put(clientId, client);
         LOG.infov("Created User Pool Client: {0} for pool {1}", clientId, userPoolId);
         return client;
@@ -111,6 +143,69 @@ public class CognitoService {
     public void deleteUserPoolClient(String userPoolId, String clientId) {
         describeUserPoolClient(userPoolId, clientId);
         clientStore.delete(clientId);
+    }
+
+    // ──────────────────────────── Resource Servers ────────────────────────────
+
+    public ResourceServer createResourceServer(String userPoolId, String identifier, String name,
+                                               List<ResourceServerScope> scopes) {
+        describeUserPool(userPoolId);
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Identifier is required", 400);
+        }
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Name is required", 400);
+        }
+
+        String key = resourceServerKey(userPoolId, identifier);
+        if (resourceServerStore.get(key).isPresent()) {
+            throw new AwsException("ResourceConflictException", "Resource server already exists", 400);
+        }
+
+        ResourceServer server = new ResourceServer();
+        server.setUserPoolId(userPoolId);
+        server.setIdentifier(identifier);
+        server.setName(name);
+        server.setScopes(normalizeScopes(scopes));
+        resourceServerStore.put(key, server);
+        return server;
+    }
+
+    public ResourceServer describeResourceServer(String userPoolId, String identifier) {
+        describeUserPool(userPoolId);
+        return resourceServerStore.get(resourceServerKey(userPoolId, identifier))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource server not found", 404));
+    }
+
+    public List<ResourceServer> listResourceServers(String userPoolId) {
+        describeUserPool(userPoolId);
+        String prefix = userPoolId + "::";
+        return resourceServerStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public ResourceServer updateResourceServer(String userPoolId, String identifier, String name,
+                                               List<ResourceServerScope> scopes) {
+        if (userPoolId == null || userPoolId.isBlank()) {
+            throw new AwsException("InvalidParameterException", "UserPoolId is required", 400);
+        }
+        if (identifier == null || identifier.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Identifier is required", 400);
+        }
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Name is required", 400);
+        }
+
+        ResourceServer server = describeResourceServer(userPoolId, identifier);
+        server.setName(name);
+        server.setScopes(normalizeScopes(scopes));
+        server.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        resourceServerStore.put(resourceServerKey(userPoolId, identifier), server);
+        return server;
+    }
+
+    public void deleteResourceServer(String userPoolId, String identifier) {
+        describeResourceServer(userPoolId, identifier);
+        resourceServerStore.delete(resourceServerKey(userPoolId, identifier));
     }
 
     // ──────────────────────────── Users ────────────────────────────
@@ -428,6 +523,33 @@ public class CognitoService {
         adminUpdateUserAttributes(poolId, username, attributes);
     }
 
+    public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope) {
+        UserPoolClient client = clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+        UserPool pool = describeUserPool(client.getUserPoolId());
+        validateClientAllowsClientCredentials(client);
+        validateClientSecret(client, clientSecret);
+        String normalizedScope = resolveAuthorizedScopes(client, pool.getId(), scope);
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("access_token", generateClientAccessToken(client, pool, normalizedScope));
+        response.put("token_type", "Bearer");
+        response.put("expires_in", 3600);
+        return response;
+    }
+
+    public String getIssuer(String poolId) {
+        return baseUrl + "/" + poolId;
+    }
+
+    public String getJwksUri(String poolId) {
+        return getIssuer(poolId) + "/.well-known/jwks.json";
+    }
+
+    public String getTokenEndpoint() {
+        return baseUrl + "/cognito-idp/oauth2/token";
+    }
+
     // ──────────────────────────── Private helpers ────────────────────────────
 
     private Map<String, Object> authenticateWithPassword(UserPool pool, Map<String, String> params, String clientId) {
@@ -502,7 +624,9 @@ public class CognitoService {
     }
 
     private String generateSignedJwt(CognitoUser user, UserPool pool, String type) {
-        String headerJson = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+        String headerJson = String.format(
+                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
+                escapeJson(getSigningKeyId(pool)));
         String header = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
 
@@ -517,45 +641,262 @@ public class CognitoService {
         }
         String payloadJson = String.format(
                 "{\"sub\":\"%s\",\"event_id\":\"%s\",\"token_use\":\"%s\",\"auth_time\":%d," +
-                "\"iss\":\"https://cognito-idp.local/%s\",\"exp\":%d,\"iat\":%d," +
+                "\"iss\":\"%s\",\"exp\":%d,\"iat\":%d," +
                 "\"username\":\"%s\",\"email\":\"%s\",\"cognito:username\":\"%s\"%s}",
                 UUID.randomUUID(), UUID.randomUUID(), type, now,
-                pool.getId(), now + 3600, now,
+                escapeJson(getIssuer(pool.getId())), now + 3600, now,
                 user.getUsername(), email, user.getUsername(), groupsFragment
         );
         String payload = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
-
-        String signingInput = header + "." + payload;
-        String signature = hmacSha256(signingInput, pool.getSigningSecret());
-        return signingInput + "." + signature;
+        return signJwt(header, payload, getSigningPrivateKey(pool));
     }
 
     private String generateTokenString(String type, String username, UserPool pool) {
         long now = System.currentTimeMillis() / 1000L;
-        String headerJson = "{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
+        String headerJson = String.format(
+                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
+                escapeJson(getSigningKeyId(pool)));
         String header = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
         String payloadJson = String.format(
-                "{\"sub\":\"%s\",\"token_use\":\"%s\",\"iss\":\"https://cognito-idp.local/%s\"," +
+                "{\"sub\":\"%s\",\"token_use\":\"%s\",\"iss\":\"%s\"," +
                 "\"exp\":%d,\"iat\":%d,\"username\":\"%s\"}",
-                UUID.randomUUID(), type, pool.getId(), now + 3600, now, username
+                UUID.randomUUID(), type, escapeJson(getIssuer(pool.getId())), now + 3600, now, username
         );
         String payload = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
+        return signJwt(header, payload, getSigningPrivateKey(pool));
+    }
+
+    private String generateClientAccessToken(UserPoolClient client, UserPool pool, String scope) {
+        String headerJson = String.format(
+                "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
+                escapeJson(getSigningKeyId(pool)));
+        String header = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
+
+        long now = System.currentTimeMillis() / 1000L;
+        StringBuilder payloadJson = new StringBuilder();
+        payloadJson.append("{")
+                .append("\"iss\":\"").append(escapeJson(getIssuer(pool.getId()))).append("\",")
+                .append("\"version\":2,")
+                .append("\"sub\":\"").append(escapeJson(client.getClientId())).append("\",")
+                .append("\"client_id\":\"").append(escapeJson(client.getClientId())).append("\",")
+                .append("\"token_use\":\"access\",")
+                .append("\"exp\":").append(now + 3600).append(",")
+                .append("\"iat\":").append(now).append(",")
+                .append("\"jti\":\"").append(UUID.randomUUID()).append("\"");
+        if (scope != null && !scope.isBlank()) {
+            payloadJson.append(",\"scope\":\"").append(escapeJson(scope)).append("\"");
+        }
+        payloadJson.append("}");
+
+        String payload = Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(payloadJson.toString().getBytes(StandardCharsets.UTF_8));
+        return signJwt(header, payload, getSigningPrivateKey(pool));
+    }
+
+    private void validateClientSecret(UserPoolClient client, String clientSecret) {
+        String expectedSecret = client.getClientSecret();
+        if (expectedSecret == null || expectedSecret.isBlank() || !client.isGenerateSecret()) {
+            throw new AwsException("InvalidClientException", "Client must have a secret for client_credentials", 400);
+        }
+        if (clientSecret == null || clientSecret.isBlank()) {
+            throw new AwsException("InvalidClientException", "Client secret is required", 400);
+        }
+        if (!expectedSecret.equals(clientSecret)) {
+            throw new AwsException("InvalidClientException", "Client secret is invalid", 400);
+        }
+    }
+
+    private void validateClientAllowsClientCredentials(UserPoolClient client) {
+        if (!client.isAllowedOAuthFlowsUserPoolClient()) {
+            throw new AwsException("UnauthorizedClientException", "Client is not enabled for OAuth flows", 400);
+        }
+        if (!client.getAllowedOAuthFlows().contains("client_credentials")) {
+            throw new AwsException("UnauthorizedClientException", "Client is not allowed to use client_credentials", 400);
+        }
+    }
+
+    private String resolveAuthorizedScopes(UserPoolClient client, String userPoolId, String requestedScope) {
+        List<String> allowedScopes = normalizeStringList(client.getAllowedOAuthScopes());
+        if (allowedScopes.isEmpty()) {
+            throw new AwsException("InvalidScopeException", "Client has no allowed OAuth scopes", 400);
+        }
+
+        List<String> effectiveScopes;
+        if (requestedScope == null || requestedScope.isBlank()) {
+            effectiveScopes = allowedScopes;
+        } else {
+            effectiveScopes = Arrays.asList(normalizeRequestedScope(requestedScope).split(" "));
+            for (String scope : effectiveScopes) {
+                if (!allowedScopes.contains(scope)) {
+                    throw new AwsException("InvalidScopeException", "Scope is not allowed for this client: " + scope, 400);
+                }
+            }
+        }
+
+        Set<String> validCustomScopes = new HashSet<>();
+        for (ResourceServer server : listResourceServers(userPoolId)) {
+            for (ResourceServerScope serverScope : server.getScopes()) {
+                validCustomScopes.add(server.getIdentifier() + "/" + serverScope.getScopeName());
+            }
+        }
+
+        for (String scope : effectiveScopes) {
+            if (isBuiltInScope(scope)) {
+                continue;
+            }
+            if (!validCustomScopes.contains(scope)) {
+                throw new AwsException("InvalidScopeException", "Scope is invalid: " + scope, 400);
+            }
+        }
+
+        return String.join(" ", effectiveScopes);
+    }
+
+    private String normalizeRequestedScope(String scope) {
+        if (scope == null || scope.isBlank()) {
+            return null;
+        }
+
+        List<String> normalized = new ArrayList<>();
+        for (String part : scope.trim().split("\\s+")) {
+            if (!part.isBlank()) {
+                normalized.add(part);
+            }
+        }
+        return normalized.isEmpty() ? null : String.join(" ", normalized);
+    }
+
+    private List<ResourceServerScope> normalizeScopes(List<ResourceServerScope> scopes) {
+        if (scopes == null || scopes.isEmpty()) {
+            return List.of();
+        }
+
+        List<ResourceServerScope> normalized = new ArrayList<>();
+        Set<String> scopeNames = new HashSet<>();
+        for (ResourceServerScope scope : scopes) {
+            if (scope == null || scope.getScopeName() == null || scope.getScopeName().isBlank()) {
+                throw new AwsException("InvalidParameterException", "ScopeName is required", 400);
+            }
+            if (!scopeNames.add(scope.getScopeName())) {
+                throw new AwsException("InvalidParameterException", "Duplicate scope name: " + scope.getScopeName(), 400);
+            }
+            ResourceServerScope normalizedScope = new ResourceServerScope();
+            normalizedScope.setScopeName(scope.getScopeName());
+            normalizedScope.setScopeDescription(scope.getScopeDescription());
+            normalized.add(normalizedScope);
+        }
+        return normalized;
+    }
+
+    private List<String> normalizeStringList(List<String> values) {
+        if (values == null || values.isEmpty()) {
+            return List.of();
+        }
+
+        List<String> normalized = new ArrayList<>();
+        Set<String> seen = new LinkedHashSet<>();
+        for (String value : values) {
+            if (value == null) {
+                continue;
+            }
+            String trimmed = value.trim();
+            if (!trimmed.isEmpty() && seen.add(trimmed)) {
+                normalized.add(trimmed);
+            }
+        }
+        return normalized;
+    }
+
+    private boolean isBuiltInScope(String scope) {
+        return switch (scope) {
+            case "phone", "email", "openid", "profile", "aws.cognito.signin.user.admin" -> true;
+            default -> false;
+        };
+    }
+
+    private String signJwt(String header, String payload, PrivateKey signingKey) {
         String signingInput = header + "." + payload;
-        String signature = hmacSha256(signingInput, pool.getSigningSecret());
+        String signature = rsaSha256(signingInput, signingKey);
         return signingInput + "." + signature;
     }
 
-    private String hmacSha256(String data, String key) {
+    private String rsaSha256(String data, PrivateKey signingKey) {
         try {
-            Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
-            byte[] sig = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+            Signature signature = Signature.getInstance("SHA256withRSA");
+            signature.initSign(signingKey);
+            signature.update(data.getBytes(StandardCharsets.UTF_8));
+            byte[] sig = signature.sign();
             return Base64.getUrlEncoder().withoutPadding().encodeToString(sig);
         } catch (Exception e) {
             throw new RuntimeException("JWT signing failed", e);
+        }
+    }
+
+    String getSigningKeyId(UserPool pool) {
+        ensureJwtSigningKeys(pool);
+        return pool.getSigningKeyId();
+    }
+
+    RSAPublicKey getSigningPublicKey(UserPool pool) {
+        ensureJwtSigningKeys(pool);
+
+        try {
+            byte[] encoded = Base64.getDecoder().decode(pool.getSigningPublicKey());
+            X509EncodedKeySpec keySpec = new X509EncodedKeySpec(encoded);
+            PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(keySpec);
+            return (RSAPublicKey) publicKey;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load Cognito RSA public key", e);
+        }
+    }
+
+    private PrivateKey getSigningPrivateKey(UserPool pool) {
+        ensureJwtSigningKeys(pool);
+
+        try {
+            byte[] encoded = Base64.getDecoder().decode(pool.getSigningPrivateKey());
+            PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
+            return KeyFactory.getInstance("RSA").generatePrivate(keySpec);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to load Cognito RSA private key", e);
+        }
+    }
+
+    private boolean ensureJwtSigningKeys(UserPool pool) {
+        synchronized (pool) {
+            boolean changed = false;
+
+            if (pool.getSigningKeyId() == null || pool.getSigningKeyId().isBlank()) {
+                pool.setSigningKeyId(pool.getId());
+                changed = true;
+            }
+
+            if (pool.getSigningPrivateKey() == null || pool.getSigningPrivateKey().isBlank()
+                    || pool.getSigningPublicKey() == null || pool.getSigningPublicKey().isBlank()) {
+                try {
+                    KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+                    generator.initialize(2048);
+                    KeyPair keyPair = generator.generateKeyPair();
+
+                    pool.setSigningPrivateKey(
+                            Base64.getEncoder().encodeToString(keyPair.getPrivate().getEncoded()));
+                    pool.setSigningPublicKey(
+                            Base64.getEncoder().encodeToString(keyPair.getPublic().getEncoded()));
+                    changed = true;
+                } catch (Exception e) {
+                    throw new RuntimeException("Failed to generate Cognito RSA signing keypair", e);
+                }
+            }
+
+            if (changed && pool.getId() != null) {
+                pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            }
+
+            return changed;
         }
     }
 
@@ -597,7 +938,6 @@ public class CognitoService {
             String payloadJson = new String(Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
             String iss = extractJsonField(payloadJson, "iss");
             if (iss == null) return null;
-            // iss = "https://cognito-idp.local/POOL_ID"
             int lastSlash = iss.lastIndexOf('/');
             return lastSlash >= 0 ? iss.substring(lastSlash + 1) : null;
         } catch (Exception e) {
@@ -650,5 +990,27 @@ public class CognitoService {
 
     private String groupKey(String poolId, String groupName) {
         return poolId + "::" + groupName;
+    }
+
+    private String resourceServerKey(String userPoolId, String identifier) {
+        return userPoolId + "::" + identifier;
+    }
+
+    private String escapeJson(String value) {
+        return value
+                .replace("\\", "\\\\")
+                .replace("\"", "\\\"");
+    }
+
+    private String generateSecretValue() {
+        return UUID.randomUUID().toString().replace("-", "")
+                + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private String trimTrailingSlash(String value) {
+        if (value.endsWith("/")) {
+            return value.substring(0, value.length() - 1);
+        }
+        return value;
     }
 }

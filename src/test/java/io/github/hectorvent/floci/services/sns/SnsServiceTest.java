@@ -154,6 +154,12 @@ class SnsServiceTest {
     }
 
     @Test
+    void publish_withPhoneNumber_returnsMessageId() {
+        String messageId = snsService.publish(null, null, "+819012345678", "Hello phone!", null, null, REGION);
+        assertNotNull(messageId);
+    }
+
+    @Test
     void publish_requiresTopicArn() {
         assertThrows(AwsException.class,
             () -> snsService.publish(null, null, "msg", null, REGION));

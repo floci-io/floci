@@ -175,6 +175,7 @@ public class SnsQueryHandler {
     private Response handlePublish(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
         String targetArn = getParam(params, "TargetArn");
+        String phoneNumber = getParam(params, "PhoneNumber");
         String message = getParam(params, "Message");
         String subject = getParam(params, "Subject");
         String messageGroupId = getParam(params, "MessageGroupId");
@@ -189,7 +190,7 @@ public class SnsQueryHandler {
         }
 
         try {
-            String messageId = snsService.publish(topicArn, targetArn, message, subject,
+            String messageId = snsService.publish(topicArn, targetArn, phoneNumber, message, subject,
                     attributes, messageGroupId, messageDeduplicationId, region);
 
             String result = new XmlBuilder().elem("MessageId", messageId).build();

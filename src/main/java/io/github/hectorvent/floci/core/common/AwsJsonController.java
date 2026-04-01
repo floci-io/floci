@@ -135,7 +135,7 @@ public class AwsJsonController {
         } catch (AwsException e) {
             return Response.status(e.getHttpStatus())
                     .type(MediaType.APPLICATION_JSON)
-                    .entity(new AwsErrorResponse(e.getErrorCode(), e.getMessage()))
+                    .entity(new AwsErrorResponse(e.jsonType(), e.getMessage()))
                     .build();
         } catch (Exception e) {
             LOG.error("Error processing " + serviceName + " JSON request", e);
@@ -329,7 +329,7 @@ public class AwsJsonController {
     private Response cborErrorResponse(AwsException e, String protocolHeader) {
         try {
             byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
-                    new AwsErrorResponse(e.getErrorCode(), e.getMessage()));
+                    new AwsErrorResponse(e.jsonType(), e.getMessage()));
             return Response.status(e.getHttpStatus())
                     .header(protocolHeader, "rpc-v2-cbor")
                     .type("application/cbor")

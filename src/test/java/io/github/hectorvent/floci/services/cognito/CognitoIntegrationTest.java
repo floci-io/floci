@@ -1,26 +1,43 @@
 package io.github.hectorvent.floci.services.cognito;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
-import org.junit.jupiter.api.*;
+import io.restassured.response.Response;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyFactory;
+import java.security.PublicKey;
+import java.security.Signature;
+import java.security.spec.RSAPublicKeySpec;
 import java.util.Base64;
+import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoIntegrationTest {
 
     private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
-    private static final String TARGET_PREFIX = "AWSCognitoIdentityProviderService.";
+    private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
-    private static String userPoolId;
+    private static String poolId;
     private static String clientId;
+    private static final String username = "alice+" + UUID.randomUUID() + "@example.com";
+    private static final String password = "Perm1234!";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -31,266 +48,347 @@ class CognitoIntegrationTest {
 
     @Test
     @Order(1)
-    void createUserPool() {
-        userPoolId = given()
-            .header("X-Amz-Target", TARGET_PREFIX + "CreateUserPool")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body("{\"PoolName\":\"TestPool\"}")
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().path("UserPool.Id");
+    void createPoolClientAndUser() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "JwtPool"
+                }
+                """);
+        poolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "jwt-client"
+                }
+                """.formatted(poolId));
+        clientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(poolId, username, username))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminSetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "Password": "%s",
+                  "Permanent": true
+                }
+                """.formatted(poolId, username, password))
+                .then()
+                .statusCode(200);
     }
 
     @Test
     @Order(2)
-    void createUserPoolClient() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"ClientName\":\"test-client\"}", userPoolId);
-
-        clientId = given()
-            .header("X-Amz-Target", TARGET_PREFIX + "CreateUserPoolClient")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().path("UserPoolClient.ClientId");
+    void initiateAuthReturnsAuthenticationResult() {
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "%s"
+                  }
+                }
+                """.formatted(clientId, username, password))
+                .then()
+                .statusCode(200)
+                .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue())
+                .body("AuthenticationResult.IdToken", org.hamcrest.Matchers.notNullValue())
+                .body("AuthenticationResult.RefreshToken", org.hamcrest.Matchers.notNullValue());
     }
 
     @Test
     @Order(3)
-    void adminCreateUser() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"Username\":\"alice\",\"TemporaryPassword\":\"TempPass1!\","
-                + "\"UserAttributes\":[{\"Name\":\"email\",\"Value\":\"alice@example.com\"}]}",
-                userPoolId);
+    void authTokensAreSignedWithPublishedRsaJwksKey() throws Exception {
+        Response authResponse = cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "%s"
+                  }
+                }
+                """.formatted(clientId, username, password));
 
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "AdminCreateUser")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
+        authResponse.then().statusCode(200);
+
+        String accessToken = authResponse.jsonPath().getString("AuthenticationResult.AccessToken");
+        JsonNode header = decodeJwtHeader(accessToken);
+        JsonNode payload = decodeJwtPayload(accessToken);
+        assertEquals("RS256", header.path("alg").asText());
+        assertEquals(poolId, header.path("kid").asText());
+        assertEquals("http://localhost:4566/" + poolId, payload.path("iss").asText());
+        assertEquals(username, payload.path("username").asText());
+        assertEquals("access", payload.path("token_use").asText());
+
+        String jwksResponse = given()
         .when()
-            .post("/")
+                .get("/" + poolId + "/.well-known/jwks.json")
         .then()
-            .statusCode(200);
+                .statusCode(200)
+                .extract()
+                .asString();
+
+        JsonNode jwks = OBJECT_MAPPER.readTree(jwksResponse);
+        JsonNode key = jwks.path("keys").get(0);
+        assertNotNull(key);
+        assertEquals("RSA", key.path("kty").asText());
+        assertEquals("RS256", key.path("alg").asText());
+        assertEquals("sig", key.path("use").asText());
+        assertEquals(poolId, key.path("kid").asText());
+        assertTrue(key.hasNonNull("n"));
+        assertTrue(key.hasNonNull("e"));
+        assertTrue(verifyJwtSignature(accessToken, key));
     }
 
     @Test
     @Order(4)
-    void adminSetUserPassword() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"Username\":\"alice\",\"Password\":\"Perm1234!\",\"Permanent\":true}",
-                userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "AdminSetUserPassword")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
+    void openIdConfigurationPublishesIssuerAndJwksUri() throws Exception {
+        String openIdResponse = given()
         .when()
-            .post("/")
+                .get("/" + poolId + "/.well-known/openid-configuration")
         .then()
-            .statusCode(200);
+                .statusCode(200)
+                .extract()
+                .asString();
+
+        JsonNode document = OBJECT_MAPPER.readTree(openIdResponse);
+        assertEquals("http://localhost:4566/" + poolId, document.path("issuer").asText());
+        assertEquals(
+                "http://localhost:4566/" + poolId + "/.well-known/jwks.json",
+                document.path("jwks_uri").asText());
+        assertEquals("public", document.path("subject_types_supported").get(0).asText());
+        assertEquals("RS256", document.path("id_token_signing_alg_values_supported").get(0).asText());
     }
+
+    // ── Groups ────────────────────────────────────────────────────────
 
     @Test
     @Order(10)
-    void createGroup() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"GroupName\":\"admin\",\"Description\":\"Admin group\",\"Precedence\":1}",
-                userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "CreateGroup")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("Group.GroupName", equalTo("admin"))
-            .body("Group.UserPoolId", equalTo(userPoolId))
-            .body("Group.Description", equalTo("Admin group"))
-            .body("Group.Precedence", equalTo(1));
+    void createGroup() throws Exception {
+        JsonNode resp = cognitoJson("CreateGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "admin",
+                  "Description": "Admin group",
+                  "Precedence": 1
+                }
+                """.formatted(poolId));
+        assertEquals("admin", resp.path("Group").path("GroupName").asText());
+        assertEquals(poolId, resp.path("Group").path("UserPoolId").asText());
+        assertEquals("Admin group", resp.path("Group").path("Description").asText());
+        assertEquals(1, resp.path("Group").path("Precedence").asInt());
     }
 
     @Test
     @Order(11)
     void createGroupDuplicate() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"GroupName\":\"admin\",\"Description\":\"Admin group\",\"Precedence\":1}",
-                userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "CreateGroup")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(400);
+        cognitoAction("CreateGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "admin",
+                  "Description": "Admin group",
+                  "Precedence": 1
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400);
     }
 
     @Test
     @Order(12)
-    void getGroup() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"GroupName\":\"admin\"}", userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "GetGroup")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("Group.GroupName", equalTo("admin"));
+    void getGroup() throws Exception {
+        JsonNode resp = cognitoJson("GetGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "admin"
+                }
+                """.formatted(poolId));
+        assertEquals("admin", resp.path("Group").path("GroupName").asText());
     }
 
     @Test
     @Order(13)
-    void listGroups() {
-        String body = String.format("{\"UserPoolId\":\"%s\"}", userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "ListGroups")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("Groups.size()", equalTo(1))
-            .body("Groups[0].GroupName", equalTo("admin"));
+    void listGroups() throws Exception {
+        JsonNode resp = cognitoJson("ListGroups", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(poolId));
+        assertEquals(1, resp.path("Groups").size());
+        assertEquals("admin", resp.path("Groups").get(0).path("GroupName").asText());
     }
 
     @Test
     @Order(14)
     void adminAddUserToGroup() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"GroupName\":\"admin\",\"Username\":\"alice\"}", userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "AdminAddUserToGroup")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        cognitoAction("AdminAddUserToGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "admin",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username))
+                .then()
+                .statusCode(200);
     }
 
     @Test
     @Order(15)
-    void adminListGroupsForUser() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"Username\":\"alice\"}", userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "AdminListGroupsForUser")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("Groups.size()", equalTo(1))
-            .body("Groups[0].GroupName", equalTo("admin"));
+    void adminListGroupsForUser() throws Exception {
+        JsonNode resp = cognitoJson("AdminListGroupsForUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username));
+        assertEquals(1, resp.path("Groups").size());
+        assertEquals("admin", resp.path("Groups").get(0).path("GroupName").asText());
     }
 
     @Test
     @Order(16)
-    void authenticateAndVerifyGroupsInToken() {
-        String body = String.format(
-                "{\"AuthFlow\":\"USER_PASSWORD_AUTH\",\"ClientId\":\"%s\","
-                + "\"AuthParameters\":{\"USERNAME\":\"alice\",\"PASSWORD\":\"Perm1234!\"}}",
-                clientId);
+    void authenticateAndVerifyGroupsInToken() throws Exception {
+        Response authResponse = cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "%s"
+                  }
+                }
+                """.formatted(clientId, username, password));
 
-        String accessToken = given()
-            .header("X-Amz-Target", TARGET_PREFIX + "InitiateAuth")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .extract().path("AuthenticationResult.AccessToken");
+        authResponse.then().statusCode(200);
 
-        String[] parts = accessToken.split("\\.");
-        String payload = new String(
-                Base64.getUrlDecoder().decode(parts[1]), StandardCharsets.UTF_8);
+        String accessToken = authResponse.jsonPath().getString("AuthenticationResult.AccessToken");
+        JsonNode payload = decodeJwtPayload(accessToken);
 
-        Assertions.assertTrue(payload.contains("\"cognito:groups\""),
+        assertTrue(payload.has("cognito:groups"),
                 "JWT payload should contain cognito:groups claim");
-        Assertions.assertTrue(payload.contains("\"admin\""),
+        assertTrue(payload.path("cognito:groups").toString().contains("\"admin\""),
                 "JWT payload should contain admin group");
     }
 
     @Test
     @Order(17)
     void adminRemoveUserFromGroup() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"GroupName\":\"admin\",\"Username\":\"alice\"}", userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "AdminRemoveUserFromGroup")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        cognitoAction("AdminRemoveUserFromGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "admin",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username))
+                .then()
+                .statusCode(200);
     }
 
     @Test
     @Order(18)
-    void adminListGroupsForUserEmpty() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"Username\":\"alice\"}", userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "AdminListGroupsForUser")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body("Groups.size()", equalTo(0));
+    void adminListGroupsForUserEmpty() throws Exception {
+        JsonNode resp = cognitoJson("AdminListGroupsForUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username));
+        assertEquals(0, resp.path("Groups").size());
     }
 
     @Test
     @Order(19)
     void deleteGroup() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"GroupName\":\"admin\"}", userPoolId);
-
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "DeleteGroup")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200);
+        cognitoAction("DeleteGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "admin"
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(200);
     }
 
     @Test
     @Order(20)
     void getGroupNotFound() {
-        String body = String.format(
-                "{\"UserPoolId\":\"%s\",\"GroupName\":\"admin\"}", userPoolId);
+        cognitoAction("GetGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "admin"
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(404);
+    }
 
-        given()
-            .header("X-Amz-Target", TARGET_PREFIX + "GetGroup")
-            .contentType(COGNITO_CONTENT_TYPE)
-            .body(body)
+    // ── Helpers ───────────────────────────────────────────────────────
+
+    private static Response cognitoAction(String action, String body) {
+        return given()
+                .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
+                .contentType(COGNITO_CONTENT_TYPE)
+                .body(body)
         .when()
-            .post("/")
-        .then()
-            .statusCode(404);
+                .post("/");
+    }
+
+    private static JsonNode cognitoJson(String action, String body) throws Exception {
+        String response = cognitoAction(action, body)
+                .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+        return OBJECT_MAPPER.readTree(response);
+    }
+
+    private static JsonNode decodeJwtPayload(String token) throws Exception {
+        return decodeJwtPart(token, 1);
+    }
+
+    private static JsonNode decodeJwtHeader(String token) throws Exception {
+        return decodeJwtPart(token, 0);
+    }
+
+    private static JsonNode decodeJwtPart(String token, int partIndex) throws Exception {
+        String[] parts = token.split("\\.");
+        assertEquals(3, parts.length);
+        return OBJECT_MAPPER.readTree(Base64.getUrlDecoder().decode(padBase64(parts[partIndex])));
+    }
+
+    private static boolean verifyJwtSignature(String token, JsonNode jwk) throws Exception {
+        String[] parts = token.split("\\.");
+        assertEquals(3, parts.length);
+
+        BigInteger modulus = new BigInteger(1, Base64.getUrlDecoder().decode(padBase64(jwk.path("n").asText())));
+        BigInteger exponent = new BigInteger(1, Base64.getUrlDecoder().decode(padBase64(jwk.path("e").asText())));
+        RSAPublicKeySpec keySpec = new RSAPublicKeySpec(modulus, exponent);
+        PublicKey publicKey = KeyFactory.getInstance("RSA").generatePublic(keySpec);
+
+        Signature signature = Signature.getInstance("SHA256withRSA");
+        signature.initVerify(publicKey);
+        signature.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
+        return signature.verify(Base64.getUrlDecoder().decode(padBase64(parts[2])));
+    }
+
+    private static String padBase64(String value) {
+        int remainder = value.length() % 4;
+        if (remainder == 0) {
+            return value;
+        }
+        return value + "=".repeat(4 - remainder);
     }
 }

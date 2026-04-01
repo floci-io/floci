@@ -150,6 +150,7 @@ public class SnsJsonHandler {
     private Response handlePublish(JsonNode request, String region) {
         String topicArn = request.path("TopicArn").asText(null);
         String targetArn = request.path("TargetArn").asText(null);
+        String phoneNumber = request.path("PhoneNumber").asText(null);
         String message = request.path("Message").asText(null);
         String subject = request.path("Subject").asText(null);
 
@@ -161,7 +162,7 @@ public class SnsJsonHandler {
             });
         }
 
-        String messageId = snsService.publish(topicArn, targetArn, message, subject, attributes, region);
+        String messageId = snsService.publish(topicArn, targetArn, phoneNumber, message, subject, attributes, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("MessageId", messageId);
         return Response.ok(response).build();

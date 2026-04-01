@@ -344,8 +344,10 @@ public class S3Controller {
 
             byte[] data = decodeAwsChunked(body, contentEncoding, contentSha256);
             validateChecksumHeaders(httpHeaders, data);
+            String persistedEncoding = toPersistedContentEncoding(contentEncoding);
             S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders),
                     httpHeaders.getHeaderString("x-amz-storage-class"),
+                    persistedEncoding,
                     lockMode, retainUntil, legalHold);
             var resp = Response.ok().header("ETag", obj.getETag());
             if (obj.getVersionId() != null) {
@@ -823,6 +825,30 @@ public class S3Controller {
         }
     }
 
+    /**
+     * Strips the {@code aws-chunked} token from a {@code Content-Encoding} value before persisting it.
+     * {@code aws-chunked} is a transfer-protocol marker used by AWS SDK v2 streaming uploads and is not
+     * a real content encoding. For example, {@code gzip,aws-chunked} persists as {@code gzip};
+     * a value of only {@code aws-chunked} persists as {@code null}.
+     */
+    private static String toPersistedContentEncoding(String contentEncoding) {
+        if (contentEncoding == null) {
+            return null;
+        }
+        String[] tokens = contentEncoding.split(",");
+        StringBuilder result = new StringBuilder();
+        for (String token : tokens) {
+            String trimmed = token.trim();
+            if (!trimmed.equalsIgnoreCase("aws-chunked")) {
+                if (!result.isEmpty()) {
+                    result.append(",");
+                }
+                result.append(trimmed);
+            }
+        }
+        return result.isEmpty() ? null : result.toString();
+    }
+
     // --- AWS Chunked Decoding ---
 
     /**
@@ -1022,6 +1048,9 @@ public class S3Controller {
         if (obj.getStorageClass() != null) {
             resp.header("x-amz-storage-class", obj.getStorageClass());
         }
+        if (obj.getContentEncoding() != null) {
+            resp.header("Content-Encoding", obj.getContentEncoding());
+        }
         if (obj.getMetadata() != null) {
             for (Map.Entry<String, String> entry : obj.getMetadata().entrySet()) {
                 resp.header("x-amz-meta-" + entry.getKey(), entry.getValue());
@@ -1056,11 +1085,13 @@ public class S3Controller {
         String sourceBucket = source.substring(0, slashIndex);
         String sourceKey = URLDecoder.decode(source.substring(slashIndex + 1), StandardCharsets.UTF_8);
 
+        String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         S3Object copy = s3Service.copyObject(sourceBucket, sourceKey, destBucket, destKey,
                 httpHeaders.getHeaderString("x-amz-metadata-directive"),
                 extractUserMetadata(httpHeaders),
                 httpHeaders.getHeaderString("x-amz-storage-class"),
-                contentType);
+                contentType,
+                copyContentEncoding);
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyObjectResult", AwsNamespaces.S3)

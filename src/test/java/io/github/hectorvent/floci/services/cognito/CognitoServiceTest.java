@@ -28,7 +28,9 @@ class CognitoServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                groupStore
+                new InMemoryStorage<>(),
+                groupStore,
+                "http://localhost:4566"
         );
     }
 
@@ -213,7 +215,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void jwtContainsGroupsClaim() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client", false, false, List.of(), List.of());
         String clientId = client.getClientId();
 
         service.createGroup(pool.getId(), "admins", "Admin group", 1, null);
@@ -239,7 +241,7 @@ class CognitoServiceTest {
     @SuppressWarnings("unchecked")
     void jwtEscapesSpecialCharsInGroupName() {
         UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "test-client", false, false, List.of(), List.of());
 
         String specialGroup = "group\"with\\special\nchars";
         service.createGroup(pool.getId(), specialGroup, null, null, null);

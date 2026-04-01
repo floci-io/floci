@@ -6,6 +6,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import io.restassured.config.DecoderConfig;
+import io.restassured.config.RestAssuredConfig;
 import java.util.Arrays;
 
 import static io.restassured.RestAssured.given;
@@ -731,5 +733,127 @@ class S3IntegrationTest {
             .delete("/test-bucket")
         .then()
             .statusCode(204);
+    }
+
+    @Test
+    @Order(80)
+    void createEncodingTestBucket() {
+        given()
+        .when()
+            .put("/encoding-test-bucket")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(81)
+    void putObjectWithContentEncoding() {
+        given()
+            .contentType("text/plain")
+            .header("Content-Encoding", "gzip")
+            .body("compressed-content")
+        .when()
+            .put("/encoding-test-bucket/encoded.txt")
+        .then()
+            .statusCode(200)
+            .header("ETag", notNullValue());
+    }
+
+    @Test
+    @Order(82)
+    void getObjectReturnsContentEncoding() {
+        RestAssuredConfig noDecompress = RestAssuredConfig.config()
+                .decoderConfig(DecoderConfig.decoderConfig().noContentDecoders());
+        given()
+            .config(noDecompress)
+        .when()
+            .get("/encoding-test-bucket/encoded.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"));
+    }
+
+    @Test
+    @Order(83)
+    void headObjectReturnsContentEncoding() {
+        given()
+        .when()
+            .head("/encoding-test-bucket/encoded.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"));
+    }
+
+    @Test
+    @Order(84)
+    void copyObjectPreservesContentEncoding() {
+        given()
+            .header("x-amz-copy-source", "/encoding-test-bucket/encoded.txt")
+        .when()
+            .put("/encoding-test-bucket/encoded-copy.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/encoding-test-bucket/encoded-copy.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"));
+    }
+
+    @Test
+    @Order(85)
+    void copyObjectReplaceContentEncoding() {
+        given()
+            .header("x-amz-copy-source", "/encoding-test-bucket/encoded.txt")
+            .header("x-amz-metadata-directive", "REPLACE")
+            .header("Content-Encoding", "identity")
+        .when()
+            .put("/encoding-test-bucket/encoded-replace.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/encoding-test-bucket/encoded-replace.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("identity"));
+    }
+
+    @Test
+    @Order(86)
+    void putObjectWithCompositeEncoding_stripsAwsChunkedToken() {
+        RestAssuredConfig noDecompress = RestAssuredConfig.config()
+                .decoderConfig(DecoderConfig.decoderConfig().noContentDecoders());
+        given()
+            .contentType("text/plain")
+            .header("Content-Encoding", "gzip,aws-chunked")
+            .body("compressed-chunked-content")
+        .when()
+            .put("/encoding-test-bucket/composite-encoded.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .config(noDecompress)
+        .when()
+            .head("/encoding-test-bucket/composite-encoded.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Encoding", equalTo("gzip"));
+    }
+
+    @Test
+    @Order(88)
+    void cleanupContentEncodingBucket() {
+        given().delete("/encoding-test-bucket/encoded.txt");
+        given().delete("/encoding-test-bucket/encoded-copy.txt");
+        given().delete("/encoding-test-bucket/encoded-replace.txt");
+        given().delete("/encoding-test-bucket/composite-encoded.txt");
+        given().delete("/encoding-test-bucket");
     }
 }

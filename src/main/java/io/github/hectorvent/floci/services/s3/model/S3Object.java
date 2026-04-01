@@ -21,6 +21,7 @@ public class S3Object {
     private byte[] data;
     private Map<String, String> metadata;
     private String contentType;
+    private String contentEncoding;
     private long size;
     private Instant lastModified;
     private String eTag;
@@ -76,6 +77,9 @@ public class S3Object {
 
     public String getContentType() { return contentType; }
     public void setContentType(String contentType) { this.contentType = contentType; }
+
+    public String getContentEncoding() { return contentEncoding; }
+    public void setContentEncoding(String contentEncoding) { this.contentEncoding = contentEncoding; }
 
     public long getSize() { return size; }
     public void setSize(long size) { this.size = size; }

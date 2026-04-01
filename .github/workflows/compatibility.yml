@@ -96,6 +96,7 @@ jobs:
             -p 4566:4566 \
             -v /var/run/docker.sock:/var/run/docker.sock \
             --group-add "$DOCKER_GID" \
+            -e FLOCI_BASE_URL=http://floci:4566 \
             -e FLOCI_SERVICES_DOCKER_NETWORK=compat-net \
             -e FLOCI_HOSTNAME=floci \
             floci:test

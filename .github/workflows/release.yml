@@ -137,6 +137,20 @@ jobs:
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
 
+      - name: Build and push JVM image (With AWS CLI)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.jvm-package
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/floci:${{ steps.version.outputs.version }}-aws
+            ${{ secrets.DOCKERHUB_USERNAME }}/floci:latest-aws
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            INSTALL_AWS_CLI=true
+
   # ── Push native Docker images (multi-arch manifest) ───────────────────────
   push-native:
     name: Push native Docker images
