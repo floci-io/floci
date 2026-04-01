@@ -1,14 +1,17 @@
 package io.github.hectorvent.floci.services.eventbridge.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class Target {
 
     private String id;
     private String arn;
     private String input;
     private String inputPath;
+    private InputTransformer inputTransformer;
 
     public Target() {}
 
@@ -30,4 +33,7 @@ public class Target {
 
     public String getInputPath() { return inputPath; }
     public void setInputPath(String inputPath) { this.inputPath = inputPath; }
+
+    public InputTransformer getInputTransformer() { return inputTransformer; }
+    public void setInputTransformer(InputTransformer inputTransformer) { this.inputTransformer = inputTransformer; }
 }

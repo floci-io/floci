@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
+import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -410,26 +411,77 @@ public class EventBridgeService {
 
     private void invokeTarget(Target target, String eventJson, String region) {
         String arn = target.getArn();
-        String payload = target.getInput() != null ? target.getInput() : eventJson;
+        String payload;
+        if (target.getInput() != null) {
+            payload = target.getInput();
+        } else if (target.getInputTransformer() != null) {
+            payload = applyInputTransformer(target.getInputTransformer(), eventJson);
+        } else {
+            payload = eventJson;
+        }
         try {
-            if (arn.contains(":lambda:") || arn.contains(":function:")) {
-                String fnName = arn.substring(arn.lastIndexOf(':') + 1);
-                String fnRegion = extractRegionFromArn(arn, region);
-                lambdaService.invoke(fnRegion, fnName, payload.getBytes(), InvocationType.Event);
-                LOG.debugv("EventBridge delivered to Lambda: {0}", arn);
-            } else if (arn.contains(":sqs:")) {
-                String queueUrl = sqsArnToUrl(arn);
-                sqsService.sendMessage(queueUrl, payload, 0);
-                LOG.debugv("EventBridge delivered to SQS: {0}", arn);
-            } else if (arn.contains(":sns:")) {
-                String topicRegion = extractRegionFromArn(arn, region);
-                snsService.publish(arn, null, payload, "EventBridge", topicRegion);
-                LOG.debugv("EventBridge delivered to SNS: {0}", arn);
-            } else {
-                LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
+            switch (arn) {
+                case String a when a.contains(":lambda:") || a.contains(":function:") -> {
+                    String fnName = a.substring(a.lastIndexOf(':') + 1);
+                    lambdaService.invoke(extractRegionFromArn(a, region), fnName, payload.getBytes(), InvocationType.Event);
+                    LOG.debugv("EventBridge delivered to Lambda: {0}", a);
+                }
+                case String a when a.contains(":sqs:") -> {
+                    sqsService.sendMessage(sqsArnToUrl(a), payload, 0);
+                    LOG.debugv("EventBridge delivered to SQS: {0}", a);
+                }
+                case String a when a.contains(":sns:") -> {
+                    snsService.publish(a, null, payload, "EventBridge", extractRegionFromArn(a, region));
+                    LOG.debugv("EventBridge delivered to SNS: {0}", a);
+                }
+                default -> LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
             }
         } catch (Exception e) {
             LOG.warnv("EventBridge failed to deliver to target {0}: {1}", arn, e.getMessage());
+        }
+    }
+
+    /**
+     * Applies an InputTransformer to the event JSON.
+     * Extracts values from the event using the InputPathsMap JSONPath expressions,
+     * then substitutes {@code <varName>} placeholders in the InputTemplate.
+     */
+    String applyInputTransformer(InputTransformer transformer, String eventJson) {
+        String template = transformer.getInputTemplate();
+        if (template == null) {
+            return eventJson;
+        }
+        String result = template;
+        for (var e : transformer.getInputPathsMap().entrySet()) {
+            String value = extractJsonPath(e.getValue(), eventJson);
+            result = result.replace("<" + e.getKey() + ">", value != null ? value : "");
+        }
+        return result;
+    }
+
+    /**
+     * Extracts a value from a JSON string using a dot-notation JSONPath expression.
+     * Supports expressions like {@code $.source}, {@code $.detail.bucket.name}, etc.
+     * Converts the JSONPath to a Jackson {@link com.fasterxml.jackson.core.JsonPointer}
+     * by replacing {@code .} separators with {@code /}.
+     * Returns the raw text value, or {@code null} if the path is not found.
+     */
+    String extractJsonPath(String jsonPath, String eventJson) {
+        if (jsonPath == null || eventJson == null) {
+            return null;
+        }
+        try {
+            // Convert "$.a.b.c" (JSONPath dot-notation) to "/a/b/c" (JsonPointer)
+            String pointer = (jsonPath.startsWith("$") ? jsonPath.substring(1) : jsonPath)
+                    .replace('.', '/');
+            JsonNode node = objectMapper.readTree(eventJson).at(pointer);
+            if (node.isMissingNode() || node.isNull()) {
+                return null;
+            }
+            return node.isTextual() ? node.asText() : node.toString();
+        } catch (Exception e) {
+            LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
+            return null;
         }
     }
 
