@@ -201,6 +201,29 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void queryWithNumericExpressionAttributeNames() {
+        createOrdersTable();
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"));
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o2"));
+        service.putItem("Orders", item("customerId", "c2", "orderId", "o1"));
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode pkVal = mapper.createObjectNode(); pkVal.put("S", "c1");
+        exprValues.set(":0", pkVal);
+        ObjectNode skVal = mapper.createObjectNode(); skVal.put("S", "o1");
+        exprValues.set(":1", skVal);
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#0", "customerId");
+        exprNames.put("#1", "orderId");
+
+        // PynamoDB-style: #0 = :0 AND #1 = :1
+        DynamoDbService.QueryResult results = service.query("Orders", null, exprValues,
+                "#0 = :0 AND #1 = :1", null, null, null, null, exprNames, "us-east-1");
+        assertEquals(1, results.items().size());
+    }
+
+    @Test
     void queryWithBeginsWith() {
         createOrdersTable();
         service.putItem("Orders", item("customerId", "c1", "orderId", "2024-01-01"));

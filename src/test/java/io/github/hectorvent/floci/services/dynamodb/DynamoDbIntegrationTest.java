@@ -250,6 +250,33 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void queryWithNumericExpressionAttributeNames() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "KeyConditionExpression": "#0 = :0 AND begins_with(#1, :prefix)",
+                    "ExpressionAttributeNames": {
+                        "#0": "pk",
+                        "#1": "sk"
+                    },
+                    "ExpressionAttributeValues": {
+                        ":0": {"S": "user-1"},
+                        ":prefix": {"S": "order"}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Count", equalTo(2));
+    }
+
+    @Test
     @Order(11)
     void queryWithFilterExpression() {
         given()
@@ -359,6 +386,65 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(200)
             .body("Item", nullValue());
+    }
+
+    @Test
+    @Order(14)
+    void transactWriteWithNumericExpressionAttributeNames() {
+        // PynamoDB-style: attribute_not_exists(#0) where #0 maps to the PK
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Put": {
+                            "TableName": "TestTable",
+                            "Item": {
+                                "pk": {"S": "user-transact"},
+                                "sk": {"S": "profile"},
+                                "name": {"S": "Test User"}
+                            },
+                            "ConditionExpression": "attribute_not_exists(#0)",
+                            "ExpressionAttributeNames": {
+                                "#0": "pk"
+                            }
+                        }
+                    }]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Second attempt — item exists now, condition should fail
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.TransactWriteItems")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TransactItems": [{
+                        "Put": {
+                            "TableName": "TestTable",
+                            "Item": {
+                                "pk": {"S": "user-transact"},
+                                "sk": {"S": "profile"},
+                                "name": {"S": "Duplicate"}
+                            },
+                            "ConditionExpression": "attribute_not_exists(#0)",
+                            "ExpressionAttributeNames": {
+                                "#0": "pk"
+                            }
+                        }
+                    }]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("TransactionCanceledException"));
     }
 
     @Test
