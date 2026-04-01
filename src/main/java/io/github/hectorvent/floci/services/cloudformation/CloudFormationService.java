@@ -240,7 +240,7 @@ public class CloudFormationService {
 
                     addEvent(stack, logicalId, null, type, "CREATE_IN_PROGRESS", null);
                     resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
-                            engine, region, config.defaultAccountId());
+                            engine, region, config.defaultAccountId(), stack.getStackName());
                     stack.getResources().put(logicalId, resource);
 
                     physicalIds.put(logicalId, resource.getPhysicalId());

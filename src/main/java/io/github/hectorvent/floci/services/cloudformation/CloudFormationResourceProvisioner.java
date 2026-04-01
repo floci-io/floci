@@ -61,7 +61,8 @@ public class CloudFormationResourceProvisioner {
      * Returns null and logs a warning for unsupported types.
      */
     public StackResource provision(String logicalId, String resourceType, JsonNode properties,
-                                   CloudFormationTemplateEngine engine, String region, String accountId) {
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
@@ -526,5 +527,21 @@ public class CloudFormationResourceProvisioner {
         } catch (Exception e) {
             LOG.debugv("Could not delete policy {0}: {1}", policyArn, e.getMessage());
         }
+    }
+
+    /**
+     * Generate an AWS-like physical name: {stackName}-{logicalId}-{randomSuffix}.
+     * Mirrors the naming pattern AWS CloudFormation uses when no explicit name is provided.
+     */
+    private String generatePhysicalName(String stackName, String logicalId, int maxLength, boolean lowercase) {
+        String suffix = UUID.randomUUID().toString().replace("-", "").substring(0, 12);
+        String name = stackName + "-" + logicalId + "-" + suffix;
+        if (lowercase) {
+            name = name.toLowerCase();
+        }
+        if (maxLength > 0 && name.length() > maxLength) {
+            name = name.substring(0, maxLength);
+        }
+        return name;
     }
 }
