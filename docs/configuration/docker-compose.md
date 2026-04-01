@@ -11,9 +11,16 @@ services:
     ports:
       - "4566:4566"
     volumes:
+      # Local directory bind mount (default)
       - ./data:/app/data
+      
+      # OR named volume (optional):
+      # - floci-data:/app/data
       - ./init/start.d:/etc/floci/init/start.d:ro
       - ./init/stop.d:/etc/floci/init/stop.d:ro
+
+#volumes:
+#  floci-data:
 ```
 
 ## Full Setup (with ElastiCache and RDS)
@@ -29,10 +36,17 @@ services:
       - "6379-6399:6379-6399"  # ElastiCache / Redis proxy ports
       - "7001-7099:7001-7099"  # RDS / PostgreSQL + MySQL proxy ports
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock  # required for Lambda, ElastiCache, RDS
+      # Local directory bind mount (default)
       - ./data:/app/data
+      
+      # OR named volume (optional):
+      # - floci-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock  # required for Lambda, ElastiCache, RDS
     environment:
       FLOCI_SERVICES_DOCKER_NETWORK: my-project_default  # (1)
+
+#volumes:
+#  floci-data:
 ```
 
 1. Set this to the Docker network name that your compose project creates (usually `<project-name>_default`). Floci uses it to attach spawned Lambda / ElastiCache / RDS containers to the same network.
@@ -68,10 +82,17 @@ services:
     ports:
       - "4566:4566"
     volumes:
+      # Local directory bind mount (default)
       - ./data:/app/data
+      
+      # OR named volume (optional):
+      # - floci-data:/app/data
     environment:
       FLOCI_STORAGE_MODE: persistent
       FLOCI_STORAGE_PERSISTENT_PATH: /app/data
+
+#volumes:
+#  floci-data:
 ```
 
 ## Environment Variables Reference

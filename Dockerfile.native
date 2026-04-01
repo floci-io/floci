@@ -16,7 +16,9 @@ RUN mvn clean package -Dnative -DskipTests -B
 # Stage 2: Minimal runtime
 FROM quay.io/quarkus/quarkus-micro-image:2.0
 
+USER root
 WORKDIR /app
+RUN mkdir -p /app/data && chown 1001:root /app /app/data
 VOLUME /app/data
 
 EXPOSE 4566
@@ -27,4 +29,5 @@ ENV FLOCI_VERSION=${VERSION}
 COPY --from=build /app/target/*-runner /app/application
 RUN chmod +x /app/application
 
+USER 1001
 ENTRYPOINT ["/app/application"]

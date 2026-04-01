@@ -7,11 +7,13 @@ ENV FLOCI_VERSION=${VERSION}
 
 WORKDIR /app
 
-VOLUME /app/data
-
-RUN chown 1001 /app \
+RUN mkdir -p /app/data \
+    && chown 1001 /app \
     && chmod "g+rwX" /app \
-    && chown 1001:root /app
+    && chown 1001:root /app \
+    && chown 1001:root /app/data
+
+VOLUME /app/data
 
 COPY --chown=1001:root target/*.properties target/*.so /app/
 COPY --chown=1001:root target/*-runner /app/application

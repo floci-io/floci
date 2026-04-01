@@ -128,7 +128,14 @@ services:
     ports:
       - "4566:4566"
     volumes:
+      # Local directory bind mount (default)
       - ./data:/app/data
+      
+      # OR named volume (optional):
+      # - floci-data:/app/data
+
+#volumes:
+#  floci-data:
 ```
 
 ```bash

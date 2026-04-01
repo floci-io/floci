@@ -15,7 +15,14 @@ This guide gets Floci running and verifies that AWS CLI commands work against it
         ports:
           - "4566:4566"
         volumes:
+          # Local directory bind mount (default)
           - ./data:/app/data
+          
+          # OR named volume (optional):
+          # - floci-data:/app/data
+
+#    volumes:
+#      floci-data:
     ```
 
     ```bash
@@ -33,7 +40,14 @@ This guide gets Floci running and verifies that AWS CLI commands work against it
         ports:
           - "4566:4566"
         volumes:
+          # Local directory bind mount (default)
           - ./data:/app/data
+          
+          # OR named volume (optional):
+          # - floci-data:/app/data
+
+#    volumes:
+#      floci-data:
     ```
 
     ```bash
