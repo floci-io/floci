@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -450,8 +451,8 @@ public class CloudFormationResourceProvisioner {
         JsonNode genNode = props.get("GenerateSecretString");
 
         if (secretString != null && genNode != null && !genNode.isNull()) {
-            // AWS rejects this combination; for emulator compatibility, prefer SecretString
-            return secretString;
+            throw new AwsException("ValidationError",
+                    "You can't specify both SecretString and GenerateSecretString", 400);
         }
 
         if (secretString != null) {

@@ -1055,8 +1055,8 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
-    void createStack_secretWithExplicitSecretString_ignoredGenerateSecretString() {
-        // When both SecretString and GenerateSecretString are set, SecretString wins
+    void createStack_secretWithBothSecretStringAndGenerateSecretString_fails() {
+        // AWS rejects when both SecretString and GenerateSecretString are specified
         String template = """
             {
               "Resources": {
@@ -1084,15 +1084,16 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200);
 
+        // The resource should have failed provisioning
         given()
-            .header("X-Amz-Target", "secretsmanager.GetSecretValue")
-            .contentType(SM_CONTENT_TYPE)
-            .body("{\"SecretId\": \"cfn-both-secret\"}")
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "both-secret-stack")
         .when()
             .post("/")
         .then()
             .statusCode(200)
-            .body("SecretString", equalTo("explicit-value"));
+            .body(containsString("CREATE_FAILED"));
     }
 
     @Test
