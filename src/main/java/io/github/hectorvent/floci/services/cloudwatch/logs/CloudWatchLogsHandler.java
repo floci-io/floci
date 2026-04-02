@@ -45,6 +45,9 @@ public class CloudWatchLogsHandler {
             case "TagLogGroup" -> handleTagLogGroup(request, region);
             case "UntagLogGroup" -> handleUntagLogGroup(request, region);
             case "ListTagsLogGroup" -> handleListTagsLogGroup(request, region);
+            case "ListTagsForResource" -> handleListTagsForResource(request, region);
+            case "TagResource" -> handleTagResource(request, region);
+            case "UntagResource" -> handleUntagResource(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -222,6 +225,46 @@ public class CloudWatchLogsHandler {
         tags.forEach(tagsNode::put);
         response.set("tags", tagsNode);
         return Response.ok(response).build();
+    }
+
+    private Response handleListTagsForResource(JsonNode request, String region) {
+        String resourceArn = request.path("resourceArn").asText();
+        String groupName = extractLogGroupNameFromArn(resourceArn);
+        Map<String, String> tags = logsService.listTagsLogGroup(groupName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode tagsNode = objectMapper.createObjectNode();
+        tags.forEach(tagsNode::put);
+        response.set("tags", tagsNode);
+        return Response.ok(response).build();
+    }
+
+    private Response handleTagResource(JsonNode request, String region) {
+        String resourceArn = request.path("resourceArn").asText();
+        String groupName = extractLogGroupNameFromArn(resourceArn);
+        Map<String, String> tags = extractTags(request.path("tags"));
+        logsService.tagLogGroup(groupName, tags, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUntagResource(JsonNode request, String region) {
+        String resourceArn = request.path("resourceArn").asText();
+        String groupName = extractLogGroupNameFromArn(resourceArn);
+        List<String> tagKeys = new ArrayList<>();
+        request.path("tagKeys").forEach(k -> tagKeys.add(k.asText()));
+        logsService.untagLogGroup(groupName, tagKeys, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private String extractLogGroupNameFromArn(String arn) {
+        if (arn != null && arn.contains(":log-group:")) {
+            String name = arn.substring(arn.indexOf(":log-group:") + ":log-group:".length());
+            if (name.endsWith(":*")) {
+                name = name.substring(0, name.length() - 2);
+            }
+            return name;
+        }
+        return arn;
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
