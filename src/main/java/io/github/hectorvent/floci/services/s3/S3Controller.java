@@ -31,6 +31,7 @@ import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -802,12 +803,48 @@ public class S3Controller {
     private Response handlePutBucketNotification(String bucket, byte[] body) {
         try {
             String xml = new String(body, StandardCharsets.UTF_8);
-            NotificationConfiguration config = NotificationConfigurationParser.parse(xml);
+            NotificationConfiguration config = new NotificationConfiguration();
+
+            for (var parsed : parseNotificationGroups(xml, "QueueConfiguration", "Queue")) {
+                config.getQueueConfigurations().add(
+                        new QueueNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
+            }
+            for (var parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
+                config.getTopicConfigurations().add(
+                        new TopicNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
+            }
+
             s3Service.putBucketNotificationConfiguration(bucket, config);
             return Response.ok().build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    private record ParsedNotificationGroup(String id, String arn, List<String> events,
+                                            List<FilterRule> filterRules) {}
+
+    private static List<ParsedNotificationGroup> parseNotificationGroups(
+            String xml, String groupElement, String arnElement) {
+        var groups = XmlParser.extractGroupsMulti(xml, groupElement);
+        var filters = XmlParser.extractPairsPerGroup(xml, groupElement,
+                "FilterRule", "Name", "Value");
+        List<ParsedNotificationGroup> result = new ArrayList<>();
+        for (int i = 0; i < groups.size(); i++) {
+            var group = groups.get(i);
+            String id = group.getOrDefault("Id", List.of("")).getFirst();
+            List<String> arns = group.get(arnElement);
+            List<String> events = group.get("Event");
+            if (arns != null && !arns.isEmpty() && events != null && !events.isEmpty()) {
+                List<FilterRule> rules = i < filters.size()
+                        ? filters.get(i).entrySet().stream()
+                            .map(e -> new FilterRule(e.getKey(), e.getValue()))
+                            .toList()
+                        : List.of();
+                result.add(new ParsedNotificationGroup(id, arns.getFirst(), events, rules));
+            }
+        }
+        return result;
     }
 
     private static void appendFilterRules(XmlBuilder xml, List<FilterRule> rules) {

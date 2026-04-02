@@ -12,7 +12,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 public record FilterRule(String name, String value) {
 
     public boolean matches(String key) {
-        if (key == null) return false;
+        if (key == null || name == null || value == null) return false;
         return switch (name.toLowerCase()) {
             case "prefix" -> key.startsWith(value);
             case "suffix" -> key.endsWith(value);
