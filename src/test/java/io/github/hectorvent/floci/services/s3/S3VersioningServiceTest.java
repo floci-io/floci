@@ -169,8 +169,10 @@ class S3VersioningServiceTest {
 
     @Test
     void versionedFileUsesS3dataSuffixOnDisk() {
-        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
-        S3Object v1 = s3Service.putObject("versioned-bucket", "test.txt",
+        S3Service diskService = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, false);
+        diskService.createBucket("versioned-bucket", "us-east-1");
+        diskService.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = diskService.putObject("versioned-bucket", "test.txt",
                 "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
 
         Path versionedPath = tempDir.resolve(".versions")
