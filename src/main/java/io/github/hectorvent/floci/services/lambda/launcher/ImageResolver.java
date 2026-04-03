@@ -5,7 +5,6 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.util.Map;
-import java.util.Optional;
 
 /**
  * Maps AWS Lambda runtime identifiers to ECR Public image URIs.
