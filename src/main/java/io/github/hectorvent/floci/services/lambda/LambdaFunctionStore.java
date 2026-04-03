@@ -66,14 +66,18 @@ public class LambdaFunctionStore {
 
     public void save(String region, LambdaFunction fn) {
         // Remove old index entry if URL changed or was removed
-        get(region, fn.getFunctionName()).ifPresent(this::deindexFunction);
+        get(region, fn.getFunctionName(), fn.getVersion()).ifPresent(this::deindexFunction);
         
-        backend.put(regionKey(region, fn.getFunctionName()), fn);
+        backend.put(regionKey(region, fn.getFunctionName(), fn.getVersion()), fn);
         indexFunction(fn);
     }
 
     public Optional<LambdaFunction> get(String region, String functionName) {
-        return backend.get(regionKey(region, functionName));
+        return get(region, functionName, "$LATEST");
+    }
+
+    public Optional<LambdaFunction> get(String region, String functionName, String version) {
+        return backend.get(regionKey(region, functionName, version));
     }
 
     public Optional<LambdaFunction> getByUrlId(String urlId) {
@@ -82,6 +86,11 @@ public class LambdaFunctionStore {
 
     public List<LambdaFunction> list(String region) {
         String prefix = "lambda::" + region + "::";
+        return backend.scan(key -> key.startsWith(prefix) && key.endsWith("::$LATEST"));
+    }
+
+    public List<LambdaFunction> listVersions(String region, String functionName) {
+        String prefix = "lambda::" + region + "::" + functionName + "::";
         return backend.scan(key -> key.startsWith(prefix));
     }
 
@@ -90,13 +99,14 @@ public class LambdaFunctionStore {
     }
 
     public void delete(String region, String functionName) {
-        get(region, functionName).ifPresent(fn -> {
+        // Delete all versions
+        listVersions(region, functionName).forEach(fn -> {
             deindexFunction(fn);
-            backend.delete(regionKey(region, functionName));
+            backend.delete(regionKey(region, functionName, fn.getVersion()));
         });
     }
 
-    private static String regionKey(String region, String functionName) {
-        return "lambda::" + region + "::" + functionName;
+    private static String regionKey(String region, String functionName, String version) {
+        return "lambda::" + region + "::" + functionName + "::" + (version != null ? version : "$LATEST");
     }
 }

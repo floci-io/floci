@@ -274,6 +274,20 @@ public class LambdaController {
         return Response.status(201).entity(buildFunctionConfiguration(version)).build();
     }
 
+    @GET
+    @Path("/functions/{functionName}/versions")
+    public Response listVersionsByFunction(@Context HttpHeaders headers,
+                                           @PathParam("functionName") String functionName) {
+        String region = regionResolver.resolveRegion(headers);
+        List<LambdaFunction> versions = lambdaService.listVersionsByFunction(region, functionName);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("Versions");
+        for (LambdaFunction v : versions) {
+            items.add(objectMapper.valueToTree(buildFunctionConfiguration(v)));
+        }
+        return Response.ok(root).build();
+    }
+
     // ──────────────────────────── Aliases ────────────────────────────
 
     @POST
@@ -384,7 +398,7 @@ public class LambdaController {
         if (fn.getImageUri() != null) node.put("ImageUri", fn.getImageUri());
         node.put("LastModified", String.valueOf(fn.getLastModified()));
         node.put("RevisionId", fn.getRevisionId());
-        node.put("Version", "$LATEST");
+        node.put("Version", fn.getVersion());
 
         if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {
             ObjectNode envNode = node.putObject("Environment");

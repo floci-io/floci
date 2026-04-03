@@ -30,6 +30,7 @@ public class LambdaFunction {
     private Map<String, String> tags = new HashMap<>();
     private long lastModified;
     private String revisionId;
+    private String version = "$LATEST";
     private LambdaUrlConfig urlConfig;
 
     @JsonIgnore
@@ -94,6 +95,9 @@ public class LambdaFunction {
 
     public String getRevisionId() { return revisionId; }
     public void setRevisionId(String revisionId) { this.revisionId = revisionId; }
+
+    public String getVersion() { return version; }
+    public void setVersion(String version) { this.version = version; }
 
     public LambdaUrlConfig getUrlConfig() { return urlConfig; }
     public void setUrlConfig(LambdaUrlConfig urlConfig) { this.urlConfig = urlConfig; }

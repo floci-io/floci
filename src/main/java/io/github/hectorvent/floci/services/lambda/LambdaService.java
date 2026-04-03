@@ -359,6 +359,7 @@ public class LambdaService {
         int version = versionCounters.merge(region + "::" + functionName, 1, Integer::sum);
         LambdaFunction snapshot = new LambdaFunction();
         snapshot.setFunctionName(fn.getFunctionName());
+        snapshot.setVersion(String.valueOf(version));
         snapshot.setFunctionArn(fn.getFunctionArn().replace(":$LATEST", "") + ":" + version);
         snapshot.setRuntime(fn.getRuntime());
         snapshot.setRole(fn.getRole());
@@ -372,7 +373,15 @@ public class LambdaService {
         snapshot.setEnvironment(fn.getEnvironment());
         snapshot.setLastModified(System.currentTimeMillis());
         snapshot.setRevisionId(UUID.randomUUID().toString());
+        
+        functionStore.save(region, snapshot);
+        LOG.infov("Published version {0} for function {1}", version, functionName);
         return snapshot;
+    }
+
+    public List<LambdaFunction> listVersionsByFunction(String region, String functionName) {
+        getFunction(region, functionName); // verify function exists
+        return functionStore.listVersions(region, functionName);
     }
 
     // ──────────────────────────── Aliases ────────────────────────────
