@@ -41,6 +41,9 @@ public interface EmulatorConfig {
     @WithDefault("512")
     int maxRequestSize();
 
+    @WithDefault("public.ecr.aws")
+    String ecrBaseUri();
+
     StorageConfig storage();
 
     AuthConfig auth();

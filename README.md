@@ -223,15 +223,16 @@ The repository also includes compatibility validation for infrastructure tooling
 
 All settings are overridable via environment variables (`FLOCI_` prefix).
 
-| Variable | Default | Description |
-|---|---|---|
-| `QUARKUS_HTTP_PORT` | `4566` | HTTP port |
-| `FLOCI_DEFAULT_REGION` | `us-east-1` | Default AWS region |
-| `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Default AWS account ID |
-| `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL used in API responses (e.g. SQS QueueUrl) |
+| Variable | Default | Description                                             |
+|---|---|---------------------------------------------------------|
+| `QUARKUS_HTTP_PORT` | `4566` | HTTP port                                               |
+| `FLOCI_DEFAULT_REGION` | `us-east-1` | Default AWS region                                      |
+| `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | Default AWS account ID                                  |
+| `FLOCI_BASE_URL` | `http://localhost:4566` | Base URL used in API responses (e.g. SQS QueueUrl)      |
 | `FLOCI_HOSTNAME` | *(unset)* | Override hostname in response URLs (for Docker Compose) |
-| `FLOCI_STORAGE_MODE` | `memory` | `memory` · `persistent` · `hybrid` · `wal` |
-| `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Data directory |
+| `FLOCI_STORAGE_MODE` | `memory` | `memory` · `persistent` · `hybrid` · `wal`              |
+| `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Data directory                                          |
+| `FLOCI_ECR_BASE_URI` | `public.ecr.aws` | AWS ECR Base URI to pull container images (e.g. Lambda) |
 
 → Full reference: [configuration docs](https://hectorvent.dev/floci/configuration/application-yml/)
 → Per-service storage overrides: [storage docs](https://hectorvent.dev/floci/configuration/storage/#per-service-storage-overrides)
