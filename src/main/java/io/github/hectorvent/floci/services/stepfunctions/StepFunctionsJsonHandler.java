@@ -33,6 +33,7 @@ public class StepFunctionsJsonHandler {
             case "ListStateMachines" -> handleListStateMachines(request, region);
             case "DeleteStateMachine" -> handleDeleteStateMachine(request);
             case "StartExecution" -> handleStartExecution(request, region);
+            case "StartSyncExecution" -> handleStartSyncExecution(request, region);
             case "DescribeExecution" -> handleDescribeExecution(request);
             case "ListExecutions" -> handleListExecutions(request);
             case "StopExecution" -> handleStopExecution(request);
@@ -102,6 +103,27 @@ public class StepFunctionsJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("executionArn", exec.getExecutionArn());
         response.put("startDate", exec.getStartDate());
+        return Response.ok(response).build();
+    }
+
+    private Response handleStartSyncExecution(JsonNode request, String region) {
+        Execution exec = service.startSyncExecution(
+                request.path("stateMachineArn").asText(),
+                request.path("name").asText(null),
+                request.path("input").asText(null),
+                region
+        );
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("executionArn", exec.getExecutionArn());
+        response.put("stateMachineArn", exec.getStateMachineArn());
+        response.put("name", exec.getName());
+        response.put("status", exec.getStatus());
+        response.put("startDate", exec.getStartDate());
+        if (exec.getStopDate() != null) response.put("stopDate", exec.getStopDate());
+        if (exec.getInput() != null) response.put("input", exec.getInput());
+        if (exec.getOutput() != null) response.put("output", exec.getOutput());
+        if (exec.getError() != null) response.put("error", exec.getError());
+        if (exec.getCause() != null) response.put("cause", exec.getCause());
         return Response.ok(response).build();
     }
 

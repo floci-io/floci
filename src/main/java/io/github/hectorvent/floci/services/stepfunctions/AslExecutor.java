@@ -69,82 +69,102 @@ public class AslExecutor {
      */
     public void executeAsync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                              BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
-        executor.submit(() -> {
-            try {
-                AtomicLong eventId = new AtomicLong(history.size());
-                JsonNode definition = objectMapper.readTree(sm.getDefinition());
-                JsonNode states = definition.path("States");
-                String startAt = definition.path("StartAt").asText();
-                String topLevelQueryLanguage = definition.path("QueryLanguage").asText("JSONPath");
-                JsonNode currentInput = parseInput(exec.getInput());
-                JsonNode execContext = buildContext(exec, sm);
+        executor.submit(() -> doExecute(sm, exec, history, onUpdate));
+    }
 
-                String currentStateName = startAt;
-                while (currentStateName != null) {
-                    JsonNode stateDef = states.path(currentStateName);
-                    if (stateDef.isMissingNode()) {
-                        throw new RuntimeException("State not found: " + currentStateName);
-                    }
+    /**
+     * Runs execution synchronously on the calling thread. Blocks until the execution completes.
+     */
+    public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
+                            BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        try {
+            Future<?> f = executor.submit(() -> doExecute(sm, exec, history, onUpdate));
+            f.get(300, TimeUnit.SECONDS);
+        } catch (java.util.concurrent.TimeoutException e) {
+            exec.setStatus("TIMED_OUT");
+            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            onUpdate.accept(exec, history);
+        } catch (Exception e) {
+            LOG.warnv("Sync execution wait failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
+        }
+    }
 
-                    String type = stateDef.path("Type").asText();
-                    addEvent(history, eventId, stateEnteredEventType(type), null,
-                            Map.of("name", currentStateName, "input", currentInput.toString()));
+    private void doExecute(StateMachine sm, Execution exec, List<HistoryEvent> history,
+                           BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
+        try {
+            AtomicLong eventId = new AtomicLong(history.size());
+            JsonNode definition = objectMapper.readTree(sm.getDefinition());
+            JsonNode states = definition.path("States");
+            String startAt = definition.path("StartAt").asText();
+            String topLevelQueryLanguage = definition.path("QueryLanguage").asText("JSONPath");
+            JsonNode currentInput = parseInput(exec.getInput());
+            JsonNode execContext = buildContext(exec, sm);
 
-                    // Update per-state context fields
-                    updateStateContext(execContext, currentStateName);
-
-                    try {
-                        boolean jsonata = isJsonata(stateDef, topLevelQueryLanguage);
-                        StateResult stateResult = executeState(currentStateName, type, stateDef, currentInput,
-                                history, eventId, sm, jsonata, topLevelQueryLanguage, execContext);
-                        addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
-                                Map.of("name", currentStateName, "output", stateResult.output().toString()));
-
-                        currentInput = stateResult.output();
-                        currentStateName = stateResult.nextState();
-
-                        if ("Succeed".equals(type) || stateDef.path("End").asBoolean(false)) {
-                            currentStateName = null;
-                        }
-                    } catch (FailStateException e) {
-                        exec.setStatus("FAILED");
-                        exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                        String failError = e.error != null ? e.error : "States.Runtime";
-                        String failCause = e.cause != null ? e.cause : "";
-                        exec.setError(failError);
-                        exec.setCause(failCause);
-                        addEvent(history, eventId, "ExecutionFailed", null,
-                                Map.of("error", failError, "cause", failCause));
-                        onUpdate.accept(exec, history);
-                        return;
-                    } catch (Exception e) {
-                        exec.setStatus("FAILED");
-                        exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                        String runtimeError = "States.Runtime";
-                        String runtimeCause = e.getMessage() != null ? e.getMessage() : "Unknown error";
-                        exec.setError(runtimeError);
-                        exec.setCause(runtimeCause);
-                        addEvent(history, eventId, "ExecutionFailed", null,
-                                Map.of("error", runtimeError, "cause", runtimeCause));
-                        onUpdate.accept(exec, history);
-                        return;
-                    }
+            String currentStateName = startAt;
+            while (currentStateName != null) {
+                JsonNode stateDef = states.path(currentStateName);
+                if (stateDef.isMissingNode()) {
+                    throw new RuntimeException("State not found: " + currentStateName);
                 }
 
-                exec.setStatus("SUCCEEDED");
-                exec.setOutput(currentInput.toString());
-                exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                addEvent(history, eventId, "ExecutionSucceeded", null,
-                        Map.of("output", currentInput.toString()));
-                onUpdate.accept(exec, history);
+                String type = stateDef.path("Type").asText();
+                addEvent(history, eventId, stateEnteredEventType(type), null,
+                        Map.of("name", currentStateName, "input", currentInput.toString()));
 
-            } catch (Exception e) {
-                LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
-                exec.setStatus("FAILED");
-                exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                onUpdate.accept(exec, history);
+                // Update per-state context fields
+                updateStateContext(execContext, currentStateName);
+
+                try {
+                    boolean jsonata = isJsonata(stateDef, topLevelQueryLanguage);
+                    StateResult stateResult = executeState(currentStateName, type, stateDef, currentInput,
+                            history, eventId, sm, jsonata, topLevelQueryLanguage, execContext);
+                    addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
+                            Map.of("name", currentStateName, "output", stateResult.output().toString()));
+
+                    currentInput = stateResult.output();
+                    currentStateName = stateResult.nextState();
+
+                    if ("Succeed".equals(type) || stateDef.path("End").asBoolean(false)) {
+                        currentStateName = null;
+                    }
+                } catch (FailStateException e) {
+                    exec.setStatus("FAILED");
+                    exec.setStopDate(System.currentTimeMillis() / 1000.0);
+                    String failError = e.error != null ? e.error : "States.Runtime";
+                    String failCause = e.cause != null ? e.cause : "";
+                    exec.setError(failError);
+                    exec.setCause(failCause);
+                    addEvent(history, eventId, "ExecutionFailed", null,
+                            Map.of("error", failError, "cause", failCause));
+                    onUpdate.accept(exec, history);
+                    return;
+                } catch (Exception e) {
+                    exec.setStatus("FAILED");
+                    exec.setStopDate(System.currentTimeMillis() / 1000.0);
+                    String runtimeError = "States.Runtime";
+                    String runtimeCause = e.getMessage() != null ? e.getMessage() : "Unknown error";
+                    exec.setError(runtimeError);
+                    exec.setCause(runtimeCause);
+                    addEvent(history, eventId, "ExecutionFailed", null,
+                            Map.of("error", runtimeError, "cause", runtimeCause));
+                    onUpdate.accept(exec, history);
+                    return;
+                }
             }
-        });
+
+            exec.setStatus("SUCCEEDED");
+            exec.setOutput(currentInput.toString());
+            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            addEvent(history, eventId, "ExecutionSucceeded", null,
+                    Map.of("output", currentInput.toString()));
+            onUpdate.accept(exec, history);
+
+        } catch (Exception e) {
+            LOG.warnv("ASL execution failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
+            exec.setStatus("FAILED");
+            exec.setStopDate(System.currentTimeMillis() / 1000.0);
+            onUpdate.accept(exec, history);
+        }
     }
 
     private StateResult executeState(String name, String type, JsonNode stateDef, JsonNode input,
