@@ -250,7 +250,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void queryWithNumericExpressionAttributeNames() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.Query")
@@ -277,7 +277,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void queryWithFilterExpression() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.Query")
@@ -303,7 +303,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void queryWithFilterExpressionAndLimitReturnsLastEvaluatedKey() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.Query")
@@ -332,7 +332,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void scan() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.Scan")
@@ -349,7 +349,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(15)
     void deleteItem() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteItem")
@@ -389,7 +389,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(16)
     void transactWriteWithNumericExpressionAttributeNames() {
         // PynamoDB-style: attribute_not_exists(#0) where #0 maps to the PK
         given()
@@ -448,7 +448,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(17)
     void deleteTable() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
@@ -477,6 +477,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
+    @Order(18)
     void unsupportedOperation() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateGlobalTable")
