@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.lifecycle;
 
 import io.github.hectorvent.floci.core.common.ServiceRegistry;
-import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
@@ -22,7 +21,6 @@ public class HealthController {
     private final ServiceRegistry serviceRegistry;
     private final String version;
 
-    @Inject
     public HealthController(ServiceRegistry serviceRegistry) {
         this.serviceRegistry = serviceRegistry;
         this.version = resolveVersion();
