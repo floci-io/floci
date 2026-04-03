@@ -1426,4 +1426,82 @@ class DynamoDbServiceTest {
                 "(#f0 = :v0)AND(#f1 BETWEEN :v1 AND :v2)", null, null, null, null, null, exprNames, "us-east-1");
         assertEquals(2, result.items().size(), "compact AND with BETWEEN should work");
     }
+
+    @Test
+    void updateItemWithNestedDottedPathSetAndRemove() {
+        createOrdersTable();
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#details", "details");
+        exprNames.put("#status", "status");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":val", attributeValue("S", "hello"));
+        exprValues.set(":s", attributeValue("S", "active"));
+
+        // SET a nested map field via dotted path: #details.subkey = :val, #status = :s
+        ObjectNode key = mapper.createObjectNode();
+        key.set("customerId", attributeValue("S", "c1"));
+        key.set("orderId", attributeValue("S", "o1"));
+
+        var result = service.updateItem("Orders", key, null,
+                "SET #details.subkey = :val, #status = :s", exprNames, exprValues, "ALL_NEW", null, "us-east-1");
+
+        JsonNode updated = result.newItem();
+        assertNotNull(updated);
+        // status should be set at top level
+        assertEquals("active", updated.get("status").get("S").asText());
+        // details.subkey should be set in a nested map
+        assertNotNull(updated.get("details"), "details map should exist");
+        assertTrue(updated.get("details").has("M"), "details should be a DynamoDB Map");
+        assertEquals("hello", updated.get("details").get("M").get("subkey").get("S").asText());
+
+        // Now REMOVE the nested field
+        result = service.updateItem("Orders", key, null,
+                "REMOVE #details.subkey", exprNames, null, "ALL_NEW", null, "us-east-1");
+
+        updated = result.newItem();
+        // The subkey should be removed from the nested map
+        assertFalse(updated.get("details").get("M").has("subkey"), "subkey should be removed");
+        // status should still be there
+        assertEquals("active", updated.get("status").get("S").asText());
+    }
+
+    @Test
+    void updateItemSetFollowedByRemovePreservesAllAssignments() {
+        // Reproduces the bug where SET's last assignment was lost because findNextComma
+        // consumed into the REMOVE clause's comma-separated list.
+        createOrdersTable();
+        service.putItem("Orders", item("customerId", "c1", "orderId", "o1"));
+
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#a", "fieldA");
+        exprNames.put("#b", "fieldB");
+        exprNames.put("#c", "fieldC");
+        exprNames.put("#d", "fieldD");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":v1", attributeValue("S", "val1"));
+        exprValues.set(":v2", attributeValue("S", "val2"));
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("customerId", attributeValue("S", "c1"));
+        key.set("orderId", attributeValue("S", "o1"));
+
+        // First, set all four fields
+        service.updateItem("Orders", key, null,
+                "SET #a = :v1, #b = :v1, #c = :v1, #d = :v1", exprNames, exprValues, "NONE", null, "us-east-1");
+
+        // SET last two assignments, then REMOVE two fields (comma-separated)
+        var result = service.updateItem("Orders", key, null,
+                "SET #a = :v1, #b = :v2 REMOVE #c, #d", exprNames, exprValues, "ALL_NEW", null, "us-east-1");
+
+        JsonNode updated = result.newItem();
+        assertNotNull(updated);
+        assertEquals("val1", updated.get("fieldA").get("S").asText(), "fieldA should be set");
+        assertEquals("val2", updated.get("fieldB").get("S").asText(), "fieldB should be set (last SET before REMOVE)");
+        assertNull(updated.get("fieldC"), "fieldC should be removed");
+        assertNull(updated.get("fieldD"), "fieldD should be removed");
+    }
 }
