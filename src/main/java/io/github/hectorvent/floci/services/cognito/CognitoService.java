@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.cognito;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -40,9 +41,10 @@ public class CognitoService {
     private final StorageBackend<String, CognitoUser> userStore;
     private final StorageBackend<String, CognitoGroup> groupStore;
     private final String baseUrl;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig) {
+    public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig, RegionResolver regionResolver) {
         this.poolStore = storageFactory.create("cognito", "cognito-pools.json",
                 new TypeReference<Map<String, UserPool>>() {});
         this.clientStore = storageFactory.create("cognito", "cognito-clients.json",
@@ -54,6 +56,7 @@ public class CognitoService {
         this.groupStore = storageFactory.create("cognito", "cognito-groups.json",
                 new TypeReference<Map<String, CognitoGroup>>() {});
         this.baseUrl = trimTrailingSlash(emulatorConfig.baseUrl());
+        this.regionResolver = regionResolver;
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -61,26 +64,72 @@ public class CognitoService {
                    StorageBackend<String, ResourceServer> resourceServerStore,
                    StorageBackend<String, CognitoUser> userStore,
                    StorageBackend<String, CognitoGroup> groupStore,
-                   String baseUrl) {
+                   String baseUrl,
+                   RegionResolver regionResolver) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
         this.userStore = userStore;
         this.groupStore = groupStore;
         this.baseUrl = baseUrl;
+        this.regionResolver = regionResolver;
     }
 
     // ──────────────────────────── User Pools ────────────────────────────
 
-    public UserPool createUserPool(String name, String region) {
+    @SuppressWarnings("unchecked")
+    public UserPool createUserPool(Map<String, Object> request, String region) {
+        String name = (String) request.get("PoolName");
         String id = region + "_" + UUID.randomUUID().toString().replace("-", "").substring(0, 9);
         UserPool pool = new UserPool();
         pool.setId(id);
         pool.setName(name);
+        pool.setArn(regionResolver.buildArn("cognito-idp", region, "userpool/" + id));
+
+        populateUserPool(pool, request);
+
         ensureJwtSigningKeys(pool);
         poolStore.put(id, pool);
         LOG.infov("Created User Pool: {0}", id);
         return pool;
+    }
+
+    public UserPool updateUserPool(Map<String, Object> request, String region) {
+        String id = (String) request.get("UserPoolId");
+        UserPool pool = describeUserPool(id);
+
+        populateUserPool(pool, request);
+
+        pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        poolStore.put(id, pool);
+        LOG.infov("Updated User Pool: {0}", id);
+        return pool;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void populateUserPool(UserPool pool, Map<String, Object> request) {
+        if (request.containsKey("Policies")) pool.setPolicies((Map<String, Object>) request.get("Policies"));
+        if (request.containsKey("DeletionProtection")) pool.setDeletionProtection((String) request.get("DeletionProtection"));
+        if (request.containsKey("LambdaConfig")) pool.setLambdaConfig((Map<String, Object>) request.get("LambdaConfig"));
+        if (request.containsKey("Schema")) pool.setSchemaAttributes((List<Map<String, Object>>) request.get("Schema"));
+        if (request.containsKey("AutoVerifiedAttributes")) pool.setAutoVerifiedAttributes((List<String>) request.get("AutoVerifiedAttributes"));
+        if (request.containsKey("AliasAttributes")) pool.setAliasAttributes((List<String>) request.get("AliasAttributes"));
+        if (request.containsKey("UsernameAttributes")) pool.setUsernameAttributes((List<String>) request.get("UsernameAttributes"));
+        if (request.containsKey("SmsVerificationMessage")) pool.setSmsVerificationMessage((String) request.get("SmsVerificationMessage"));
+        if (request.containsKey("EmailVerificationMessage")) pool.setEmailVerificationMessage((String) request.get("EmailVerificationMessage"));
+        if (request.containsKey("EmailVerificationSubject")) pool.setEmailVerificationSubject((String) request.get("EmailVerificationSubject"));
+        if (request.containsKey("VerificationMessageTemplate")) pool.setVerificationMessageTemplate((Map<String, Object>) request.get("VerificationMessageTemplate"));
+        if (request.containsKey("SmsAuthenticationMessage")) pool.setSmsAuthenticationMessage((String) request.get("SmsAuthenticationMessage"));
+        if (request.containsKey("MfaConfiguration")) pool.setMfaConfiguration((String) request.get("MfaConfiguration"));
+        if (request.containsKey("DeviceConfiguration")) pool.setDeviceConfiguration((Map<String, Object>) request.get("DeviceConfiguration"));
+        if (request.containsKey("EmailConfiguration")) pool.setEmailConfiguration((Map<String, Object>) request.get("EmailConfiguration"));
+        if (request.containsKey("SmsConfiguration")) pool.setSmsConfiguration((Map<String, Object>) request.get("SmsConfiguration"));
+        if (request.containsKey("UserPoolTags")) pool.setUserPoolTags((Map<String, String>) request.get("UserPoolTags"));
+        if (request.containsKey("AdminCreateUserConfig")) pool.setAdminCreateUserConfig((Map<String, Object>) request.get("AdminCreateUserConfig"));
+        if (request.containsKey("UserPoolAddOns")) pool.setUserPoolAddOns((Map<String, Object>) request.get("UserPoolAddOns"));
+        if (request.containsKey("UsernameConfiguration")) pool.setUsernameConfiguration((Map<String, Object>) request.get("UsernameConfiguration"));
+        if (request.containsKey("AccountRecoverySetting")) pool.setAccountRecoverySetting((Map<String, Object>) request.get("AccountRecoverySetting"));
+        if (request.containsKey("UserPoolTier")) pool.setUserPoolTier((String) request.get("UserPoolTier"));
     }
 
     public UserPool describeUserPool(String id) {

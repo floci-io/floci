@@ -36,6 +36,8 @@ public class CognitoJsonHandler {
             case "CreateUserPool" -> handleCreateUserPool(request, region);
             case "DescribeUserPool" -> handleDescribeUserPool(request);
             case "ListUserPools" -> handleListUserPools(request);
+            case "UpdateUserPool" -> handleUpdateUserPool(request, region);
+            case "GetUserPoolMfaConfig" -> handleGetUserPoolMfaConfig(request);
             case "DeleteUserPool" -> handleDeleteUserPool(request);
             case "CreateUserPoolClient" -> handleCreateUserPoolClient(request);
             case "DescribeUserPoolClient" -> handleDescribeUserPoolClient(request);
@@ -76,17 +78,18 @@ public class CognitoJsonHandler {
     }
 
     private Response handleCreateUserPool(JsonNode request, String region) {
-        String poolName = request.path("PoolName").asText();
-        UserPool pool = service.createUserPool(poolName, region);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> reqMap = objectMapper.convertValue(request, Map.class);
+        UserPool pool = service.createUserPool(reqMap, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("UserPool", userPoolToNode(pool));
+        response.set("UserPool", userPoolToFullNode(pool));
         return Response.ok(response).build();
     }
 
     private Response handleDescribeUserPool(JsonNode request) {
         UserPool pool = service.describeUserPool(request.path("UserPoolId").asText());
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("UserPool", userPoolToNode(pool));
+        response.set("UserPool", userPoolToFullNode(pool));
         return Response.ok(response).build();
     }
 
@@ -94,7 +97,23 @@ public class CognitoJsonHandler {
         List<UserPool> pools = service.listUserPools();
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("UserPools");
-        pools.forEach(p -> items.add(userPoolToNode(p)));
+        pools.forEach(p -> items.add(userPoolToDescriptionNode(p)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateUserPool(JsonNode request, String region) {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> reqMap = objectMapper.convertValue(request, Map.class);
+        UserPool pool = service.updateUserPool(reqMap, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("UserPool", userPoolToFullNode(pool));
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetUserPoolMfaConfig(JsonNode request) {
+        UserPool pool = service.describeUserPool(request.path("UserPoolId").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("MfaConfiguration", pool.getMfaConfiguration());
         return Response.ok(response).build();
     }
 
@@ -376,12 +395,54 @@ public class CognitoJsonHandler {
         return Response.ok(response).build();
     }
 
-    private ObjectNode userPoolToNode(UserPool p) {
+    private ObjectNode userPoolToDescriptionNode(UserPool p) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("Id", p.getId());
         node.put("Name", p.getName());
-        node.put("CreationDate", p.getCreationDate());
-        node.put("LastModifiedDate", p.getLastModifiedDate());
+        node.set("LambdaConfig", objectMapper.valueToTree(p.getLambdaConfig() != null ? p.getLambdaConfig() : new HashMap<>()));
+        node.put("Status", p.getStatus());
+        node.put("LastModifiedDate", (double) p.getLastModifiedDate());
+        node.put("CreationDate", (double) p.getCreationDate());
+        return node;
+    }
+
+    private ObjectNode userPoolToFullNode(UserPool p) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Id", p.getId());
+        node.put("Name", p.getName());
+        node.put("Arn", p.getArn());
+        node.put("Status", p.getStatus());
+        node.put("CreationDate", (double) p.getCreationDate());
+        node.put("LastModifiedDate", (double) p.getLastModifiedDate());
+
+        node.set("Policies", objectMapper.valueToTree(p.getPolicies() != null ? p.getPolicies() : new HashMap<>()));
+        node.put("DeletionProtection", p.getDeletionProtection() != null ? p.getDeletionProtection() : "INACTIVE");
+        node.set("LambdaConfig", objectMapper.valueToTree(p.getLambdaConfig() != null ? p.getLambdaConfig() : new HashMap<>()));
+        node.set("SchemaAttributes", objectMapper.valueToTree(p.getSchemaAttributes() != null ? p.getSchemaAttributes() : new java.util.ArrayList<>()));
+        node.set("AutoVerifiedAttributes", objectMapper.valueToTree(p.getAutoVerifiedAttributes() != null ? p.getAutoVerifiedAttributes() : new java.util.ArrayList<>()));
+        node.set("AliasAttributes", objectMapper.valueToTree(p.getAliasAttributes() != null ? p.getAliasAttributes() : new java.util.ArrayList<>()));
+        node.set("UsernameAttributes", objectMapper.valueToTree(p.getUsernameAttributes() != null ? p.getUsernameAttributes() : new java.util.ArrayList<>()));
+        
+        if (p.getSmsVerificationMessage() != null) node.put("SmsVerificationMessage", p.getSmsVerificationMessage());
+        if (p.getEmailVerificationMessage() != null) node.put("EmailVerificationMessage", p.getEmailVerificationMessage());
+        if (p.getEmailVerificationSubject() != null) node.put("EmailVerificationSubject", p.getEmailVerificationSubject());
+        
+        node.set("VerificationMessageTemplate", objectMapper.valueToTree(p.getVerificationMessageTemplate() != null ? p.getVerificationMessageTemplate() : new HashMap<>()));
+        
+        if (p.getSmsAuthenticationMessage() != null) node.put("SmsAuthenticationMessage", p.getSmsAuthenticationMessage());
+        
+        node.put("MfaConfiguration", p.getMfaConfiguration() != null ? p.getMfaConfiguration() : "OFF");
+        node.set("DeviceConfiguration", objectMapper.valueToTree(p.getDeviceConfiguration() != null ? p.getDeviceConfiguration() : new HashMap<>()));
+        node.put("EstimatedNumberOfUsers", p.getEstimatedNumberOfUsers());
+        node.set("EmailConfiguration", objectMapper.valueToTree(p.getEmailConfiguration() != null ? p.getEmailConfiguration() : new HashMap<>()));
+        node.set("SmsConfiguration", objectMapper.valueToTree(p.getSmsConfiguration() != null ? p.getSmsConfiguration() : new HashMap<>()));
+        node.set("UserPoolTags", objectMapper.valueToTree(p.getUserPoolTags() != null ? p.getUserPoolTags() : new HashMap<>()));
+        node.set("AdminCreateUserConfig", objectMapper.valueToTree(p.getAdminCreateUserConfig() != null ? p.getAdminCreateUserConfig() : new HashMap<>()));
+        node.set("UserPoolAddOns", objectMapper.valueToTree(p.getUserPoolAddOns() != null ? p.getUserPoolAddOns() : new HashMap<>()));
+        node.set("UsernameConfiguration", objectMapper.valueToTree(p.getUsernameConfiguration() != null ? p.getUsernameConfiguration() : new HashMap<>()));
+        node.set("AccountRecoverySetting", objectMapper.valueToTree(p.getAccountRecoverySetting() != null ? p.getAccountRecoverySetting() : new HashMap<>()));
+        node.put("UserPoolTier", p.getUserPoolTier() != null ? p.getUserPoolTier() : "ESSENTIALS");
+
         return node;
     }
 
