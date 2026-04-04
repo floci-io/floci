@@ -12,6 +12,8 @@ import jakarta.inject.Inject;
 import java.util.Iterator;
 import java.util.Map;
 
+import static io.github.hectorvent.floci.services.stepfunctions.AslExecutor.FailStateException;
+
 import static com.dashjoin.jsonata.Jsonata.jsonata;
 
 /**
@@ -107,8 +109,17 @@ public class JsonataEvaluator {
         }
         if (template.isArray()) {
             ArrayNode resolved = objectMapper.createArrayNode();
-            for (JsonNode element : template) {
-                resolved.add(resolveTemplate(element, statesVar));
+            for (int i = 0; i < template.size(); i++) {
+                JsonNode element = template.get(i);
+                JsonNode value = resolveTemplate(element, statesVar);
+                // Per real AWS behavior: undefined array elements fail the execution.
+                // Unlike object fields (which are omitted), undefined in an array is a runtime error.
+                if (value == null || value.isNull() || value.isMissingNode()) {
+                    String expr = element.isTextual() ? element.asText() : element.toString();
+                    throw new FailStateException("States.Runtime",
+                            "The JSONata expression '" + expr + "' at array index " + i + " returned nothing (undefined).");
+                }
+                resolved.add(value);
             }
             return resolved;
         }
