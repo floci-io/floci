@@ -29,8 +29,12 @@ public class StepFunctionsService {
     private final AslExecutor aslExecutor;
     private final ObjectMapper objectMapper;
 
+    // Fields that are valid only in JSONPath mode and should be rejected in JSONata states.
+    // Note: "Result" is intentionally excluded — it is valid in JSONata Pass states (static pass-through value).
+    // Note: "Parameters" is intentionally excluded — AWS accepts it in JSONata states (ignored at execution time);
+    //       the JSONata equivalent is "Arguments".
     private static final Set<String> JSONPATH_ONLY_FIELDS = Set.of(
-            "InputPath", "OutputPath", "ResultPath", "ResultSelector", "Parameters", "Result", "ItemsPath");
+            "InputPath", "OutputPath", "ResultPath", "ResultSelector", "ItemsPath");
 
     @Inject
     public StepFunctionsService(StorageFactory storageFactory, RegionResolver regionResolver,

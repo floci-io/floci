@@ -492,6 +492,57 @@ class StepFunctionsDynamoDbIntegrationTest {
         assertEquals("200", result.path("Attributes").path("score").path("N").asText());
     }
 
+    // ──────────────── Optimized Integration: putItem + getItem ────────────────
+
+    @Test
+    @Order(71)
+    void optimized_putAndGetItem() throws Exception {
+        // Put via optimized integration
+        executeSfnOptimized("opt-put", "dynamodb:putItem", """
+                {
+                    "TableName": "%s",
+                    "Item": {
+                        "pk": {"S": "opt-get-test"},
+                        "sk": {"S": "row"},
+                        "value": {"S": "hello"}
+                    }
+                }
+                """.formatted(TABLE_NAME));
+
+        // Get via optimized integration — must return the item, not {}
+        String output = executeSfnOptimized("opt-get", "dynamodb:getItem", """
+                {
+                    "TableName": "%s",
+                    "Key": {
+                        "pk": {"S": "opt-get-test"},
+                        "sk": {"S": "row"}
+                    }
+                }
+                """.formatted(TABLE_NAME));
+
+        JsonNode result = mapper.readTree(output);
+        assertTrue(result.has("Item"), "Optimized getItem must return Item field");
+        assertEquals("hello", result.path("Item").path("value").path("S").asText());
+    }
+
+    @Test
+    @Order(72)
+    void optimized_getItem_notFound_returnsEmptyObject() throws Exception {
+        String output = executeSfnOptimized("opt-get-missing", "dynamodb:getItem", """
+                {
+                    "TableName": "%s",
+                    "Key": {
+                        "pk": {"S": "does-not-exist"},
+                        "sk": {"S": "nope"}
+                    }
+                }
+                """.formatted(TABLE_NAME));
+
+        JsonNode result = mapper.readTree(output);
+        // AWS returns {} (no Item field) when item does not exist
+        assertFalse(result.has("Item"), "Not-found getItem must return empty object (no Item field)");
+    }
+
     // ──────────────── Error Handling ────────────────
 
     @Test

@@ -227,6 +227,57 @@ class StepFunctionsJsonataIntegrationTest {
         assertTrue(output.contains("value"));
     }
 
+    @Test
+    void jsonataPassState_withResult_accepted() throws Exception {
+        // JSONata Pass states may use "Result" (static pass-through value) — must not be rejected at validation.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "SetResult",
+                    "States": {
+                        "SetResult": {
+                            "Type": "Pass",
+                            "Result": {"status": "ok", "code": 200},
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-result-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+        assertTrue(output.contains("ok"));
+        assertTrue(output.contains("200"));
+    }
+
+    @Test
+    void jsonataPassState_withParameters_accepted() throws Exception {
+        // JSONata states that include "Parameters" must be accepted (not validation-rejected).
+        // AWS allows Parameters in JSONata states even though it is a JSONPath concept;
+        // Floci ignores it at execution time, matching AWS behavior.
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "PrepareData",
+                    "States": {
+                        "PrepareData": {
+                            "Type": "Pass",
+                            "Parameters": {
+                                "created_at.$": "$$.Execution.StartTime"
+                            },
+                            "Output": {"processed": true},
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        // Should not throw InvalidDefinition — state machine must be created successfully.
+        String smArn = createStateMachine("jsonata-parameters-test", definition);
+        assertNotNull(smArn);
+    }
+
     // ──────────────── Helpers ────────────────
 
     private String createStateMachine(String name, String definition) {

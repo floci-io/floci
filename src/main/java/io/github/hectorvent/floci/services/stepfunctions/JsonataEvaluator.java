@@ -50,6 +50,16 @@ public class JsonataEvaluator {
     /**
      * Evaluate a single JSONata expression string with $states bound.
      * The expression may or may not have {% %} delimiters.
+     *
+     * <p><b>Known limitation — singleton sequence reduction:</b>
+     * AWS Step Functions does not apply JSONata's singleton sequence rule (a 1-element sequence
+     * is not unwrapped to its single element). dashjoin's JSONata implementation DOES apply this
+     * rule, so expressions that map over a 1-element array — e.g.
+     * {@code $states.result.Items.{"id": id}} — return a single object instead of a 1-element
+     * array when the array has exactly one element.
+     *
+     * <p>Workaround: wrap the expression in {@code [...]} to force array output, e.g.
+     * {@code [$states.result.Items.{"id": id}]}.
      */
     JsonNode evaluate(String expression, JsonNode statesVar) {
         String expr = isExpression(expression) ? unwrap(expression) : expression;
