@@ -312,7 +312,13 @@ public class AslExecutor {
         switch (operation) {
             case "putItem" -> {
                 JsonNode item = input.path("Item");
-                dynamoDbService.putItem(tableName, item, region);
+                String conditionExpr = input.has("ConditionExpression")
+                        ? input.get("ConditionExpression").asText() : null;
+                JsonNode exprAttrNames = input.has("ExpressionAttributeNames")
+                        ? input.get("ExpressionAttributeNames") : null;
+                JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
+                        ? input.get("ExpressionAttributeValues") : null;
+                dynamoDbService.putItem(tableName, item, conditionExpr, exprAttrNames, exprAttrValues, region);
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
@@ -326,7 +332,13 @@ public class AslExecutor {
             }
             case "deleteItem" -> {
                 JsonNode key = input.path("Key");
-                dynamoDbService.deleteItem(tableName, key, region);
+                String conditionExpr = input.has("ConditionExpression")
+                        ? input.get("ConditionExpression").asText() : null;
+                JsonNode exprAttrNames = input.has("ExpressionAttributeNames")
+                        ? input.get("ExpressionAttributeNames") : null;
+                JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
+                        ? input.get("ExpressionAttributeValues") : null;
+                dynamoDbService.deleteItem(tableName, key, conditionExpr, exprAttrNames, exprAttrValues, region);
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {
@@ -808,6 +820,9 @@ public class AslExecutor {
         if (path == null || "$".equals(path)) {
             return root;
         }
+        if (path.startsWith("States.")) {
+            return evaluateIntrinsic(path, root);
+        }
         if (!path.startsWith("$.")) {
             return NullNode.getInstance();
         }
@@ -829,6 +844,156 @@ public class AslExecutor {
             }
         }
         return current.isMissingNode() ? NullNode.getInstance() : current;
+    }
+
+    /**
+     * Evaluate a JSONPath-mode intrinsic function (States.*).
+     * Supports: States.StringToJson, States.JsonToString, States.Format,
+     *           States.Array, States.ArrayLength, States.MathAdd, States.UUID.
+     * Throws FailStateException("States.Runtime") for unrecognized functions.
+     */
+    private JsonNode evaluateIntrinsic(String expr, JsonNode root) {
+        int parenOpen = expr.indexOf('(');
+        int parenClose = expr.lastIndexOf(')');
+        if (parenOpen < 0 || parenClose < 0) {
+            throw new FailStateException("States.Runtime", "Malformed intrinsic function: " + expr);
+        }
+        String fnName = expr.substring(0, parenOpen).trim();
+        String argsStr = expr.substring(parenOpen + 1, parenClose).trim();
+
+        return switch (fnName) {
+            case "States.StringToJson" -> {
+                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                try {
+                    yield objectMapper.readTree(arg.asText());
+                } catch (Exception e) {
+                    throw new FailStateException("States.Runtime",
+                            "States.StringToJson could not parse: " + arg.asText());
+                }
+            }
+            case "States.JsonToString" -> {
+                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                try {
+                    yield objectMapper.getNodeFactory().textNode(objectMapper.writeValueAsString(arg));
+                } catch (Exception e) {
+                    throw new FailStateException("States.Runtime", "States.JsonToString failed: " + e.getMessage());
+                }
+            }
+            case "States.Format" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.isEmpty()) {
+                    throw new FailStateException("States.Runtime", "States.Format requires at least one argument");
+                }
+                String template = unquoteString(parts.get(0));
+                StringBuilder sb = new StringBuilder();
+                int argIdx = 1;
+                for (int i = 0; i < template.length(); i++) {
+                    if (i + 1 < template.length() && template.charAt(i) == '{' && template.charAt(i + 1) == '}') {
+                        if (argIdx >= parts.size()) {
+                            throw new FailStateException("States.Runtime", "States.Format: not enough arguments");
+                        }
+                        JsonNode argVal = resolveIntrinsicArg(parts.get(argIdx++).trim(), root);
+                        sb.append(argVal.isTextual() ? argVal.asText() : argVal.toString());
+                        i++; // skip '}'
+                    } else {
+                        sb.append(template.charAt(i));
+                    }
+                }
+                yield objectMapper.getNodeFactory().textNode(sb.toString());
+            }
+            case "States.Array" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                ArrayNode arr = objectMapper.createArrayNode();
+                for (String part : parts) {
+                    arr.add(resolveIntrinsicArg(part.trim(), root));
+                }
+                yield arr;
+            }
+            case "States.ArrayLength" -> {
+                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                if (!arg.isArray()) {
+                    throw new FailStateException("States.Runtime", "States.ArrayLength requires an array");
+                }
+                yield objectMapper.getNodeFactory().numberNode(arg.size());
+            }
+            case "States.MathAdd" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2) {
+                    throw new FailStateException("States.Runtime", "States.MathAdd requires exactly 2 arguments");
+                }
+                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
+                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
+                yield objectMapper.getNodeFactory().numberNode(a.asLong() + b.asLong());
+            }
+            case "States.UUID" -> {
+                yield objectMapper.getNodeFactory().textNode(java.util.UUID.randomUUID().toString());
+            }
+            default -> throw new FailStateException("States.Runtime",
+                    "Unsupported intrinsic function: " + fnName);
+        };
+    }
+
+    /**
+     * Resolve a single intrinsic argument: either a $.path reference, a quoted string literal,
+     * or a numeric literal.
+     */
+    private JsonNode resolveIntrinsicArg(String arg, JsonNode root) {
+        arg = arg.trim();
+        if (arg.startsWith("$.") || "$".equals(arg)) {
+            return resolvePath(arg, root);
+        }
+        if (arg.startsWith("'") && arg.endsWith("'")) {
+            return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+        }
+        if (arg.startsWith("\"") && arg.endsWith("\"")) {
+            return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+        }
+        try {
+            return objectMapper.getNodeFactory().numberNode(Long.parseLong(arg));
+        } catch (NumberFormatException e1) {
+            try {
+                return objectMapper.getNodeFactory().numberNode(Double.parseDouble(arg));
+            } catch (NumberFormatException e2) {
+                // fall through: treat as bare path
+                return resolvePath(arg, root);
+            }
+        }
+    }
+
+    /**
+     * Split a comma-separated intrinsic args string, respecting nested parentheses and quoted strings.
+     */
+    private List<String> splitIntrinsicArgs(String argsStr) {
+        List<String> result = new ArrayList<>();
+        int depth = 0;
+        boolean inSingleQuote = false;
+        boolean inDoubleQuote = false;
+        int start = 0;
+        for (int i = 0; i < argsStr.length(); i++) {
+            char c = argsStr.charAt(i);
+            if (c == '\'' && !inDoubleQuote) inSingleQuote = !inSingleQuote;
+            else if (c == '"' && !inSingleQuote) inDoubleQuote = !inDoubleQuote;
+            else if (!inSingleQuote && !inDoubleQuote) {
+                if (c == '(') depth++;
+                else if (c == ')') depth--;
+                else if (c == ',' && depth == 0) {
+                    result.add(argsStr.substring(start, i).trim());
+                    start = i + 1;
+                }
+            }
+        }
+        if (start < argsStr.length()) {
+            result.add(argsStr.substring(start).trim());
+        }
+        return result;
+    }
+
+    private String unquoteString(String s) {
+        s = s.trim();
+        if ((s.startsWith("'") && s.endsWith("'")) || (s.startsWith("\"") && s.endsWith("\""))) {
+            return s.substring(1, s.length() - 1);
+        }
+        return s;
     }
 
     private void setPath(ObjectNode root, String path, JsonNode value) {
