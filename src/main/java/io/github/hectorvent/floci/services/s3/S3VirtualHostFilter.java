@@ -16,6 +16,21 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         String host = requestContext.getHeaderString("Host");
         if (host == null) return;
 
+        // Do not hijack requests meant for other AWS services
+        String auth = requestContext.getHeaderString("Authorization");
+        if (auth != null && auth.contains("Credential=") && !auth.contains("/s3/aws4_request")) {
+            return;
+        }
+
+        // S3 does not use these content types for bucket/object operations, 
+        // but other AWS services (AwsQuery, JSON protocols) do.
+        String contentType = requestContext.getHeaderString("Content-Type");
+        if (contentType != null && (
+                contentType.startsWith("application/x-www-form-urlencoded") ||
+                contentType.startsWith("application/x-amz-json-"))) {
+            return;
+        }
+
         String bucket = extractBucket(host);
         if (bucket == null) return;
 
