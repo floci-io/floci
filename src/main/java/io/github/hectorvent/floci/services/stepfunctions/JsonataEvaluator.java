@@ -96,7 +96,12 @@ public class JsonataEvaluator {
             Iterator<Map.Entry<String, JsonNode>> fields = template.fields();
             while (fields.hasNext()) {
                 Map.Entry<String, JsonNode> entry = fields.next();
-                resolved.set(entry.getKey(), resolveTemplate(entry.getValue(), statesVar));
+                JsonNode value = resolveTemplate(entry.getValue(), statesVar);
+                // Per JSONata spec: undefined (null) values are omitted from object output,
+                // matching real AWS Step Functions behavior.
+                if (value != null && !value.isNull() && !value.isMissingNode()) {
+                    resolved.set(entry.getKey(), value);
+                }
             }
             return resolved;
         }
