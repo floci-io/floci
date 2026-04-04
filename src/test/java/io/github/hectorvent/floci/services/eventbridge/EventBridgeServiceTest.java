@@ -8,6 +8,11 @@ import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -15,21 +20,30 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 class EventBridgeServiceTest {
 
     private static final String REGION = "us-east-1";
 
     private EventBridgeService service;
+    private LambdaService lambdaServiceMock;
+    private SqsService sqsServiceMock;
+    private SnsService snsServiceMock;
 
     @BeforeEach
     void setUp() {
+        snsServiceMock = mock(SnsService.class);
+        sqsServiceMock = mock(SqsService.class);
+        lambdaServiceMock = mock(LambdaService.class);
         service = new EventBridgeService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
-                null, null, null,
+                lambdaServiceMock, sqsServiceMock, snsServiceMock,
                 new ObjectMapper()
         );
     }
@@ -313,5 +327,75 @@ class EventBridgeServiceTest {
 
         EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
         assertEquals(1, result.failedCount());
+    }
+
+    @Test
+    void putEventsShouldInvokeLambdaTarget() {
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                "A test rule", null, null, REGION);
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:lambda:us-east-1:000000000000:function:my-function");
+        service.putTargets("my-rule", null, List.of(target), "us-east-1");
+
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}", "Resources", new String[] {"arn:123456789012:anything:something/id"})
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+        assertEquals(0, result.failedCount());
+        assertEquals(1, result.entries().size());
+        assertNotNull(result.entries().getFirst().get("EventId"));
+        String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"my.app\"," +
+                "\"detail-type\":\"Test\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.[0-9]{9}Z\"," +
+                "\"region\":\"us-east-1\",\"resources\":\\[],\"detail\":\\{},\"event-bus-name\":\"default\"}";
+        verify(lambdaServiceMock).invoke(eq(REGION), eq("my-function"),
+                argThat(bytes -> new String(bytes).matches(expectedMessage)), eq(InvocationType.Event));
+    }
+
+    @Test
+    void putEventsShouldInvokeSqsTarget() {
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                "A test rule", null, null, REGION);
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:my-queue");
+        service.putTargets("my-rule", null, List.of(target), "us-east-1");
+
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}", "Resources", new String[] {"arn:123456789012:anything:something/id"})
+        );
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+        assertEquals(0, result.failedCount());
+        assertEquals(1, result.entries().size());
+        assertNotNull(result.entries().getFirst().get("EventId"));
+        String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"my.app\"," +
+                "\"detail-type\":\"Test\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.[0-9]{9}Z\"," +
+                "\"region\":\"us-east-1\",\"resources\":\\[],\"detail\":\\{},\"event-bus-name\":\"default\"}";
+        verify(sqsServiceMock).sendMessage(eq("http://localhost:4566/000000000000/my-queue"), matches(expectedMessage), eq(0));
+    }
+
+    @Test
+    void putEventsShouldInvokeSnsTarget() {
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                "A test rule", null, null, REGION);
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sns:us-east-1:000000000000:my-topic");
+        service.putTargets("my-rule", null, List.of(target), "us-east-1");
+
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}", "Resources", new String[] {"arn:123456789012:anything:something/id"})
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, REGION);
+        assertEquals(0, result.failedCount());
+        assertEquals(1, result.entries().size());
+        assertNotNull(result.entries().getFirst().get("EventId"));
+
+        String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"my.app\"," +
+                "\"detail-type\":\"Test\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.[0-9]{9}Z\"," +
+                "\"region\":\"us-east-1\",\"resources\":\\[],\"detail\":\\{},\"event-bus-name\":\"default\"}";
+        verify(snsServiceMock).publish(eq("arn:aws:sns:us-east-1:000000000000:my-topic"), isNull(), matches(expectedMessage), eq("EventBridge"), eq(REGION));
     }
 }
