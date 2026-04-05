@@ -15,6 +15,7 @@ public final class AwsNamespaces {
     public static final String CW  = "http://monitoring.amazonaws.com/doc/2010-08-01/";
     public static final String S3  = "http://s3.amazonaws.com/doc/2006-03-01/";
     public static final String SES = "http://ses.amazonaws.com/doc/2010-12-01/";
+    public static final String EC2 = "http://ec2.amazonaws.com/doc/2016-11-15/";
 
     private AwsNamespaces() {}
 }

@@ -190,6 +190,7 @@ public interface EmulatorConfig {
         AcmServiceConfig acm();
         SesServiceConfig ses();
         OpenSearchServiceConfig opensearch();
+        Ec2ServiceConfig ec2();
     }
 
     interface SsmServiceConfig {
@@ -403,6 +404,11 @@ public interface EmulatorConfig {
 
         /** Docker network to attach Lambda containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
+    }
+
+    interface Ec2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface InitHooksConfig {

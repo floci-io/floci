@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
+import io.github.hectorvent.floci.services.ec2.Ec2QueryHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsQueryHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
 import io.github.hectorvent.floci.services.elasticache.ElastiCacheQueryHandler;
@@ -101,6 +102,29 @@ public class AwsQueryController {
             "GetAccountSummary", "GetAccountAuthorizationDetails"
     );
 
+    private static final Set<String> EC2_ACTIONS = Set.of(
+            "RunInstances", "DescribeInstances", "TerminateInstances", "StartInstances", "StopInstances",
+            "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
+            "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
+            "CreateDefaultVpc", "AssociateVpcCidrBlock", "DisassociateVpcCidrBlock",
+            "CreateSubnet", "DescribeSubnets", "DeleteSubnet", "ModifySubnetAttribute",
+            "CreateSecurityGroup", "DescribeSecurityGroups", "DeleteSecurityGroup",
+            "AuthorizeSecurityGroupIngress", "AuthorizeSecurityGroupEgress",
+            "RevokeSecurityGroupIngress", "RevokeSecurityGroupEgress",
+            "DescribeSecurityGroupRules", "ModifySecurityGroupRules",
+            "UpdateSecurityGroupRuleDescriptionsIngress", "UpdateSecurityGroupRuleDescriptionsEgress",
+            "CreateKeyPair", "DescribeKeyPairs", "DeleteKeyPair", "ImportKeyPair",
+            "DescribeImages",
+            "CreateTags", "DeleteTags", "DescribeTags",
+            "CreateInternetGateway", "DescribeInternetGateways", "DeleteInternetGateway",
+            "AttachInternetGateway", "DetachInternetGateway",
+            "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
+            "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
+            "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
+            "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
+            "DescribeInstanceTypes"
+    );
+
     private final CloudFormationQueryHandler cloudFormationQueryHandler;
     private final ElastiCacheQueryHandler elastiCacheQueryHandler;
     private final RdsQueryHandler rdsQueryHandler;
@@ -111,6 +135,7 @@ public class AwsQueryController {
     private final StsQueryHandler stsQueryHandler;
     private final CloudWatchMetricsQueryHandler cloudWatchMetricsQueryHandler;
     private final CognitoJsonHandler cognitoJsonHandler;
+    private final Ec2QueryHandler ec2QueryHandler;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -122,6 +147,7 @@ public class AwsQueryController {
                               IamQueryHandler iamQueryHandler, StsQueryHandler stsQueryHandler,
                               CloudWatchMetricsQueryHandler cloudWatchMetricsQueryHandler,
                               CognitoJsonHandler cognitoJsonHandler,
+                              Ec2QueryHandler ec2QueryHandler,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
         this.elastiCacheQueryHandler = elastiCacheQueryHandler;
@@ -133,6 +159,7 @@ public class AwsQueryController {
         this.stsQueryHandler = stsQueryHandler;
         this.cloudWatchMetricsQueryHandler = cloudWatchMetricsQueryHandler;
         this.cognitoJsonHandler = cognitoJsonHandler;
+        this.ec2QueryHandler = ec2QueryHandler;
         this.regionResolver = regionResolver;
     }
 
@@ -165,6 +192,7 @@ public class AwsQueryController {
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);
             case "cognito-idp" -> handleCognitoQuery(action, formParams, region);
+            case "ec2" -> ec2QueryHandler.handle(action, formParams, region);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
@@ -239,7 +267,7 @@ public class AwsQueryController {
             "AdminAddUserToGroup", "AdminRemoveUserFromGroup", "AdminListGroupsForUser"
     );
 
-    private static final Set<String> QUERY_PROTOCOL_SERVICES = Set.of("sqs", "sns", "iam", "sts", "elasticache", "rds", "monitoring", "cloudformation", "email", "cognito-idp");
+    private static final Set<String> QUERY_PROTOCOL_SERVICES = Set.of("sqs", "sns", "iam", "sts", "elasticache", "rds", "monitoring", "cloudformation", "email", "cognito-idp", "ec2");
 
     private String resolveService(String authorization, String action) {
         if (authorization != null && !authorization.isEmpty()) {
@@ -281,6 +309,9 @@ public class AwsQueryController {
         }
         if (COGNITO_ACTIONS.contains(action)) {
             return "cognito-idp";
+        }
+        if (EC2_ACTIONS.contains(action)) {
+            return "ec2";
         }
         // SQS actions are numerous and not enumerated — fall back to sqs only for
         // requests that arrived without an Authorization header (raw/test clients)
