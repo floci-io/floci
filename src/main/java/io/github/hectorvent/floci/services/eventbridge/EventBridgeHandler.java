@@ -246,6 +246,9 @@ public class EventBridgeHandler {
                 if (!entryNode.path("Detail").isMissingNode()) {
                     entry.put("Detail", entryNode.path("Detail").asText(null));
                 }
+                if (!entryNode.path("Resources").isMissingNode()) {
+                    entry.put("Resources", entryNode.path("Resources"));
+                }
                 entries.add(entry);
             }
         }

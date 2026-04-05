@@ -4,12 +4,11 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.RestAssured;
 import io.restassured.config.EncoderConfig;
 import io.restassured.http.ContentType;
-import io.restassured.path.json.JsonPath;
 import org.junit.jupiter.api.*;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
-import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.matchesPattern;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -97,7 +96,7 @@ class EventBridgeIntegrationTest {
 
         String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"com.mycompany.myapp\"," +
                 "\"detail-type\":\"myDetailType\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.[0-9]{9}Z\"," +
-                "\"region\":\"us-east-1\",\"resources\":\\[],\"detail\":\\{\"key1\":\"value1\",\"key2\":\"value2\"},\"event-bus-name\":\"default\"}";
+                "\"region\":\"us-east-1\",\"resources\":\\[\"resource1\",\"resource2\"],\"detail\":\\{\"key1\":\"value1\",\"key2\":\"value2\"},\"event-bus-name\":\"default\"}";
 
         given()
             .contentType(SQS_CONTENT_TYPE)
