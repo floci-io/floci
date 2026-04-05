@@ -12,6 +12,7 @@ data/
 .zed/settings.json
 .DS_Store
 .zed/settings.json
+.kiro/
 
 CLAUDE.md
 GEMINI.md

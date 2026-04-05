@@ -9,10 +9,6 @@ import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
-import io.github.hectorvent.floci.services.lambda.LambdaService;
-import io.github.hectorvent.floci.services.lambda.model.InvocationType;
-import io.github.hectorvent.floci.services.sns.SnsService;
-import io.github.hectorvent.floci.services.sqs.SqsService;
 
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -31,22 +27,19 @@ class EventBridgeServiceTest {
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private EventBridgeService service;
-    private LambdaService lambdaServiceMock;
-    private SqsService sqsServiceMock;
-    private SnsService snsServiceMock;
+    private EventBridgeInvoker invokerMock;
 
     @BeforeEach
     void setUp() {
-        snsServiceMock = mock(SnsService.class);
-        sqsServiceMock = mock(SqsService.class);
-        lambdaServiceMock = mock(LambdaService.class);
+        invokerMock = mock(EventBridgeInvoker.class);
         service = new EventBridgeService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000"),
-                lambdaServiceMock, sqsServiceMock, snsServiceMock,
-                new ObjectMapper()
+                new ObjectMapper(),
+                null,
+                invokerMock
         );
     }
 
@@ -364,11 +357,7 @@ class EventBridgeServiceTest {
         assertEquals(0, result.failedCount());
         assertEquals(1, result.entries().size());
         assertNotNull(result.entries().getFirst().get("EventId"));
-        String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"my.app\"," +
-                "\"detail-type\":\"Test\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.[0-9]{9}Z\"," +
-                "\"region\":\"us-east-1\",\"resources\":\\[\"resource1\"],\"detail\":\\{},\"event-bus-name\":\"default\"}";
-        verify(lambdaServiceMock).invoke(eq(REGION), eq("my-function"),
-                argThat(bytes -> new String(bytes).matches(expectedMessage)), eq(InvocationType.Event));
+        verify(invokerMock).invokeTarget(eq(target), any(String.class), eq(REGION));
     }
 
     @Test
@@ -389,10 +378,7 @@ class EventBridgeServiceTest {
         assertEquals(0, result.failedCount());
         assertEquals(1, result.entries().size());
         assertNotNull(result.entries().getFirst().get("EventId"));
-        String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"my.app\"," +
-                "\"detail-type\":\"Test\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.[0-9]{9}Z\"," +
-                "\"region\":\"us-east-1\",\"resources\":\\[\"resource1\"],\"detail\":\\{},\"event-bus-name\":\"default\"}";
-        verify(sqsServiceMock).sendMessage(eq("http://localhost:4566/000000000000/my-queue"), matches(expectedMessage), eq(0));
+        verify(invokerMock).invokeTarget(eq(target), any(String.class), eq(REGION));
     }
 
     @Test
@@ -413,10 +399,6 @@ class EventBridgeServiceTest {
         assertEquals(0, result.failedCount());
         assertEquals(1, result.entries().size());
         assertNotNull(result.entries().getFirst().get("EventId"));
-
-        String expectedMessage = "\\{\"version\":\"0\",\"id\":\"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\",\"source\":\"my.app\"," +
-                "\"detail-type\":\"Test\",\"account\":\"000000000000\",\"time\":\"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}.[0-9]{9}Z\"," +
-                "\"region\":\"us-east-1\",\"resources\":\\[\"resource1\"],\"detail\":\\{},\"event-bus-name\":\"default\"}";
-        verify(snsServiceMock).publish(eq("arn:aws:sns:us-east-1:000000000000:my-topic"), isNull(), matches(expectedMessage), eq("EventBridge"), eq(REGION));
+        verify(invokerMock).invokeTarget(eq(target), any(String.class), eq(REGION));
     }
 }

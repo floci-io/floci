@@ -61,6 +61,20 @@
             <artifactId>jackson-dataformat-yaml</artifactId>
         </dependency>
 
+        <!-- Vert.x for per-container Lambda Runtime API servers -->
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-vertx</artifactId>
+        </dependency>
+
+        <!-- cron-utils for EventBridge schedule expression parsing -->
+        <dependency>
+            <groupId>com.cronutils</groupId>
+            <artifactId>cron-utils</artifactId>
+            <version>9.2.1</version>
+        </dependency>
+
+
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>
             <groupId>com.github.docker-java</groupId>

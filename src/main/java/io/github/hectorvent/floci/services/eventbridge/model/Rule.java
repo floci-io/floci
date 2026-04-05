@@ -51,4 +51,10 @@ public class Rule {
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+
+    public String getRegion() {
+        if (arn == null) return null;
+        String[] parts = arn.split(":");
+        return parts.length >= 4 && !parts[3].isEmpty() ? parts[3] : null;
+    }
 }
