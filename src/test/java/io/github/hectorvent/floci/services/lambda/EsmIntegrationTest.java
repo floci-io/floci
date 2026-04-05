@@ -93,6 +93,40 @@ class EsmIntegrationTest {
 
     @Test
     @Order(4)
+    void createEventSourceMappingWithReportBatchItemFailures() {
+        String uuid = given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "BatchSize": 3,
+                    "FunctionResponseTypes": ["ReportBatchItemFailures"]
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(202)
+            .body("UUID", notNullValue())
+            .body("FunctionResponseTypes", hasItem("ReportBatchItemFailures"))
+        .extract()
+            .path("UUID");
+
+        // Verify it round-trips through GET
+        given()
+        .when()
+            .get(LAMBDA_BASE + "/event-source-mappings/" + uuid)
+        .then()
+            .statusCode(200)
+            .body("FunctionResponseTypes", hasItem("ReportBatchItemFailures"));
+
+        // Clean up
+        given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    @Test
+    @Order(5)
     void createEventSourceMappingForNonExistentFunction() {
         given()
             .contentType("application/json")
@@ -109,7 +143,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void createEventSourceMappingUnsupportedArn() {
         given()
             .contentType("application/json")
@@ -126,7 +160,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(7)
     void getEventSourceMapping() {
         given()
         .when()
@@ -140,7 +174,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void listEventSourceMappings() {
         given()
         .when()
@@ -152,7 +186,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void listEventSourceMappingsByFunction() {
         given()
             .queryParam("FunctionName", FUNCTION_ARN)
@@ -164,7 +198,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void updateEventSourceMapping() {
         given()
             .contentType("application/json")
@@ -178,7 +212,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void disableEventSourceMapping() {
         given()
             .contentType("application/json")
@@ -191,7 +225,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void getEventSourceMappingNotFound() {
         given()
         .when()
@@ -201,7 +235,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(13)
     void deleteEventSourceMapping() {
         given()
         .when()
@@ -212,7 +246,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(14)
     void deleteEventSourceMappingNotFound() {
         given()
         .when()

@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.lambda.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -20,6 +22,7 @@ public class EventSourceMapping {
     private int batchSize = 10;
     private String state = "Enabled";
     private long lastModified;
+    private List<String> functionResponseTypes = new ArrayList<>();
     private Map<String, String> shardSequenceNumbers = new HashMap<>();
 
     public EventSourceMapping() {
@@ -54,6 +57,15 @@ public class EventSourceMapping {
 
     public long getLastModified() { return lastModified; }
     public void setLastModified(long lastModified) { this.lastModified = lastModified; }
+
+    public List<String> getFunctionResponseTypes() { return functionResponseTypes; }
+    public void setFunctionResponseTypes(List<String> functionResponseTypes) {
+        this.functionResponseTypes = functionResponseTypes != null ? functionResponseTypes : new ArrayList<>();
+    }
+
+    public boolean isReportBatchItemFailures() {
+        return functionResponseTypes != null && functionResponseTypes.contains("ReportBatchItemFailures");
+    }
 
     public Map<String, String> getShardSequenceNumbers() { return shardSequenceNumbers; }
     public void setShardSequenceNumbers(Map<String, String> shardSequenceNumbers) {

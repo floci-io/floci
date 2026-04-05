@@ -249,6 +249,10 @@ public class LambdaController {
         node.put("BatchSize", esm.getBatchSize());
         node.put("State", esm.getState());
         node.put("LastModified", (double) esm.getLastModified() / 1000.0);
+        ArrayNode responseTypes = node.putArray("FunctionResponseTypes");
+        if (esm.getFunctionResponseTypes() != null) {
+            esm.getFunctionResponseTypes().forEach(responseTypes::add);
+        }
         @SuppressWarnings("unchecked")
         Map<String, Object> result = objectMapper.convertValue(node, Map.class);
         return result;

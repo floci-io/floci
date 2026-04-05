@@ -23,6 +23,7 @@ import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -262,6 +263,11 @@ public class LambdaService {
         int batchSize = toInt(request.get("BatchSize"), 10);
         boolean enabled = !Boolean.FALSE.equals(request.get("Enabled"));
 
+        @SuppressWarnings("unchecked")
+        List<String> functionResponseTypes = request.get("FunctionResponseTypes") instanceof List
+                ? (List<String>) request.get("FunctionResponseTypes")
+                : new ArrayList<>();
+
         String queueUrl = eventSourceArn.contains(":sqs:") ? AwsArnUtils.arnToQueueUrl(eventSourceArn, config.effectiveBaseUrl()) : null;
 
         EventSourceMapping esm = new EventSourceMapping();
@@ -274,6 +280,7 @@ public class LambdaService {
         esm.setBatchSize(batchSize);
         esm.setEnabled(enabled);
         esm.setState(enabled ? "Enabled" : "Disabled");
+        esm.setFunctionResponseTypes(functionResponseTypes);
         esm.setLastModified(System.currentTimeMillis());
 
         esmStore.save(esm);
