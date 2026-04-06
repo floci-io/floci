@@ -523,8 +523,202 @@ class DynamoDbIntegrationTest {
             .body("Item", nullValue());
     }
 
+    // --- UpdateTable GSI tests (separate table to avoid key schema conflicts) ---
+
     @Test
     @Order(19)
+    void createTableForGsiTests() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "GsiTestTable",
+                    "KeySchema": [
+                        {"AttributeName": "pk", "KeyType": "HASH"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.TableName", equalTo("GsiTestTable"))
+            .body("TableDescription.GlobalSecondaryIndexes", nullValue());
+    }
+
+    @Test
+    @Order(20)
+    void updateTableAddGsi() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "GsiTestTable",
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "gsiPk", "AttributeType": "S"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"}
+                    ],
+                    "GlobalSecondaryIndexUpdates": [
+                        {
+                            "Create": {
+                                "IndexName": "TestGsi",
+                                "KeySchema": [
+                                    {"AttributeName": "gsiPk", "KeyType": "HASH"},
+                                    {"AttributeName": "gsiSk", "KeyType": "RANGE"}
+                                ],
+                                "Projection": {"ProjectionType": "ALL"}
+                            }
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.GlobalSecondaryIndexes.size()", equalTo(1))
+            .body("TableDescription.GlobalSecondaryIndexes[0].IndexName", equalTo("TestGsi"))
+            .body("TableDescription.GlobalSecondaryIndexes[0].IndexStatus", equalTo("ACTIVE"))
+            .body("TableDescription.GlobalSecondaryIndexes[0].KeySchema.size()", equalTo(2))
+            .body("TableDescription.GlobalSecondaryIndexes[0].Projection.ProjectionType", equalTo("ALL"));
+    }
+
+    @Test
+    @Order(21)
+    void describeTableReturnsGsi() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "GsiTestTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.GlobalSecondaryIndexes.size()", equalTo(1))
+            .body("Table.GlobalSecondaryIndexes[0].IndexName", equalTo("TestGsi"))
+            .body("Table.GlobalSecondaryIndexes[0].IndexStatus", equalTo("ACTIVE"))
+            .body("Table.GlobalSecondaryIndexes[0].IndexArn", containsString("/index/TestGsi"))
+            .body("Table.AttributeDefinitions.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(22)
+    void updateTableAddGsiWithKeysOnlyProjection() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "GsiTestTable",
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "gsiPk", "AttributeType": "S"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"},
+                        {"AttributeName": "owner", "AttributeType": "S"}
+                    ],
+                    "GlobalSecondaryIndexUpdates": [
+                        {
+                            "Create": {
+                                "IndexName": "OwnerIndex",
+                                "KeySchema": [
+                                    {"AttributeName": "owner", "KeyType": "HASH"},
+                                    {"AttributeName": "pk", "KeyType": "RANGE"}
+                                ],
+                                "Projection": {"ProjectionType": "KEYS_ONLY"}
+                            }
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.GlobalSecondaryIndexes.size()", equalTo(2))
+            .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndex' }.IndexStatus", equalTo("ACTIVE"))
+            .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndex' }.Projection.ProjectionType", equalTo("KEYS_ONLY"));
+    }
+
+    @Test
+    @Order(23)
+    void updateTableDeleteGsi() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "GsiTestTable",
+                    "GlobalSecondaryIndexUpdates": [
+                        {
+                            "Delete": {
+                                "IndexName": "TestGsi"
+                            }
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.GlobalSecondaryIndexes.size()", equalTo(1))
+            .body("TableDescription.GlobalSecondaryIndexes[0].IndexName", equalTo("OwnerIndex"));
+    }
+
+    @Test
+    @Order(24)
+    void updateTableDeleteAllGsis() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "GsiTestTable",
+                    "GlobalSecondaryIndexUpdates": [
+                        {
+                            "Delete": {
+                                "IndexName": "OwnerIndex"
+                            }
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.GlobalSecondaryIndexes", nullValue());
+    }
+
+    @Test
+    @Order(25)
+    void describeTableAfterAllGsisDeletion() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "GsiTestTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.GlobalSecondaryIndexes", nullValue());
+    }
+
+    // --- Cleanup ---
+
+    @Test
+    @Order(26)
     void deleteTable() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")

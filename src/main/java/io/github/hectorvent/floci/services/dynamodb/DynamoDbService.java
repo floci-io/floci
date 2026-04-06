@@ -726,6 +726,12 @@ public class DynamoDbService {
     // --- UpdateTable ---
 
     public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity, String region) {
+        return updateTable(tableName, readCapacity, writeCapacity, List.of(), List.of(), List.of(), region);
+    }
+
+    public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity,
+                                        List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
+                                        List<AttributeDefinition> newAttrDefs, String region) {
         String storageKey = regionKey(region, tableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(tableName));
@@ -736,6 +742,27 @@ public class DynamoDbService {
         if (writeCapacity != null) {
             table.getProvisionedThroughput().setWriteCapacityUnits(writeCapacity);
         }
+
+        for (String indexName : gsiDeletes) {
+            table.getGlobalSecondaryIndexes().removeIf(g -> indexName.equals(g.getIndexName()));
+        }
+
+        for (GlobalSecondaryIndex gsi : gsiCreates) {
+            gsi.setIndexArn(table.getTableArn() + "/index/" + gsi.getIndexName());
+            table.getGlobalSecondaryIndexes().add(gsi);
+        }
+
+        if (newAttrDefs != null && !newAttrDefs.isEmpty()) {
+            List<AttributeDefinition> existing = table.getAttributeDefinitions();
+            for (AttributeDefinition newDef : newAttrDefs) {
+                boolean found = existing.stream()
+                        .anyMatch(e -> e.getAttributeName().equals(newDef.getAttributeName()));
+                if (!found) {
+                    existing.add(newDef);
+                }
+            }
+        }
+
         tableStore.put(storageKey, table);
         LOG.infov("Updated table: {0} in region {1}", tableName, region);
         return table;
