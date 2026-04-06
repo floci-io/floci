@@ -1,3 +1,29 @@
+# [1.3.0](https://github.com/floci-io/floci/compare/1.2.0...1.3.0) (2026-04-06)
+
+
+### Bug Fixes
+
+* compilation issue ([10edd2b](https://github.com/floci-io/floci/commit/10edd2bc38523d4f55226b653696f843129a38c7))
+* fall back to Docker bridge IP when host.docker.internal is unresolvable ([#216](https://github.com/floci-io/floci/issues/216)) ([b973b70](https://github.com/floci-io/floci/commit/b973b7060d4cadbf54b6c4bac4f28c69bbf5cdab))
+* **lambda:** copy code to TASK_DIR for provided runtimes ([#206](https://github.com/floci-io/floci/issues/206)) ([0de7931](https://github.com/floci-io/floci/commit/0de793148063f37973f876bbcbe9f76a1fcdead0))
+* **lambda:** honour ReportBatchItemFailures in SQS ESM ([#208](https://github.com/floci-io/floci/issues/208)) ([55b2f29](https://github.com/floci-io/floci/commit/55b2f292cc879be814a2e3e3675255ecf382f618))
+* **lambda:** support Code.S3Bucket + Code.S3Key in CreateFunction and UpdateFunctionCode ([#219](https://github.com/floci-io/floci/issues/219)) ([d4ebc8e](https://github.com/floci-io/floci/commit/d4ebc8e82087a57dfd86a7bcff27ef8739f12b70))
+* merge branch 'main' into release/1.x ([82d3184](https://github.com/floci-io/floci/commit/82d3184498796a4f177a6af0bf0fffb066f245ab))
+* **ses:** add missing Result element to query protocol responses ([#207](https://github.com/floci-io/floci/issues/207)) ([80e2054](https://github.com/floci-io/floci/commit/80e205452b7966c5bb5dcda66d1a5f4159f5161a))
+* **sns:** make Subscribe idempotent for same topic+protocol+endpoint ([#185](https://github.com/floci-io/floci/issues/185)) ([858775c](https://github.com/floci-io/floci/commit/858775c38edb23f8e79b1b121640549a10c16ebb))
+
+
+### Features
+
+* add GlobalSecondaryIndexUpdates support in DynamoDB UpdateTable ([#222](https://github.com/floci-io/floci/issues/222)) ([4e6e953](https://github.com/floci-io/floci/commit/4e6e9533b5983530a9b9bc000abf9349e620dcb6)), closes [#221](https://github.com/floci-io/floci/issues/221)
+* add scheduled rules support for EventBridge Rules ([#217](https://github.com/floci-io/floci/issues/217)) ([e8c6440](https://github.com/floci-io/floci/commit/e8c64404899f011493d9ce477ce5db306d76b76f))
+* **dynamodb:** add ScanFilter support for Scan operation ([#175](https://github.com/floci-io/floci/issues/175)) ([fe4ffd1](https://github.com/floci-io/floci/commit/fe4ffd1ee4f76bff685fd16162327b69f11da3d7))
+* **ec2:** add EC2 service with 61 operations, integration tests, and docs ([#213](https://github.com/floci-io/floci/issues/213)) ([2859d25](https://github.com/floci-io/floci/commit/2859d257b50824548292467903c9ab3210325974))
+* **ecs:** adding ecs service ([#209](https://github.com/floci-io/floci/issues/209)) ([07a7a97](https://github.com/floci-io/floci/commit/07a7a97b4747977641ec16a1e1f06e7124016683))
+* **eventbridge:** forward resources array and support resources pattern matching ([#210](https://github.com/floci-io/floci/issues/210)) ([6d49f09](https://github.com/floci-io/floci/commit/6d49f0983f0d89c896115fdcc98095b9f50ed76a))
+* **lambda:** add AddPermission, GetPolicy, ListTags, ListLayerVersions, etc endpoints ([#223](https://github.com/floci-io/floci/issues/223)) ([c79f02f](https://github.com/floci-io/floci/commit/c79f02f26f6610e67be5b7ac53b8dc26af4fb747))
+* **sfn:** JSONata improvements, States.* intrinsics, DynamoDB ConditionExpression, StartSyncExecution ([#205](https://github.com/floci-io/floci/issues/205)) ([53dd7a6](https://github.com/floci-io/floci/commit/53dd7a68dd79f148265d24eea016d57f043cda08))
+
 # [1.2.0](https://github.com/hectorvent/floci/compare/1.1.0...1.2.0) (2026-04-04)
 
 
