@@ -177,6 +177,88 @@ func TestS3NonASCIIKey(t *testing.T) {
 	require.NoError(t, err, "copied object should exist")
 }
 
+// TestS3MultipartCopyNonASCIIKey exercises UploadPartCopy with a URL-encoded
+// non-ASCII source key to cover the multipart copy code path.
+func TestS3MultipartCopyNonASCIIKey(t *testing.T) {
+	ctx := context.Background()
+	svc := testutil.S3Client()
+	bucket := "go-test-multipart-copy-non-ascii"
+	srcKey := "src/テスト画像.bin"
+	dstKey := "dst/テスト画像.bin"
+	content := bytes.Repeat([]byte("a"), 6*1024*1024)
+	var uploadID string
+
+	t.Cleanup(func() {
+		if uploadID != "" {
+			svc.AbortMultipartUpload(ctx, &s3.AbortMultipartUploadInput{
+				Bucket:   aws.String(bucket),
+				Key:      aws.String(dstKey),
+				UploadId: aws.String(uploadID),
+			})
+		}
+		svc.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(srcKey)})
+		svc.DeleteObject(ctx, &s3.DeleteObjectInput{Bucket: aws.String(bucket), Key: aws.String(dstKey)})
+		svc.DeleteBucket(ctx, &s3.DeleteBucketInput{Bucket: aws.String(bucket)})
+	})
+
+	_, err := svc.CreateBucket(ctx, &s3.CreateBucketInput{Bucket: aws.String(bucket)})
+	require.NoError(t, err)
+
+	_, err = svc.PutObject(ctx, &s3.PutObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(srcKey),
+		Body:   bytes.NewReader(content),
+	})
+	require.NoError(t, err)
+
+	createOut, err := svc.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(dstKey),
+	})
+	require.NoError(t, err)
+	uploadID = aws.ToString(createOut.UploadId)
+	require.NotEmpty(t, uploadID)
+
+	partOut, err := svc.UploadPartCopy(ctx, &s3.UploadPartCopyInput{
+		Bucket:     aws.String(bucket),
+		Key:        aws.String(dstKey),
+		UploadId:   aws.String(uploadID),
+		PartNumber: aws.Int32(1),
+		CopySource: aws.String(bucket + "/" + url.PathEscape(srcKey)),
+	})
+	require.NoError(t, err, "UploadPartCopy with non-ASCII key should succeed")
+	require.NotNil(t, partOut.CopyPartResult)
+	require.NotNil(t, partOut.CopyPartResult.ETag)
+
+	_, err = svc.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(dstKey),
+		UploadId: aws.String(uploadID),
+		MultipartUpload: &s3types.CompletedMultipartUpload{
+			Parts: []s3types.CompletedPart{
+				{
+					ETag:       partOut.CopyPartResult.ETag,
+					PartNumber: aws.Int32(1),
+				},
+			},
+		},
+	})
+	require.NoError(t, err)
+	uploadID = ""
+
+	getOut, err := svc.GetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(dstKey),
+	})
+	require.NoError(t, err)
+	defer getOut.Body.Close()
+
+	var copied bytes.Buffer
+	_, err = copied.ReadFrom(getOut.Body)
+	require.NoError(t, err)
+	assert.Equal(t, content, copied.Bytes())
+}
+
 // TestS3LargeObject tests uploading a 25 MB object.
 // Validates upload size limit handling.
 func TestS3LargeObject(t *testing.T) {

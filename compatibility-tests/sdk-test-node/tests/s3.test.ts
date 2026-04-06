@@ -16,6 +16,10 @@ import {
   ListBucketsCommand,
   CopyObjectCommand,
   GetBucketLocationCommand,
+  CreateMultipartUploadCommand,
+  UploadPartCopyCommand,
+  CompleteMultipartUploadCommand,
+  AbortMultipartUploadCommand,
 } from '@aws-sdk/client-s3';
 import { makeClient, uniqueName, CLIENT_CONFIG } from './setup';
 
@@ -152,6 +156,78 @@ describe('S3', () => {
     // Cleanup
     await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: nonAsciiKey }));
     await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: nonAsciiDst }));
+  });
+
+  it('should multipart copy object with non-ASCII key', async () => {
+    const srcKey = 'src/テスト画像.bin';
+    const dstKey = 'dst/テスト画像.bin';
+    const body = Buffer.alloc(6 * 1024 * 1024, 'a');
+    let uploadId: string | undefined;
+
+    try {
+      await s3.send(
+        new PutObjectCommand({
+          Bucket: bucketName,
+          Key: srcKey,
+          Body: body,
+        })
+      );
+
+      const create = await s3.send(
+        new CreateMultipartUploadCommand({
+          Bucket: bucketName,
+          Key: dstKey,
+        })
+      );
+      uploadId = create.UploadId;
+      expect(uploadId).toBeTruthy();
+
+      const part = await s3.send(
+        new UploadPartCopyCommand({
+          Bucket: bucketName,
+          Key: dstKey,
+          UploadId: uploadId,
+          PartNumber: 1,
+          CopySource: `${bucketName}/${encodeURIComponent(srcKey)}`,
+        })
+      );
+      expect(part.CopyPartResult?.ETag).toBeTruthy();
+
+      await s3.send(
+        new CompleteMultipartUploadCommand({
+          Bucket: bucketName,
+          Key: dstKey,
+          UploadId: uploadId,
+          MultipartUpload: {
+            Parts: [
+              {
+                ETag: part.CopyPartResult?.ETag,
+                PartNumber: 1,
+              },
+            ],
+          },
+        })
+      );
+      uploadId = undefined;
+
+      const response = await s3.send(
+        new GetObjectCommand({ Bucket: bucketName, Key: dstKey })
+      );
+      const copied = await response.Body?.transformToByteArray();
+      expect(copied && Buffer.from(copied)).toEqual(body);
+    } finally {
+      if (uploadId) {
+        await s3.send(
+          new AbortMultipartUploadCommand({
+            Bucket: bucketName,
+            Key: dstKey,
+            UploadId: uploadId,
+          })
+        ).catch(() => {});
+      }
+      await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: srcKey })).catch(() => {});
+      await s3.send(new DeleteObjectCommand({ Bucket: bucketName, Key: dstKey })).catch(() => {});
+    }
   });
 
   it('should list objects', async () => {
