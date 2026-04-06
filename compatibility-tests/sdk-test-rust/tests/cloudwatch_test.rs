@@ -82,3 +82,62 @@ async fn test_cloudwatch_get_metric_statistics() {
     assert!(result.is_ok(), "GetMetricStatistics failed: {:?}", result.err());
     assert!(!result.unwrap().datapoints().is_empty());
 }
+
+#[tokio::test]
+async fn test_cloudwatch_put_statistic_values() {
+    let cw = common::cloudwatch_client().await;
+    let namespace = "RustTestStatisticValues";
+
+    // Setup: Put metric data with pre-calculated statistics
+    let result = cw
+        .put_metric_data()
+        .namespace(namespace)
+        .metric_data(
+            MetricDatum::builder()
+                .metric_name("AggregatedMetric")
+                .statistic_values(
+                    aws_sdk_cloudwatch::types::StatisticSet::builder()
+                        .sample_count(5.0)
+                        .sum(150.0)
+                        .minimum(20.0)
+                        .maximum(40.0)
+                        .build(),
+                )
+                .unit(StandardUnit::Count)
+                .build(),
+        )
+        .send()
+        .await;
+    assert!(result.is_ok(), "PutMetricData with StatisticValues failed: {:?}", result.err());
+
+    // Query back the statistics
+    let now = std::time::SystemTime::now();
+    let five_mins_ago = now - std::time::Duration::from_secs(300);
+    let one_min_future = now + std::time::Duration::from_secs(60);
+
+    let result = cw
+        .get_metric_statistics()
+        .namespace(namespace)
+        .metric_name("AggregatedMetric")
+        .start_time(aws_smithy_types::DateTime::from(five_mins_ago))
+        .end_time(aws_smithy_types::DateTime::from(one_min_future))
+        .period(60)
+        .statistics(Statistic::Sum)
+        .statistics(Statistic::SampleCount)
+        .statistics(Statistic::Minimum)
+        .statistics(Statistic::Maximum)
+        .statistics(Statistic::Average)
+        .send()
+        .await;
+    assert!(result.is_ok(), "GetMetricStatistics failed: {:?}", result.err());
+    
+    let response = result.unwrap();
+    assert!(!response.datapoints().is_empty(), "No datapoints returned");
+    
+    let dp = &response.datapoints()[0];
+    assert_eq!(dp.sample_count(), Some(5.0), "SampleCount mismatch");
+    assert_eq!(dp.sum(), Some(150.0), "Sum mismatch");
+    assert_eq!(dp.minimum(), Some(20.0), "Minimum mismatch");
+    assert_eq!(dp.maximum(), Some(40.0), "Maximum mismatch");
+    assert_eq!(dp.average(), Some(30.0), "Average mismatch"); // sum / sampleCount = 150 / 5
+}

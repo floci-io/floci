@@ -76,6 +76,52 @@ describe('CloudWatch Metrics', () => {
     expect(response.Datapoints).toBeDefined();
   });
 
+  it('should put metric data with statistic values', async () => {
+    const now = new Date();
+    const start = new Date(now.getTime() - 3600000);
+
+    // Put metric data with pre-calculated statistics
+    await cw.send(
+      new PutMetricDataCommand({
+        Namespace: namespace,
+        MetricData: [
+          {
+            MetricName: 'AggregatedMetric',
+            StatisticValues: {
+              SampleCount: 5,
+              Sum: 150,
+              Minimum: 20,
+              Maximum: 40,
+            },
+            Unit: 'Count',
+          },
+        ],
+      })
+    );
+
+    // Query back the statistics
+    const response = await cw.send(
+      new GetMetricStatisticsCommand({
+        Namespace: namespace,
+        MetricName: 'AggregatedMetric',
+        StartTime: start,
+        EndTime: now,
+        Period: 3600,
+        Statistics: ['Sum', 'Average', 'Minimum', 'Maximum', 'SampleCount'],
+      })
+    );
+    
+    expect(response.Datapoints).toBeDefined();
+    expect(response.Datapoints?.length).toBeGreaterThan(0);
+    
+    const dp = response.Datapoints?.[0];
+    expect(dp?.Sum).toBe(150);
+    expect(dp?.SampleCount).toBe(5);
+    expect(dp?.Minimum).toBe(20);
+    expect(dp?.Maximum).toBe(40);
+    expect(dp?.Average).toBe(30); // sum / sampleCount
+  });
+
   it('should put metric alarm', async () => {
     await cw.send(
       new PutMetricAlarmCommand({

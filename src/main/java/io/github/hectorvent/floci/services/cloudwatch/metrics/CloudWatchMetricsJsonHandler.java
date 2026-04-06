@@ -206,6 +206,15 @@ public class CloudWatchMetricsJsonHandler {
                 if (parsed != null) datum.setTimestamp(parsed.getEpochSecond());
             }
             datum.setDimensions(parseDimensionsJson(item.path("Dimensions")));
+
+            JsonNode statsValues = item.path("StatisticValues");
+            if (!statsValues.isMissingNode()) {
+                datum.setSampleCount(statsValues.path("SampleCount").asDouble(0));
+                datum.setSum(statsValues.path("Sum").asDouble(0));
+                datum.setMinimum(statsValues.path("Minimum").asDouble(0));
+                datum.setMaximum(statsValues.path("Maximum").asDouble(0));
+            }
+            
             datums.add(datum);
         }
         return datums;

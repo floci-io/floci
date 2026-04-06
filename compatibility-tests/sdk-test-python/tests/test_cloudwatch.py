@@ -117,6 +117,46 @@ class TestCloudWatchMetrics:
         assert abs(total_sum - 150.0) < 0.001
         assert abs(total_sc - 5.0) < 0.001
 
+    def test_put_metric_data_with_statistic_values(self, cloudwatch_client, unique_name):
+        """Test PutMetricData with pre-calculated StatisticValues."""
+        namespace = f"TestApp/StatisticValues/{unique_name}"
+        now = datetime.datetime.now(datetime.timezone.utc)
+
+        # Put metric data with pre-calculated statistics
+        cloudwatch_client.put_metric_data(
+            Namespace=namespace,
+            MetricData=[
+                {
+                    "MetricName": "AggregatedMetric",
+                    "StatisticValues": {
+                        "SampleCount": 5,
+                        "Sum": 150.0,
+                        "Minimum": 20.0,
+                        "Maximum": 40.0,
+                    },
+                    "Unit": "Count",
+                }
+            ],
+        )
+
+        # Query back the statistics
+        response = cloudwatch_client.get_metric_statistics(
+            Namespace=namespace,
+            MetricName="AggregatedMetric",
+            StartTime=now - datetime.timedelta(hours=1),
+            EndTime=now + datetime.timedelta(seconds=60),
+            Period=3600,
+            Statistics=["Sum", "Average", "Minimum", "Maximum", "SampleCount"],
+        )
+
+        assert response["Datapoints"]
+        dp = response["Datapoints"][0]
+        assert dp["Sum"] == 150.0
+        assert dp["SampleCount"] == 5
+        assert dp["Minimum"] == 20.0
+        assert dp["Maximum"] == 40.0
+        assert dp["Average"] == 30.0  # sum / sampleCount
+
 
 class TestCloudWatchAlarms:
     """Test CloudWatch alarm operations."""
