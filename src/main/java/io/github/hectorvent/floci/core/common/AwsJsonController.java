@@ -177,7 +177,8 @@ public class AwsJsonController {
             gen.writeEndArray();
         } else if ("Timestamp".equals(fieldName) && node.isNumber()) {
             gen.writeTag(1);
-            gen.writeNumber(node.longValue());
+            // Smithy rpc-v2-cbor timestamps are epoch seconds encoded as tagged floating-point numbers.
+            gen.writeNumber(node.doubleValue());
         } else if (node.isTextual()) {
             gen.writeString(node.textValue());
         } else if (node.isDouble() || node.isFloat()) {

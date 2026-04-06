@@ -1,0 +1,30 @@
+{
+  "name": "floci-compatibility-tests-typescript",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cloudformation": "^3.500.0",
+    "@aws-sdk/client-cloudwatch": "^3.500.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.500.0",
+    "@aws-sdk/client-dynamodb": "^3.500.0",
+    "@aws-sdk/client-iam": "^3.500.0",
+    "@aws-sdk/client-kinesis": "^3.500.0",
+    "@aws-sdk/client-kms": "^3.500.0",
+    "@aws-sdk/client-lambda": "^3.500.0",
+    "@aws-sdk/client-s3": "^3.500.0",
+    "@aws-sdk/client-secrets-manager": "^3.500.0",
+    "@aws-sdk/client-sns": "^3.500.0",
+    "@aws-sdk/client-sqs": "^3.500.0",
+    "@aws-sdk/client-ssm": "^3.500.0",
+    "@aws-sdk/client-sts": "^3.500.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.4.0",
+    "vitest": "^2.0.0"
+  }
+}

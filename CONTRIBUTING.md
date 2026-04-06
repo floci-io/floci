@@ -7,7 +7,7 @@ Thank you for your interest in contributing! Floci is a community-driven project
 - **Bug reports** — open an issue with a minimal reproduction
 - **Feature requests** — open an issue describing the AWS behavior you need
 - **Pull requests** — bug fixes, new service implementations, or improvements
-- **Compatibility tests** — add cases to `../floci-compatibility-tests`
+- **Compatibility tests** — add cases to `./compatibility-tests/`
 
 ## Getting Started
 

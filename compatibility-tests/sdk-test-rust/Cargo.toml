@@ -1,0 +1,36 @@
+[package]
+name = "sdk-test-rust"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "sdk_test_rust"
+path = "src/lib.rs"
+
+[dependencies]
+aws-config = "1"
+aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-sdk-s3 = "1"
+aws-sdk-ssm = "1"
+aws-sdk-sqs = "1"
+aws-sdk-sns = "1"
+aws-sdk-dynamodb = "1"
+aws-sdk-iam = "1"
+aws-sdk-sts = "1"
+aws-sdk-secretsmanager = "1"
+aws-sdk-kms = "1"
+aws-sdk-kinesis = "1"
+aws-sdk-lambda = "1"
+aws-sdk-cloudwatch = "1"
+aws-sdk-cognitoidentityprovider = "1"
+aws-sdk-cloudformation = "1"
+aws-smithy-types = "1"
+aws-types = "1"
+tokio = { version = "1", features = ["full"] }
+bytes = "1"
+reqwest = { version = "0.12", default-features = false }
+zip = "2"
+
+[dev-dependencies]
+tokio-test = "0.4"
+futures = "0.3"

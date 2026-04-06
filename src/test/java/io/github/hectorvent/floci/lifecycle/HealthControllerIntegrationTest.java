@@ -39,6 +39,7 @@ class HealthControllerIntegrationTest {
                 "acm": "running",
                 "email": "running",
                 "es": "running",
+                "ec2": "running",
                 "ecs": "running"
               },
               "edition": "floci-always-free",

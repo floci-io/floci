@@ -198,9 +198,9 @@ const client = new S3Client({
 
 ## Compatibility Testing
 
-> For full compatibility validation against real SDK and client workflows, use [floci-compatibility-tests](https://github.com/floci-io/floci-compatibility-tests).
+> For full compatibility validation against real SDK and client workflows, see the [compatibility-tests](./compatibility-tests/) directory.
 
-This companion project provides a dedicated compatibility test suite for Floci across multiple SDKs and tooling scenarios, and is the recommended starting point when verifying integration behavior end to end.
+This directory provides a dedicated compatibility test suite for Floci across multiple SDKs and tooling scenarios, and is the recommended starting point when verifying integration behavior end to end.
 
 Available compatibility test modules:
 

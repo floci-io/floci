@@ -14,6 +14,7 @@ on:
       - 'Dockerfile.native-package'
       - 'docker-compose.yml'
       - 'docker-compose-test.yml'
+      - 'compatibility-tests/**'
       - '.github/workflows/compatibility.yml'
 
 permissions:
@@ -104,30 +105,39 @@ jobs:
       - name: Wait for floci to be ready
         run: timeout 60 bash -c 'until curl -sf http://localhost:4566/ >/dev/null 2>&1; do sleep 1; done'
 
-      - name: Checkout compatibility tests
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          repository: hectorvent/floci-compatibility-tests
-          path: compat-tests
+          sparse-checkout: compatibility-tests
 
       - uses: docker/setup-buildx-action@v3
 
       - name: Build test image
         uses: docker/build-push-action@v6
         with:
-          context: compat-tests/${{ matrix.test }}
+          context: compatibility-tests/${{ matrix.test }}
           load: true
           tags: compat-${{ matrix.test }}
           cache-from: type=gha,scope=${{ matrix.test }}
           cache-to: type=gha,scope=${{ matrix.test }},mode=max
 
       - name: Run tests
+        id: tests
         run: |
+          mkdir -p test-results
           FLOCI_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "compat-net").IPAddress}}' floci)
+
           docker run --rm --network compat-net \
             -e FLOCI_ENDPOINT=http://floci:4566 \
+            -v "$(pwd)/test-results:/results" \
             --add-host "sdk-vhost-bucket.floci:${FLOCI_IP}" \
             compat-${{ matrix.test }}
+
+      - name: Generate test summary
+        if: always() && steps.tests.outcome != 'skipped'
+        uses: test-summary/action@v2
+        with:
+          paths: test-results/*.xml
 
       - name: Dump floci logs
         if: failure()

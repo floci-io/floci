@@ -1,0 +1,67 @@
+# Environment
+.env
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# CDK
+compat-cdk/cdk.out/
+compat-cdk/node_modules/
+
+# Java / Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+.eggs/
+.pytest_cache/
+
+# Bash/Bats (shared bats dependencies)
+lib/bats-core/
+lib/bats-support/
+lib/bats-assert/
+
+# Test results
+test-results/
+
+# Rust
+sdk-test-rust/target/
+
+# Go binaries
+sdk-test-go/floci-sdk-test-go
+
+# Terraform / OpenTofu
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfplan
+crash.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# IDE
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local Personal files/test
+*-local.*

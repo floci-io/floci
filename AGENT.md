@@ -194,7 +194,7 @@ Critical areas:
 ## Compatibility Project
 
 Compatibility test suite:
-<https://github.com/hectorvent/floci-compatibility-tests>
+`./compatibility-tests/`
 
 Guidelines:
 

@@ -360,4 +360,18 @@ class S3ServiceTest {
         assertEquals("STANDARD_IA", copy.getStorageClass());
         assertEquals("dest", copy.getMetadata().get("owner"));
     }
+
+    @Test
+    void copyObjectWithNonASCIIKey() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        String nonASCIIKey = "src/テスト画像.png";
+        s3Service.putObject("test-bucket", nonASCIIKey, "image-data".getBytes(), "image/png", null);
+
+        String destKey = "dst/テスト画像.png";
+        S3Object copy = s3Service.copyObject("test-bucket", nonASCIIKey, "test-bucket", destKey);
+        assertNotNull(copy.getETag());
+
+        S3Object retrieved = s3Service.getObject("test-bucket", destKey);
+        assertArrayEquals("image-data".getBytes(), retrieved.getData());
+    }
 }

@@ -1,0 +1,3 @@
+boto3==1.37.1
+botocore==1.37.1
+pytest>=8.0.0

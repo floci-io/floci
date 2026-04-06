@@ -1255,13 +1255,17 @@ public class S3Controller {
 
     private Response handleCopyObject(String copySource, String destBucket, String destKey,
                                       String contentType, HttpHeaders httpHeaders) {
+        // copySource format: /bucket/key or bucket/key, where key is URL-encoded
         String source = copySource.startsWith("/") ? copySource.substring(1) : copySource;
-        int slashIndex = source.indexOf('/');
+        
+        // URL decode the entire source first, then split
+        String decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
+        int slashIndex = decodedSource.indexOf('/');
         if (slashIndex < 0) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
-        String sourceBucket = source.substring(0, slashIndex);
-        String sourceKey = URLDecoder.decode(source.substring(slashIndex + 1), StandardCharsets.UTF_8);
+        String sourceBucket = decodedSource.substring(0, slashIndex);
+        String sourceKey = decodedSource.substring(slashIndex + 1);
 
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         S3Object copy = s3Service.copyObject(sourceBucket, sourceKey, destBucket, destKey,
@@ -1282,13 +1286,17 @@ public class S3Controller {
 
     private Response handleUploadPartCopy(String copySource, String destBucket, String destKey,
                                            String uploadId, int partNumber, HttpHeaders httpHeaders) {
+        // copySource format: /bucket/key or bucket/key, where key is URL-encoded
         String source = copySource.startsWith("/") ? copySource.substring(1) : copySource;
-        int slashIndex = source.indexOf('/');
+
+        // URL decode the entire source first, then split.
+        String decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
+        int slashIndex = decodedSource.indexOf('/');
         if (slashIndex < 0) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
-        String sourceBucket = source.substring(0, slashIndex);
-        String sourceKey = source.substring(slashIndex + 1);
+        String sourceBucket = decodedSource.substring(0, slashIndex);
+        String sourceKey = decodedSource.substring(slashIndex + 1);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
                 sourceBucket, sourceKey, copySourceRange);

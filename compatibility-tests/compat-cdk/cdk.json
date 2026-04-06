@@ -1,0 +1,6 @@
+{
+  "app": "node bin/app.js",
+  "context": {
+    "@aws-cdk/aws-s3:keepNotificationInImportedBucket": false
+  }
+}
