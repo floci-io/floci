@@ -42,7 +42,7 @@ floci:
     presign-secret: local-emulator-secret  # HMAC secret for S3 pre-signed URL verification
 
   init-hooks:
-    shell-executable: /bin/bash
+    shell-executable: /bin/sh
     timeout-seconds: 30
     shutdown-grace-period-seconds: 2
 

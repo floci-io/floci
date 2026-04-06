@@ -37,7 +37,7 @@ floci:
     presign-secret: test-secret
 
   init-hooks:
-    shell-executable: /bin/bash
+    shell-executable: /bin/sh
     timeout-seconds: 5
     shutdown-grace-period-seconds: 2
 

@@ -430,7 +430,7 @@ public interface EmulatorConfig {
     }
 
     interface InitHooksConfig {
-        @WithDefault("/bin/bash")
+        @WithDefault("/bin/sh")
         String shellExecutable();
 
         @WithDefault("2")

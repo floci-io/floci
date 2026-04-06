@@ -117,7 +117,7 @@ You can customize hook behavior via configuration:
 
 | Key                                              | Default     | Description                                                                                                      |
 |--------------------------------------------------|-------------|------------------------------------------------------------------------------------------------------------------|
-| `floci.init-hooks.shell-executable`              | `/bin/bash` | Shell executable used to run scripts                                                                             |
+| `floci.init-hooks.shell-executable`              | `/bin/sh`   | Shell executable used to run scripts                                                                             |
 | `floci.init-hooks.timeout-seconds`               | `30`        | Maximum execution time per script before it is terminated and considered failed                                  |
 | `floci.init-hooks.shutdown-grace-period-seconds` | `2`         | Time to wait after calling `destroy()` before forcefully stopping the process (allows cleanup hooks to complete) |
 
