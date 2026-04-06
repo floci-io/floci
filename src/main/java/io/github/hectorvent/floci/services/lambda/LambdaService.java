@@ -12,6 +12,8 @@ import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.model.LambdaUrlConfig;
 import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -48,6 +50,7 @@ public class LambdaService {
     private final RegionResolver regionResolver;
     private final EsmStore esmStore;
     private final LambdaAliasStore aliasStore;
+    private final S3Service s3Service;
     private final SqsService sqsService;
     private final SqsEventSourcePoller poller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -69,6 +72,7 @@ public class LambdaService {
         this.regionResolver = regionResolver;
         this.esmStore = null;
         this.aliasStore = null;
+        this.s3Service = null;
         this.sqsService = null;
         this.poller = null;
         this.kinesisPoller = null;
@@ -85,6 +89,7 @@ public class LambdaService {
                           RegionResolver regionResolver,
                           EsmStore esmStore,
                           LambdaAliasStore aliasStore,
+                          S3Service s3Service,
                           SqsService sqsService,
                           SqsEventSourcePoller poller,
                           KinesisEventSourcePoller kinesisPoller,
@@ -98,6 +103,7 @@ public class LambdaService {
         this.regionResolver = regionResolver;
         this.esmStore = esmStore;
         this.aliasStore = aliasStore;
+        this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.poller = poller;
         this.kinesisPoller = kinesisPoller;
@@ -172,6 +178,11 @@ public class LambdaService {
             if (zipFileBase64 != null) {
                 extractZipCode(fn, zipFileBase64);
             }
+            String s3Bucket = (String) code.get("S3Bucket");
+            String s3Key = (String) code.get("S3Key");
+            if (s3Bucket != null && s3Key != null) {
+                extractZipCodeFromS3(fn, s3Bucket, s3Key);
+            }
         }
 
         functionStore.save(region, fn);
@@ -194,12 +205,17 @@ public class LambdaService {
 
         String zipFileBase64 = (String) request.get("ZipFile");
         String imageUri = (String) request.get("ImageUri");
+        String s3Bucket = (String) request.get("S3Bucket");
+        String s3Key = (String) request.get("S3Key");
 
         if (zipFileBase64 != null) {
             extractZipCode(fn, zipFileBase64);
         }
         if (imageUri != null) {
             fn.setImageUri(imageUri);
+        }
+        if (s3Bucket != null && s3Key != null) {
+            extractZipCodeFromS3(fn, s3Bucket, s3Key);
         }
 
         fn.setLastModified(System.currentTimeMillis());
@@ -617,6 +633,20 @@ public class LambdaService {
             throw new AwsException("InvalidParameterValueException",
                     "Failed to extract deployment package: " + e.getMessage(), 400);
         }
+    }
+
+    private void extractZipCodeFromS3(LambdaFunction fn, String s3Bucket, String s3Key) {
+        if (s3Service == null) {
+            throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
+        }
+        S3Object obj;
+        try {
+            obj = s3Service.getObject(s3Bucket, s3Key);
+        } catch (Exception e) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
+        }
+        extractZipCode(fn, Base64.getEncoder().encodeToString(obj.getData()));
     }
 
     private int toInt(Object value, int defaultValue) {
