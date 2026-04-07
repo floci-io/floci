@@ -4,10 +4,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.scheduler.model.FlexibleTimeWindow;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
-import io.github.hectorvent.floci.services.scheduler.model.Target;
+import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -147,43 +146,38 @@ public class SchedulerService {
 
     // ──────────────────────────── Schedules ────────────────────────────
 
-    public Schedule createSchedule(String name, String groupName, String scheduleExpression,
-                                   String scheduleExpressionTimezone,
-                                   FlexibleTimeWindow flexibleTimeWindow,
-                                   Target target,
-                                   String description, String state, String actionAfterCompletion,
-                                   Instant startDate, Instant endDate, String kmsKeyArn,
-                                   String region) {
-        validateName(name);
-        String effectiveGroup = (groupName == null || groupName.isBlank()) ? DEFAULT_GROUP : groupName;
+    public Schedule createSchedule(ScheduleRequest req, String region) {
+        validateName(req.getName());
+        String effectiveGroup = (req.getGroupName() == null || req.getGroupName().isBlank())
+                ? DEFAULT_GROUP : req.getGroupName();
         getScheduleGroup(effectiveGroup, region); // verify group exists
 
-        String key = scheduleKey(region, effectiveGroup, name);
+        String key = scheduleKey(region, effectiveGroup, req.getName());
         if (scheduleStore.get(key).isPresent()) {
             throw new AwsException("ConflictException",
-                    "Schedule already exists: " + name, 409);
+                    "Schedule already exists: " + req.getName(), 409);
         }
 
         Instant now = Instant.now();
         Schedule schedule = new Schedule();
-        schedule.setName(name);
-        schedule.setArn(buildScheduleArn(region, effectiveGroup, name));
+        schedule.setName(req.getName());
+        schedule.setArn(buildScheduleArn(region, effectiveGroup, req.getName()));
         schedule.setGroupName(effectiveGroup);
-        schedule.setState(state != null ? state : "ENABLED");
-        schedule.setScheduleExpression(scheduleExpression);
-        schedule.setScheduleExpressionTimezone(scheduleExpressionTimezone);
-        schedule.setFlexibleTimeWindow(flexibleTimeWindow);
-        schedule.setTarget(target);
-        schedule.setDescription(description);
-        schedule.setActionAfterCompletion(actionAfterCompletion);
-        schedule.setStartDate(startDate);
-        schedule.setEndDate(endDate);
-        schedule.setKmsKeyArn(kmsKeyArn);
+        schedule.setState(req.getState() != null ? req.getState() : "ENABLED");
+        schedule.setScheduleExpression(req.getScheduleExpression());
+        schedule.setScheduleExpressionTimezone(req.getScheduleExpressionTimezone());
+        schedule.setFlexibleTimeWindow(req.getFlexibleTimeWindow());
+        schedule.setTarget(req.getTarget());
+        schedule.setDescription(req.getDescription());
+        schedule.setActionAfterCompletion(req.getActionAfterCompletion());
+        schedule.setStartDate(req.getStartDate());
+        schedule.setEndDate(req.getEndDate());
+        schedule.setKmsKeyArn(req.getKmsKeyArn());
         schedule.setCreationDate(now);
         schedule.setLastModificationDate(now);
 
         scheduleStore.put(key, schedule);
-        LOG.infov("Created schedule: {0} in group {1}, region {2}", name, effectiveGroup, region);
+        LOG.infov("Created schedule: {0} in group {1}, region {2}", req.getName(), effectiveGroup, region);
         return schedule;
     }
 
@@ -197,42 +191,37 @@ public class SchedulerService {
                         "Schedule not found: " + name, 404));
     }
 
-    public Schedule updateSchedule(String name, String groupName, String scheduleExpression,
-                                   String scheduleExpressionTimezone,
-                                   FlexibleTimeWindow flexibleTimeWindow,
-                                   Target target,
-                                   String description, String state, String actionAfterCompletion,
-                                   Instant startDate, Instant endDate, String kmsKeyArn,
-                                   String region) {
-        if (name == null || name.isBlank()) {
+    public Schedule updateSchedule(ScheduleRequest req, String region) {
+        if (req.getName() == null || req.getName().isBlank()) {
             throw new AwsException("ValidationException", "Name is required.", 400);
         }
-        String effectiveGroup = (groupName == null || groupName.isBlank()) ? DEFAULT_GROUP : groupName;
-        String key = scheduleKey(region, effectiveGroup, name);
+        String effectiveGroup = (req.getGroupName() == null || req.getGroupName().isBlank())
+                ? DEFAULT_GROUP : req.getGroupName();
+        String key = scheduleKey(region, effectiveGroup, req.getName());
         Schedule existing = scheduleStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Schedule not found: " + name, 404));
+                        "Schedule not found: " + req.getName(), 404));
 
         Instant now = Instant.now();
         Schedule updated = new Schedule();
-        updated.setName(name);
+        updated.setName(req.getName());
         updated.setArn(existing.getArn());
         updated.setGroupName(effectiveGroup);
-        updated.setState(state != null ? state : "ENABLED");
-        updated.setScheduleExpression(scheduleExpression);
-        updated.setScheduleExpressionTimezone(scheduleExpressionTimezone);
-        updated.setFlexibleTimeWindow(flexibleTimeWindow);
-        updated.setTarget(target);
-        updated.setDescription(description);
-        updated.setActionAfterCompletion(actionAfterCompletion);
-        updated.setStartDate(startDate);
-        updated.setEndDate(endDate);
-        updated.setKmsKeyArn(kmsKeyArn);
+        updated.setState(req.getState() != null ? req.getState() : "ENABLED");
+        updated.setScheduleExpression(req.getScheduleExpression());
+        updated.setScheduleExpressionTimezone(req.getScheduleExpressionTimezone());
+        updated.setFlexibleTimeWindow(req.getFlexibleTimeWindow());
+        updated.setTarget(req.getTarget());
+        updated.setDescription(req.getDescription());
+        updated.setActionAfterCompletion(req.getActionAfterCompletion());
+        updated.setStartDate(req.getStartDate());
+        updated.setEndDate(req.getEndDate());
+        updated.setKmsKeyArn(req.getKmsKeyArn());
         updated.setCreationDate(existing.getCreationDate());
         updated.setLastModificationDate(now);
 
         scheduleStore.put(key, updated);
-        LOG.infov("Updated schedule: {0} in group {1}", name, effectiveGroup);
+        LOG.infov("Updated schedule: {0} in group {1}", req.getName(), effectiveGroup);
         return updated;
     }
 

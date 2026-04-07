@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.scheduler.model.DeadLetterConfig;
 import io.github.hectorvent.floci.services.scheduler.model.FlexibleTimeWindow;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
+import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +30,17 @@ class SchedulerServiceTest {
                 new InMemoryStorage<>(),
                 new RegionResolver("us-east-1", "000000000000")
         );
+    }
+
+    private ScheduleRequest newRequest(String name, String groupName, String expression,
+                                       FlexibleTimeWindow ftw, Target target) {
+        ScheduleRequest req = new ScheduleRequest();
+        req.setName(name);
+        req.setGroupName(groupName);
+        req.setScheduleExpression(expression);
+        req.setFlexibleTimeWindow(ftw);
+        req.setTarget(target);
+        return req;
     }
 
     @Test
@@ -125,14 +137,16 @@ class SchedulerServiceTest {
     @Test
     void deleteScheduleGroupCascadesSchedules() {
         service.createScheduleGroup("cascade-grp", null, REGION);
-        service.createSchedule("s1", "cascade-grp", "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
-        service.createSchedule("s2", "cascade-grp", "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("s1", "cascade-grp", "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
+        service.createSchedule(
+                newRequest("s2", "cascade-grp", "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
         service.deleteScheduleGroup("cascade-grp", REGION);
         assertThrows(AwsException.class, () ->
                 service.getSchedule("s1", "cascade-grp", REGION));
@@ -181,11 +195,11 @@ class SchedulerServiceTest {
 
     @Test
     void createSchedule() {
-        Schedule s = service.createSchedule("my-schedule", null, "rate(1 hour)", null,
+        ScheduleRequest req = newRequest("my-schedule", null, "rate(1 hour)",
                 new FlexibleTimeWindow("OFF", null),
                 new Target("arn:aws:lambda:us-east-1:000000000000:function:my-func",
-                        "arn:aws:iam::000000000000:role/my-role", null, null),
-                null, null, null, null, null, null, REGION);
+                        "arn:aws:iam::000000000000:role/my-role", null, null));
+        Schedule s = service.createSchedule(req, REGION);
         assertEquals("my-schedule", s.getName());
         assertEquals("default", s.getGroupName());
         assertEquals("ENABLED", s.getState());
@@ -197,45 +211,49 @@ class SchedulerServiceTest {
     @Test
     void createScheduleInCustomGroup() {
         service.createScheduleGroup("custom", null, REGION);
-        Schedule s = service.createSchedule("my-schedule", "custom", "rate(5 minutes)", null,
+        ScheduleRequest req = newRequest("my-schedule", "custom", "rate(5 minutes)",
                 new FlexibleTimeWindow("OFF", null),
                 new Target("arn:aws:sqs:us-east-1:000000000000:my-queue",
-                        "arn:aws:iam::000000000000:role/r", null, null),
-                null, null, null, null, null, null, REGION);
+                        "arn:aws:iam::000000000000:role/r", null, null));
+        Schedule s = service.createSchedule(req, REGION);
         assertEquals("custom", s.getGroupName());
         assertTrue(s.getArn().contains("schedule/custom/my-schedule"));
     }
 
     @Test
     void createScheduleDuplicateThrows() {
-        service.createSchedule("dup", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
-        AwsException e = assertThrows(AwsException.class, () ->
-                service.createSchedule("dup", null, "rate(1 hour)", null,
+        service.createSchedule(
+                newRequest("dup", null, "rate(1 hour)",
                         new FlexibleTimeWindow("OFF", null),
-                        new Target("arn:t", "arn:r", null, null),
-                        null, null, null, null, null, null, REGION));
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
+        AwsException e = assertThrows(AwsException.class, () ->
+                service.createSchedule(
+                        newRequest("dup", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:t", "arn:r", null, null)),
+                        REGION));
         assertEquals("ConflictException", e.getErrorCode());
     }
 
     @Test
     void createScheduleInNonExistentGroupThrows() {
         AwsException e = assertThrows(AwsException.class, () ->
-                service.createSchedule("s", "no-such-group", "rate(1 hour)", null,
-                        new FlexibleTimeWindow("OFF", null),
-                        new Target("arn:t", "arn:r", null, null),
-                        null, null, null, null, null, null, REGION));
+                service.createSchedule(
+                        newRequest("s", "no-such-group", "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:t", "arn:r", null, null)),
+                        REGION));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
     @Test
     void getSchedule() {
-        service.createSchedule("find-me", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("find-me", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
         Schedule s = service.getSchedule("find-me", null, REGION);
         assertEquals("find-me", s.getName());
     }
@@ -249,14 +267,19 @@ class SchedulerServiceTest {
 
     @Test
     void updateSchedule() {
-        service.createSchedule("upd", null, "rate(1 hour)", null,
+        ScheduleRequest createReq = newRequest("upd", null, "rate(1 hour)",
                 new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                "original desc", null, null, null, null, null, REGION);
-        Schedule updated = service.updateSchedule("upd", null, "rate(5 minutes)", "UTC",
+                new Target("arn:t", "arn:r", null, null));
+        createReq.setDescription("original desc");
+        service.createSchedule(createReq, REGION);
+
+        ScheduleRequest updateReq = newRequest("upd", null, "rate(5 minutes)",
                 new FlexibleTimeWindow("FLEXIBLE", 10),
-                new Target("arn:t2", "arn:r2", "{}", null),
-                "updated desc", "DISABLED", null, null, null, null, REGION);
+                new Target("arn:t2", "arn:r2", "{}", null));
+        updateReq.setScheduleExpressionTimezone("UTC");
+        updateReq.setDescription("updated desc");
+        updateReq.setState("DISABLED");
+        Schedule updated = service.updateSchedule(updateReq, REGION);
         assertEquals("rate(5 minutes)", updated.getScheduleExpression());
         assertEquals("DISABLED", updated.getState());
         assertEquals("updated desc", updated.getDescription());
@@ -267,19 +290,21 @@ class SchedulerServiceTest {
     @Test
     void updateScheduleNotFoundThrows() {
         AwsException e = assertThrows(AwsException.class, () ->
-                service.updateSchedule("missing", null, "rate(1 hour)", null,
-                        new FlexibleTimeWindow("OFF", null),
-                        new Target("arn:t", "arn:r", null, null),
-                        null, null, null, null, null, null, REGION));
+                service.updateSchedule(
+                        newRequest("missing", null, "rate(1 hour)",
+                                new FlexibleTimeWindow("OFF", null),
+                                new Target("arn:t", "arn:r", null, null)),
+                        REGION));
         assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 
     @Test
     void deleteSchedule() {
-        service.createSchedule("to-del", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("to-del", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
         service.deleteSchedule("to-del", null, REGION);
         assertThrows(AwsException.class, () ->
                 service.getSchedule("to-del", null, REGION));
@@ -294,14 +319,16 @@ class SchedulerServiceTest {
 
     @Test
     void listSchedules() {
-        service.createSchedule("s1", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
-        service.createSchedule("s2", null, "rate(2 hours)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("s1", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
+        service.createSchedule(
+                newRequest("s2", null, "rate(2 hours)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
         List<Schedule> result = service.listSchedules(null, null, null, REGION);
         assertEquals(2, result.size());
     }
@@ -309,14 +336,16 @@ class SchedulerServiceTest {
     @Test
     void listSchedulesAcrossGroups() {
         service.createScheduleGroup("group-a", null, REGION);
-        service.createSchedule("s-default", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
-        service.createSchedule("s-group-a", "group-a", "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("s-default", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
+        service.createSchedule(
+                newRequest("s-group-a", "group-a", "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
         List<Schedule> result = service.listSchedules(null, null, null, REGION);
         assertEquals(2, result.size());
         assertTrue(result.stream().anyMatch(s -> "s-default".equals(s.getName())));
@@ -326,14 +355,16 @@ class SchedulerServiceTest {
     @Test
     void listSchedulesFilteredByGroup() {
         service.createScheduleGroup("group-b", null, REGION);
-        service.createSchedule("s-in-default", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
-        service.createSchedule("s-in-group-b", "group-b", "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("s-in-default", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
+        service.createSchedule(
+                newRequest("s-in-group-b", "group-b", "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
         List<Schedule> result = service.listSchedules("group-b", null, null, REGION);
         assertEquals(1, result.size());
         assertEquals("s-in-group-b", result.get(0).getName());
@@ -341,18 +372,21 @@ class SchedulerServiceTest {
 
     @Test
     void listSchedulesWithNamePrefix() {
-        service.createSchedule("alpha-1", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
-        service.createSchedule("alpha-2", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
-        service.createSchedule("beta-1", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("alpha-1", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
+        service.createSchedule(
+                newRequest("alpha-2", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
+        service.createSchedule(
+                newRequest("beta-1", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                REGION);
         List<Schedule> result = service.listSchedules(null, "alpha", null, REGION);
         assertEquals(2, result.size());
         assertTrue(result.stream().allMatch(s -> s.getName().startsWith("alpha")));
@@ -360,14 +394,18 @@ class SchedulerServiceTest {
 
     @Test
     void listSchedulesWithStateFilter() {
-        service.createSchedule("enabled-1", null, "rate(1 hour)", null,
+        ScheduleRequest enabledReq = newRequest("enabled-1", null, "rate(1 hour)",
                 new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, "ENABLED", null, null, null, null, REGION);
-        service.createSchedule("disabled-1", null, "rate(1 hour)", null,
+                new Target("arn:t", "arn:r", null, null));
+        enabledReq.setState("ENABLED");
+        service.createSchedule(enabledReq, REGION);
+
+        ScheduleRequest disabledReq = newRequest("disabled-1", null, "rate(1 hour)",
                 new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, "DISABLED", null, null, null, null, REGION);
+                new Target("arn:t", "arn:r", null, null));
+        disabledReq.setState("DISABLED");
+        service.createSchedule(disabledReq, REGION);
+
         List<Schedule> result = service.listSchedules(null, null, "DISABLED", REGION);
         assertEquals(1, result.size());
         assertEquals("disabled-1", result.get(0).getName());
@@ -378,9 +416,9 @@ class SchedulerServiceTest {
         Target target = new Target("arn:aws:lambda:us-east-1:000000000000:function:my-func",
                 "arn:aws:iam::000000000000:role/my-role", null, null);
         target.setDeadLetterConfig(new DeadLetterConfig("arn:aws:sqs:us-east-1:000000000000:dlq"));
-        Schedule s = service.createSchedule("dlc-schedule", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null), target,
-                null, null, null, null, null, null, REGION);
+        ScheduleRequest req = newRequest("dlc-schedule", null, "rate(1 hour)",
+                new FlexibleTimeWindow("OFF", null), target);
+        Schedule s = service.createSchedule(req, REGION);
         assertNotNull(s.getTarget().getDeadLetterConfig());
         assertEquals("arn:aws:sqs:us-east-1:000000000000:dlq",
                 s.getTarget().getDeadLetterConfig().getArn());
@@ -390,25 +428,27 @@ class SchedulerServiceTest {
     void updateSchedulePreservesDeadLetterConfig() {
         Target target = new Target("arn:t", "arn:r", null, null);
         target.setDeadLetterConfig(new DeadLetterConfig("arn:aws:sqs:us-east-1:000000000000:dlq"));
-        service.createSchedule("dlc-upd", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null), target,
-                null, null, null, null, null, null, REGION);
+        service.createSchedule(
+                newRequest("dlc-upd", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null), target),
+                REGION);
 
         Target updatedTarget = new Target("arn:t2", "arn:r2", null, null);
         updatedTarget.setDeadLetterConfig(new DeadLetterConfig("arn:aws:sqs:us-east-1:000000000000:dlq-updated"));
-        Schedule updated = service.updateSchedule("dlc-upd", null, "rate(5 minutes)", null,
-                new FlexibleTimeWindow("OFF", null), updatedTarget,
-                null, null, null, null, null, null, REGION);
+        ScheduleRequest updateReq = newRequest("dlc-upd", null, "rate(5 minutes)",
+                new FlexibleTimeWindow("OFF", null), updatedTarget);
+        Schedule updated = service.updateSchedule(updateReq, REGION);
         assertEquals("arn:aws:sqs:us-east-1:000000000000:dlq-updated",
                 updated.getTarget().getDeadLetterConfig().getArn());
     }
 
     @Test
     void schedulesAreRegionScoped() {
-        service.createSchedule("regional", null, "rate(1 hour)", null,
-                new FlexibleTimeWindow("OFF", null),
-                new Target("arn:t", "arn:r", null, null),
-                null, null, null, null, null, null, "us-east-1");
+        service.createSchedule(
+                newRequest("regional", null, "rate(1 hour)",
+                        new FlexibleTimeWindow("OFF", null),
+                        new Target("arn:t", "arn:r", null, null)),
+                "us-east-1");
         assertThrows(AwsException.class, () ->
                 service.getSchedule("regional", null, "us-west-2"));
     }

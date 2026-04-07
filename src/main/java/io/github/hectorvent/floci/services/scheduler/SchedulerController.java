@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.scheduler.model.FlexibleTimeWindow;
 import io.github.hectorvent.floci.services.scheduler.model.RetryPolicy;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
+import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -126,21 +127,9 @@ public class SchedulerController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode node = objectMapper.readTree(body != null ? body : "{}");
-            Schedule schedule = schedulerService.createSchedule(
-                    name,
-                    textField(node, "GroupName"),
-                    textField(node, "ScheduleExpression"),
-                    textField(node, "ScheduleExpressionTimezone"),
-                    parseFlexibleTimeWindow(node.get("FlexibleTimeWindow")),
-                    parseTarget(node.get("Target")),
-                    textField(node, "Description"),
-                    textField(node, "State"),
-                    textField(node, "ActionAfterCompletion"),
-                    instantField(node, "StartDate"),
-                    instantField(node, "EndDate"),
-                    textField(node, "KmsKeyArn"),
-                    region
-            );
+            ScheduleRequest req = parseScheduleRequest(node);
+            req.setName(name);
+            Schedule schedule = schedulerService.createSchedule(req, region);
             ObjectNode response = objectMapper.createObjectNode();
             response.put("ScheduleArn", schedule.getArn());
             return Response.ok(response).build();
@@ -173,21 +162,9 @@ public class SchedulerController {
         String region = regionResolver.resolveRegion(headers);
         try {
             JsonNode node = objectMapper.readTree(body != null ? body : "{}");
-            Schedule schedule = schedulerService.updateSchedule(
-                    name,
-                    textField(node, "GroupName"),
-                    textField(node, "ScheduleExpression"),
-                    textField(node, "ScheduleExpressionTimezone"),
-                    parseFlexibleTimeWindow(node.get("FlexibleTimeWindow")),
-                    parseTarget(node.get("Target")),
-                    textField(node, "Description"),
-                    textField(node, "State"),
-                    textField(node, "ActionAfterCompletion"),
-                    instantField(node, "StartDate"),
-                    instantField(node, "EndDate"),
-                    textField(node, "KmsKeyArn"),
-                    region
-            );
+            ScheduleRequest req = parseScheduleRequest(node);
+            req.setName(name);
+            Schedule schedule = schedulerService.updateSchedule(req, region);
             ObjectNode response = objectMapper.createObjectNode();
             response.put("ScheduleArn", schedule.getArn());
             return Response.ok(response).build();
@@ -349,6 +326,22 @@ public class SchedulerController {
             return Instant.ofEpochSecond(secs, nanos);
         }
         return null;
+    }
+
+    private ScheduleRequest parseScheduleRequest(JsonNode node) {
+        ScheduleRequest req = new ScheduleRequest();
+        req.setGroupName(textField(node, "GroupName"));
+        req.setScheduleExpression(textField(node, "ScheduleExpression"));
+        req.setScheduleExpressionTimezone(textField(node, "ScheduleExpressionTimezone"));
+        req.setFlexibleTimeWindow(parseFlexibleTimeWindow(node.get("FlexibleTimeWindow")));
+        req.setTarget(parseTarget(node.get("Target")));
+        req.setDescription(textField(node, "Description"));
+        req.setState(textField(node, "State"));
+        req.setActionAfterCompletion(textField(node, "ActionAfterCompletion"));
+        req.setStartDate(instantField(node, "StartDate"));
+        req.setEndDate(instantField(node, "EndDate"));
+        req.setKmsKeyArn(textField(node, "KmsKeyArn"));
+        return req;
     }
 
     private FlexibleTimeWindow parseFlexibleTimeWindow(JsonNode node) {
