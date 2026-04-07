@@ -334,7 +334,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DkimAttributes.SigningEnabled", equalTo(true))
-            .body("DkimAttributes.Status", equalTo("Success"));
+            .body("DkimAttributes.Status", equalTo("SUCCESS"));
     }
 
     @Test
@@ -359,7 +359,7 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DkimAttributes.SigningEnabled", equalTo(false))
-            .body("DkimAttributes.Status", equalTo("NotStarted"));
+            .body("DkimAttributes.Status", equalTo("NOT_STARTED"));
     }
 
     @Test
@@ -631,7 +631,7 @@ class SesV2IntegrationTest {
             .statusCode(200)
             .body("IdentityType", equalTo("EMAIL_ADDRESS"))
             .body("VerifiedForSendingStatus", equalTo(true))
-            .body("VerificationStatus", equalTo("Success"))
+            .body("VerificationStatus", equalTo("SUCCESS"))
             .body("FeedbackForwardingStatus", notNullValue())
             .body("DkimAttributes", notNullValue())
             .body("DkimAttributes.SigningEnabled", notNullValue())

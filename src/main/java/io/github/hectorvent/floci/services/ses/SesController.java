@@ -297,7 +297,7 @@ public class SesController {
         result.put("IdentityType", toV2IdentityType(identity.getIdentityType()));
         result.put("VerifiedForSendingStatus",
                 "Success".equals(identity.getVerificationStatus()));
-        result.put("VerificationStatus", identity.getVerificationStatus());
+        result.put("VerificationStatus", toV2Status(identity.getVerificationStatus()));
         result.put("FeedbackForwardingStatus", identity.isFeedbackForwardingEnabled());
 
         result.set("DkimAttributes", buildDkimAttributes(identity));
@@ -316,13 +316,25 @@ public class SesController {
     private ObjectNode buildDkimAttributes(Identity identity) {
         ObjectNode dkim = objectMapper.createObjectNode();
         dkim.put("SigningEnabled", identity.isDkimEnabled());
-        dkim.put("Status", identity.getDkimVerificationStatus());
+        dkim.put("Status", toV2Status(identity.getDkimVerificationStatus()));
         dkim.putArray("Tokens");
         return dkim;
     }
 
     private static String toV2IdentityType(String v1Type) {
         return "EmailAddress".equals(v1Type) ? "EMAIL_ADDRESS" : "DOMAIN";
+    }
+
+    private static String toV2Status(String v1Status) {
+        if (v1Status == null) return null;
+        return switch (v1Status) {
+            case "Success" -> "SUCCESS";
+            case "NotStarted" -> "NOT_STARTED";
+            case "Pending" -> "PENDING";
+            case "Failed" -> "FAILED";
+            case "TemporaryFailure" -> "TEMPORARY_FAILURE";
+            default -> v1Status;
+        };
     }
 
     private List<String> jsonArrayToList(JsonNode arrayNode) {

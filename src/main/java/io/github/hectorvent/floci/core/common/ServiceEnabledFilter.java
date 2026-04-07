@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
+import io.github.hectorvent.floci.services.ses.SesController;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
@@ -100,8 +101,12 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
         String target = ctx.getHeaderString("X-Amz-Target");
         String contentType = ctx.getMediaType() != null ? ctx.getMediaType().toString() : "";
         boolean jsonEndpoint = serviceKeyFromMatchedResource() != null;
+        String accept = ctx.getHeaderString("Accept");
+        boolean acceptsJson = accept != null && accept.contains("json");
+        boolean isSesV2 = resourceInfo != null
+                && SesController.class.equals(resourceInfo.getResourceClass());
 
-        if (target != null || contentType.contains("json") || jsonEndpoint) {
+        if (target != null || contentType.contains("json") || jsonEndpoint || acceptsJson || isSesV2) {
             return Response.status(400)
                     .type(MediaType.APPLICATION_JSON)
                     .entity(new AwsErrorResponse("ServiceNotAvailableException", message))
