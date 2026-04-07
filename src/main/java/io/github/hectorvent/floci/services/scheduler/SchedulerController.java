@@ -236,10 +236,10 @@ public class SchedulerController {
         response.put("Arn", group.getArn());
         response.put("State", group.getState());
         if (group.getCreationDate() != null) {
-            response.put("CreationDate", group.getCreationDate().getEpochSecond());
+            response.put("CreationDate", toEpochDouble(group.getCreationDate()));
         }
         if (group.getLastModificationDate() != null) {
-            response.put("LastModificationDate", group.getLastModificationDate().getEpochSecond());
+            response.put("LastModificationDate", toEpochDouble(group.getLastModificationDate()));
         }
         return response;
     }
@@ -295,19 +295,19 @@ public class SchedulerController {
             r.put("ActionAfterCompletion", s.getActionAfterCompletion());
         }
         if (s.getStartDate() != null) {
-            r.put("StartDate", s.getStartDate().getEpochSecond());
+            r.put("StartDate", toEpochDouble(s.getStartDate()));
         }
         if (s.getEndDate() != null) {
-            r.put("EndDate", s.getEndDate().getEpochSecond());
+            r.put("EndDate", toEpochDouble(s.getEndDate()));
         }
         if (s.getKmsKeyArn() != null) {
             r.put("KmsKeyArn", s.getKmsKeyArn());
         }
         if (s.getCreationDate() != null) {
-            r.put("CreationDate", s.getCreationDate().getEpochSecond());
+            r.put("CreationDate", toEpochDouble(s.getCreationDate()));
         }
         if (s.getLastModificationDate() != null) {
-            r.put("LastModificationDate", s.getLastModificationDate().getEpochSecond());
+            r.put("LastModificationDate", toEpochDouble(s.getLastModificationDate()));
         }
         return r;
     }
@@ -319,10 +319,10 @@ public class SchedulerController {
         r.put("GroupName", s.getGroupName());
         r.put("State", s.getState());
         if (s.getCreationDate() != null) {
-            r.put("CreationDate", s.getCreationDate().getEpochSecond());
+            r.put("CreationDate", toEpochDouble(s.getCreationDate()));
         }
         if (s.getLastModificationDate() != null) {
-            r.put("LastModificationDate", s.getLastModificationDate().getEpochSecond());
+            r.put("LastModificationDate", toEpochDouble(s.getLastModificationDate()));
         }
         if (s.getTarget() != null) {
             Map<String, Object> t = new HashMap<>();
@@ -330,6 +330,10 @@ public class SchedulerController {
             r.put("Target", t);
         }
         return r;
+    }
+
+    private double toEpochDouble(Instant instant) {
+        return instant.getEpochSecond() + instant.getNano() / 1_000_000_000.0;
     }
 
     private String textField(JsonNode node, String field) {

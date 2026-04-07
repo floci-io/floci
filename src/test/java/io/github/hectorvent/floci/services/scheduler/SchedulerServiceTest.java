@@ -123,6 +123,24 @@ class SchedulerServiceTest {
     }
 
     @Test
+    void deleteScheduleGroupCascadesSchedules() {
+        service.createScheduleGroup("cascade-grp", null, REGION);
+        service.createSchedule("s1", "cascade-grp", "rate(1 hour)", null,
+                new FlexibleTimeWindow("OFF", null),
+                new Target("arn:t", "arn:r", null, null),
+                null, null, null, null, null, null, REGION);
+        service.createSchedule("s2", "cascade-grp", "rate(1 hour)", null,
+                new FlexibleTimeWindow("OFF", null),
+                new Target("arn:t", "arn:r", null, null),
+                null, null, null, null, null, null, REGION);
+        service.deleteScheduleGroup("cascade-grp", REGION);
+        assertThrows(AwsException.class, () ->
+                service.getSchedule("s1", "cascade-grp", REGION));
+        assertThrows(AwsException.class, () ->
+                service.getSchedule("s2", "cascade-grp", REGION));
+    }
+
+    @Test
     void deleteDefaultGroupThrows() {
         AwsException e = assertThrows(AwsException.class, () ->
                 service.deleteScheduleGroup("default", REGION));

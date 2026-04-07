@@ -115,8 +115,17 @@ public class SchedulerService {
         groupStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "ScheduleGroup not found: " + name, 404));
+
+        // Cascade-delete all schedules in this group (matches AWS behavior)
+        String schedulePrefix = "schedule:" + region + ":" + name + ":";
+        List<String> orphanKeys = scheduleStore.scan(k -> k.startsWith(schedulePrefix))
+                .stream()
+                .map(s -> scheduleKey(region, name, s.getName()))
+                .toList();
+        orphanKeys.forEach(scheduleStore::delete);
+
         groupStore.delete(key);
-        LOG.infov("Deleted schedule group: {0}", name);
+        LOG.infov("Deleted schedule group: {0} (removed {1} schedules)", name, orphanKeys.size());
     }
 
     public java.util.List<ScheduleGroup> listScheduleGroups(String namePrefix, String region) {
