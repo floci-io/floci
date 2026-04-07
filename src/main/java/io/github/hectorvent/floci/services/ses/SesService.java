@@ -166,6 +166,8 @@ public class SesService {
         identity.setDkimEnabled(signingEnabled);
         if (signingEnabled) {
             identity.setDkimVerificationStatus("Success");
+        } else {
+            identity.setDkimVerificationStatus("NotStarted");
         }
         identityStore.put(key, identity);
         LOG.infov("Updated DKIM attributes for {0}: signingEnabled={1}", identityValue, signingEnabled);

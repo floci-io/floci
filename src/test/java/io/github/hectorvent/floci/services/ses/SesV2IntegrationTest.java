@@ -358,7 +358,8 @@ class SesV2IntegrationTest {
             .get("/v2/email/identities/dkim-test@example.com")
         .then()
             .statusCode(200)
-            .body("DkimAttributes.SigningEnabled", equalTo(false));
+            .body("DkimAttributes.SigningEnabled", equalTo(false))
+            .body("DkimAttributes.Status", equalTo("NotStarted"));
     }
 
     @Test
