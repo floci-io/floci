@@ -10,6 +10,7 @@ path = "src/lib.rs"
 [dependencies]
 aws-config = "1"
 aws-credential-types = { version = "1", features = ["hardcoded-credentials"] }
+aws-sdk-acm = "1"
 aws-sdk-s3 = "1"
 aws-sdk-ssm = "1"
 aws-sdk-sqs = "1"
@@ -29,6 +30,7 @@ aws-types = "1"
 tokio = { version = "1", features = ["full"] }
 bytes = "1"
 reqwest = { version = "0.12", default-features = false }
+rcgen = "0.13"
 zip = "2"
 
 [dev-dependencies]

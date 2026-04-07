@@ -185,28 +185,16 @@ Critical areas:
     ./mvnw test -Dtest=SsmIntegrationTest
     ./mvnw test -Dtest=SsmIntegrationTest#putParameter
 
-### Manual testing
-
-    ./test-services.sh
-
 ---
 
 ## Compatibility Project
 
-Compatibility test suite:
-`./compatibility-tests/`
+Compatibility test suite: `./compatibility-tests/`
 
 Guidelines:
 
 - Prefer AWS SDK clients over raw HTTP for management-plane validation
 - Use this suite when changes may affect real SDK behavior
-- If the suite is unavailable locally, state that limitation explicitly
-
-Default module:
-
-- `sdk-test-java`
-
-Use `docker-compose-test.yml` for container-based testing.
 
 ---
 

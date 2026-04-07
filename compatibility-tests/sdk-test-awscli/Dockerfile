@@ -1,6 +1,6 @@
 FROM amazon/aws-cli:latest
 
-RUN yum install -y git jq bc
+RUN yum install -y git jq bc openssl
 
 WORKDIR /app
 
