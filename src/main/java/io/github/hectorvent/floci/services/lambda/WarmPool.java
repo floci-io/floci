@@ -41,6 +41,7 @@ public class WarmPool {
     private final ConcurrentHashMap<String, ArrayDeque<ContainerHandle>> pool = new ConcurrentHashMap<>();
     private final ScheduledExecutorService evictionScheduler = Executors.newSingleThreadScheduledExecutor(
             r -> { Thread t = new Thread(r, "warm-pool-evictor"); t.setDaemon(true); return t; });
+    private Thread shutdownHook;
 
     @Inject
     public WarmPool(ContainerLauncher containerLauncher, EmulatorConfig config) {
@@ -73,10 +74,20 @@ public class WarmPool {
         } else if (config.services().lambda().ephemeral()) {
             LOG.infov("Lambda containers running in ephemeral mode (destroyed after each invocation)");
         }
+
+        shutdownHook = new Thread(this::drainAll, "warm-pool-shutdown-hook");
+        Runtime.getRuntime().addShutdownHook(shutdownHook);
     }
 
     @PreDestroy
     void shutdown() {
+        if (shutdownHook != null) {
+            try {
+                Runtime.getRuntime().removeShutdownHook(shutdownHook);
+            } catch (IllegalStateException ignored) {
+                // JVM already shutting down
+            }
+        }
         evictionScheduler.shutdownNow();
         drainAll();
     }
