@@ -171,4 +171,247 @@ class SchedulerIntegrationTest {
         .then()
             .statusCode(404);
     }
+
+    // ──────────────────────────── Schedule tests ────────────────────────────
+
+    @Test
+    @Order(20)
+    void createSchedule() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:lambda:us-east-1:000000000000:function:my-func",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role"
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/my-schedule")
+        .then()
+            .statusCode(200)
+            .body("ScheduleArn", containsString("schedule/default/my-schedule"));
+    }
+
+    @Test
+    @Order(21)
+    void createScheduleInGroup() {
+        // First create the group
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/schedule-groups/sched-test-group")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "GroupName": "sched-test-group",
+                    "ScheduleExpression": "rate(5 minutes)",
+                    "FlexibleTimeWindow": {"Mode": "FLEXIBLE", "MaximumWindowInMinutes": 10},
+                    "Target": {
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:my-queue",
+                        "RoleArn": "arn:aws:iam::000000000000:role/r",
+                        "Input": "hello"
+                    },
+                    "Description": "test schedule",
+                    "State": "DISABLED"
+                }
+                """)
+        .when()
+            .post("/schedules/grouped-schedule")
+        .then()
+            .statusCode(200)
+            .body("ScheduleArn", containsString("schedule/sched-test-group/grouped-schedule"));
+    }
+
+    @Test
+    @Order(22)
+    void createScheduleDuplicateReturns409() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {"Arn": "arn:t", "RoleArn": "arn:r"}
+                }
+                """)
+        .when()
+            .post("/schedules/my-schedule")
+        .then()
+            .statusCode(409);
+    }
+
+    @Test
+    @Order(23)
+    void getSchedule() {
+        given()
+        .when()
+            .get("/schedules/my-schedule")
+        .then()
+            .statusCode(200)
+            .body("Name", equalTo("my-schedule"))
+            .body("GroupName", equalTo("default"))
+            .body("State", equalTo("ENABLED"))
+            .body("ScheduleExpression", equalTo("rate(1 hour)"))
+            .body("FlexibleTimeWindow.Mode", equalTo("OFF"))
+            .body("Target.Arn", containsString("function:my-func"))
+            .body("Target.RoleArn", containsString("role/scheduler-role"))
+            .body("CreationDate", notNullValue())
+            .body("LastModificationDate", notNullValue());
+    }
+
+    @Test
+    @Order(24)
+    void getScheduleInGroup() {
+        given()
+            .queryParam("groupName", "sched-test-group")
+        .when()
+            .get("/schedules/grouped-schedule")
+        .then()
+            .statusCode(200)
+            .body("Name", equalTo("grouped-schedule"))
+            .body("GroupName", equalTo("sched-test-group"))
+            .body("State", equalTo("DISABLED"))
+            .body("Description", equalTo("test schedule"));
+    }
+
+    @Test
+    @Order(25)
+    void getScheduleNotFoundReturns404() {
+        given()
+        .when()
+            .get("/schedules/nonexistent-schedule")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(26)
+    void listSchedules() {
+        given()
+        .when()
+            .get("/schedules")
+        .then()
+            .statusCode(200)
+            .body("Schedules.Name", hasItem("my-schedule"));
+    }
+
+    @Test
+    @Order(27)
+    void listSchedulesInGroup() {
+        given()
+            .queryParam("ScheduleGroup", "sched-test-group")
+        .when()
+            .get("/schedules")
+        .then()
+            .statusCode(200)
+            .body("Schedules.Name", hasItem("grouped-schedule"))
+            .body("Schedules.Name", not(hasItem("my-schedule")));
+    }
+
+    @Test
+    @Order(28)
+    void updateSchedule() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(30 minutes)",
+                    "FlexibleTimeWindow": {"Mode": "FLEXIBLE", "MaximumWindowInMinutes": 5},
+                    "Target": {
+                        "Arn": "arn:aws:lambda:us-east-1:000000000000:function:updated-func",
+                        "RoleArn": "arn:aws:iam::000000000000:role/updated-role"
+                    },
+                    "State": "DISABLED",
+                    "Description": "updated description"
+                }
+                """)
+        .when()
+            .put("/schedules/my-schedule")
+        .then()
+            .statusCode(200)
+            .body("ScheduleArn", containsString("schedule/default/my-schedule"));
+
+        // Verify the update
+        given()
+        .when()
+            .get("/schedules/my-schedule")
+        .then()
+            .statusCode(200)
+            .body("ScheduleExpression", equalTo("rate(30 minutes)"))
+            .body("State", equalTo("DISABLED"))
+            .body("Description", equalTo("updated description"))
+            .body("FlexibleTimeWindow.Mode", equalTo("FLEXIBLE"))
+            .body("FlexibleTimeWindow.MaximumWindowInMinutes", equalTo(5));
+    }
+
+    @Test
+    @Order(29)
+    void updateScheduleNotFoundReturns404() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {"Arn": "arn:t", "RoleArn": "arn:r"}
+                }
+                """)
+        .when()
+            .put("/schedules/nonexistent-schedule")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(30)
+    void deleteSchedule() {
+        given()
+        .when()
+            .delete("/schedules/my-schedule")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/schedules/my-schedule")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(31)
+    void deleteScheduleNotFoundReturns404() {
+        given()
+        .when()
+            .delete("/schedules/already-gone-schedule")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(32)
+    void deleteScheduleInGroup() {
+        given()
+            .queryParam("groupName", "sched-test-group")
+        .when()
+            .delete("/schedules/grouped-schedule")
+        .then()
+            .statusCode(200);
+
+        given()
+            .queryParam("groupName", "sched-test-group")
+        .when()
+            .get("/schedules/grouped-schedule")
+        .then()
+            .statusCode(404);
+    }
 }

@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -11,6 +12,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 import java.util.regex.Pattern;
 
@@ -24,6 +26,7 @@ public class SchedulerService {
     private static final String DEFAULT_GROUP = "default";
 
     private final StorageBackend<String, ScheduleGroup> groupStore;
+    private final StorageBackend<String, Schedule> scheduleStore;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -31,12 +34,17 @@ public class SchedulerService {
         this(
                 storageFactory.create("scheduler", "scheduler-groups.json",
                         new TypeReference<Map<String, ScheduleGroup>>() {}),
+                storageFactory.create("scheduler", "scheduler-schedules.json",
+                        new TypeReference<Map<String, Schedule>>() {}),
                 regionResolver
         );
     }
 
-    SchedulerService(StorageBackend<String, ScheduleGroup> groupStore, RegionResolver regionResolver) {
+    SchedulerService(StorageBackend<String, ScheduleGroup> groupStore,
+                     StorageBackend<String, Schedule> scheduleStore,
+                     RegionResolver regionResolver) {
         this.groupStore = groupStore;
+        this.scheduleStore = scheduleStore;
         this.regionResolver = regionResolver;
     }
 
@@ -126,6 +134,130 @@ public class SchedulerService {
         });
     }
 
+    // ──────────────────────────── Schedules ────────────────────────────
+
+    public Schedule createSchedule(String name, String groupName, String scheduleExpression,
+                                   String scheduleExpressionTimezone,
+                                   io.github.hectorvent.floci.services.scheduler.model.FlexibleTimeWindow flexibleTimeWindow,
+                                   io.github.hectorvent.floci.services.scheduler.model.Target target,
+                                   String description, String state, String actionAfterCompletion,
+                                   Instant startDate, Instant endDate, String kmsKeyArn,
+                                   String region) {
+        validateName(name);
+        String effectiveGroup = (groupName == null || groupName.isBlank()) ? DEFAULT_GROUP : groupName;
+        getScheduleGroup(effectiveGroup, region); // verify group exists
+
+        String key = scheduleKey(region, effectiveGroup, name);
+        if (scheduleStore.get(key).isPresent()) {
+            throw new AwsException("ConflictException",
+                    "Schedule already exists: " + name, 409);
+        }
+
+        Instant now = Instant.now();
+        Schedule schedule = new Schedule();
+        schedule.setName(name);
+        schedule.setArn(buildScheduleArn(region, effectiveGroup, name));
+        schedule.setGroupName(effectiveGroup);
+        schedule.setState(state != null ? state : "ENABLED");
+        schedule.setScheduleExpression(scheduleExpression);
+        schedule.setScheduleExpressionTimezone(scheduleExpressionTimezone);
+        schedule.setFlexibleTimeWindow(flexibleTimeWindow);
+        schedule.setTarget(target);
+        schedule.setDescription(description);
+        schedule.setActionAfterCompletion(actionAfterCompletion);
+        schedule.setStartDate(startDate);
+        schedule.setEndDate(endDate);
+        schedule.setKmsKeyArn(kmsKeyArn);
+        schedule.setCreationDate(now);
+        schedule.setLastModificationDate(now);
+
+        scheduleStore.put(key, schedule);
+        LOG.infov("Created schedule: {0} in group {1}, region {2}", name, effectiveGroup, region);
+        return schedule;
+    }
+
+    public Schedule getSchedule(String name, String groupName, String region) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Name is required.", 400);
+        }
+        String effectiveGroup = (groupName == null || groupName.isBlank()) ? DEFAULT_GROUP : groupName;
+        return scheduleStore.get(scheduleKey(region, effectiveGroup, name))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Schedule not found: " + name, 404));
+    }
+
+    public Schedule updateSchedule(String name, String groupName, String scheduleExpression,
+                                   String scheduleExpressionTimezone,
+                                   io.github.hectorvent.floci.services.scheduler.model.FlexibleTimeWindow flexibleTimeWindow,
+                                   io.github.hectorvent.floci.services.scheduler.model.Target target,
+                                   String description, String state, String actionAfterCompletion,
+                                   Instant startDate, Instant endDate, String kmsKeyArn,
+                                   String region) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Name is required.", 400);
+        }
+        String effectiveGroup = (groupName == null || groupName.isBlank()) ? DEFAULT_GROUP : groupName;
+        String key = scheduleKey(region, effectiveGroup, name);
+        Schedule existing = scheduleStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Schedule not found: " + name, 404));
+
+        Instant now = Instant.now();
+        Schedule updated = new Schedule();
+        updated.setName(name);
+        updated.setArn(existing.getArn());
+        updated.setGroupName(effectiveGroup);
+        updated.setState(state != null ? state : "ENABLED");
+        updated.setScheduleExpression(scheduleExpression);
+        updated.setScheduleExpressionTimezone(scheduleExpressionTimezone);
+        updated.setFlexibleTimeWindow(flexibleTimeWindow);
+        updated.setTarget(target);
+        updated.setDescription(description);
+        updated.setActionAfterCompletion(actionAfterCompletion);
+        updated.setStartDate(startDate);
+        updated.setEndDate(endDate);
+        updated.setKmsKeyArn(kmsKeyArn);
+        updated.setCreationDate(existing.getCreationDate());
+        updated.setLastModificationDate(now);
+
+        scheduleStore.put(key, updated);
+        LOG.infov("Updated schedule: {0} in group {1}", name, effectiveGroup);
+        return updated;
+    }
+
+    public void deleteSchedule(String name, String groupName, String region) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "Name is required.", 400);
+        }
+        String effectiveGroup = (groupName == null || groupName.isBlank()) ? DEFAULT_GROUP : groupName;
+        String key = scheduleKey(region, effectiveGroup, name);
+        scheduleStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Schedule not found: " + name, 404));
+        scheduleStore.delete(key);
+        LOG.infov("Deleted schedule: {0} in group {1}", name, effectiveGroup);
+    }
+
+    public List<Schedule> listSchedules(String groupName, String namePrefix, String state, String region) {
+        String effectiveGroup = (groupName == null || groupName.isBlank()) ? DEFAULT_GROUP : groupName;
+        String storagePrefix = "schedule:" + region + ":" + effectiveGroup + ":";
+        return scheduleStore.scan(k -> {
+            if (!k.startsWith(storagePrefix)) {
+                return false;
+            }
+            String scheduleName = k.substring(storagePrefix.length());
+            if (namePrefix != null && !namePrefix.isBlank() && !scheduleName.startsWith(namePrefix)) {
+                return false;
+            }
+            return true;
+        }).stream().filter(s -> {
+            if (state != null && !state.isBlank()) {
+                return state.equals(s.getState());
+            }
+            return true;
+        }).toList();
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private void validateName(String name) {
@@ -144,5 +276,13 @@ public class SchedulerService {
 
     private static String groupKey(String region, String name) {
         return "group:" + region + ":" + name;
+    }
+
+    private String buildScheduleArn(String region, String groupName, String name) {
+        return regionResolver.buildArn("scheduler", region, "schedule/" + groupName + "/" + name);
+    }
+
+    private static String scheduleKey(String region, String groupName, String name) {
+        return "schedule:" + region + ":" + groupName + ":" + name;
     }
 }
