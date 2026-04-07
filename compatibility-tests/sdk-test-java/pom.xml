@@ -253,8 +253,11 @@
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.2.5</version>
                 <configuration>
+                    <!-- Include *Tests.java to also run DynamoDbScanConditionTests, EcsTests,
+                         Ec2Tests, etc. that were silently skipped by the original pattern -->
                     <includes>
                         <include>**/*Test.java</include>
+                        <include>**/*Tests.java</include>
                     </includes>
                     <environmentVariables>
                         <FLOCI_ENDPOINT>${env.FLOCI_ENDPOINT}</FLOCI_ENDPOINT>

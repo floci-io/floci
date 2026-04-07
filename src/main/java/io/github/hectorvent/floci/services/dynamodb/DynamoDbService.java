@@ -1318,7 +1318,7 @@ public class DynamoDbService {
     }
 
     String resolveAttributeName(String nameOrPlaceholder, JsonNode exprAttrNames) {
-        nameOrPlaceholder = trimBalancedOuterParens(nameOrPlaceholder).trim();
+        nameOrPlaceholder = nameOrPlaceholder.trim();
         if (nameOrPlaceholder.startsWith("#") && exprAttrNames != null) {
             JsonNode resolved = exprAttrNames.get(nameOrPlaceholder);
             if (resolved != null) {
@@ -1659,7 +1659,6 @@ public class DynamoDbService {
                                                 String expression,
                                                 JsonNode expressionAttrValues,
                                                 JsonNode exprAttrNames) {
-        expression = trimBalancedOuterParens(expression);
         List<JsonNode> results = new ArrayList<>();
 
         // Use token-based splitting that correctly handles BETWEEN...AND and compact format
