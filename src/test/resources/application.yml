@@ -96,6 +96,8 @@ floci:
       enabled: true
     cloudformation:
       enabled: true
+    ses:
+      enabled: true
     opensearch:
       enabled: true
       mode: mock

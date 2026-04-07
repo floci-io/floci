@@ -119,6 +119,7 @@ flowchart LR
 | **EC2** | 61 | In-process | VPCs, subnets, security groups, instances, AMIs, key pairs, internet gateways, route tables, Elastic IPs, tags |
 | **ACM** | 8 | In-process | Certificate issuance, validation lifecycle |
 | **SES** | 14 | In-process | Send email / raw email, identity verification, DKIM attributes |
+| **SES v2 (HTTP)** | 9 | In-process | REST JSON API, identities, DKIM, feedback attributes, account sending |
 | **OpenSearch** | 24 | In-process | Domain CRUD, tags, versions, instance types, upgrade stubs |
 
 > **Lambda, ElastiCache, RDS, and ECS** spin up real Docker containers and support IAM authentication and SigV4 request signing — the same auth flow as production AWS.

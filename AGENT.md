@@ -97,7 +97,7 @@ Floci must implement real AWS wire protocols.
 |----------|----------|----------------|-----------------|----------------|
 | Query | SQS, SNS, IAM, STS, RDS, ElastiCache, CloudFormation, CloudWatch Metrics | form-encoded POST + `Action` | XML | `AwsQueryController` |
 | JSON 1.1 | SSM, EventBridge, CloudWatch Logs, Kinesis, KMS, Cognito, Secrets Manager, ACM | POST + `X-Amz-Target` | JSON | `AwsJson11Controller` |
-| REST JSON | Lambda, API Gateway | REST paths | JSON | JAX-RS |
+| REST JSON | Lambda, API Gateway, SES V2 | REST paths | JSON | JAX-RS |
 | REST XML | S3 | REST paths | XML | JAX-RS |
 | TCP | ElastiCache, RDS | raw protocol | native | proxies |
 

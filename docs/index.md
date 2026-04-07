@@ -17,7 +17,7 @@ Floci is a fast, free, and open-source local AWS service emulator built for deve
 | SSM Parameter Store | JSON 1.1 |
 | SQS | Query / JSON |
 | SNS | Query / JSON |
-| SES | Query |
+| SES | Query / REST JSON |
 | S3 | REST XML |
 | DynamoDB + Streams | JSON 1.1 |
 | Lambda | REST JSON |
