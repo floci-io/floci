@@ -17,6 +17,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
 public class SesService {
@@ -26,6 +27,7 @@ public class SesService {
     private final StorageBackend<String, Identity> identityStore;
     private final StorageBackend<String, SentEmail> emailStore;
     private final RegionResolver regionResolver;
+    private final Map<String, Boolean> accountSendingEnabled = new ConcurrentHashMap<>();
 
     @Inject
     public SesService(StorageFactory storageFactory, EmulatorConfig config,
@@ -150,6 +152,29 @@ public class SesService {
         return identityStore.get(key).orElse(null);
     }
 
+    public void setDkimAttributes(String identityValue, boolean signingEnabled, String region) {
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Identity does not exist: " + identityValue, 404));
+        identity.setDkimEnabled(signingEnabled);
+        if (signingEnabled) {
+            identity.setDkimVerificationStatus("Success");
+        }
+        identityStore.put(key, identity);
+        LOG.infov("Updated DKIM attributes for {0}: signingEnabled={1}", identityValue, signingEnabled);
+    }
+
+    public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Identity does not exist: " + identityValue, 404));
+        identity.setFeedbackForwardingEnabled(enabled);
+        identityStore.put(key, identity);
+        LOG.infov("Updated feedback forwarding for {0}: enabled={1}", identityValue, enabled);
+    }
+
     public List<String> getVerifiedEmailAddresses(String region) {
         String prefix = "identity::" + region + "::";
         List<Identity> all = identityStore.scan(k -> k.startsWith(prefix));
@@ -175,6 +200,15 @@ public class SesService {
                 .toList());
         keys.forEach(emailStore::delete);
         LOG.infov("Cleared all SES emails in region {0}", region);
+    }
+
+    public boolean isAccountSendingEnabled(String region) {
+        return accountSendingEnabled.getOrDefault(region, true);
+    }
+
+    public void setAccountSendingEnabled(String region, boolean enabled) {
+        accountSendingEnabled.put(region, enabled);
+        LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);
     }
 
     private static String identityKey(String region, String identity) {

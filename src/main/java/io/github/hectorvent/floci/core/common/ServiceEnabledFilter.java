@@ -78,6 +78,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
     private String mapCredentialScope(String scope) {
         return switch (scope) {
             case "execute-api" -> "apigateway";
+            case "ses" -> "email";
             default -> scope;
         };
     }
