@@ -6,7 +6,7 @@ COPY . .
 RUN npx tsc
 
 FROM node:22-alpine
-RUN apk add --no-cache aws-cli bash python3 git jq
+RUN apk add --no-cache aws-cli bash python3 git jq docker-cli
 WORKDIR /app
 
 # Install bats and helpers
@@ -18,6 +18,7 @@ COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/bin ./bin
 COPY --from=builder /app/lib ./lib
 COPY package.json cdk.json tsconfig.json ./
+COPY docker-fn/ docker-fn/
 COPY run.sh ./
 COPY run-bats-in-container.sh ./
 COPY test/ test/

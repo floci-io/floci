@@ -109,4 +109,5 @@ floci:
     appconfig:
       enabled: true
     appconfigdata:
+    ecr:
       enabled: true

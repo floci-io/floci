@@ -23,7 +23,6 @@ on:
       - 'Dockerfile.native'
       - 'Dockerfile.native-package'
       - 'docker-compose.yml'
-      - 'docker-compose-test.yml'
       - '.releaserc.json'
       - '.github/workflows/semver.yml'
 

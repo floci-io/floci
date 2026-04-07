@@ -3,6 +3,8 @@ import * as s3 from 'aws-cdk-lib/aws-s3';
 import * as sqs from 'aws-cdk-lib/aws-sqs';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as path from 'path';
 import { Construct } from 'constructs';
 
 export class FlociTestStack extends cdk.Stack {
@@ -57,6 +59,17 @@ export class FlociTestStack extends cdk.Stack {
       },
     });
     generatedSecret.applyRemovalPolicy(cdk.RemovalPolicy.DESTROY);
+
+    // Custom Docker image Lambda — exercises ECR emulation end-to-end:
+    // CDK builds the local Dockerfile, cdk-assets pushes it to the bootstrap
+    // ECR repository (via Floci's emulated ECR + registry:2), and Floci's
+    // Lambda runner pulls the image at invoke time.
+    new lambda.DockerImageFunction(this, 'DockerHelloFn', {
+      functionName: 'floci-cdk-docker-hello',
+      code: lambda.DockerImageCode.fromImageAsset(path.join(__dirname, '..', 'docker-fn')),
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 256,
+    });
 
     new cdk.CfnOutput(this, 'BucketName', { value: bucket.bucketName });
     new cdk.CfnOutput(this, 'QueueUrl', { value: queue.queueUrl });

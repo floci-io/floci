@@ -1,6 +1,10 @@
 """S3 notification filter integration tests."""
 
+import logging
+
 import pytest
+
+logger = logging.getLogger(__name__)
 
 
 class TestS3Notifications:
@@ -34,17 +38,17 @@ class TestS3Notifications:
         # Cleanup
         try:
             s3_client.delete_bucket(Bucket=self.bucket_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clean up S3 bucket %s: %s", self.bucket_name, e)
         try:
             sns_client.delete_topic(TopicArn=self.topic_arn)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clean up SNS topic %s: %s", self.topic_arn, e)
         try:
             queue_url = sqs_client.get_queue_url(QueueName=self.queue_name)["QueueUrl"]
             sqs_client.delete_queue(QueueUrl=queue_url)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clean up SQS queue %s: %s", self.queue_name, e)
 
     def test_put_bucket_notification_configuration_with_filters(self):
         """Test PutBucketNotificationConfiguration with prefix/suffix filters."""

@@ -7,7 +7,10 @@ Tests that CloudFormation correctly handles:
 """
 
 import json
+import logging
 import time
+
+logger = logging.getLogger(__name__)
 
 import pytest
 
@@ -80,8 +83,8 @@ class TestCloudFormationAutoNaming:
         # Cleanup
         try:
             cloudformation_client.delete_stack(StackName=stack_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clean up CloudFormation stack %s: %s", stack_name, e)
 
     def test_auto_naming_create_stack(self, cloudformation_client, auto_naming_stack):
         """Test CreateStack succeeds with auto-named resources."""
@@ -309,8 +312,8 @@ class TestCloudFormationExplicitNaming:
         # Cleanup
         try:
             cloudformation_client.delete_stack(StackName=stack_name)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clean up CloudFormation stack %s: %s", stack_name, e)
 
     def test_explicit_naming_create_stack(
         self, cloudformation_client, explicit_naming_stack

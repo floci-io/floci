@@ -1,9 +1,12 @@
 """S3 CORS enforcement integration tests."""
 
+import logging
 import urllib.request
 import urllib.error
 
 import pytest
+
+logger = logging.getLogger(__name__)
 
 
 class TestS3CORS:
@@ -29,13 +32,13 @@ class TestS3CORS:
         # Cleanup
         try:
             s3_client.delete_bucket_cors(Bucket=self.bucket)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clean up CORS config for bucket %s: %s", self.bucket, e)
         try:
             s3_client.delete_object(Bucket=self.bucket, Key="cors-test.txt")
             s3_client.delete_bucket(Bucket=self.bucket)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to clean up S3 bucket %s: %s", self.bucket, e)
 
     def _raw_request(self, method, path, headers=None):
         """Make a raw HTTP request; returns (status_code, lowercase_headers_dict)."""

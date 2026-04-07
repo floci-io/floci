@@ -8,6 +8,7 @@ import org.jboss.logging.Logger;
 import java.net.InetAddress;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Detects the hostname that Lambda containers should use to reach the Floci host.
@@ -24,6 +25,7 @@ public class DockerHostResolver {
     private static final String LINUX_DOCKER_BRIDGE = "172.17.0.1";
 
     private final EmulatorConfig config;
+    private final AtomicBoolean ufwHintLogged = new AtomicBoolean(false);
 
     @Inject
     public DockerHostResolver(EmulatorConfig config) {
@@ -53,15 +55,30 @@ public class DockerHostResolver {
             }
         }
 
-        // On Docker Desktop (macOS/Windows/Linux Desktop), host.docker.internal works.
-        // On native Linux Docker, it doesn't exist - fall back to bridge IP.
-        if (isHostDockerInternalResolvable()) {
-            LOG.debugv("Using host.docker.internal for container-to-host communication");
-            return HOST_DOCKER_INTERNAL;
+        // Floci is running natively on the host. Always return host.docker.internal:
+        //   - On macOS/Windows (Docker Desktop), the alias is auto-injected into every
+        //     container's /etc/hosts and routes through the Docker VM to the host.
+        //   - On native Linux Docker, the alias is NOT auto-injected, so ContainerLauncher
+        //     must add `host.docker.internal:host-gateway` to each Lambda container's
+        //     extra-hosts at create time. ContainerLauncher does that on Linux only.
+        // Either way, the in-container Lambda RIC can resolve "host.docker.internal" to
+        // the host gateway and reach Floci's Runtime API server.
+        LOG.debugv("Floci on host ({0}) — Lambda containers will use host.docker.internal",
+                System.getProperty("os.name"));
+        if (isLinuxHost() && ufwHintLogged.compareAndSet(false, true)) {
+            LOG.info("Lambda containers will reach Floci via host.docker.internal "
+                    + "(translated to the docker bridge gateway). On Linux hosts running UFW "
+                    + "with the default 'INPUT DROP' policy, this path is blocked and Lambda "
+                    + "invocations will time out with Function.TimedOut. If you see that, run: "
+                    + "'sudo ufw allow in on docker0' (see README \u2192 'Lambda on native Linux Docker').");
         }
+        return HOST_DOCKER_INTERNAL;
+    }
 
-        LOG.infov("host.docker.internal not resolvable (native Linux Docker?) — using bridge IP: {0}", LINUX_DOCKER_BRIDGE);
-        return LINUX_DOCKER_BRIDGE;
+    /** True when the Floci JVM is running natively on a Linux host (not on Docker Desktop). */
+    public boolean isLinuxHost() {
+        String os = System.getProperty("os.name", "").toLowerCase();
+        return os.contains("linux") || os.contains("nix") || os.contains("nux");
     }
 
     private boolean isRunningInContainer() {
@@ -77,12 +94,4 @@ public class DockerHostResolver {
         }
     }
 
-    private boolean isHostDockerInternalResolvable() {
-        try {
-            InetAddress.getByName(HOST_DOCKER_INTERNAL);
-            return true;
-        } catch (Exception e) {
-            return false;
-        }
-    }
 }

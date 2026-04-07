@@ -1,0 +1,15 @@
+bin/*.d.ts
+bin/*.js
+bin/*.js.map
+
+lib/*.d.ts
+lib/*.js
+lib/*.js.map
+
+docker-fns/*.d.ts
+docker-fns/*.js
+docker-fns/*.js.map
+
+node_modules/
+coverage/
+cdk.out/

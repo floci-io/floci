@@ -118,13 +118,14 @@ flowchart LR
 | **ECS** | **Real Docker containers** | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | **EC2** | In-process | VPCs, subnets, security groups, instances, AMIs, key pairs, internet gateways, route tables, Elastic IPs, tags |
 | **ACM** | In-process | Certificate issuance, validation lifecycle |
+| **ECR** | In-process + **real OCI registry** | Repositories, image push / pull via stock `docker`, image-backed Lambda functions |
 | **SES** | In-process | Send email / raw email, identity verification, DKIM attributes |
 | **SES v2 (HTTP)** | In-process | REST JSON API, identities, DKIM, feedback attributes, account sending |
 | **OpenSearch** | In-process | Domain CRUD, tags, versions, instance types, upgrade stubs |
 | **AppConfig** | In-process | Applications, environments, profiles, hosted configuration versions, deployments |
 | **AppConfigData** | In-process | Configuration sessions, dynamic configuration retrieval |
 
-> **Lambda, ElastiCache, RDS, and ECS** spin up real Docker containers and support IAM authentication and SigV4 request signing, the same auth flow as production AWS.
+> **Lambda, ElastiCache, RDS, and ECS** spin up real Docker containers and support IAM authentication and SigV4 request signing — the same auth flow as production AWS. **ECR** runs a shared `registry:2` container so the stock `docker` client can push and pull image bytes against repositories returned by the AWS-shaped control plane.
 >
 > For per-service operation counts and endpoint protocols, see the [Services Overview](https://floci.io/floci/services/) in the documentation site.
 

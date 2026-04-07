@@ -139,6 +139,12 @@ def acm_client(aws_config, client_config):
     return boto3.client("acm", config=client_config, **aws_config)
 
 
+@pytest.fixture
+def ecr_client(aws_config, client_config):
+    """Create ECR client."""
+    return boto3.client("ecr", config=client_config, **aws_config)
+
+
 # ============================================
 # Utility Fixtures
 # ============================================

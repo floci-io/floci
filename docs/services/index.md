@@ -1,6 +1,6 @@
 # Services Overview
 
-Floci emulates 31 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
+Floci emulates 32 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
 
 This page is the canonical reference for supported service counts and operation counts. Other docs (and the README) should link here rather than duplicating the table.
 
@@ -36,6 +36,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [ECS](ecs.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerServiceV20141113.*` | JSON 1.1 | 58 |
 | [EC2](ec2.md) | `POST /` with `Action=` param | EC2 Query | 61 |
 | [ACM](acm.md) | `POST /` + `X-Amz-Target: CertificateManager.*` | JSON 1.1 | 12 |
+| [ECR](ecr.md) | `POST /` + `X-Amz-Target: AmazonEC2ContainerRegistry_V20150921.*` (control plane) and `/v2/...` (data plane via `registry:2`) | JSON 1.1 + OCI Distribution | 17 |
 | [SES](ses.md) | `POST /` with `Action=` param | Query | 16 |
 | [SES v2](ses.md#v2) | `/v2/email/*` | REST JSON | 9 |
 | [OpenSearch](opensearch.md) | `/2021-01-01/opensearch/...` | REST JSON | 24 |
@@ -43,6 +44,8 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [AppConfigData](appconfig.md#data-plane) | `/configurationsessions`, `/configuration` | REST JSON | 2 |
 
 **Lambda, ElastiCache, RDS, and ECS** spin up real Docker containers and support IAM authentication and SigV4 request signing, the same auth flow as production AWS.
+
+**ECR** runs a shared `registry:2` container so the stock `docker` client can push and pull image bytes against repositories returned by the AWS-shaped control plane.
 
 ## Common Setup
 

@@ -13,7 +13,6 @@ on:
       - 'Dockerfile.native'
       - 'Dockerfile.native-package'
       - 'docker-compose.yml'
-      - 'docker-compose-test.yml'
       - 'compatibility-tests/**'
       - '.github/workflows/compatibility.yml'
 
@@ -125,11 +124,19 @@ jobs:
         run: |
           mkdir -p test-results
           FLOCI_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "compat-net").IPAddress}}' floci)
+          DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+
+          EXTRA_ARGS=""
+          # compat-cdk needs Docker access for CDK's DockerImageFunction (docker build + push to emulated ECR)
+          if [ "${{ matrix.test }}" = "compat-cdk" ]; then
+            EXTRA_ARGS="-v /var/run/docker.sock:/var/run/docker.sock --group-add $DOCKER_GID"
+          fi
 
           docker run --rm --network compat-net \
             -e FLOCI_ENDPOINT=http://floci:4566 \
             -v "$(pwd)/test-results:/results" \
             --add-host "sdk-vhost-bucket.floci:${FLOCI_IP}" \
+            $EXTRA_ARGS \
             compat-${{ matrix.test }}
 
       - name: Generate test summary

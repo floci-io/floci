@@ -214,6 +214,7 @@ public interface EmulatorConfig {
         EcsServiceConfig ecs();
         AppConfigServiceConfig appconfig();
         AppConfigDataServiceConfig appconfigdata();
+        EcrServiceConfig ecr();
     }
 
     interface SsmServiceConfig {
@@ -412,6 +413,38 @@ public interface EmulatorConfig {
 
         @WithDefault("256")
         int defaultCpuUnits();
+    }
+
+    interface EcrServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("registry:2")
+        String registryImage();
+
+        @WithDefault("floci-ecr-registry")
+        String registryContainerName();
+
+        @WithDefault("5000")
+        int registryBasePort();
+
+        @WithDefault("5099")
+        int registryMaxPort();
+
+        @WithDefault("./data/ecr")
+        String dataPath();
+
+        @WithDefault("false")
+        boolean tlsEnabled();
+
+        @WithDefault("true")
+        boolean keepRunningOnShutdown();
+
+        /** URI style for repositoryUri responses: "hostname" (default, *.dkr.ecr.<region>.localhost) or "path". */
+        @WithDefault("hostname")
+        String uriStyle();
+
+        Optional<String> dockerNetwork();
     }
 
     interface LambdaServiceConfig {

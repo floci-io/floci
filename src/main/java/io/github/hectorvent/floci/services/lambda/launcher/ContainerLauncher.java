@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
@@ -56,6 +57,11 @@ public class ContainerLauncher {
     private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
     private final CloudWatchLogsService cloudWatchLogsService;
+    private final EcrRegistryManager ecrRegistryManager;
+
+    /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
+    private static final java.util.regex.Pattern AWS_ECR_URI =
+            java.util.regex.Pattern.compile("^([0-9]{12})\\.dkr\\.ecr\\.([a-z0-9-]+)\\.amazonaws\\.com/(.+)$");
 
     @Inject
     public ContainerLauncher(DockerClient dockerClient,
@@ -64,7 +70,8 @@ public class ContainerLauncher {
                               RuntimeApiServerFactory runtimeApiServerFactory,
                               DockerHostResolver dockerHostResolver,
                               EmulatorConfig config,
-                              CloudWatchLogsService cloudWatchLogsService) {
+                              CloudWatchLogsService cloudWatchLogsService,
+                              EcrRegistryManager ecrRegistryManager) {
         this.dockerClient = dockerClient;
         this.imageCacheService = imageCacheService;
         this.imageResolver = imageResolver;
@@ -72,6 +79,26 @@ public class ContainerLauncher {
         this.dockerHostResolver = dockerHostResolver;
         this.config = config;
         this.cloudWatchLogsService = cloudWatchLogsService;
+        this.ecrRegistryManager = ecrRegistryManager;
+    }
+
+    /**
+     * Rewrites real-AWS-shaped ECR image URIs to point at Floci's loopback registry.
+     * Stored ImageUri is preserved (so describe-function returns the original);
+     * the rewrite is only applied immediately before the docker pull.
+     */
+    private String rewriteForEmulatedRegistry(String image) {
+        if (image == null) return null;
+        java.util.regex.Matcher m = AWS_ECR_URI.matcher(image);
+        if (!m.matches()) return image;
+        String account = m.group(1);
+        String region = m.group(2);
+        String repoAndTag = m.group(3);
+        ecrRegistryManager.ensureStarted();
+        int port = ecrRegistryManager.effectivePort();
+        String rewritten = account + ".dkr.ecr." + region + ".localhost:" + port + "/" + repoAndTag;
+        LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
+        return rewritten;
     }
 
     public ContainerHandle launch(LambdaFunction fn) {
@@ -98,6 +125,10 @@ public class ContainerLauncher {
                 ? fn.getImageUri()
                 : imageResolver.resolve(fn.getRuntime());
 
+        // If this is an AWS-shaped ECR URI, rewrite it to Floci's loopback registry
+        // so docker pull lands on the emulated backing store rather than real AWS.
+        image = rewriteForEmulatedRegistry(image);
+
         // Ensure image is available locally
         imageCacheService.ensureImageExists(image);
 
@@ -112,7 +143,9 @@ public class ContainerLauncher {
         env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + fn.getMemorySize());
         env.add("AWS_LAMBDA_FUNCTION_TIMEOUT=" + fn.getTimeout());
         env.add("AWS_LAMBDA_FUNCTION_VERSION=$LATEST");
-        env.add("_HANDLER=" + fn.getHandler());
+        if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
+            env.add("_HANDLER=" + fn.getHandler());
+        }
         env.add("AWS_DEFAULT_REGION=us-east-1");
         env.add("AWS_REGION=us-east-1");
         if (fn.getEnvironment() != null) {
@@ -123,6 +156,17 @@ public class ContainerLauncher {
         // (code is copied in via Docker API tar-copy after container creation)
         HostConfig hostConfig = HostConfig.newHostConfig()
                 .withMemory(fn.getMemorySize() * 1024 * 1024L);
+
+        // On native Linux Docker, host.docker.internal is NOT auto-injected into
+        // containers (unlike Docker Desktop on Mac/Windows). Add an extra-host
+        // mapping that resolves to the host gateway, so the in-container Lambda
+        // RIC can reach Floci's Runtime API server via the same hostname on every
+        // platform. Harmless on Docker Desktop (it just duplicates an existing
+        // entry). The "host-gateway" magic value is translated by Docker to the
+        // bridge gateway IP at container-create time.
+        if (dockerHostResolver.isLinuxHost()) {
+            hostConfig.withExtraHosts("host.docker.internal:host-gateway");
+        }
 
         // Attach to a specific Docker network if configured
         config.services().lambda().dockerNetwork()

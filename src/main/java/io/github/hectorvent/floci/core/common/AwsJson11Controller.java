@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
+import io.github.hectorvent.floci.services.ecr.EcrJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
@@ -43,6 +44,7 @@ public class AwsJson11Controller {
     private static final String COGNITO_TARGET_PREFIX = "AWSCognitoIdentityProviderService.";
     private static final String ACM_TARGET_PREFIX = "CertificateManager.";
     private static final String ECS_TARGET_PREFIX = "AmazonEC2ContainerServiceV20141113.";
+    private static final String ECR_TARGET_PREFIX = "AmazonEC2ContainerRegistry_V20150921.";
 
     private final ObjectMapper objectMapper;
     private final RegionResolver regionResolver;
@@ -56,6 +58,7 @@ public class AwsJson11Controller {
     private final CognitoJsonHandler cognitoJsonHandler;
     private final AcmJsonHandler acmJsonHandler;
     private final EcsJsonHandler ecsJsonHandler;
+    private final EcrJsonHandler ecrJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, RegionResolver regionResolver,
@@ -65,7 +68,8 @@ public class AwsJson11Controller {
                                KinesisJsonHandler kinesisJsonHandler,
                                ApiGatewayV2JsonHandler apigwV2JsonHandler,
                                KmsJsonHandler kmsJsonHandler, CognitoJsonHandler cognitoJsonHandler,
-                               AcmJsonHandler acmJsonHandler, EcsJsonHandler ecsJsonHandler) {
+                               AcmJsonHandler acmJsonHandler, EcsJsonHandler ecsJsonHandler,
+                               EcrJsonHandler ecrJsonHandler) {
         this.objectMapper = objectMapper;
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
@@ -78,6 +82,7 @@ public class AwsJson11Controller {
         this.cognitoJsonHandler = cognitoJsonHandler;
         this.acmJsonHandler = acmJsonHandler;
         this.ecsJsonHandler = ecsJsonHandler;
+        this.ecrJsonHandler = ecrJsonHandler;
     }
 
     @POST
@@ -125,6 +130,9 @@ public class AwsJson11Controller {
         } else if (target.startsWith(ECS_TARGET_PREFIX)) {
             prefix = ECS_TARGET_PREFIX;
             serviceName = "ECS";
+        } else if (target.startsWith(ECR_TARGET_PREFIX)) {
+            prefix = ECR_TARGET_PREFIX;
+            serviceName = "ECR";
         } else {
             return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
         }
@@ -147,6 +155,7 @@ public class AwsJson11Controller {
                 case "Cognito" -> cognitoJsonHandler.handle(action, request, region);
                 case "ACM" -> acmJsonHandler.handle(action, request, region);
                 case "ECS" -> ecsJsonHandler.handle(action, request, region);
+                case "ECR" -> ecrJsonHandler.handle(action, request, region);
                 default -> null;
             };
         } catch (AwsException e) {

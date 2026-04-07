@@ -164,6 +164,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ecs</artifactId>
         </dependency>
+        <!-- ECR client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ecr</artifactId>
+        </dependency>
         <!-- EventBridge Scheduler client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

@@ -83,9 +83,15 @@ public class LambdaController {
         ObjectNode root = objectMapper.createObjectNode();
         root.set("Configuration", objectMapper.valueToTree(buildFunctionConfiguration(fn)));
         ObjectNode code = root.putObject("Code");
-        code.put("Location", "https://awslambda-" + region + "-tasks.s3." + region
-                + ".amazonaws.com/" + fn.getFunctionName());
-        code.put("RepositoryType", "S3");
+        if ("Image".equals(fn.getPackageType()) && fn.getImageUri() != null) {
+            code.put("RepositoryType", "ECR");
+            code.put("ImageUri", fn.getImageUri());
+            code.put("ResolvedImageUri", fn.getImageUri());
+        } else {
+            code.put("Location", "https://awslambda-" + region + "-tasks.s3." + region
+                    + ".amazonaws.com/" + fn.getFunctionName());
+            code.put("RepositoryType", "S3");
+        }
 
         return Response.ok(root).build();
     }

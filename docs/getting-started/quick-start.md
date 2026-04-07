@@ -159,6 +159,52 @@ Point your AWS SDK to Floci the same way:
     client := s3.NewFromConfig(cfg)
     ```
 
+## Step 5 — (Optional) Push and pull a container image to emulated ECR
+
+Floci emulates ECR with a real OCI registry behind it, so the stock `docker` client works against repositories you create through the AWS CLI. No daemon configuration needed — Floci returns repository URIs that resolve to loopback, which `docker` auto-trusts as insecure.
+
+```bash
+# Create the repository (lazy-starts the backing registry container)
+aws ecr create-repository --repository-name floci-it/app --endpoint-url $AWS_ENDPOINT
+
+# Authenticate
+aws ecr get-login-password --endpoint-url $AWS_ENDPOINT \
+  | docker login --username AWS --password-stdin \
+        000000000000.dkr.ecr.us-east-1.localhost:5000
+
+# Push
+docker pull alpine:3.19
+docker tag  alpine:3.19 000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+docker push             000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+
+# Pull from a clean local image store
+docker rmi  000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+docker pull 000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+```
+
+See the [ECR service docs](../services/ecr.md) for the full action surface, image-backed Lambda integration, and CDK `DockerImageFunction` support.
+
+## Lambda on native Linux Docker (UFW)
+
+When Floci runs **natively on a Linux host** (not Docker Desktop), Lambda function containers reach Floci's Runtime API server via the docker bridge gateway. On Ubuntu / Pop!_OS / Debian boxes with **UFW enabled**, the default `INPUT DROP` policy silently drops these packets and Lambda invocations time out with `Function.TimedOut`. This affects every Lambda packaging type — Zip *and* image-backed functions deployed via emulated ECR.
+
+**One-time fix**, scoped to the docker bridge only (does not expose anything to the network — `docker0` is internal):
+
+```bash
+sudo ufw allow in on docker0 comment 'floci: containers reach host'
+```
+
+If you want to scope it tighter to just the Lambda Runtime API and the ECR registry port ranges:
+
+```bash
+sudo ufw allow in on docker0 to any port 9200:9299 proto tcp comment 'floci lambda runtime api'
+sudo ufw allow in on docker0 to any port 5000:5099 proto tcp comment 'floci ecr registry'
+```
+
+**Docker Desktop** (macOS / Windows / Linux) does not need this — it routes container → host through the Docker VM, which Floci's `DockerHostResolver` detects automatically.
+
+**Floci-in-Docker** (running the published Floci image inside a container) does not need this either — Lambda containers and Floci share the same docker network and reach each other via container IPs.
+
 ## Next Steps
 
 - [Configure Docker Compose with ElastiCache and RDS ports](../configuration/docker-compose.md)
