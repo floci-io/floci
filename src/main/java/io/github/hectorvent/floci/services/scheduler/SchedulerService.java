@@ -284,6 +284,26 @@ public class SchedulerService {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'flexibleTimeWindow' failed to satisfy constraint: Member must not be null", 400);
         }
+        String flexibleTimeWindowMode = req.getFlexibleTimeWindow().getMode();
+        if (flexibleTimeWindowMode == null || flexibleTimeWindowMode.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must not be null", 400);
+        }
+        flexibleTimeWindowMode = flexibleTimeWindowMode.trim();
+        if (!"OFF".equals(flexibleTimeWindowMode) && !"FLEXIBLE".equals(flexibleTimeWindowMode)) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + flexibleTimeWindowMode + "' at 'flexibleTimeWindow.mode' failed to satisfy constraint: Member must satisfy enum value set: [OFF, FLEXIBLE]", 400);
+        }
+        if ("FLEXIBLE".equals(flexibleTimeWindowMode)
+                && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() == null) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must not be null", 400);
+        }
+        if ("OFF".equals(flexibleTimeWindowMode)
+                && req.getFlexibleTimeWindow().getMaximumWindowInMinutes() != null) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value at 'flexibleTimeWindow.maximumWindowInMinutes' failed to satisfy constraint: Member must be null when flexibleTimeWindow.mode is OFF", 400);
+        }
         if (req.getTarget() == null) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'target' failed to satisfy constraint: Member must not be null", 400);
@@ -295,6 +315,12 @@ public class SchedulerService {
         if (req.getTarget().getRoleArn() == null || req.getTarget().getRoleArn().isBlank()) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value null at 'target.roleArn' failed to satisfy constraint: Member must not be null", 400);
+        }
+        if (req.getTarget().getDeadLetterConfig() != null
+                && (req.getTarget().getDeadLetterConfig().getArn() == null
+                || req.getTarget().getDeadLetterConfig().getArn().isBlank())) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value null at 'target.deadLetterConfig.arn' failed to satisfy constraint: Member must not be null", 400);
         }
     }
 
