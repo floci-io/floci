@@ -72,6 +72,7 @@ public class CognitoJsonHandler {
             case "AdminAddUserToGroup" -> handleAdminAddUserToGroup(request);
             case "AdminRemoveUserFromGroup" -> handleAdminRemoveUserFromGroup(request);
             case "AdminListGroupsForUser" -> handleAdminListGroupsForUser(request);
+            case "GetTokensFromRefreshToken" -> handleGetTokensFromRefreshToken(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -285,11 +286,20 @@ public class CognitoJsonHandler {
     }
 
     private Response handleListUsers(JsonNode request) {
-        List<CognitoUser> users = service.listUsers(request.path("UserPoolId").asText());
+        String filter = request.path("Filter").isMissingNode() ? null : request.path("Filter").asText(null);
+        List<CognitoUser> users = service.listUsers(request.path("UserPoolId").asText(), filter);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("Users");
         users.forEach(u -> items.add(userToNode(u)));
         return Response.ok(response).build();
+    }
+
+    private Response handleGetTokensFromRefreshToken(JsonNode request) {
+        Map<String, Object> result = service.getTokensFromRefreshToken(
+                request.path("ClientId").asText(),
+                request.path("RefreshToken").asText()
+        );
+        return Response.ok(objectMapper.valueToTree(result)).build();
     }
 
     private Response handleInitiateAuth(JsonNode request) {

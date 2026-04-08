@@ -1,0 +1,214 @@
+  ______ _      ____   _____ _____
+ |  ____| |    / __ \ / ____|_   _|
+ | |__  | |   | |  | | |      | |  
+ |  __| | |   | |  | | |      | |  
+ | |    | |___| |__| | |____ _| |_ 
+ |_|    |______\____/ \_____|_____|
+
+
+          Powered by Quarkus 3.32.3
+2026-04-08 01:03:41,714 INFO  [io.github.hectorvent.floci.lifecycle.EmulatorLifecycle] (main) === AWS Local Emulator Starting ===
+2026-04-08 01:03:41,718 INFO  [io.github.hectorvent.floci.lifecycle.EmulatorLifecycle] (main) Storage mode: memory
+2026-04-08 01:03:41,719 INFO  [io.github.hectorvent.floci.lifecycle.EmulatorLifecycle] (main) Persistent path: ./data
+2026-04-08 01:03:41,719 INFO  [io.github.hectorvent.floci.core.common.ServiceRegistry] (main) Enabled services: [ssm, sqs, s3, dynamodb, sns, lambda, apigateway, iam, elasticache, rds, events, scheduler, logs, monitoring, secretsmanager, apigatewayv2, kinesis, kms, cognito-idp, states, cloudformation, acm, email, es]
+2026-04-08 01:03:41,719 INFO  [io.github.hectorvent.floci.lifecycle.EmulatorLifecycle] (main) === AWS Local Emulator Ready ===
+2026-04-08 01:03:41,998 INFO  [io.github.hectorvent.floci.core.common.BouncyCastleInitializer] (main) Registered BouncyCastle security provider (static initializer)
+2026-04-08 01:03:42,073 INFO  [io.quarkus] (main) floci 1.0.11 on JVM (powered by Quarkus 3.32.3) started in 0.889s. Listening on: http://0.0.0.0:4566
+2026-04-08 01:03:42,073 INFO  [io.quarkus] (main) Profile prod activated. 
+2026-04-08 01:03:42,073 INFO  [io.quarkus] (main) Installed features: [cdi, config-yaml, rest, rest-jackson, smallrye-context-propagation, vertx]
+2026-04-08 01:03:44,299 INFO  [io.github.hectorvent.floci.core.storage.StorageFactory] (executor-thread-1) Creating memory storage for service s3 (file: ./data/s3-buckets.json)
+2026-04-08 01:03:44,300 INFO  [io.github.hectorvent.floci.core.storage.StorageFactory] (executor-thread-1) Creating memory storage for service s3 (file: ./data/s3-objects.json)
+2026-04-08 01:05:39,506 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPool
+2026-04-08 01:05:39,535 INFO  [io.github.hectorvent.floci.core.storage.StorageFactory] (executor-thread-1) Creating memory storage for service cognito (file: ./data/cognito-pools.json)
+2026-04-08 01:05:39,536 INFO  [io.github.hectorvent.floci.core.storage.StorageFactory] (executor-thread-1) Creating memory storage for service cognito (file: ./data/cognito-clients.json)
+2026-04-08 01:05:39,536 INFO  [io.github.hectorvent.floci.core.storage.StorageFactory] (executor-thread-1) Creating memory storage for service cognito (file: ./data/cognito-resource-servers.json)
+2026-04-08 01:05:39,536 INFO  [io.github.hectorvent.floci.core.storage.StorageFactory] (executor-thread-1) Creating memory storage for service cognito (file: ./data/cognito-users.json)
+2026-04-08 01:05:39,536 INFO  [io.github.hectorvent.floci.core.storage.StorageFactory] (executor-thread-1) Creating memory storage for service cognito (file: ./data/cognito-groups.json)
+2026-04-08 01:05:39,691 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool: us-east-1_6d7144642
+2026-04-08 01:05:39,794 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPoolClient
+2026-04-08 01:05:39,795 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool Client: 7f5e63cc637d4206b6163d7ad9 for pool us-east-1_6d7144642
+2026-04-08 01:05:39,811 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:05:39,812 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com in pool us-east-1_6d7144642
+2026-04-08 01:05:39,822 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:05:39,822 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com in pool us-east-1_6d7144642 (permanent=true)
+2026-04-08 01:05:39,828 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:05:39,836 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:05:39,837 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com in pool us-east-1_6d7144642
+2026-04-08 01:05:39,845 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:39,872 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:39,876 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:05:39,877 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com in pool us-east-1_6d7144642 (permanent=false)
+2026-04-08 01:05:39,880 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:39,882 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:39,892 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:05:39,893 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com in pool us-east-1_6d7144642 (permanent=true)
+2026-04-08 01:05:39,896 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:39,919 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:39,926 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:39,933 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:40,011 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:05:40,016 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:05:40,020 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:05:40,020 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com in pool us-east-1_6d7144642 (permanent=true)
+2026-04-08 01:05:40,022 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:40,031 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:40,039 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:40,039 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com against filter [email = "compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com"]: attrName=[email], rawValue=[compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com], attrValue=[no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com], matches=false
+2026-04-08 01:05:40,040 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com against filter [email = "compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com"]: attrName=[email], rawValue=[compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com], attrValue=[compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com], matches=true
+2026-04-08 01:05:40,044 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:40,044 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com against filter [email ^= "compat-user-"]: attrName=[email], rawValue=[compat-user-], attrValue=[no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com], matches=false
+2026-04-08 01:05:40,044 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com against filter [email ^= "compat-user-"]: attrName=[email], rawValue=[compat-user-], attrValue=[compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com], matches=true
+2026-04-08 01:05:40,048 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:40,048 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com against filter [sub = "e5deeefe-846c-4ec5-b9f3-635cf9f4b411"]: attrName=[sub], rawValue=[e5deeefe-846c-4ec5-b9f3-635cf9f4b411], attrValue=[12ea2251-5968-4479-90db-37d16d75ef77], matches=false
+2026-04-08 01:05:40,048 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com against filter [sub = "e5deeefe-846c-4ec5-b9f3-635cf9f4b411"]: attrName=[sub], rawValue=[e5deeefe-846c-4ec5-b9f3-635cf9f4b411], attrValue=[e5deeefe-846c-4ec5-b9f3-635cf9f4b411], matches=true
+2026-04-08 01:05:40,051 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:40,052 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[no-hash-f8a2428b-5098-49a6-9300-22fa9b48420a@example.com], matches=false
+2026-04-08 01:05:40,052 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[compat-user-d033d08e-d17c-4da4-8dac-e7ceb78f9ae5@example.com], matches=false
+2026-04-08 01:05:40,056 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: DeleteUserPool
+2026-04-08 01:05:49,762 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPool
+2026-04-08 01:05:49,893 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool: us-east-1_74bf25322
+2026-04-08 01:05:49,901 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPoolClient
+2026-04-08 01:05:49,902 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool Client: ad730846525d4f379c26831104 for pool us-east-1_74bf25322
+2026-04-08 01:05:49,904 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:05:49,904 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user compat-test-3f78da26@example.com in pool us-east-1_74bf25322
+2026-04-08 01:05:49,907 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:05:49,907 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-3f78da26@example.com in pool us-east-1_74bf25322 (permanent=true)
+2026-04-08 01:05:49,909 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:05:49,912 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:05:49,912 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user no-hash-test-794948a1@example.com in pool us-east-1_74bf25322
+2026-04-08 01:05:49,914 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,918 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,920 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:05:49,920 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-3f78da26@example.com in pool us-east-1_74bf25322 (permanent=false)
+2026-04-08 01:05:49,925 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,929 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,932 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,934 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,936 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:05:49,938 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:05:49,940 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:05:49,940 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-3f78da26@example.com in pool us-east-1_74bf25322 (permanent=true)
+2026-04-08 01:05:49,942 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,947 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:49,949 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:49,949 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-3f78da26@example.com against filter [email = "compat-test-3f78da26@example.com"]: attrName=[email], rawValue=[compat-test-3f78da26@example.com], attrValue=[compat-test-3f78da26@example.com], matches=true
+2026-04-08 01:05:49,949 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-794948a1@example.com against filter [email = "compat-test-3f78da26@example.com"]: attrName=[email], rawValue=[compat-test-3f78da26@example.com], attrValue=[no-hash-test-794948a1@example.com], matches=false
+2026-04-08 01:05:49,951 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:49,952 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-3f78da26@example.com against filter [email ^= "compat-"]: attrName=[email], rawValue=[compat-], attrValue=[compat-test-3f78da26@example.com], matches=true
+2026-04-08 01:05:49,952 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-794948a1@example.com against filter [email ^= "compat-"]: attrName=[email], rawValue=[compat-], attrValue=[no-hash-test-794948a1@example.com], matches=false
+2026-04-08 01:05:49,953 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:49,953 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-3f78da26@example.com against filter [sub = "41e928d5-6c74-4daf-912d-385435cf1729"]: attrName=[sub], rawValue=[41e928d5-6c74-4daf-912d-385435cf1729], attrValue=[41e928d5-6c74-4daf-912d-385435cf1729], matches=true
+2026-04-08 01:05:49,954 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-794948a1@example.com against filter [sub = "41e928d5-6c74-4daf-912d-385435cf1729"]: attrName=[sub], rawValue=[41e928d5-6c74-4daf-912d-385435cf1729], attrValue=[177fae24-1de4-40b2-8469-8db5aabaf5f2], matches=false
+2026-04-08 01:05:49,955 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:05:49,955 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-3f78da26@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[compat-test-3f78da26@example.com], matches=false
+2026-04-08 01:05:49,955 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-794948a1@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[no-hash-test-794948a1@example.com], matches=false
+2026-04-08 01:05:49,957 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,961 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,966 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:05:49,971 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,976 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:05:49,980 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:05:49,982 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,987 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:05:49,991 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: DeleteUserPool
+2026-04-08 01:06:32,337 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPool
+2026-04-08 01:06:32,462 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool: us-east-1_40ada8d8f
+2026-04-08 01:06:32,469 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPoolClient
+2026-04-08 01:06:32,469 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool Client: 68085b4130ef44e983e8b05194 for pool us-east-1_40ada8d8f
+2026-04-08 01:06:32,472 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:06:32,472 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user compat-test-d4df6120@example.com in pool us-east-1_40ada8d8f
+2026-04-08 01:06:32,475 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:06:32,475 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-d4df6120@example.com in pool us-east-1_40ada8d8f (permanent=true)
+2026-04-08 01:06:32,477 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:06:32,479 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:06:32,479 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user no-hash-test-b57cb3a2@example.com in pool us-east-1_40ada8d8f
+2026-04-08 01:06:32,481 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,485 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,487 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:06:32,487 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-d4df6120@example.com in pool us-east-1_40ada8d8f (permanent=false)
+2026-04-08 01:06:32,493 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,496 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,498 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,501 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,503 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:06:32,505 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:06:32,506 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:06:32,506 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-d4df6120@example.com in pool us-east-1_40ada8d8f (permanent=true)
+2026-04-08 01:06:32,508 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,513 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:06:32,515 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:06:32,515 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-b57cb3a2@example.com against filter [email = "compat-test-d4df6120@example.com"]: attrName=[email], rawValue=[compat-test-d4df6120@example.com], attrValue=[no-hash-test-b57cb3a2@example.com], matches=false
+2026-04-08 01:06:32,515 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-d4df6120@example.com against filter [email = "compat-test-d4df6120@example.com"]: attrName=[email], rawValue=[compat-test-d4df6120@example.com], attrValue=[compat-test-d4df6120@example.com], matches=true
+2026-04-08 01:06:32,517 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:06:32,517 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-b57cb3a2@example.com against filter [email ^= "compat-"]: attrName=[email], rawValue=[compat-], attrValue=[no-hash-test-b57cb3a2@example.com], matches=false
+2026-04-08 01:06:32,517 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-d4df6120@example.com against filter [email ^= "compat-"]: attrName=[email], rawValue=[compat-], attrValue=[compat-test-d4df6120@example.com], matches=true
+2026-04-08 01:06:32,519 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:06:32,519 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-b57cb3a2@example.com against filter [sub = "2bfa0da3-8402-4220-a3bc-c0dd17e80946"]: attrName=[sub], rawValue=[2bfa0da3-8402-4220-a3bc-c0dd17e80946], attrValue=[c9457eb7-be69-4eb9-84d7-3f33725cb32f], matches=false
+2026-04-08 01:06:32,519 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-d4df6120@example.com against filter [sub = "2bfa0da3-8402-4220-a3bc-c0dd17e80946"]: attrName=[sub], rawValue=[2bfa0da3-8402-4220-a3bc-c0dd17e80946], attrValue=[2bfa0da3-8402-4220-a3bc-c0dd17e80946], matches=true
+2026-04-08 01:06:32,520 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:06:32,521 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-b57cb3a2@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[no-hash-test-b57cb3a2@example.com], matches=false
+2026-04-08 01:06:32,521 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-d4df6120@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[compat-test-d4df6120@example.com], matches=false
+2026-04-08 01:06:32,522 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,526 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,531 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:06:32,535 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,539 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:06:32,544 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:06:32,545 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,549 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:06:32,554 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: DeleteUserPool
+2026-04-08 01:07:03,870 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPool
+2026-04-08 01:07:03,984 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool: us-east-1_c739f7507
+2026-04-08 01:07:03,992 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: CreateUserPoolClient
+2026-04-08 01:07:03,993 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created User Pool Client: 481f126ab4ac4a3b92089184cb for pool us-east-1_c739f7507
+2026-04-08 01:07:03,996 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:07:03,996 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user compat-test-68c3ddc3@example.com in pool us-east-1_c739f7507
+2026-04-08 01:07:03,998 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:07:03,998 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-68c3ddc3@example.com in pool us-east-1_c739f7507 (permanent=true)
+2026-04-08 01:07:04,000 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:07:04,002 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminCreateUser
+2026-04-08 01:07:04,002 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Created user no-hash-test-225c2380@example.com in pool us-east-1_c739f7507
+2026-04-08 01:07:04,005 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,008 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,010 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:07:04,011 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-68c3ddc3@example.com in pool us-east-1_c739f7507 (permanent=false)
+2026-04-08 01:07:04,012 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,013 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,015 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:07:04,015 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-68c3ddc3@example.com in pool us-east-1_c739f7507 (permanent=true)
+2026-04-08 01:07:04,016 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,021 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,026 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,030 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,050 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:07:04,051 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminGetUser
+2026-04-08 01:07:04,053 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: AdminSetUserPassword
+2026-04-08 01:07:04,053 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Set password for user compat-test-68c3ddc3@example.com in pool us-east-1_c739f7507 (permanent=true)
+2026-04-08 01:07:04,054 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,058 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:07:04,060 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:07:04,060 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-68c3ddc3@example.com against filter [email = "compat-test-68c3ddc3@example.com"]: attrName=[email], rawValue=[compat-test-68c3ddc3@example.com], attrValue=[compat-test-68c3ddc3@example.com], matches=true
+2026-04-08 01:07:04,060 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-225c2380@example.com against filter [email = "compat-test-68c3ddc3@example.com"]: attrName=[email], rawValue=[compat-test-68c3ddc3@example.com], attrValue=[no-hash-test-225c2380@example.com], matches=false
+2026-04-08 01:07:04,062 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:07:04,062 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-68c3ddc3@example.com against filter [email ^= "compat-"]: attrName=[email], rawValue=[compat-], attrValue=[compat-test-68c3ddc3@example.com], matches=true
+2026-04-08 01:07:04,062 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-225c2380@example.com against filter [email ^= "compat-"]: attrName=[email], rawValue=[compat-], attrValue=[no-hash-test-225c2380@example.com], matches=false
+2026-04-08 01:07:04,064 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:07:04,064 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-68c3ddc3@example.com against filter [sub = "77b5cd65-c5f0-440a-b421-f2a9dd75c1bf"]: attrName=[sub], rawValue=[77b5cd65-c5f0-440a-b421-f2a9dd75c1bf], attrValue=[77b5cd65-c5f0-440a-b421-f2a9dd75c1bf], matches=true
+2026-04-08 01:07:04,064 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-225c2380@example.com against filter [sub = "77b5cd65-c5f0-440a-b421-f2a9dd75c1bf"]: attrName=[sub], rawValue=[77b5cd65-c5f0-440a-b421-f2a9dd75c1bf], attrValue=[ae478f1e-5e58-47b1-8b3f-c966bfbe4a1f], matches=false
+2026-04-08 01:07:04,065 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: ListUsers
+2026-04-08 01:07:04,065 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user compat-test-68c3ddc3@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[compat-test-68c3ddc3@example.com], matches=false
+2026-04-08 01:07:04,065 INFO  [io.github.hectorvent.floci.services.cognito.CognitoService] (executor-thread-1) Matching user no-hash-test-225c2380@example.com against filter [email = "nobody@nowhere.invalid"]: attrName=[email], rawValue=[nobody@nowhere.invalid], attrValue=[no-hash-test-225c2380@example.com], matches=false
+2026-04-08 01:07:04,066 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,071 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,075 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:07:04,079 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,084 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:07:04,088 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: GetTokensFromRefreshToken
+2026-04-08 01:07:04,089 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,094 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: InitiateAuth
+2026-04-08 01:07:04,098 INFO  [io.github.hectorvent.floci.core.common.AwsJson11Controller] (executor-thread-1) AwsJson11Controller Cognito action: DeleteUserPool
+2026-04-08 01:07:07,001 INFO  [io.github.hectorvent.floci.lifecycle.EmulatorLifecycle] (Shutdown thread) === AWS Local Emulator Shutting Down ===
+2026-04-08 01:07:07,002 INFO  [io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager] (Shutdown thread) Stopped all ElastiCache proxies
+2026-04-08 01:07:07,002 INFO  [io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager] (Shutdown thread) Stopped all RDS proxies
+2026-04-08 01:07:07,002 INFO  [io.github.hectorvent.floci.lifecycle.EmulatorLifecycle] (Shutdown thread) === AWS Local Emulator Stopped ===
+2026-04-08 01:07:07,009 INFO  [io.quarkus] (Shutdown thread) floci stopped in 0.016s

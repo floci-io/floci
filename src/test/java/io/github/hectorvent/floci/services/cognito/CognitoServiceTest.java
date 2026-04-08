@@ -398,6 +398,254 @@ class CognitoServiceTest {
     }
 
     // =========================================================================
+    // Issue #229 — password verification
+    // =========================================================================
+
+    @Test
+    void initiateAuthRejectsAnyPasswordWhenNoHashSet() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "bob", "PASSWORD", "anything")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void initiateAuthWorksAfterPasswordIsSet() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        service.adminSetUserPassword(pool.getId(), "bob", "Perm1!", true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "bob", "PASSWORD", "Perm1!"));
+        assertNotNull(((Map<String, Object>) result.get("AuthenticationResult")).get("AccessToken"));
+    }
+
+    // =========================================================================
+    // Issue #235 — AdminSetUserPassword(Permanent=false) changes the password
+    // =========================================================================
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void adminSetUserPasswordPermanentFalseChangesPassword() {
+        UserPool pool = createPoolAndUser(); // alice has permanent "Perm1234!"
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        service.adminSetUserPassword(pool.getId(), "alice", "NewTemp1!", false);
+
+        // Old password now rejected
+        assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                        Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")));
+
+        // New temp password triggers NEW_PASSWORD_REQUIRED challenge
+        Map<String, Object> result = service.initiateAuth(client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "NewTemp1!"));
+        assertEquals("NEW_PASSWORD_REQUIRED", result.get("ChallengeName"));
+    }
+
+    // =========================================================================
+    // Issue #228 — AccessToken contains client_id claim
+    // =========================================================================
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void accessTokenContainsClientId() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        Map<String, Object> auth = (Map<String, Object>) authResult.get("AuthenticationResult");
+        String accessToken = (String) auth.get("AccessToken");
+
+        String payloadJson = new String(Base64.getUrlDecoder().decode(accessToken.split("\\.")[1]),
+                StandardCharsets.UTF_8);
+        assertTrue(payloadJson.contains("\"client_id\":\"" + client.getClientId() + "\""),
+                "AccessToken should contain client_id claim matching the requesting client");
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void idTokenDoesNotContainClientId() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        Map<String, Object> auth = (Map<String, Object>) authResult.get("AuthenticationResult");
+        String idToken = (String) auth.get("IdToken");
+
+        String payloadJson = new String(Base64.getUrlDecoder().decode(idToken.split("\\.")[1]),
+                StandardCharsets.UTF_8);
+        assertFalse(payloadJson.contains("\"client_id\""),
+                "IdToken should not contain client_id claim");
+    }
+
+    // =========================================================================
+    // Issue #220 — adminGetUser resolves sub UUID and email aliases
+    // =========================================================================
+
+    @Test
+    void adminGetUserBySubUuid() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+
+        String sub = service.adminGetUser(pool.getId(), "bob").getAttributes().get("sub");
+        assertNotNull(sub);
+
+        CognitoUser found = service.adminGetUser(pool.getId(), sub);
+        assertEquals("bob", found.getUsername());
+    }
+
+    @Test
+    void adminGetUserByEmailAlias() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+
+        CognitoUser found = service.adminGetUser(pool.getId(), "bob@example.com");
+        assertEquals("bob", found.getUsername());
+    }
+
+    // =========================================================================
+    // Issue #233 — listUsers Filter
+    // =========================================================================
+
+    @Test
+    void listUsersNoFilterReturnsAll() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "user1", Map.of("email", "user1@example.com"), null);
+        service.adminCreateUser(pool.getId(), "user2", Map.of("email", "user2@example.com"), null);
+
+        assertEquals(2, service.listUsers(pool.getId(), null).size());
+    }
+
+    @Test
+    void listUsersFilterBySubExactMatch() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "user1", Map.of("email", "user1@example.com"), null);
+        service.adminCreateUser(pool.getId(), "user2", Map.of("email", "user2@example.com"), null);
+
+        String sub2 = service.adminGetUser(pool.getId(), "user2").getAttributes().get("sub");
+        List<CognitoUser> result = service.listUsers(pool.getId(), "sub = \"" + sub2 + "\"");
+
+        assertEquals(1, result.size());
+        assertEquals("user2", result.get(0).getUsername());
+    }
+
+    @Test
+    void listUsersFilterByEmailExactMatch() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "user1", Map.of("email", "user1@example.com"), null);
+        service.adminCreateUser(pool.getId(), "user2", Map.of("email", "user2@example.com"), null);
+
+        List<CognitoUser> result = service.listUsers(pool.getId(), "email = \"user1@example.com\"");
+        assertEquals(1, result.size());
+        assertEquals("user1", result.get(0).getUsername());
+    }
+
+    @Test
+    void listUsersFilterByEmailPrefix() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "user1", Map.of("email", "alice@example.com"), null);
+        service.adminCreateUser(pool.getId(), "user2", Map.of("email", "bob@example.com"), null);
+        service.adminCreateUser(pool.getId(), "user3", Map.of("email", "alice2@example.com"), null);
+
+        List<CognitoUser> result = service.listUsers(pool.getId(), "email ^= \"alice\"");
+        assertEquals(2, result.size());
+    }
+
+    @Test
+    void listUsersFilterNoMatchReturnsEmpty() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "user1", Map.of("email", "user1@example.com"), null);
+
+        List<CognitoUser> result = service.listUsers(pool.getId(), "email = \"nobody@example.com\"");
+        assertTrue(result.isEmpty());
+    }
+
+    // =========================================================================
+    // Issue #234 — GetTokensFromRefreshToken
+    // =========================================================================
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void refreshTokenIsStructuredAndDecodable() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        Map<String, Object> auth = (Map<String, Object>) authResult.get("AuthenticationResult");
+        String refreshToken = (String) auth.get("RefreshToken");
+
+        assertNotNull(refreshToken);
+        // Should be parseable as base64 structured token
+        String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
+        String[] parts = decoded.split("\\|", 4);
+        assertEquals(4, parts.length, "Refresh token should encode 4 pipe-separated fields");
+        assertEquals(pool.getId(), parts[0]);
+        assertEquals("alice", parts[1]);
+        assertEquals(client.getClientId(), parts[2]);
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void getTokensFromRefreshTokenReturnsNewAccessAndIdTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> authResult = service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!"));
+        String refreshToken = (String) ((Map<String, Object>) authResult.get("AuthenticationResult")).get("RefreshToken");
+
+        Map<String, Object> refreshResult = service.getTokensFromRefreshToken(client.getClientId(), refreshToken);
+        Map<String, Object> refreshAuth = (Map<String, Object>) refreshResult.get("AuthenticationResult");
+
+        assertNotNull(refreshAuth.get("AccessToken"), "Should return a new AccessToken");
+        assertNotNull(refreshAuth.get("IdToken"), "Should return a new IdToken");
+        assertNull(refreshAuth.get("RefreshToken"), "GetTokensFromRefreshToken should not return a new RefreshToken");
+    }
+
+    @Test
+    void getTokensFromRefreshTokenInvalidTokenThrows() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), "not-a-valid-refresh-token"));
+    }
+
+    @Test
+    void refreshTokenAuthFlowReturnsNewTokens() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> firstAuth = (Map<String, Object>) service.initiateAuth(
+                client.getClientId(), "USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "alice", "PASSWORD", "Perm1234!")).get("AuthenticationResult");
+        String refreshToken = (String) firstAuth.get("RefreshToken");
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> refreshed = (Map<String, Object>) service.initiateAuth(
+                client.getClientId(), "REFRESH_TOKEN_AUTH",
+                Map.of("REFRESH_TOKEN", refreshToken)).get("AuthenticationResult");
+
+        assertNotNull(refreshed.get("AccessToken"));
+        assertNotNull(refreshed.get("IdToken"));
+    }
+
+    // =========================================================================
     // deleteUserPool cascades groups
     // =========================================================================
 
