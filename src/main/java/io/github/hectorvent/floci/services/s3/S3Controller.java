@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
+import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
 import io.github.hectorvent.floci.services.s3.model.MultipartUpload;
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
@@ -941,6 +942,16 @@ public class S3Controller {
                 appendFilterRules(xml, tn.filterRules());
                 xml.end("TopicConfiguration");
             }
+            for (LambdaNotification ln : config.getLambdaFunctionConfigurations()) {
+                xml.start("CloudFunctionConfiguration")
+                   .elem("Id", ln.id())
+                   .elem("CloudFunction", ln.functionArn());
+                for (String event : ln.events()) {
+                    xml.elem("Event", event);
+                }
+                appendFilterRules(xml, ln.filterRules());
+                xml.end("CloudFunctionConfiguration");
+            }
             xml.end("NotificationConfiguration");
             return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
         } catch (AwsException e) {
@@ -960,6 +971,14 @@ public class S3Controller {
             for (var parsed : parseNotificationGroups(xml, "TopicConfiguration", "Topic")) {
                 config.getTopicConfigurations().add(
                         new TopicNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
+            }
+            for (var parsed : parseNotificationGroups(xml, "LambdaFunctionConfiguration", "LambdaFunctionArn")) {
+                config.getLambdaFunctionConfigurations().add(
+                        new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
+            }
+            for (var parsed : parseNotificationGroups(xml, "CloudFunctionConfiguration", "CloudFunction")) {
+                config.getLambdaFunctionConfigurations().add(
+                        new LambdaNotification(parsed.id, parsed.arn, parsed.events, parsed.filterRules));
             }
 
             s3Service.putBucketNotificationConfiguration(bucket, config);

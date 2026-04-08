@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.s3.model.*;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -15,12 +17,14 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.UncheckedIOException;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.security.MessageDigest;
@@ -32,6 +36,11 @@ import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
 public class S3Service {
+
+    @FunctionalInterface
+    interface LambdaInvoker {
+        void invoke(String region, String functionName, byte[] payload, InvocationType type);
+    }
 
     private static final Logger LOG = Logger.getLogger(S3Service.class);
 
@@ -45,13 +54,17 @@ public class S3Service {
 
     private final SqsService sqsService;
     private final SnsService snsService;
+    private final LambdaService lambdaService;
+    private final Instance<LambdaService> lambdaServiceProvider;
+    private final LambdaInvoker lambdaInvoker;
     private final RegionResolver regionResolver;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
 
     @Inject
     public S3Service(StorageFactory storageFactory, EmulatorConfig config,
-                     SqsService sqsService, SnsService snsService, RegionResolver regionResolver,
+                     SqsService sqsService, SnsService snsService, Instance<LambdaService> lambdaServiceProvider,
+                     RegionResolver regionResolver,
                      ObjectMapper objectMapper) {
         this(
                 storageFactory.create("s3", "s3-buckets.json",
@@ -62,7 +75,8 @@ public class S3Service {
                         }),
                 Path.of(config.storage().persistentPath()).resolve("s3"),
                 "memory".equals(config.storage().services().s3().mode().orElse(config.storage().mode())),
-                sqsService, snsService, regionResolver, config.effectiveBaseUrl(), objectMapper
+                sqsService, snsService, null, lambdaServiceProvider, null, regionResolver,
+                config.effectiveBaseUrl(), objectMapper
         );
     }
 
@@ -72,13 +86,34 @@ public class S3Service {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, "http://localhost:4566",
-                new ObjectMapper());
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null,
+                "http://localhost:4566", new ObjectMapper());
+    }
+
+    S3Service(StorageBackend<String, Bucket> bucketStore,
+              StorageBackend<String, S3Object> objectStore,
+              Path dataRoot, boolean inMemory,
+              LambdaService lambdaService,
+              RegionResolver regionResolver) {
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, lambdaService, null, null, regionResolver,
+                "http://localhost:4566", new ObjectMapper());
+    }
+
+    S3Service(StorageBackend<String, Bucket> bucketStore,
+              StorageBackend<String, S3Object> objectStore,
+              Path dataRoot, boolean inMemory,
+              LambdaInvoker lambdaInvoker,
+              RegionResolver regionResolver) {
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, lambdaInvoker, regionResolver,
+                "http://localhost:4566", new ObjectMapper());
     }
 
     private S3Service(StorageBackend<String, Bucket> bucketStore,
                       StorageBackend<String, S3Object> objectStore,
                       Path dataRoot, boolean inMemory, SqsService sqsService, SnsService snsService,
+                      LambdaService lambdaService,
+                      Instance<LambdaService> lambdaServiceProvider,
+                      LambdaInvoker lambdaInvoker,
                       RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
@@ -86,6 +121,9 @@ public class S3Service {
         this.inMemory = inMemory;
         this.sqsService = sqsService;
         this.snsService = snsService;
+        this.lambdaService = lambdaService;
+        this.lambdaServiceProvider = lambdaServiceProvider;
+        this.lambdaInvoker = lambdaInvoker;
         this.regionResolver = regionResolver;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
@@ -1218,7 +1256,8 @@ public class S3Service {
     }
 
     private void fireNotifications(String bucketName, String key, String eventName, S3Object obj) {
-        if (sqsService == null && snsService == null) {
+        if (sqsService == null && snsService == null && lambdaService == null
+                && lambdaServiceProvider == null && lambdaInvoker == null) {
             return;
         }
         Bucket bucket = bucketStore.get(bucketName).orElse(null);
@@ -1254,6 +1293,27 @@ public class S3Service {
                 }
             }
         }
+
+        if (lambdaInvoker == null && resolveLambdaService() == null) {
+            return;
+        }
+
+        for (LambdaNotification ln : config.getLambdaFunctionConfigurations()) {
+            if (ln.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && ln.matchesKey(key)) {
+                try {
+                    String lambdaRegion = extractRegionFromArn(ln.functionArn());
+                    String functionName = extractLambdaFunctionName(ln.functionArn());
+                    if (lambdaRegion == null || functionName == null) {
+                        throw new AwsException("InvalidParameterValueException",
+                                "Invalid Lambda function ARN: " + ln.functionArn(), 400);
+                    }
+                    invokeLambda(lambdaRegion, functionName, eventJson.getBytes(StandardCharsets.UTF_8));
+                    LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
+                } catch (Exception e) {
+                    LOG.warnv("Failed to deliver S3 event to Lambda {0}: {1}", ln.functionArn(), e.getMessage());
+                }
+            }
+        }
     }
 
     private boolean matchesEvent(String pattern, String eventName) {
@@ -1267,6 +1327,48 @@ public class S3Service {
     private String sqsUrlFromArn(String arn) {
         if (arn.split(":").length < 6) return arn;
         return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
+    }
+
+    private static String extractRegionFromArn(String arn) {
+        if (arn == null || !arn.startsWith("arn:aws:")) {
+            return null;
+        }
+        String[] parts = arn.split(":");
+        return parts.length >= 4 ? parts[3] : null;
+    }
+
+    private static String extractLambdaFunctionName(String functionArn) {
+        if (functionArn == null) {
+            return null;
+        }
+        int functionMarker = functionArn.indexOf(":function:");
+        if (functionMarker < 0) {
+            return null;
+        }
+        String suffix = functionArn.substring(functionMarker + ":function:".length());
+        int qualifierSeparator = suffix.indexOf(':');
+        return qualifierSeparator >= 0 ? suffix.substring(0, qualifierSeparator) : suffix;
+    }
+
+    private LambdaService resolveLambdaService() {
+        if (lambdaService != null) {
+            return lambdaService;
+        }
+        if (lambdaServiceProvider != null && lambdaServiceProvider.isResolvable()) {
+            return lambdaServiceProvider.get();
+        }
+        return null;
+    }
+
+    private void invokeLambda(String region, String functionName, byte[] payload) {
+        if (lambdaInvoker != null) {
+            lambdaInvoker.invoke(region, functionName, payload, InvocationType.Event);
+            return;
+        }
+        LambdaService service = resolveLambdaService();
+        if (service != null) {
+            service.invoke(region, functionName, payload, InvocationType.Event);
+        }
     }
 
     private String buildS3EventJson(String bucketName, String key, String eventName,

@@ -1002,6 +1002,55 @@ class S3IntegrationTest {
 
     @Test
     @Order(93)
+    void putLambdaNotificationConfigWithFilterIsPersisted() {
+        String xml = """
+                <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <CloudFunctionConfiguration>
+                    <Id>lambda-notif</Id>
+                    <CloudFunction>arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test</CloudFunction>
+                    <Event>s3:ObjectCreated:Put</Event>
+                    <Filter>
+                      <S3Key>
+                        <FilterRule>
+                          <Name>prefix</Name>
+                          <Value>uploads/</Value>
+                        </FilterRule>
+                        <FilterRule>
+                          <Name>suffix</Name>
+                          <Value>.json</Value>
+                        </FilterRule>
+                      </S3Key>
+                    </Filter>
+                  </CloudFunctionConfiguration>
+                </NotificationConfiguration>
+                """;
+
+        given()
+            .contentType("application/xml")
+            .queryParam("notification", "")
+            .body(xml)
+        .when()
+            .put("/notif-test-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .queryParam("notification", "")
+        .when()
+            .get("/notif-test-bucket")
+        .then()
+            .statusCode(200)
+            .body(containsString("CloudFunctionConfiguration"))
+            .body(containsString("arn:aws:lambda:us-east-1:000000000000:function:s3-notif-test"))
+            .body(containsString("s3:ObjectCreated:Put"))
+            .body(containsString("<Name>prefix</Name>"))
+            .body(containsString("<Value>uploads/</Value>"))
+            .body(containsString("<Name>suffix</Name>"))
+            .body(containsString("<Value>.json</Value>"));
+    }
+
+    @Test
+    @Order(94)
     void cleanupNotificationBucket() {
         given().delete("/notif-test-bucket");
     }
