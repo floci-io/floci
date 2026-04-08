@@ -239,10 +239,17 @@ public class CloudFormationResourceProvisioner {
                 }
                 String projectionType = "ALL";
                 JsonNode projection = gsiNode.get("Projection");
+                List<String> nonKeyAttributes = new ArrayList<>();
                 if (projection != null && projection.has("ProjectionType")) {
                     projectionType = engine.resolve(projection.get("ProjectionType"));
+                    JsonNode nonKeyAttrArray = projection.path("NonKeyAttributes");
+                    if (!nonKeyAttrArray.isMissingNode() && nonKeyAttrArray.isArray()){
+                        for (JsonNode nonKeyAttr : nonKeyAttrArray){
+                            nonKeyAttributes.add(nonKeyAttr.asText());
+                        }
+                    }
                 }
-                gsis.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType));
+                gsis.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes));
             }
         }
 
