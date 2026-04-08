@@ -602,6 +602,7 @@ class DynamoDbIntegrationTest {
             .body("Table.GlobalSecondaryIndexes.size()", equalTo(1))
             .body("Table.GlobalSecondaryIndexes[0].IndexName", equalTo("TestGsi"))
             .body("Table.GlobalSecondaryIndexes[0].IndexStatus", equalTo("ACTIVE"))
+            .body("Table.GlobalSecondaryIndexes[0].Projection.ProjectionType", equalTo("ALL"))
             .body("Table.GlobalSecondaryIndexes[0].IndexArn", containsString("/index/TestGsi"))
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput", notNullValue())
             .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits", equalTo(0))
@@ -649,9 +650,51 @@ class DynamoDbIntegrationTest {
             .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndex' }.IndexStatus", equalTo("ACTIVE"))
             .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndex' }.Projection.ProjectionType", equalTo("KEYS_ONLY"));
     }
+    
 
     @Test
     @Order(23)
+    void updateTableAddGsiWithIncludeProjection() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "GsiTestTable",
+                    "AttributeDefinitions": [
+                        {"AttributeName": "pk", "AttributeType": "S"},
+                        {"AttributeName": "gsiPk", "AttributeType": "S"},
+                        {"AttributeName": "gsiSk", "AttributeType": "S"},
+                        {"AttributeName": "owner", "AttributeType": "S"}
+                    ],
+                    "GlobalSecondaryIndexUpdates": [
+                        {
+                            "Create": {
+                                "IndexName": "OwnerIndexProj",
+                                "KeySchema": [
+                                    {"AttributeName": "owner", "KeyType": "HASH"},
+                                    {"AttributeName": "pk", "KeyType": "RANGE"}
+                                ],
+                                "Projection": {"ProjectionType": "INCLUDE", "NonKeyAttributes":["TestAttr"]}
+                            }
+                        }
+                    ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.GlobalSecondaryIndexes.size()", equalTo(3))
+            .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndexProj' }.IndexStatus", equalTo("ACTIVE"))
+            .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndexProj' }.Projection.ProjectionType", equalTo("INCLUDE"))
+            .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndexProj' }.Projection.NonKeyAttributes.size()", equalTo(1))
+            .body("TableDescription.GlobalSecondaryIndexes.find { it.IndexName == 'OwnerIndexProj' }.Projection.NonKeyAttributes[0]", equalTo("TestAttr"));
+    }
+
+
+    @Test
+    @Order(24)
     void updateTableDeleteGsi() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
@@ -672,12 +715,13 @@ class DynamoDbIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("TableDescription.GlobalSecondaryIndexes.size()", equalTo(1))
-            .body("TableDescription.GlobalSecondaryIndexes[0].IndexName", equalTo("OwnerIndex"));
+            .body("TableDescription.GlobalSecondaryIndexes.size()", equalTo(2))
+            .body("TableDescription.GlobalSecondaryIndexes[0].IndexName", equalTo("OwnerIndex"))
+            .body("TableDescription.GlobalSecondaryIndexes[1].IndexName", equalTo("OwnerIndexProj"));
     }
 
     @Test
-    @Order(24)
+    @Order(25)
     void updateTableDeleteAllGsis() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.UpdateTable")
@@ -689,6 +733,9 @@ class DynamoDbIntegrationTest {
                         {
                             "Delete": {
                                 "IndexName": "OwnerIndex"
+                            },
+                            "Delete": {
+                                "IndexName": "OwnerIndexProj"
                             }
                         }
                     ]
@@ -702,7 +749,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(25)
+    @Order(26)
     void describeTableAfterAllGsisDeletion() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
@@ -720,7 +767,7 @@ class DynamoDbIntegrationTest {
     // --- Cleanup ---
 
     @Test
-    @Order(26)
+    @Order(27)
     void deleteTable() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
@@ -749,7 +796,7 @@ class DynamoDbIntegrationTest {
     }
 
     @Test
-    @Order(27)
+    @Order(28)
     void updateItemListAppend() {
         // Create a table for this test
         given()
