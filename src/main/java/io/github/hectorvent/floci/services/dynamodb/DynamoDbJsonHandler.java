@@ -95,7 +95,13 @@ public class DynamoDbJsonHandler {
                                 ks.path("AttributeName").asText(),
                                 ks.path("KeyType").asText())));
                 String projectionType = gsiNode.path("Projection").path("ProjectionType").asText("ALL");
-                gsis.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType));
+                GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType);
+                JsonNode gsiPt = gsiNode.path("ProvisionedThroughput");
+                if (!gsiPt.isMissingNode()) {
+                    gsi.getProvisionedThroughput().setReadCapacityUnits(gsiPt.path("ReadCapacityUnits").asLong(0));
+                    gsi.getProvisionedThroughput().setWriteCapacityUnits(gsiPt.path("WriteCapacityUnits").asLong(0));
+                }
+                gsis.add(gsi);
             }
         }
 
@@ -410,7 +416,13 @@ public class DynamoDbJsonHandler {
                                     ks.path("AttributeName").asText(),
                                     ks.path("KeyType").asText())));
                     String projectionType = createNode.path("Projection").path("ProjectionType").asText("ALL");
-                    gsiCreates.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType));
+                    GlobalSecondaryIndex newGsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType);
+                    JsonNode newGsiPt = createNode.path("ProvisionedThroughput");
+                    if (!newGsiPt.isMissingNode()) {
+                        newGsi.getProvisionedThroughput().setReadCapacityUnits(newGsiPt.path("ReadCapacityUnits").asLong(0));
+                        newGsi.getProvisionedThroughput().setWriteCapacityUnits(newGsiPt.path("WriteCapacityUnits").asLong(0));
+                    }
+                    gsiCreates.add(newGsi);
                 }
                 JsonNode deleteNode = update.path("Delete");
                 if (!deleteNode.isMissingNode()) {
@@ -654,6 +666,14 @@ public class DynamoDbJsonHandler {
                 projection.put("ProjectionType",
                         gsi.getProjectionType() != null ? gsi.getProjectionType() : "ALL");
                 gsiNode.set("Projection", projection);
+
+                ObjectNode gsiPt = objectMapper.createObjectNode();
+                gsiPt.put("ReadCapacityUnits", gsi.getProvisionedThroughput().getReadCapacityUnits());
+                gsiPt.put("WriteCapacityUnits", gsi.getProvisionedThroughput().getWriteCapacityUnits());
+                gsiPt.put("NumberOfDecreasesToday", gsi.getProvisionedThroughput().getNumberOfDecreasesToday());
+                gsiNode.set("ProvisionedThroughput", gsiPt);
+                gsiNode.put("IndexSizeBytes", gsi.getIndexSizeBytes());
+                gsiNode.put("ItemCount", gsi.getItemCount());
 
                 gsiArray.add(gsiNode);
             }

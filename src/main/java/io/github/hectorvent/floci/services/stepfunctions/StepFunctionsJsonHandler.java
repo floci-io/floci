@@ -5,6 +5,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
+import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
@@ -41,6 +43,11 @@ public class StepFunctionsJsonHandler {
             case "SendTaskSuccess" -> handleSendTaskSuccess(request);
             case "SendTaskFailure" -> handleSendTaskFailure(request);
             case "SendTaskHeartbeat" -> handleSendTaskHeartbeat(request);
+            case "CreateActivity" -> handleCreateActivity(request, region);
+            case "DeleteActivity" -> handleDeleteActivity(request);
+            case "DescribeActivity" -> handleDescribeActivity(request);
+            case "ListActivities" -> handleListActivities(request, region);
+            case "GetActivityTask" -> handleGetActivityTask(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -204,6 +211,53 @@ public class StepFunctionsJsonHandler {
     private Response handleSendTaskHeartbeat(JsonNode request) {
         service.sendTaskHeartbeat(request.path("taskToken").asText());
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleCreateActivity(JsonNode request, String region) {
+        Activity activity = service.createActivity(request.path("name").asText(), region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("activityArn", activity.getActivityArn());
+        response.put("creationDate", activity.getCreationDate());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteActivity(JsonNode request) {
+        service.deleteActivity(request.path("activityArn").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeActivity(JsonNode request) {
+        Activity activity = service.describeActivity(request.path("activityArn").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("activityArn", activity.getActivityArn());
+        response.put("name", activity.getName());
+        response.put("creationDate", activity.getCreationDate());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListActivities(JsonNode request, String region) {
+        List<Activity> list = service.listActivities(region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("activities");
+        for (Activity a : list) {
+            ObjectNode item = array.addObject();
+            item.put("activityArn", a.getActivityArn());
+            item.put("name", a.getName());
+            item.put("creationDate", a.getCreationDate());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetActivityTask(JsonNode request) {
+        String activityArn = request.path("activityArn").asText();
+        String workerName = request.path("workerName").asText(null);
+        ActivityTask task = service.getActivityTask(activityArn, workerName);
+        ObjectNode response = objectMapper.createObjectNode();
+        if (task != null) {
+            response.put("taskToken", task.getTaskToken());
+            response.put("input", task.getInput());
+        }
+        return Response.ok(response).build();
     }
 
 }

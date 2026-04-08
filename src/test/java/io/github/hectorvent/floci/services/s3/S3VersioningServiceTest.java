@@ -140,8 +140,9 @@ class S3VersioningServiceTest {
         s3Service.putObject("versioned-bucket", "test.txt",
                 "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
 
-        List<S3Object> versions = s3Service.listObjectVersions("versioned-bucket", null, 100);
-        assertEquals(2, versions.size());
+        S3Service.ListVersionsResult result = s3Service.listObjectVersions("versioned-bucket", null, 100, null);
+        assertEquals(2, result.versions().size());
+        assertFalse(result.isTruncated());
     }
 
     @Test
@@ -151,9 +152,9 @@ class S3VersioningServiceTest {
                 "data".getBytes(StandardCharsets.UTF_8), "text/plain", null);
         s3Service.deleteObject("versioned-bucket", "test.txt");
 
-        List<S3Object> versions = s3Service.listObjectVersions("versioned-bucket", null, 100);
-        assertEquals(2, versions.size());
-        assertTrue(versions.stream().anyMatch(S3Object::isDeleteMarker));
+        S3Service.ListVersionsResult result = s3Service.listObjectVersions("versioned-bucket", null, 100, null);
+        assertEquals(2, result.versions().size());
+        assertTrue(result.versions().stream().anyMatch(S3Object::isDeleteMarker));
     }
 
     @Test

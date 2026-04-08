@@ -331,6 +331,173 @@ class CognitoIntegrationTest {
                 .statusCode(404);
     }
 
+    // ── Issue #228: AccessToken contains client_id ─────────────────────
+
+    @Test
+    @Order(30)
+    void accessTokenContainsClientId() throws Exception {
+        String token = initiateAuthAndGetAccessToken();
+        JsonNode payload = decodeJwtPayload(token);
+        assertEquals(clientId, payload.path("client_id").asText(),
+                "AccessToken must contain client_id matching the requesting client");
+    }
+
+    @Test
+    @Order(31)
+    void idTokenDoesNotContainClientId() throws Exception {
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(clientId, username, password));
+        String idToken = auth.path("AuthenticationResult").path("IdToken").asText();
+        JsonNode payload = decodeJwtPayload(idToken);
+        assertTrue(payload.path("client_id").isMissingNode(),
+                "IdToken should not contain client_id");
+    }
+
+    // ── Issue #229: Password verification ──────────────────────────────
+
+    @Test
+    @Order(40)
+    void initiateAuthRejectsWrongPassword() {
+        cognitoAction("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "WrongPassword!" }
+                }
+                """.formatted(clientId, username))
+                .then()
+                .statusCode(400);
+    }
+
+    // ── Issue #220: Lookup by sub and email ─────────────────────────────
+
+    @Test
+    @Order(50)
+    void adminGetUserBySubUuid() throws Exception {
+        JsonNode user = cognitoJson("AdminGetUser", """
+                { "UserPoolId": "%s", "Username": "%s" }
+                """.formatted(poolId, username));
+        String sub = null;
+        for (JsonNode attr : user.path("UserAttributes")) {
+            if ("sub".equals(attr.path("Name").asText())) {
+                sub = attr.path("Value").asText();
+                break;
+            }
+        }
+        assertNotNull(sub, "User should have a sub attribute");
+
+        JsonNode bySubUser = cognitoJson("AdminGetUser", """
+                { "UserPoolId": "%s", "Username": "%s" }
+                """.formatted(poolId, sub));
+        assertEquals(username, bySubUser.path("Username").asText(),
+                "AdminGetUser with sub UUID should return the same user");
+    }
+
+    @Test
+    @Order(51)
+    void adminGetUserByEmailAlias() throws Exception {
+        JsonNode byEmail = cognitoJson("AdminGetUser", """
+                { "UserPoolId": "%s", "Username": "%s" }
+                """.formatted(poolId, username));
+        assertEquals(username, byEmail.path("Username").asText());
+    }
+
+    // ── Issue #233: ListUsers Filter ─────────────────────────────────────
+
+    @Test
+    @Order(60)
+    void listUsersFilterByEmailExactMatch() throws Exception {
+        JsonNode resp = cognitoJson("ListUsers", """
+                {
+                  "UserPoolId": "%s",
+                  "Filter": "email = \\"%s\\""
+                }
+                """.formatted(poolId, username));
+        assertEquals(1, resp.path("Users").size(),
+                "Filter by email should return exactly one matching user");
+        assertEquals(username, resp.path("Users").get(0).path("Username").asText());
+    }
+
+    @Test
+    @Order(61)
+    void listUsersFilterByEmailPrefixStartsWith() throws Exception {
+        String prefix = username.substring(0, 5);
+        JsonNode resp = cognitoJson("ListUsers", """
+                {
+                  "UserPoolId": "%s",
+                  "Filter": "email ^= \\"%s\\""
+                }
+                """.formatted(poolId, prefix));
+        assertTrue(resp.path("Users").size() >= 1,
+                "Prefix filter should return at least the test user");
+    }
+
+    @Test
+    @Order(62)
+    void listUsersNoFilterReturnsAll() throws Exception {
+        JsonNode resp = cognitoJson("ListUsers", """
+                { "UserPoolId": "%s" }
+                """.formatted(poolId));
+        assertTrue(resp.path("Users").size() >= 1);
+    }
+
+    // ── Issue #234: GetTokensFromRefreshToken ────────────────────────────
+
+    @Test
+    @Order(70)
+    void getTokensFromRefreshTokenReturnsAccessAndIdToken() throws Exception {
+        JsonNode authResp = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(clientId, username, password));
+        String refreshToken = authResp.path("AuthenticationResult").path("RefreshToken").asText();
+        assertNotNull(refreshToken);
+
+        JsonNode refreshResp = cognitoJson("GetTokensFromRefreshToken", """
+                {
+                  "ClientId": "%s",
+                  "RefreshToken": "%s"
+                }
+                """.formatted(clientId, refreshToken));
+
+        assertNotNull(refreshResp.path("AuthenticationResult").path("AccessToken").asText(null));
+        assertNotNull(refreshResp.path("AuthenticationResult").path("IdToken").asText(null));
+        assertTrue(refreshResp.path("AuthenticationResult").path("RefreshToken").isMissingNode(),
+                "GetTokensFromRefreshToken should not return a new RefreshToken");
+    }
+
+    @Test
+    @Order(71)
+    void refreshTokenAuthFlowReturnsNewTokens() throws Exception {
+        JsonNode authResp = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(clientId, username, password));
+        String refreshToken = authResp.path("AuthenticationResult").path("RefreshToken").asText();
+
+        JsonNode refreshed = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s" }
+                }
+                """.formatted(clientId, refreshToken));
+
+        assertNotNull(refreshed.path("AuthenticationResult").path("AccessToken").asText(null));
+        assertNotNull(refreshed.path("AuthenticationResult").path("IdToken").asText(null));
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────
 
     private static Response cognitoAction(String action, String body) {
@@ -378,6 +545,17 @@ class CognitoIntegrationTest {
         signature.initVerify(publicKey);
         signature.update((parts[0] + "." + parts[1]).getBytes(StandardCharsets.UTF_8));
         return signature.verify(Base64.getUrlDecoder().decode(padBase64(parts[2])));
+    }
+
+    private static String initiateAuthAndGetAccessToken() throws Exception {
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(clientId, username, password));
+        return auth.path("AuthenticationResult").path("AccessToken").asText();
     }
 
     private static String padBase64(String value) {

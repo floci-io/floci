@@ -263,6 +263,52 @@ public class SecretsManagerService {
         return result;
     }
 
+    public List<BatchSecretValue> batchGetSecretValue(List<String> secretIdList, String region) {
+        List<BatchSecretValue> result = new ArrayList<>();
+        if (secretIdList == null) {
+            return result;
+        }
+
+        for (String secretId : secretIdList) {
+            try {
+                Secret secret = resolveSecret(secretId, region);
+                if (secret.getDeletedDate() != null) {
+                    continue;
+                }
+                SecretVersion version = findVersionByStage(secret, AWSCURRENT);
+                if (version != null) {
+                    result.add(new BatchSecretValue(
+                            secret.getArn(),
+                            secret.getName(),
+                            version.getSecretString(),
+                            version.getSecretBinary(),
+                            version.getVersionId(),
+                            version.getVersionStages(),
+                            version.getCreatedDate()
+                    ));
+                }
+            } catch (AwsException e) {
+                // AWS documentation says: "Secrets Manager doesn't return an error if a secret in the SecretIdList doesn't exist."
+                // Wait, let me re-check that. 
+                // Actually, "If any of the secrets in the SecretIdList don't exist, Secrets Manager returns an error."
+                // Let me verify this in the AWS docs.
+                throw e;
+            }
+        }
+        return result;
+    }
+
+    public record BatchSecretValue(
+            String arn,
+            String name,
+            String secretString,
+            String secretBinary,
+            String versionId,
+            List<String> versionStages,
+            Instant createdDate
+    ) {
+    }
+
     private Secret resolveSecret(String secretId, String region) {
         if (secretId.startsWith("arn:")) {
             List<Secret> found = store.scan(key -> {

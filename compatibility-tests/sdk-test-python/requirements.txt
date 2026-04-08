@@ -1,4 +1,5 @@
 boto3==1.37.1
 botocore==1.37.1
+cryptography>=42.0.0
 pytest>=8.0.0
 pytest-timeout>=2.3.0

@@ -159,6 +159,10 @@ public class S3Controller {
                 s3Service.putBucketEncryption(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
+            if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+                s3Service.putPublicAccessBlock(bucket, new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
 
             String locationConstraint = null;
             if (body != null && body.length > 0) {
@@ -214,6 +218,10 @@ public class S3Controller {
                 s3Service.deleteBucketEncryption(bucket);
                 return Response.noContent().build();
             }
+            if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+                s3Service.deletePublicAccessBlock(bucket);
+                return Response.noContent().build();
+            }
             s3Service.deleteBucket(bucket);
             return Response.noContent().build();
         } catch (AwsException e) {
@@ -231,6 +239,8 @@ public class S3Controller {
                                 @QueryParam("list-type") String listType,
                                 @QueryParam("continuation-token") String continuationToken,
                                 @QueryParam("start-after") String startAfter,
+                                @QueryParam("encoding-type") String encodingType,
+                                @QueryParam("key-marker") String keyMarker,
                                 @Context UriInfo uriInfo) {
         try {
             if (hasQueryParam(uriInfo, "uploads")) {
@@ -243,7 +253,7 @@ public class S3Controller {
                 return handleGetBucketVersioning(bucket);
             }
             if (hasQueryParam(uriInfo, "versions")) {
-                return handleListObjectVersions(bucket, prefix, maxKeys);
+                return handleListObjectVersions(bucket, prefix, maxKeys, keyMarker);
             }
             if (hasQueryParam(uriInfo, "location")) {
                 return handleGetBucketLocation(bucket);
@@ -269,9 +279,13 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "encryption")) {
                 return Response.ok(s3Service.getBucketEncryption(bucket)).build();
             }
+            if (hasQueryParam(uriInfo, "publicAccessBlock")) {
+                return Response.ok(s3Service.getPublicAccessBlock(bucket)).build();
+            }
 
             int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
-            S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(bucket, prefix, delimiter, max);
+            S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
+                    bucket, prefix, delimiter, max, continuationToken, startAfter);
             List<S3Object> objects = result.objects();
             List<String> commonPrefixes = result.commonPrefixes();
             boolean v2 = "2".equals(listType);
@@ -300,6 +314,20 @@ public class S3Controller {
                 xml.start("CommonPrefixes")
                    .elem("Prefix", cp)
                    .end("CommonPrefixes");
+            }
+            if (encodingType != null) {
+                xml.elem("EncodingType", encodingType);
+            }
+            if (v2) {
+                if (continuationToken != null) {
+                    xml.elem("ContinuationToken", continuationToken);
+                }
+                if (result.isTruncated()) {
+                    xml.elem("NextContinuationToken", result.nextContinuationToken());
+                }
+                if (startAfter != null) {
+                    xml.elem("StartAfter", startAfter);
+                }
             }
             xml.end("ListBucketResult");
             return Response.ok(xml.build()).build();
@@ -880,16 +908,21 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListObjectVersions(String bucket, String prefix, Integer maxKeys) {
+    private Response handleListObjectVersions(String bucket, String prefix, Integer maxKeys, String keyMarker) {
         int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
-        List<S3Object> versions = s3Service.listObjectVersions(bucket, prefix, max);
+        S3Service.ListVersionsResult result = s3Service.listObjectVersions(bucket, prefix, max, keyMarker);
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("ListVersionsResult", AwsNamespaces.S3)
                 .elem("Name", bucket)
                 .elem("Prefix", prefix)
-                .elem("MaxKeys", max);
-        for (S3Object obj : versions) {
+                .elem("KeyMarker", keyMarker)
+                .elem("MaxKeys", max)
+                .elem("IsTruncated", result.isTruncated());
+        if (result.isTruncated()) {
+            xml.elem("NextKeyMarker", result.nextKeyMarker());
+        }
+        for (S3Object obj : result.versions()) {
             if (obj.isDeleteMarker()) {
                 xml.start("DeleteMarker")
                    .elem("Key", obj.getKey())
@@ -1577,10 +1610,18 @@ public class S3Controller {
                     "Bucket POST must contain a file field.", 400);
         }
 
+        // Build a case-insensitive (lowercased) view of the form fields for policy
+        // validation, matching the behaviour of LocalStack and real AWS S3.
+        // The AWS SDK sends "Policy" (capital P) while some clients use "policy".
+        Map<String, String> lcFields = new LinkedHashMap<>(fields.size());
+        for (Map.Entry<String, String> e : fields.entrySet()) {
+            lcFields.put(e.getKey().toLowerCase(Locale.ROOT), e.getValue());
+        }
+
         // Validate policy conditions if present
-        String policy = fields.get("policy");
+        String policy = lcFields.get("policy");
         if (policy != null && !policy.isEmpty()) {
-            validatePolicyConditions(policy, bucket, fields, fileData.length);
+            validatePolicyConditions(policy, bucket, lcFields, fileData.length);
         }
 
         // Use Content-Type from form fields, fall back to file part Content-Type
@@ -1640,10 +1681,11 @@ public class S3Controller {
             String fieldName = entry.getKey();
             String expectedValue = entry.getValue().asText();
             String actualValue;
-            if ("bucket".equals(fieldName)) {
+            String lookupKey = fieldName.toLowerCase(Locale.ROOT);
+            if ("bucket".equals(lookupKey)) {
                 actualValue = bucket;
             } else {
-                actualValue = fields.get(fieldName);
+                actualValue = fields.get(lookupKey);
             }
             if (actualValue == null || !actualValue.equals(expectedValue)) {
                 throw new AwsException("AccessDenied",
@@ -1670,7 +1712,7 @@ public class S3Controller {
             String fieldRef = condition.get(1).asText();
             String expectedValue = condition.get(2).asText();
             String fieldName = fieldRef.startsWith("$") ? fieldRef.substring(1) : fieldRef;
-            String actualValue = resolveFieldValue(fieldName, bucket, fields);
+            String actualValue = resolveFieldValue(fieldName.toLowerCase(Locale.ROOT), bucket, fields);
             if (actualValue == null || !actualValue.equals(expectedValue)) {
                 throw new AwsException("AccessDenied",
                         "Invalid according to Policy: Policy Condition failed: "
@@ -1680,7 +1722,7 @@ public class S3Controller {
             String fieldRef = condition.get(1).asText();
             String prefix = condition.get(2).asText();
             String fieldName = fieldRef.startsWith("$") ? fieldRef.substring(1) : fieldRef;
-            String actualValue = resolveFieldValue(fieldName, bucket, fields);
+            String actualValue = resolveFieldValue(fieldName.toLowerCase(Locale.ROOT), bucket, fields);
             if (actualValue == null || !actualValue.startsWith(prefix)) {
                 throw new AwsException("AccessDenied",
                         "Invalid according to Policy: Policy Condition failed: "

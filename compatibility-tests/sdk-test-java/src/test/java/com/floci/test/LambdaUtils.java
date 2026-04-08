@@ -95,6 +95,46 @@ public final class LambdaUtils {
         return createZip("index.js", code);
     }
 
+    /**
+     * ZIP containing a Node.js handler that checks whether a file at a deeply nested
+     * long path (> 100 chars) exists inside the container.
+     *
+     * Used to test that zip extraction correctly preserves long file paths.
+     * Regression test for: https://github.com/floci-io/floci/issues/232
+     *
+     * The nested file path is intentionally > 99 characters to exceed the legacy
+     * POSIX USTAR tar header name field limit, which is where truncation occurred.
+     */
+    public static byte[] longPathZip() {
+        // Relative path is 117 chars — well over the 99-char USTAR limit
+        String longPath = "vendor/bundle/ruby/3.3.0/gems/bundler-4.0.3/lib/bundler/vendor/thor/lib/thor/core_ext/hash_with_indifferent_access.txt";
+        String handler = """
+                const fs = require('fs');
+                exports.handler = async () => {
+                    const longPath = '/var/task/%s';
+                    const exists = fs.existsSync(longPath);
+                    return { exists, pathLength: longPath.length };
+                };
+                """.formatted(longPath);
+        String fileContent = "present";
+
+        try {
+            ByteArrayOutputStream baos = new ByteArrayOutputStream();
+            try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+                zos.putNextEntry(new ZipEntry("index.js"));
+                zos.write(handler.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+
+                zos.putNextEntry(new ZipEntry(longPath));
+                zos.write(fileContent.getBytes(StandardCharsets.UTF_8));
+                zos.closeEntry();
+            }
+            return baos.toByteArray();
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to build long-path ZIP", e);
+        }
+    }
+
     private static byte[] createZip(String filename, String content) {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

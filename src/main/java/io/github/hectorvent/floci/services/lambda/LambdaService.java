@@ -126,7 +126,7 @@ public class LambdaService {
         if (role == null || role.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "Role is required", 400);
         }
-        if (handler == null || handler.isBlank()) {
+        if ("Zip".equals(packageType) && (handler == null || handler.isBlank())) {
             throw new AwsException("InvalidParameterValueException", "Handler is required", 400);
         }
         if ("Zip".equals(packageType) && (runtime == null || runtime.isBlank())) {

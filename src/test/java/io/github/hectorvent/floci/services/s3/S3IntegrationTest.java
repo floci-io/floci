@@ -1005,4 +1005,130 @@ class S3IntegrationTest {
     void cleanupNotificationBucket() {
         given().delete("/notif-test-bucket");
     }
+
+    // --- PublicAccessBlock ---
+
+    @Test
+    @Order(100)
+    void putPublicAccessBlockReturns200() {
+        given().when().put("/test-bucket").then().statusCode(anyOf(equalTo(200), equalTo(409)));
+
+        String xml = "<PublicAccessBlockConfiguration xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+                + "<BlockPublicAcls>true</BlockPublicAcls>"
+                + "<IgnorePublicAcls>true</IgnorePublicAcls>"
+                + "<BlockPublicPolicy>true</BlockPublicPolicy>"
+                + "<RestrictPublicBuckets>true</RestrictPublicBuckets>"
+                + "</PublicAccessBlockConfiguration>";
+        given()
+            .body(xml)
+        .when()
+            .put("/test-bucket?publicAccessBlock")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(101)
+    void getPublicAccessBlockReturnsStoredConfig() {
+        given()
+        .when()
+            .get("/test-bucket?publicAccessBlock")
+        .then()
+            .statusCode(200)
+            .body(containsString("BlockPublicAcls"))
+            .body(containsString("true"));
+    }
+
+    @Test
+    @Order(102)
+    void deletePublicAccessBlockReturns204() {
+        given()
+        .when()
+            .delete("/test-bucket?publicAccessBlock")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(103)
+    void getPublicAccessBlockAfterDeleteReturns404() {
+        given()
+        .when()
+            .get("/test-bucket?publicAccessBlock")
+        .then()
+            .statusCode(404)
+            .body(containsString("NoSuchPublicAccessBlockConfiguration"));
+    }
+
+    // --- ListObjectsV2 pagination ---
+
+    @Test
+    @Order(110)
+    void listObjectsV2StartAfterFiltersResults() {
+        // bucket and objects from earlier test orders exist; add fresh ones in a dedicated bucket
+        given().when().put("/pag-test-bucket").then().statusCode(200);
+        given().body("a").when().put("/pag-test-bucket/a.txt").then().statusCode(200);
+        given().body("b").when().put("/pag-test-bucket/b.txt").then().statusCode(200);
+        given().body("c").when().put("/pag-test-bucket/c.txt").then().statusCode(200);
+
+        given()
+        .when()
+            .get("/pag-test-bucket?list-type=2&start-after=a.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StartAfter>a.txt</StartAfter>"))
+            .body(not(containsString("<Key>a.txt</Key>")))
+            .body(containsString("<Key>b.txt</Key>"))
+            .body(containsString("<Key>c.txt</Key>"));
+    }
+
+    @Test
+    @Order(111)
+    void listObjectsV2ContinuationTokenPaginates() {
+        // First page: max-keys=2
+        String page1Body =
+            given()
+            .when()
+                .get("/pag-test-bucket?list-type=2&max-keys=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<IsTruncated>true</IsTruncated>"))
+                .body(containsString("<NextContinuationToken>"))
+                .extract().body().asString();
+
+        // Extract NextContinuationToken
+        int start = page1Body.indexOf("<NextContinuationToken>") + "<NextContinuationToken>".length();
+        int end = page1Body.indexOf("</NextContinuationToken>");
+        String token = page1Body.substring(start, end);
+
+        // Second page using the token
+        given()
+        .when()
+            .get("/pag-test-bucket?list-type=2&max-keys=2&continuation-token=" + token)
+        .then()
+            .statusCode(200)
+            .body(containsString("<IsTruncated>false</IsTruncated>"))
+            .body(containsString("<ContinuationToken>" + token + "</ContinuationToken>"))
+            .body(containsString("<Key>c.txt</Key>"));
+    }
+
+    @Test
+    @Order(112)
+    void listObjectsV2EncodingTypeIsEchoed() {
+        given()
+        .when()
+            .get("/pag-test-bucket?list-type=2&encoding-type=url")
+        .then()
+            .statusCode(200)
+            .body(containsString("<EncodingType>url</EncodingType>"));
+    }
+
+    @Test
+    @Order(113)
+    void cleanupPaginationBucket() {
+        given().when().delete("/pag-test-bucket/a.txt");
+        given().when().delete("/pag-test-bucket/b.txt");
+        given().when().delete("/pag-test-bucket/c.txt");
+        given().when().delete("/pag-test-bucket");
+    }
 }

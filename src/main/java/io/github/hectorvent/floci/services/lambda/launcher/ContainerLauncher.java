@@ -17,9 +17,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
-import java.io.ByteArrayInputStream;
-import java.io.ByteArrayOutputStream;
+import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
+import org.apache.commons.compress.archivers.tar.TarArchiveOutputStream;
+
 import java.io.IOException;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -137,11 +139,14 @@ public class ContainerLauncher {
         String containerName = "floci-" + fn.getFunctionName() + "-" + shortId;
 
         // Create container — CMD must be the handler name (Lambda entrypoint requires it as first arg)
+        // For Image package type without an explicit handler, omit CMD so the image's own CMD is used.
         CreateContainerCmd createCmd = dockerClient.createContainerCmd(image)
                 .withName(containerName)
                 .withEnv(env)
-                .withCmd(fn.getHandler())
                 .withHostConfig(hostConfig);
+        if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
+            createCmd.withCmd(fn.getHandler());
+        }
 
         CreateContainerResponse container = createCmd.exec();
         String containerId = container.getId();
@@ -283,15 +288,15 @@ public class ContainerLauncher {
              java.io.PipedInputStream pis = new java.io.PipedInputStream(pos)) {
 
             new Thread(() -> {
-                try (pos) {
-                    long size = Files.size(sourceFile);
-                    writeTarHeader(pos, entryName, size);
-                    try (java.io.InputStream fis = Files.newInputStream(sourceFile)) {
-                        fis.transferTo(pos);
+                try (TarArchiveOutputStream tar = newTarStream(pos)) {
+                    TarArchiveEntry entry = new TarArchiveEntry(entryName);
+                    entry.setSize(Files.size(sourceFile));
+                    entry.setMode(0755);
+                    tar.putArchiveEntry(entry);
+                    try (var fis = Files.newInputStream(sourceFile)) {
+                        fis.transferTo(tar);
                     }
-                    int pad = (int) ((512 - (size % 512)) % 512);
-                    if (pad > 0) pos.write(new byte[pad]);
-                    pos.write(new byte[1024]); // End-of-archive
+                    tar.closeArchiveEntry();
                 } catch (IOException e) {
                     LOG.errorv("Failed to stream file tar for function {0}: {1}", functionName, e.getMessage());
                 }
@@ -320,65 +325,34 @@ public class ContainerLauncher {
     }
 
     /**
-     * Creates a minimal POSIX TAR archive from all files in {@code sourceDir}.
-     * Streams content to the OutputStream to avoid loading entire files into memory.
+     * Creates a TAR archive from all files in {@code sourceDir}, streaming to {@code out}.
+     * Uses GNU long-name extension (via Commons Compress) so file paths of any length
+     * are preserved without truncation.
      */
-    private static void createTarFromDir(Path sourceDir, java.io.OutputStream out) throws IOException {
-        try (var stream = Files.walk(sourceDir)) {
+    private static void createTarFromDir(Path sourceDir, OutputStream out) throws IOException {
+        try (TarArchiveOutputStream tar = newTarStream(out);
+             var stream = Files.walk(sourceDir)) {
             for (Path path : (Iterable<Path>) stream::iterator) {
-                if (Files.isDirectory(path)) continue;
-
-                String entryName = sourceDir.relativize(path).toString();
-                long size = Files.size(path);
-
-                writeTarHeader(out, entryName, size);
-                try (java.io.InputStream fis = Files.newInputStream(path)) {
-                    fis.transferTo(out);
+                if (Files.isDirectory(path)) {
+                    continue;
                 }
-                
-                // Pad data to 512-byte boundary
-                int pad = (int) ((512 - (size % 512)) % 512);
-                if (pad > 0) out.write(new byte[pad]);
+                String entryName = sourceDir.relativize(path).toString();
+                TarArchiveEntry entry = new TarArchiveEntry(entryName);
+                entry.setSize(Files.size(path));
+                entry.setMode(0755);
+                tar.putArchiveEntry(entry);
+                try (var fis = Files.newInputStream(path)) {
+                    fis.transferTo(tar);
+                }
+                tar.closeArchiveEntry();
             }
         }
-
-        // End-of-archive: two 512-byte zero blocks
-        out.write(new byte[1024]);
     }
 
-    private static void writeTarHeader(java.io.OutputStream out, String name, long size) throws IOException {
-        byte[] header = new byte[512];
-
-        // Filename (max 100 bytes)
-        byte[] nameBytes = name.getBytes(StandardCharsets.UTF_8);
-        System.arraycopy(nameBytes, 0, header, 0, Math.min(nameBytes.length, 99));
-
-        // File mode: 0000755
-        putOctal(header, 100, 8, 0755);
-        // UID / GID: 0
-        putOctal(header, 108, 8, 0);
-        putOctal(header, 116, 8, 0);
-        // File size
-        putOctal(header, 124, 12, size);
-        // Modification time
-        putOctal(header, 136, 12, System.currentTimeMillis() / 1000);
-        // Type flag: '0' = regular file
-        header[156] = '0';
-
-        // Checksum: fill checksum field with spaces first, then compute
-        for (int i = 148; i < 156; i++) header[i] = ' ';
-        int checksum = 0;
-        for (byte b : header) checksum += b & 0xFF;
-        putOctal(header, 148, 8, checksum);
-
-        out.write(header);
-    }
-
-    /** Writes {@code value} as a null-terminated octal string into {@code buf[offset..offset+length)}. */
-    private static void putOctal(byte[] buf, int offset, int length, long value) {
-        String octal = String.format("%0" + (length - 1) + "o", value);
-        byte[] bytes = octal.getBytes(StandardCharsets.US_ASCII);
-        System.arraycopy(bytes, 0, buf, offset, Math.min(bytes.length, length - 1));
-        buf[offset + length - 1] = 0;
+    private static TarArchiveOutputStream newTarStream(OutputStream out) {
+        TarArchiveOutputStream tar = new TarArchiveOutputStream(out);
+        tar.setLongFileMode(TarArchiveOutputStream.LONGFILE_GNU);
+        tar.setBigNumberMode(TarArchiveOutputStream.BIGNUMBER_STAR);
+        return tar;
     }
 }

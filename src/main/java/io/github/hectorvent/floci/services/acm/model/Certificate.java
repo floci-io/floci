@@ -256,6 +256,7 @@ public class Certificate {
 
     public boolean canExport() {
         return type == CertificateType.PRIVATE ||
+               type == CertificateType.IMPORTED ||
                (certOptions != null && "ENABLED".equals(certOptions.export()));
     }
 

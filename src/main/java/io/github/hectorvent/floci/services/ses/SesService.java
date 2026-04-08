@@ -25,6 +25,7 @@ public class SesService {
 
     private final StorageBackend<String, Identity> identityStore;
     private final StorageBackend<String, SentEmail> emailStore;
+    private final StorageBackend<String, Boolean> accountSettingsStore;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -34,14 +35,18 @@ public class SesService {
                 new TypeReference<Map<String, Identity>>() {});
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
                 new TypeReference<Map<String, SentEmail>>() {});
+        this.accountSettingsStore = storageFactory.create("ses", "ses-account-settings.json",
+                new TypeReference<Map<String, Boolean>>() {});
         this.regionResolver = regionResolver;
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
                StorageBackend<String, SentEmail> emailStore,
+               StorageBackend<String, Boolean> accountSettingsStore,
                RegionResolver regionResolver) {
         this.identityStore = identityStore;
         this.emailStore = emailStore;
+        this.accountSettingsStore = accountSettingsStore;
         this.regionResolver = regionResolver;
     }
 
@@ -101,7 +106,10 @@ public class SesService {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
-        if (toAddresses == null || toAddresses.isEmpty()) {
+        boolean hasRecipient = (toAddresses != null && !toAddresses.isEmpty())
+                || (ccAddresses != null && !ccAddresses.isEmpty())
+                || (bccAddresses != null && !bccAddresses.isEmpty());
+        if (!hasRecipient) {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
 
@@ -150,6 +158,31 @@ public class SesService {
         return identityStore.get(key).orElse(null);
     }
 
+    public void setDkimAttributes(String identityValue, boolean signingEnabled, String region) {
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Identity does not exist: " + identityValue, 404));
+        identity.setDkimEnabled(signingEnabled);
+        if (signingEnabled) {
+            identity.setDkimVerificationStatus("Success");
+        } else {
+            identity.setDkimVerificationStatus("NotStarted");
+        }
+        identityStore.put(key, identity);
+        LOG.infov("Updated DKIM attributes for {0}: signingEnabled={1}", identityValue, signingEnabled);
+    }
+
+    public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Identity does not exist: " + identityValue, 404));
+        identity.setFeedbackForwardingEnabled(enabled);
+        identityStore.put(key, identity);
+        LOG.infov("Updated feedback forwarding for {0}: enabled={1}", identityValue, enabled);
+    }
+
     public List<String> getVerifiedEmailAddresses(String region) {
         String prefix = "identity::" + region + "::";
         List<Identity> all = identityStore.scan(k -> k.startsWith(prefix));
@@ -175,6 +208,15 @@ public class SesService {
                 .toList());
         keys.forEach(emailStore::delete);
         LOG.infov("Cleared all SES emails in region {0}", region);
+    }
+
+    public boolean isAccountSendingEnabled(String region) {
+        return accountSettingsStore.get("sending::" + region).orElse(true);
+    }
+
+    public void setAccountSendingEnabled(String region, boolean enabled) {
+        accountSettingsStore.put("sending::" + region, enabled);
+        LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);
     }
 
     private static String identityKey(String region, String identity) {

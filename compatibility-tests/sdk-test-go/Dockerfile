@@ -5,13 +5,11 @@ WORKDIR /app
 # Install gotestsum for JUnit XML output
 RUN go install gotest.tools/gotestsum@latest
 
-COPY go.mod go.sum ./
-RUN go mod download && go mod verify
-
+COPY go.mod ./
 COPY . .
 
-# Resolve test dependencies
-RUN go mod tidy
+# Resolve test dependencies and download modules
+RUN go mod tidy && go mod download
 
 ENV FLOCI_ENDPOINT=http://floci:4566
 ENV AWS_ACCESS_KEY_ID=test

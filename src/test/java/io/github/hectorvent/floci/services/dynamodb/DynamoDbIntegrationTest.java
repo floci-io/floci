@@ -603,6 +603,12 @@ class DynamoDbIntegrationTest {
             .body("Table.GlobalSecondaryIndexes[0].IndexName", equalTo("TestGsi"))
             .body("Table.GlobalSecondaryIndexes[0].IndexStatus", equalTo("ACTIVE"))
             .body("Table.GlobalSecondaryIndexes[0].IndexArn", containsString("/index/TestGsi"))
+            .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput", notNullValue())
+            .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.ReadCapacityUnits", equalTo(0))
+            .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.WriteCapacityUnits", equalTo(0))
+            .body("Table.GlobalSecondaryIndexes[0].ProvisionedThroughput.NumberOfDecreasesToday", equalTo(0))
+            .body("Table.GlobalSecondaryIndexes[0].IndexSizeBytes", equalTo(0))
+            .body("Table.GlobalSecondaryIndexes[0].ItemCount", equalTo(0))
             .body("Table.AttributeDefinitions.size()", equalTo(3));
     }
 
@@ -740,6 +746,89 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(27)
+    void updateItemListAppend() {
+        // Create a table for this test
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "ListAppendTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Put item with initial list
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "ListAppendTable",
+                    "Item": {"pk": {"S": "k1"}, "items": {"L": [{"S": "a"}]}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Append to list
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "ListAppendTable",
+                    "Key": {"pk": {"S": "k1"}},
+                    "UpdateExpression": "SET items = list_append(items, :val)",
+                    "ExpressionAttributeValues": {":val": {"L": [{"S": "b"}]}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify both elements present
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "ListAppendTable",
+                    "Key": {"pk": {"S": "k1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.items.L.size()", equalTo(2))
+            .body("Item.items.L[0].S", equalTo("a"))
+            .body("Item.items.L[1].S", equalTo("b"));
+
+        // Cleanup
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "ListAppendTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test

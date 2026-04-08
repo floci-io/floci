@@ -45,7 +45,7 @@ public class SesQueryHandler {
                 case "SendRawEmail" -> handleSendRawEmail(params, region);
                 case "GetSendQuota" -> handleGetSendQuota(region);
                 case "GetSendStatistics" -> handleGetSendStatistics(region);
-                case "GetAccountSendingEnabled" -> handleGetAccountSendingEnabled();
+                case "GetAccountSendingEnabled" -> handleGetAccountSendingEnabled(region);
                 case "ListVerifiedEmailAddresses" -> handleListVerifiedEmailAddresses(region);
                 case "DeleteVerifiedEmailAddress" -> handleDeleteVerifiedEmailAddress(params, region);
                 case "SetIdentityNotificationTopic" -> handleSetIdentityNotificationTopic(params, region);
@@ -171,8 +171,9 @@ public class SesQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("GetSendStatistics", AwsNamespaces.SES, xml.build())).build();
     }
 
-    private Response handleGetAccountSendingEnabled() {
-        String result = new XmlBuilder().elem("Enabled", "true").build();
+    private Response handleGetAccountSendingEnabled(String region) {
+        boolean enabled = sesService.isAccountSendingEnabled(region);
+        String result = new XmlBuilder().elem("Enabled", String.valueOf(enabled)).build();
         return Response.ok(AwsQueryResponse.envelope("GetAccountSendingEnabled", AwsNamespaces.SES, result)).build();
     }
 

@@ -14,6 +14,9 @@ Verifies that standard AWS tooling (SDKs, CDK, OpenTofu/Terraform) works correct
 # Copy and configure environment
 cp env.example .env
 
+# Install dependencies
+just setup
+
 # Run all tests
 just test-all
 
@@ -99,21 +102,6 @@ Bats-based suites keep their normal console output and also write JUnit XML repo
 - `compat-terraform/test-results/junit.xml`
 - `compat-opentofu/test-results/junit.xml`
 
-### TAP Output
-
-All test frameworks support TAP (Test Anything Protocol) output:
-
-```bash
-# Python
-cd sdk-test-python && pytest --tap-stream
-
-# TypeScript
-cd sdk-test-node && npm run test:tap
-
-# AWS CLI
-cd sdk-test-awscli && ./lib/bats-core/bin/bats --tap test/
-```
-
 ## Configuration
 
 All modules read from environment variables (see `.env.example`):
@@ -123,77 +111,6 @@ FLOCI_ENDPOINT=http://localhost:4566
 AWS_ACCESS_KEY_ID=test
 AWS_SECRET_ACCESS_KEY=test
 AWS_DEFAULT_REGION=us-east-1
-```
-
-## Services Covered
-
-### Python SDK (`sdk-test-python`)
-
-16 test files covering:
-
-- SSM Parameter Store
-- SQS Queues
-- SNS Topics
-- S3 Buckets & Objects
-- S3 CORS
-- S3 Notifications
-- DynamoDB Tables
-- Lambda Functions
-- IAM Users, Roles, Policies
-- STS Identity
-- Secrets Manager
-- KMS Keys & Encryption
-- Kinesis Streams
-- CloudWatch Metrics & Alarms
-- CloudFormation
-- Cognito User Pools
-
-### TypeScript SDK (`sdk-test-node`)
-
-17 test files covering:
-
-- SSM Parameter Store
-- SQS Queues
-- SNS Topics
-- S3 Buckets & Objects
-- S3 CORS
-- S3 Notifications
-- DynamoDB Tables
-- Lambda Functions
-- IAM Roles & Policies
-- STS Identity
-- Secrets Manager
-- KMS Keys & Encryption
-- Kinesis Streams
-- CloudWatch Metrics & Alarms
-- CloudFormation Naming
-- Cognito User Pools
-- Cognito OAuth
-
-### AWS CLI Tests (`sdk-test-awscli`)
-
-12 test files covering:
-
-- SSM Parameter Store
-- SQS Queues
-- SNS Topics
-- S3 Buckets & Objects
-- S3 Notifications
-- DynamoDB Tables
-- IAM Roles & Policies
-- STS Identity
-- SES Identities & Sending
-- Secrets Manager
-- KMS Keys & Encryption
-- Cognito User Pools
-
-## CI/CD
-
-GitHub Actions workflow runs tests on pull requests and pushes:
-
-```yaml
-# .github/workflows/sdk-tests.yml
-# Matrix strategy runs python, typescript, bash in parallel
 ```
 
 ## Running with Docker

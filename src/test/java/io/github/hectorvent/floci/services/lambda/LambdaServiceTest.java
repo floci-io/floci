@@ -124,6 +124,42 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createImageFunctionSucceedsWithoutHandler() {
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "image-fn",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "PackageType", "Image",
+                "ImageUri", "myrepo/myimage:latest"
+        ));
+        LambdaFunction fn = service.createFunction(REGION, req);
+        assertEquals("image-fn", fn.getFunctionName());
+        assertEquals("Image", fn.getPackageType());
+        assertNull(fn.getHandler());
+    }
+
+    @Test
+    void createImageFunctionSucceedsWithHandler() {
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "image-fn-with-handler",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "PackageType", "Image",
+                "ImageUri", "myrepo/myimage:latest",
+                "Handler", "com.example.Handler::handleRequest"
+        ));
+        LambdaFunction fn = service.createFunction(REGION, req);
+        assertEquals("com.example.Handler::handleRequest", fn.getHandler());
+    }
+
+    @Test
+    void createZipFunctionFailsWithoutHandler() {
+        Map<String, Object> req = baseRequest("zip-no-handler");
+        req.remove("Handler");
+        AwsException ex = assertThrows(AwsException.class, () -> service.createFunction(REGION, req));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("Handler"));
+    }
+
+    @Test
     void updateFunctionCodeUpdatesRevision() {
         service.createFunction(REGION, baseRequest("update-fn"));
         LambdaFunction original = service.getFunction(REGION, "update-fn");

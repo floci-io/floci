@@ -25,6 +25,8 @@ import software.amazon.awssdk.services.secretsmanager.model.SecretVersionsListEn
 import software.amazon.awssdk.services.secretsmanager.model.TagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UntagResourceRequest;
 import software.amazon.awssdk.services.secretsmanager.model.UpdateSecretRequest;
+import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueRequest;
+import software.amazon.awssdk.services.secretsmanager.model.BatchGetSecretValueResponse;
 
 import java.util.List;
 import java.util.Map;
@@ -303,5 +305,30 @@ class SecretsManagerTest {
                 .isInstanceOf(SecretsManagerException.class)
                 .extracting(e -> ((SecretsManagerException) e).statusCode())
                 .isEqualTo(400);
+    }
+
+    @Test
+    @Order(17)
+    void batchGetSecretValue() {
+        String s1 = "batch-secret-1-" + System.currentTimeMillis();
+        String s2 = "batch-secret-2-" + System.currentTimeMillis();
+
+        try {
+            sm.createSecret(CreateSecretRequest.builder().name(s1).secretString("v1").build());
+            sm.createSecret(CreateSecretRequest.builder().name(s2).secretString("v2").build());
+
+            BatchGetSecretValueResponse response = sm.batchGetSecretValue(BatchGetSecretValueRequest.builder()
+                    .secretIdList(s1, s2)
+                    .build());
+
+            assertThat(response.secretValues()).hasSize(2);
+            assertThat(response.secretValues().stream().map(v -> v.name()).collect(Collectors.toList()))
+                    .containsExactlyInAnyOrder(s1, s2);
+        } finally {
+            try {
+                sm.deleteSecret(DeleteSecretRequest.builder().secretId(s1).forceDeleteWithoutRecovery(true).build());
+                sm.deleteSecret(DeleteSecretRequest.builder().secretId(s2).forceDeleteWithoutRecovery(true).build());
+            } catch (Exception ignored) {}
+        }
     }
 }

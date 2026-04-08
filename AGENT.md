@@ -97,7 +97,7 @@ Floci must implement real AWS wire protocols.
 |----------|----------|----------------|-----------------|----------------|
 | Query | SQS, SNS, IAM, STS, RDS, ElastiCache, CloudFormation, CloudWatch Metrics | form-encoded POST + `Action` | XML | `AwsQueryController` |
 | JSON 1.1 | SSM, EventBridge, CloudWatch Logs, Kinesis, KMS, Cognito, Secrets Manager, ACM | POST + `X-Amz-Target` | JSON | `AwsJson11Controller` |
-| REST JSON | Lambda, API Gateway | REST paths | JSON | JAX-RS |
+| REST JSON | Lambda, API Gateway, SES V2 | REST paths | JSON | JAX-RS |
 | REST XML | S3 | REST paths | XML | JAX-RS |
 | TCP | ElastiCache, RDS | raw protocol | native | proxies |
 
@@ -185,28 +185,16 @@ Critical areas:
     ./mvnw test -Dtest=SsmIntegrationTest
     ./mvnw test -Dtest=SsmIntegrationTest#putParameter
 
-### Manual testing
-
-    ./test-services.sh
-
 ---
 
 ## Compatibility Project
 
-Compatibility test suite:
-`./compatibility-tests/`
+Compatibility test suite: `./compatibility-tests/`
 
 Guidelines:
 
 - Prefer AWS SDK clients over raw HTTP for management-plane validation
 - Use this suite when changes may affect real SDK behavior
-- If the suite is unavailable locally, state that limitation explicitly
-
-Default module:
-
-- `sdk-test-java`
-
-Use `docker-compose-test.yml` for container-based testing.
 
 ---
 

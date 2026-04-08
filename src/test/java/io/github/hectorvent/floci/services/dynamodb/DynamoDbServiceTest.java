@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -764,4 +765,52 @@ class DynamoDbServiceTest {
         DynamoDbService.ScanResult result = service.scan("Users", "contains(values, :v)", null, exprValues, null, null, null);
         assertEquals(1, result.items().size(), "contains() on List with N elements should use type-aware numeric comparison");
     }
+
+    @Test
+    void updateItemSetAddsToStringSet() {
+        createOrdersTable();
+
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode priceVal = mapper.createObjectNode();
+        priceVal.put("N", "100");
+
+        // Use SS (String Set) type for ADD operation
+        ObjectNode tagVal = mapper.createObjectNode();
+        var tagArray = tagVal.putArray("SS");
+        tagArray.add("a");
+        exprValues.set(":val", priceVal);
+        exprValues.set(":newTag", tagVal);
+
+        service.updateItem("Orders", key, null,
+                "SET price = if_not_exists(price, :val) ADD tags :newTag",
+                null, exprValues, null);
+
+        // And add another tag to the same item, to verify that the ADD works on existing items as well
+        ObjectNode tagVal2 = mapper.createObjectNode();
+        var tagArray2 = tagVal2.putArray("SS");
+        tagArray2.add("b");
+        exprValues.set(":newTag", tagVal2);
+        DynamoDbService.UpdateResult updateResult = service.updateItem("Orders", key, null,
+                "SET price = if_not_exists(price, :val) ADD tags :newTag",
+                null, exprValues, null);
+
+        JsonNode stored = service.getItem("Orders", key);
+        assertNotNull(stored, "item should have been created");
+        assertTrue(stored.has("tags"), "tags attribute must be present on item after ADD");
+
+        // Verify tags is a String Set (SS) with both values
+        JsonNode tagsNode = stored.get("tags");
+        assertTrue(tagsNode.has("SS"), "tags should be of type SS (String Set)");
+        JsonNode ssArray = tagsNode.get("SS");
+        assertEquals(2, ssArray.size(), "tags should have 2 elements");
+
+        // Verify values from the SS array
+        java.util.Set<String> tagValues = new java.util.HashSet<>();
+        ssArray.forEach(node -> tagValues.add(node.asText()));
+        assertEquals(2, tagValues.size());
+        assertTrue(tagValues.containsAll(Arrays.asList("a", "b")));
+    }
+
 }

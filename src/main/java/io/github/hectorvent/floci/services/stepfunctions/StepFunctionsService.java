@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.services.stepfunctions.model.Activity;
+import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
@@ -18,7 +20,11 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class StepFunctionsService {
@@ -27,7 +33,10 @@ public class StepFunctionsService {
 
     private final StorageBackend<String, StateMachine> stateMachineStore;
     private final StorageBackend<String, Execution> executionStore;
+    private final StorageBackend<String, Activity> activityStore;
     private final Map<String, List<HistoryEvent>> historyCache = new ConcurrentHashMap<>();
+    private final Map<String, BlockingQueue<ActivityTask>> activityQueues = new ConcurrentHashMap<>();
+    private final Map<String, CompletableFuture<JsonNode>> pendingTaskTokens = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
     private final AslExecutor aslExecutor;
     private final ObjectMapper objectMapper;
@@ -44,6 +53,8 @@ public class StepFunctionsService {
                 new TypeReference<Map<String, StateMachine>>() {});
         this.executionStore = storageFactory.create("stepfunctions", "sfn-executions.json",
                 new TypeReference<Map<String, Execution>>() {});
+        this.activityStore = storageFactory.create("stepfunctions", "sfn-activities.json",
+                new TypeReference<Map<String, Activity>>() {});
         this.regionResolver = regionResolver;
         this.aslExecutor = aslExecutor;
         this.objectMapper = objectMapper;
@@ -200,14 +211,86 @@ public class StepFunctionsService {
         return historyCache.getOrDefault(arn, Collections.emptyList());
     }
 
+    // ──────────────────────────── Activities ────────────────────────────
+
+    public Activity createActivity(String name, String region) {
+        String arn = regionResolver.buildArn("states", region, "activity:" + name);
+        if (activityStore.get(arn).isPresent()) {
+            throw new AwsException("ActivityAlreadyExists", "Activity already exists: " + arn, 400);
+        }
+        Activity activity = new Activity();
+        activity.setActivityArn(arn);
+        activity.setName(name);
+        activityStore.put(arn, activity);
+        LOG.infov("Created activity: {0}", arn);
+        return activity;
+    }
+
+    public Activity describeActivity(String arn) {
+        return activityStore.get(arn)
+                .orElseThrow(() -> new AwsException("ActivityDoesNotExist", "Activity does not exist: " + arn, 400));
+    }
+
+    public List<Activity> listActivities(String region) {
+        String prefix = "arn:aws:states:" + region + ":";
+        return activityStore.scan(k -> k.startsWith(prefix) && k.contains(":activity:"));
+    }
+
+    public void deleteActivity(String arn) {
+        activityStore.delete(arn);
+        activityQueues.remove(arn);
+    }
+
+    /**
+     * Long-poll: blocks up to 60 seconds waiting for a task to be enqueued for this activity.
+     * Returns null if no task arrives within the timeout.
+     */
+    public ActivityTask getActivityTask(String activityArn, String workerName) {
+        describeActivity(activityArn); // validate exists
+        BlockingQueue<ActivityTask> queue = activityQueues.computeIfAbsent(activityArn,
+                k -> new LinkedBlockingQueue<>());
+        try {
+            return queue.poll(60, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return null;
+        }
+    }
+
+    public void enqueueActivityTask(String activityArn, String taskToken, String input) {
+        BlockingQueue<ActivityTask> queue = activityQueues.computeIfAbsent(activityArn,
+                k -> new LinkedBlockingQueue<>());
+        queue.add(new ActivityTask(taskToken, input));
+    }
+
+    public CompletableFuture<JsonNode> registerPendingToken(String token) {
+        CompletableFuture<JsonNode> future = new CompletableFuture<>();
+        pendingTaskTokens.put(token, future);
+        return future;
+    }
+
     // ──────────────────────────── Tasks ────────────────────────────
 
     public void sendTaskSuccess(String taskToken, String output) {
-        LOG.infov("Task success received for token {0}", taskToken);
+        CompletableFuture<JsonNode> future = pendingTaskTokens.remove(taskToken);
+        if (future != null) {
+            try {
+                future.complete(objectMapper.readTree(output));
+            } catch (Exception e) {
+                future.completeExceptionally(new RuntimeException("Invalid JSON output: " + e.getMessage()));
+            }
+        } else {
+            LOG.warnv("SendTaskSuccess: no pending task for token {0}", taskToken);
+        }
     }
 
     public void sendTaskFailure(String taskToken, String cause, String error) {
-        LOG.infov("Task failure received for token {0}: {1}", taskToken, error);
+        CompletableFuture<JsonNode> future = pendingTaskTokens.remove(taskToken);
+        if (future != null) {
+            future.completeExceptionally(new AslExecutor.FailStateException(error, cause));
+        } else {
+            LOG.warnv("SendTaskFailure: no pending task for token {0}", taskToken);
+        }
     }
 
     public void sendTaskHeartbeat(String taskToken) {

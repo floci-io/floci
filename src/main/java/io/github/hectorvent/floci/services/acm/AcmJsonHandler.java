@@ -135,9 +135,12 @@ public class AcmJsonHandler {
     }
 
     private Response handleImportCertificate(JsonNode request, String region) {
-        String certificate = request.path("Certificate").asText();
-        String privateKey = request.path("PrivateKey").asText();
+        String certificate = decodeBlob(request.path("Certificate").asText());
+        String privateKey = decodeBlob(request.path("PrivateKey").asText());
         String chain = request.path("CertificateChain").asText(null);
+        if (chain != null) {
+            chain = decodeBlob(chain);
+        }
         String existingArn = request.path("CertificateArn").asText(null);
         Map<String, String> tags = parseTags(request.path("Tags"));
 
@@ -430,6 +433,24 @@ public class AcmJsonHandler {
             }
         }
         return list.isEmpty() ? null : list;
+    }
+
+    /**
+     * Decodes a base64-encoded blob field from the AWS JSON 1.1 wire protocol.
+     * AWS SDKs send binary fields (Certificate, PrivateKey, Passphrase, etc.)
+     * as base64-encoded strings. If the value is already in PEM format (e.g. from
+     * direct HTTP calls), it is returned as-is.
+     */
+    private String decodeBlob(String value) {
+        if (value == null || value.startsWith("-----")) {
+            return value;
+        }
+        try {
+            return new String(Base64.getDecoder().decode(value));
+        } catch (IllegalArgumentException e) {
+            // Not valid base64 — return as-is
+            return value;
+        }
     }
 
     private List<KeyAlgorithm> parseKeyTypes(JsonNode node) {

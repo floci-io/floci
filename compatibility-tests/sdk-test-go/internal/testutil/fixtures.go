@@ -10,6 +10,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/acm"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -106,6 +107,11 @@ func KinesisClient() *kinesis.Client {
 // CloudWatchClient returns a new CloudWatch client.
 func CloudWatchClient() *cloudwatch.Client {
 	return cloudwatch.NewFromConfig(Config())
+}
+
+// ACMClient returns a new ACM client.
+func ACMClient() *acm.Client {
+	return acm.NewFromConfig(Config())
 }
 
 // MinimalZip returns a minimal Lambda deployment zip with a Node.js handler.

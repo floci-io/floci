@@ -374,4 +374,40 @@ class S3ServiceTest {
         S3Object retrieved = s3Service.getObject("test-bucket", destKey);
         assertArrayEquals("image-data".getBytes(), retrieved.getData());
     }
+
+    @Test
+    void listObjectsWithStartAfterFiltersResults() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        s3Service.putObject("test-bucket", "a.txt", "a".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "b.txt", "b".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "c.txt", "c".getBytes(), null, null);
+
+        S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
+                "test-bucket", null, null, 1000, null, "a.txt");
+        List<String> keys = result.objects().stream().map(S3Object::getKey).toList();
+        assertEquals(List.of("b.txt", "c.txt"), keys);
+        assertFalse(result.isTruncated());
+    }
+
+    @Test
+    void listObjectsWithContinuationTokenPaginates() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        s3Service.putObject("test-bucket", "a.txt", "a".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "b.txt", "b".getBytes(), null, null);
+        s3Service.putObject("test-bucket", "c.txt", "c".getBytes(), null, null);
+
+        // First page
+        S3Service.ListObjectsResult page1 = s3Service.listObjectsWithPrefixes(
+                "test-bucket", null, null, 2, null, null);
+        assertEquals(2, page1.objects().size());
+        assertTrue(page1.isTruncated());
+        assertNotNull(page1.nextContinuationToken());
+
+        // Second page using the token
+        S3Service.ListObjectsResult page2 = s3Service.listObjectsWithPrefixes(
+                "test-bucket", null, null, 2, page1.nextContinuationToken(), null);
+        assertEquals(1, page2.objects().size());
+        assertFalse(page2.isTruncated());
+        assertEquals("c.txt", page2.objects().get(0).getKey());
+    }
 }

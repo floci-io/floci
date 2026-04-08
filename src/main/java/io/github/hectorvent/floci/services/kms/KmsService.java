@@ -42,7 +42,16 @@ public class KmsService {
         this.regionResolver = regionResolver;
     }
 
+    private static final String DEFAULT_KEY_POLICY =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"Enable IAM User Permissions\"," +
+            "\"Effect\":\"Allow\",\"Principal\":{\"AWS\":\"arn:aws:iam::000000000000:root\"}," +
+            "\"Action\":\"kms:*\",\"Resource\":\"*\"}]}";
+
     public KmsKey createKey(String description, String region) {
+        return createKey(description, null, Map.of(), region);
+    }
+
+    public KmsKey createKey(String description, String policy, Map<String, String> tags, String region) {
         String keyId = UUID.randomUUID().toString();
         String arn = regionResolver.buildArn("kms", region, "key/" + keyId);
 
@@ -50,6 +59,10 @@ public class KmsService {
         key.setKeyId(keyId);
         key.setArn(arn);
         key.setDescription(description);
+        key.setPolicy(policy != null ? policy : DEFAULT_KEY_POLICY);
+        if (tags != null) {
+            key.getTags().putAll(tags);
+        }
 
         keyStore.put(region + "::" + keyId, key);
         LOG.infov("Created KMS key: {0} in {1}", keyId, region);
@@ -77,6 +90,21 @@ public class KmsService {
         key.setKeyState("Enabled");
         key.setDeletionDate(0);
         keyStore.put(region + "::" + key.getKeyId(), key);
+    }
+
+    public Map<String, Object> getKeyPolicy(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        Map<String, Object> result = new HashMap<>();
+        result.put("Policy", key.getPolicy());
+        result.put("PolicyName", "default");
+        return result;
+    }
+
+    public void putKeyPolicy(String keyId, String policy, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        key.setPolicy(policy);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
     // ──────────────────────────── Aliases ────────────────────────────

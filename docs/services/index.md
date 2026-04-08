@@ -1,6 +1,6 @@
 # Services Overview
 
-Floci emulates 26 AWS services on a single port (`4566`). All services use the real AWS wire protocol — your existing AWS CLI commands and SDK clients work without modification.
+Floci emulates 27 AWS services on a single port (`4566`). All services use the real AWS wire protocol — your existing AWS CLI commands and SDK clients work without modification.
 
 ## Service Matrix
 
@@ -27,6 +27,7 @@ Floci emulates 26 AWS services on a single port (`4566`). All services use the r
 | [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 8 |
 | [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 13 |
 | [EventBridge](eventbridge.md) | `POST /` + `X-Amz-Target: AmazonEventBridge.*` | JSON 1.1 | 14 |
+| [EventBridge Scheduler](scheduler.md) | `/schedules/*`, `/schedule-groups/*` | REST JSON | 9 |
 | [CloudWatch Logs](cloudwatch.md) | `POST /` + `X-Amz-Target: Logs.*` | JSON 1.1 | 14 |
 | [CloudWatch Metrics](cloudwatch.md#metrics) | `POST /` with `Action=` or JSON 1.1 | Query / JSON | 8 |
 | [ACM](acm.md) | `POST /` + `X-Amz-Target: CertificateManager.*` | JSON 1.1 | 12 |

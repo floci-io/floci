@@ -178,6 +178,7 @@ public interface EmulatorConfig {
         ElastiCacheServiceConfig elasticache();
         RdsServiceConfig rds();
         EventBridgeServiceConfig eventbridge();
+        SchedulerServiceConfig scheduler();
         CloudWatchLogsServiceConfig cloudwatchlogs();
         CloudWatchMetricsServiceConfig cloudwatchmetrics();
         SecretsManagerServiceConfig secretsmanager();
@@ -282,6 +283,11 @@ public interface EmulatorConfig {
     }
 
     interface EventBridgeServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface SchedulerServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

@@ -268,6 +268,47 @@ class AcmImportExportTest {
 
     @Test
     @Order(14)
+    void exportImportedCertificate() {
+        // Imported certificates should be exportable (they have a private key)
+        String certJson = validTestCertificate.replace("\n", "\\n");
+        String keyJson = validTestPrivateKey.replace("\n", "\\n");
+
+        String arn = given()
+            .header("X-Amz-Target", "CertificateManager.ImportCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "Certificate": "%s",
+                    "PrivateKey": "%s"
+                }
+                """.formatted(certJson, keyJson))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("CertificateArn");
+
+        String passphrase = Base64.getEncoder().encodeToString("testpassphrase".getBytes());
+
+        given()
+            .header("X-Amz-Target", "CertificateManager.ExportCertificate")
+            .contentType(ACM_CONTENT_TYPE)
+            .body("""
+                {
+                    "CertificateArn": "%s",
+                    "Passphrase": "%s"
+                }
+                """.formatted(arn, passphrase))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Certificate", startsWith("-----BEGIN CERTIFICATE-----"))
+            .body("PrivateKey", startsWith("-----BEGIN ENCRYPTED PRIVATE KEY-----"));
+    }
+
+    @Test
+    @Order(16)
     void exportCertificateNotFoundFails() {
         String passphrase = Base64.getEncoder().encodeToString("testpassphrase".getBytes());
 
@@ -288,7 +329,7 @@ class AcmImportExportTest {
     }
 
     @Test
-    @Order(15)
+    @Order(17)
     void importInvalidCertificateFails() {
         given()
             .header("X-Amz-Target", "CertificateManager.ImportCertificate")

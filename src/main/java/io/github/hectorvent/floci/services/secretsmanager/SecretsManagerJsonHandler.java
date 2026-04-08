@@ -44,12 +44,55 @@ public class SecretsManagerJsonHandler {
             case "ListSecretVersionIds" -> handleListSecretVersionIds(request, region);
             case "GetResourcePolicy" -> handleGetResourcePolicy(request, region);
             case "GetRandomPassword" -> handleGetRandomPassword(request, region);
+            case "BatchGetSecretValue" -> handleBatchGetSecretValue(request, region);
             case "DeleteResourcePolicy" -> Response.ok(objectMapper.createObjectNode()).build();
             case "PutResourcePolicy" -> Response.ok(objectMapper.createObjectNode()).build();
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
         };
+    }
+
+    private Response handleBatchGetSecretValue(JsonNode request, String region) {
+        if (!request.has("SecretIdList") && !request.has("Filters")) {
+            return Response.status(400)
+                    .entity(new AwsErrorResponse("InvalidParameterException", "You must specify either SecretIdList or Filters."))
+                    .build();
+        }
+
+        List<String> secretIdList = new ArrayList<>();
+        if (request.has("SecretIdList")) {
+            request.path("SecretIdList").forEach(id -> secretIdList.add(id.asText()));
+        }
+
+        // Filters are not fully implemented yet, but for now we only support SecretIdList
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(secretIdList, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode secretValues = objectMapper.createArrayNode();
+        for (SecretsManagerService.BatchSecretValue value : values) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("ARN", value.arn());
+            node.put("Name", value.name());
+            node.put("VersionId", value.versionId());
+            if (value.secretString() != null) {
+                node.put("SecretString", value.secretString());
+            }
+            if (value.secretBinary() != null) {
+                node.put("SecretBinary", value.secretBinary());
+            }
+            if (value.createdDate() != null) {
+                node.put("CreatedDate", value.createdDate().toEpochMilli() / 1000.0);
+            }
+            ArrayNode stages = objectMapper.createArrayNode();
+            if (value.versionStages() != null) {
+                value.versionStages().forEach(stages::add);
+            }
+            node.set("VersionStages", stages);
+            secretValues.add(node);
+        }
+        response.set("SecretValues", secretValues);
+        return Response.ok(response).build();
     }
 
     private Response handleCreateSecret(JsonNode request, String region) {

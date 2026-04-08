@@ -229,4 +229,62 @@ class KmsServiceTest {
         assertFalse(updated.getTags().containsKey("env"));
         assertTrue(updated.getTags().containsKey("team"));
     }
+
+    // ── Issue #269 — CreateKey with Tags ────────────────────────────────────
+
+    @Test
+    void createKeyWithTagsStoresTags() {
+        KmsKey key = kmsService.createKey("tagged-key", null, Map.of("env", "prod", "team", "platform"), REGION);
+
+        KmsKey found = kmsService.describeKey(key.getKeyId(), REGION);
+        assertEquals("prod", found.getTags().get("env"));
+        assertEquals("platform", found.getTags().get("team"));
+    }
+
+    @Test
+    void createKeyWithoutTagsHasEmptyTagMap() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        assertTrue(key.getTags().isEmpty());
+    }
+
+    // ── Issue #258 — GetKeyPolicy ────────────────────────────────────────────
+
+    @Test
+    void createKeyWithoutPolicyHasDefaultPolicy() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        Map<String, Object> result = kmsService.getKeyPolicy(key.getKeyId(), REGION);
+
+        assertNotNull(result.get("Policy"));
+        assertEquals("default", result.get("PolicyName"));
+        assertTrue(((String) result.get("Policy")).contains("kms:*"));
+    }
+
+    @Test
+    void createKeyWithPolicyStoresPolicy() {
+        String customPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[]}";
+        KmsKey key = kmsService.createKey("policy-key", customPolicy, Map.of(), REGION);
+
+        Map<String, Object> result = kmsService.getKeyPolicy(key.getKeyId(), REGION);
+        assertEquals(customPolicy, result.get("Policy"));
+        assertEquals("default", result.get("PolicyName"));
+    }
+
+    // ── Issue #259 — PutKeyPolicy ────────────────────────────────────────────
+
+    @Test
+    void putKeyPolicyUpdatesPolicy() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        String newPolicy = "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\"}]}";
+
+        kmsService.putKeyPolicy(key.getKeyId(), newPolicy, REGION);
+
+        Map<String, Object> result = kmsService.getKeyPolicy(key.getKeyId(), REGION);
+        assertEquals(newPolicy, result.get("Policy"));
+    }
+
+    @Test
+    void putKeyPolicyOnNonExistentKeyThrows() {
+        assertThrows(AwsException.class, () ->
+                kmsService.putKeyPolicy("non-existent", "{}", REGION));
+    }
 }

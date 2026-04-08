@@ -96,6 +96,8 @@ floci:
       default-mariadb-image: "mariadb:11"
     eventbridge:
       enabled: true
+    scheduler:
+      enabled: true
     cloudwatchlogs:
       enabled: true
       max-events-per-query: 10000

@@ -89,6 +89,11 @@ pub async fn cognito_client() -> aws_sdk_cognitoidentityprovider::Client {
     aws_sdk_cognitoidentityprovider::Client::new(&base_config().await)
 }
 
+/// Returns an ACM client.
+pub async fn acm_client() -> aws_sdk_acm::Client {
+    aws_sdk_acm::Client::new(&base_config().await)
+}
+
 /// Returns a CloudFormation client.
 pub async fn cloudformation_client() -> aws_sdk_cloudformation::Client {
     aws_sdk_cloudformation::Client::new(&base_config().await)

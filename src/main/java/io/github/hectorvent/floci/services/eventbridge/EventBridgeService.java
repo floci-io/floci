@@ -305,6 +305,40 @@ public class EventBridgeService {
         return targetStore.get(key).orElse(List.of());
     }
 
+    // ──────────────────────────── Tags ────────────────────────────
+
+    public Map<String, String> listTagsForResource(String resourceArn, String region) {
+        // Check if it's an event bus ARN (contains "event-bus/")
+        if (resourceArn.contains("event-bus/")) {
+            String busName = resourceArn.substring(resourceArn.lastIndexOf("event-bus/") + "event-bus/".length());
+            String key = busKey(region, busName);
+            return busStore.get(key)
+                    .map(EventBus::getTags)
+                    .orElse(Map.of());
+        }
+        // Check if it's a rule ARN (contains "rule/")
+        if (resourceArn.contains("rule/")) {
+            String afterRule = resourceArn.substring(resourceArn.lastIndexOf("rule/") + "rule/".length());
+            String busName;
+            String ruleName;
+            if (afterRule.contains("/")) {
+                // Custom bus: rule/{busName}/{ruleName}
+                int slashIdx = afterRule.indexOf('/');
+                busName = afterRule.substring(0, slashIdx);
+                ruleName = afterRule.substring(slashIdx + 1);
+            } else {
+                // Default bus: rule/{ruleName}
+                busName = "default";
+                ruleName = afterRule;
+            }
+            String key = ruleKey(region, busName, ruleName);
+            return ruleStore.get(key)
+                    .map(Rule::getTags)
+                    .orElse(Map.of());
+        }
+        return Map.of();
+    }
+
     // ──────────────────────────── PutEvents ────────────────────────────
 
     public record PutEventsResult(int failedCount, List<Map<String, String>> entries) {}

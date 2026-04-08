@@ -13,8 +13,13 @@ public class GlobalSecondaryIndex {
     private List<KeySchemaElement> keySchema;
     private String indexArn;
     private String projectionType;
+    private ProvisionedThroughput provisionedThroughput;
+    private long itemCount;
+    private long indexSizeBytes;
 
-    public GlobalSecondaryIndex() {}
+    public GlobalSecondaryIndex() {
+        this.provisionedThroughput = new ProvisionedThroughput(0, 0);
+    }
 
     public GlobalSecondaryIndex(String indexName, List<KeySchemaElement> keySchema,
                                  String indexArn, String projectionType) {
@@ -22,6 +27,7 @@ public class GlobalSecondaryIndex {
         this.keySchema = keySchema;
         this.indexArn = indexArn;
         this.projectionType = projectionType != null ? projectionType : "ALL";
+        this.provisionedThroughput = new ProvisionedThroughput(0, 0);
     }
 
     public String getIndexName() { return indexName; }
@@ -35,6 +41,15 @@ public class GlobalSecondaryIndex {
 
     public String getProjectionType() { return projectionType; }
     public void setProjectionType(String projectionType) { this.projectionType = projectionType; }
+
+    public ProvisionedThroughput getProvisionedThroughput() { return provisionedThroughput; }
+    public void setProvisionedThroughput(ProvisionedThroughput provisionedThroughput) { this.provisionedThroughput = provisionedThroughput; }
+
+    public long getItemCount() { return itemCount; }
+    public void setItemCount(long itemCount) { this.itemCount = itemCount; }
+
+    public long getIndexSizeBytes() { return indexSizeBytes; }
+    public void setIndexSizeBytes(long indexSizeBytes) { this.indexSizeBytes = indexSizeBytes; }
 
     public String getPartitionKeyName() {
         return keySchema.stream()

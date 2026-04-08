@@ -1,8 +1,8 @@
 FROM node:22-slim
 WORKDIR /app
 
-COPY package.json package-lock.json ./
-RUN npm ci --no-fund --no-audit
+COPY package*.json ./
+RUN npm install --no-fund --no-audit
 
 COPY tsconfig.json vitest.config.ts ./
 COPY tests/ tests/

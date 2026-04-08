@@ -48,6 +48,8 @@ public class KmsJsonHandler {
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "ListResourceTags" -> handleListResourceTags(request, region);
+            case "GetKeyPolicy" -> handleGetKeyPolicy(request, region);
+            case "PutKeyPolicy" -> handlePutKeyPolicy(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -56,7 +58,10 @@ public class KmsJsonHandler {
 
     private Response handleCreateKey(JsonNode request, String region) {
         String description = request.path("Description").asText(null);
-        KmsKey key = service.createKey(description, region);
+        String policy = request.path("Policy").isMissingNode() ? null : request.path("Policy").asText(null);
+        Map<String, String> tags = new HashMap<>();
+        request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
+        KmsKey key = service.createKey(description, policy, tags, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("KeyMetadata", keyToNode(key));
         return Response.ok(response).build();
@@ -252,6 +257,19 @@ public class KmsJsonHandler {
         });
         response.put("Truncated", false);
         return Response.ok(response).build();
+    }
+
+    private Response handleGetKeyPolicy(JsonNode request, String region) {
+        Map<String, Object> result = service.getKeyPolicy(request.path("KeyId").asText(), region);
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handlePutKeyPolicy(JsonNode request, String region) {
+        service.putKeyPolicy(
+                request.path("KeyId").asText(),
+                request.path("Policy").asText(),
+                region);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private ObjectNode keyToNode(KmsKey k) {

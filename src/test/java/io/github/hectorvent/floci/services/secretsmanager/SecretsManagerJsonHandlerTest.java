@@ -156,4 +156,33 @@ class SecretsManagerJsonHandlerTest {
         assertThat(secret.get("KmsKeyId").asText(), is("list-kms-key"));
         assertThat(secret.has("CreatedDate"), is(true));
     }
+
+    @Test
+    void batchGetSecretValue() {
+        ObjectNode createReq1 = MAPPER.createObjectNode();
+        createReq1.put("Name", "secret1");
+        createReq1.put("SecretString", "value1");
+        handler.handle("CreateSecret", createReq1, REGION);
+
+        ObjectNode createReq2 = MAPPER.createObjectNode();
+        createReq2.put("Name", "secret2");
+        createReq2.put("SecretString", "value2");
+        handler.handle("CreateSecret", createReq2, REGION);
+
+        ObjectNode batchReq = MAPPER.createObjectNode();
+        batchReq.putArray("SecretIdList").add("secret1").add("secret2");
+        Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(2));
+        assertThat(body.get("SecretValues").get(0).get("Name").asText(), anyOf(is("secret1"), is("secret2")));
+    }
+
+    @Test
+    void batchGetSecretValueMissingParameters() {
+        ObjectNode batchReq = MAPPER.createObjectNode();
+        Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
+        assertThat(response.getStatus(), is(400));
+    }
 }

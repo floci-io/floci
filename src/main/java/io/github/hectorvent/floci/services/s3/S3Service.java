@@ -440,13 +440,18 @@ public class S3Service {
         }
     }
 
-    public record ListObjectsResult(List<S3Object> objects, List<String> commonPrefixes, boolean isTruncated) {}
+    public record ListObjectsResult(List<S3Object> objects, List<String> commonPrefixes, boolean isTruncated, String nextContinuationToken) {}
 
     public List<S3Object> listObjects(String bucketName, String prefix, String delimiter, int maxKeys) {
-        return listObjectsWithPrefixes(bucketName, prefix, delimiter, maxKeys).objects();
+        return listObjectsWithPrefixes(bucketName, prefix, delimiter, maxKeys, null, null).objects();
     }
 
     public ListObjectsResult listObjectsWithPrefixes(String bucketName, String prefix, String delimiter, int maxKeys) {
+        return listObjectsWithPrefixes(bucketName, prefix, delimiter, maxKeys, null, null);
+    }
+
+    public ListObjectsResult listObjectsWithPrefixes(String bucketName, String prefix, String delimiter, int maxKeys,
+                                                     String continuationToken, String startAfter) {
         ensureBucketExists(bucketName);
 
         String keyPrefix = bucketName + "/";
@@ -485,34 +490,54 @@ public class S3Service {
 
         allObjects.sort(Comparator.comparing(S3Object::getKey));
 
+        // Apply continuation-token / start-after filter.
+        // continuation-token takes precedence; it encodes the last key seen on a previous page.
+        String filterKey = continuationToken != null ? continuationToken : startAfter;
+        if (filterKey != null) {
+            final String fk = filterKey;
+            allObjects = allObjects.stream()
+                    .filter(o -> o.getKey().compareTo(fk) > 0)
+                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+            commonPrefixes = commonPrefixes.stream()
+                    .filter(cp -> cp.compareTo(fk) > 0)
+                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
+        }
+
         // S3 counts both direct objects and common prefixes.
         // Each common prefix group (e.g. "docs/") uses one entry regardless of
         // how many keys it contains. Merge both sorted lists lexicographically
         // and stop at maxKeys to try to match S3 ListObjectsV2 behavior.
         // see https://docs.aws.amazon.com/AmazonS3/latest/API/API_ListObjectsV2.html
         boolean isTruncated = false;
+        String nextContinuationToken = null;
         if (maxKeys > 0) {
             List<S3Object> limitedObjects = new ArrayList<>();
             List<String> limitedPrefixes = new ArrayList<>();
             int count = 0;
             int directObjectCount = 0;
             int commonPrefixCount = 0;
+            String lastEmittedKey = null;
             while (count < maxKeys && (directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size())) {
                 String objectKey = directObjectCount < allObjects.size() ? allObjects.get(directObjectCount).getKey() : null;
                 String prefixKey = commonPrefixCount < commonPrefixes.size() ? commonPrefixes.get(commonPrefixCount) : null;
                 if (objectKey != null && (prefixKey == null || objectKey.compareTo(prefixKey) <= 0)) {
                     limitedObjects.add(allObjects.get(directObjectCount++));
+                    lastEmittedKey = objectKey;
                 } else {
                     limitedPrefixes.add(commonPrefixes.get(commonPrefixCount++));
+                    lastEmittedKey = prefixKey;
                 }
                 count++;
             }
             isTruncated = directObjectCount < allObjects.size() || commonPrefixCount < commonPrefixes.size();
+            if (isTruncated) {
+                nextContinuationToken = lastEmittedKey;
+            }
             allObjects = limitedObjects;
             commonPrefixes = limitedPrefixes;
         }
 
-        return new ListObjectsResult(allObjects, commonPrefixes, isTruncated);
+        return new ListObjectsResult(allObjects, commonPrefixes, isTruncated, nextContinuationToken);
     }
 
     public S3Object copyObject(String sourceBucket, String sourceKey,
@@ -576,7 +601,9 @@ public class S3Service {
         return bucket.getVersioningStatus();
     }
 
-    public List<S3Object> listObjectVersions(String bucketName, String prefix, int maxKeys) {
+    public record ListVersionsResult(List<S3Object> versions, boolean isTruncated, String nextKeyMarker) {}
+
+    public ListVersionsResult listObjectVersions(String bucketName, String prefix, int maxKeys, String keyMarker) {
         ensureBucketExists(bucketName);
 
         String versionPrefix = bucketName + "/";
@@ -593,10 +620,33 @@ public class S3Service {
             return b.getLastModified().compareTo(a.getLastModified());
         });
 
-        if (maxKeys > 0 && versions.size() > maxKeys) {
-            versions = versions.subList(0, maxKeys);
+        // Apply key-marker filter: skip objects whose key is <= keyMarker
+        if (keyMarker != null && !keyMarker.isEmpty()) {
+            final String km = keyMarker;
+            versions = versions.stream()
+                    .filter(v -> v.getKey().compareTo(km) > 0)
+                    .collect(java.util.stream.Collectors.toCollection(ArrayList::new));
         }
-        return versions;
+
+        boolean isTruncated = false;
+        String nextKeyMarker = null;
+        if (maxKeys > 0 && versions.size() > maxKeys) {
+            // Extend the cutoff to avoid splitting versions of the same key across pages.
+            // All versions of the same key must appear on the same page.
+            int cutoff = maxKeys;
+            String lastKey = versions.get(maxKeys - 1).getKey();
+            while (cutoff < versions.size() && versions.get(cutoff).getKey().equals(lastKey)) {
+                cutoff++;
+            }
+            isTruncated = cutoff < versions.size();
+            if (isTruncated) {
+                // nextKeyMarker is used as an exclusive lower bound: next page gets key > nextKeyMarker.
+                // Set it to the last included key so the next page starts right after it.
+                nextKeyMarker = versions.get(cutoff - 1).getKey();
+            }
+            versions = new ArrayList<>(versions.subList(0, cutoff));
+        }
+        return new ListVersionsResult(versions, isTruncated, nextKeyMarker);
     }
 
     // --- Head Bucket / Bucket Location ---
@@ -1188,6 +1238,30 @@ public class S3Service {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setEncryptionConfiguration(null);
+        bucketStore.put(bucketName, bucket);
+    }
+
+    public String getPublicAccessBlock(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        if (bucket.getPublicAccessBlockConfiguration() == null) {
+            throw new AwsException("NoSuchPublicAccessBlockConfiguration",
+                    "The public access block configuration was not found", 404);
+        }
+        return bucket.getPublicAccessBlockConfiguration();
+    }
+
+    public void putPublicAccessBlock(String bucketName, String xml) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        bucket.setPublicAccessBlockConfiguration(xml);
+        bucketStore.put(bucketName, bucket);
+    }
+
+    public void deletePublicAccessBlock(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        bucket.setPublicAccessBlockConfiguration(null);
         bucketStore.put(bucketName, bucket);
     }
 

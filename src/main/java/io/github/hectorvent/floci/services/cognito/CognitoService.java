@@ -296,7 +296,16 @@ public class CognitoService {
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
-        return userStore.get(userKey(userPoolId, username))
+        Optional<CognitoUser> byKey = userStore.get(userKey(userPoolId, username));
+        if (byKey.isPresent()) {
+            return byKey.get();
+        }
+        // Fallback: resolve by sub UUID or email alias
+        String prefix = userPoolId + "::";
+        return userStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(u -> username.equals(u.getAttributes().get("sub"))
+                          || username.equals(u.getAttributes().get("email")))
+                .findFirst()
                 .orElseThrow(() -> new AwsException("UserNotFoundException", "User not found", 404));
     }
 
@@ -304,12 +313,12 @@ public class CognitoService {
         CognitoUser user = adminGetUser(userPoolId, username);
         for (String groupName : new ArrayList<>(user.getGroupNames())) {
             groupStore.get(groupKey(userPoolId, groupName)).ifPresent(group -> {
-                group.removeUserName(username);
+                group.removeUserName(user.getUsername());
                 group.setLastModifiedDate(System.currentTimeMillis() / 1000L);
                 groupStore.put(groupKey(userPoolId, groupName), group);
             });
         }
-        userStore.delete(userKey(userPoolId, username));
+        userStore.delete(userKey(userPoolId, user.getUsername()));
     }
 
     public void adminSetUserPassword(String userPoolId, String username, String password, boolean permanent) {
@@ -318,20 +327,55 @@ public class CognitoService {
         user.setTemporaryPassword(!permanent);
         user.setUserStatus(permanent ? "CONFIRMED" : "FORCE_CHANGE_PASSWORD");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        userStore.put(userKey(userPoolId, username), user);
-        LOG.infov("Set password for user {0} in pool {1} (permanent={2})", username, userPoolId, permanent);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Set password for user {0} in pool {1} (permanent={2})", user.getUsername(), userPoolId, permanent);
     }
 
     public void adminUpdateUserAttributes(String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
         user.getAttributes().putAll(attributes);
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        userStore.put(userKey(userPoolId, username), user);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
     }
 
-    public List<CognitoUser> listUsers(String userPoolId) {
+    public List<CognitoUser> listUsers(String userPoolId, String filter) {
         String prefix = userPoolId + "::";
-        return userStore.scan(k -> k.startsWith(prefix));
+        List<CognitoUser> all = userStore.scan(k -> k.startsWith(prefix));
+        if (filter == null || filter.isBlank()) {
+            return all;
+        }
+        return all.stream().filter(u -> matchesUserFilter(u, filter)).toList();
+    }
+
+    private boolean matchesUserFilter(CognitoUser user, String filter) {
+        String originalFilter = filter;
+        filter = filter.trim();
+        boolean startsWithOp = filter.contains("^=");
+        int opIdx = startsWithOp ? filter.indexOf("^=") : filter.indexOf('=');
+        if (opIdx < 0) {
+            throw new AwsException("InvalidParameterException", "Invalid filter expression: " + filter, 400);
+        }
+        String attrName = filter.substring(0, opIdx).trim();
+        String rawValue = filter.substring(opIdx + (startsWithOp ? 2 : 1)).trim();
+        if (rawValue.length() >= 2 && rawValue.startsWith("\"") && rawValue.endsWith("\"")) {
+            rawValue = rawValue.substring(1, rawValue.length() - 1);
+        }
+        String attrValue = getUserAttribute(user, attrName);
+        boolean matches = false;
+        if (attrValue != null) {
+            matches = startsWithOp ? attrValue.startsWith(rawValue) : attrValue.equals(rawValue);
+        }
+        LOG.infov("Matching user {0} against filter [{1}]: attrName=[{2}], rawValue=[{3}], attrValue=[{4}], matches={5}",
+                user.getUsername(), originalFilter, attrName, rawValue, attrValue, matches);
+        return matches;
+    }
+
+    private String getUserAttribute(CognitoUser user, String attrName) {
+        return switch (attrName) {
+            case "username" -> user.getUsername();
+            case "cognito:user_status", "status" -> user.getUserStatus();
+            default -> user.getAttributes().get(attrName);
+        };
     }
 
     // ──────────────────────────── Groups ────────────────────────────
@@ -378,7 +422,7 @@ public class CognitoService {
             userStore.get(userKey(userPoolId, username)).ifPresent(user -> {
                 if (user.getGroupNames().remove(groupName)) {
                     user.setLastModifiedDate(now);
-                    userStore.put(userKey(userPoolId, username), user);
+                    userStore.put(userKey(userPoolId, user.getUsername()), user);
                 }
             });
         }
@@ -390,14 +434,14 @@ public class CognitoService {
         CognitoGroup group = getGroup(userPoolId, groupName);
         CognitoUser user = adminGetUser(userPoolId, username);
         long now = System.currentTimeMillis() / 1000L;
-        if (group.addUserName(username)) {
+        if (group.addUserName(user.getUsername())) {
             group.setLastModifiedDate(now);
             groupStore.put(groupKey(userPoolId, groupName), group);
         }
         if (!user.getGroupNames().contains(groupName)) {
             user.getGroupNames().add(groupName);
             user.setLastModifiedDate(now);
-            userStore.put(userKey(userPoolId, username), user);
+            userStore.put(userKey(userPoolId, user.getUsername()), user);
         }
     }
 
@@ -405,13 +449,13 @@ public class CognitoService {
         CognitoGroup group = getGroup(userPoolId, groupName);
         CognitoUser user = adminGetUser(userPoolId, username);
         long now = System.currentTimeMillis() / 1000L;
-        if (group.removeUserName(username)) {
+        if (group.removeUserName(user.getUsername())) {
             group.setLastModifiedDate(now);
             groupStore.put(groupKey(userPoolId, groupName), group);
         }
         if (user.getGroupNames().remove(groupName)) {
             user.setLastModifiedDate(now);
-            userStore.put(userKey(userPoolId, username), user);
+            userStore.put(userKey(userPoolId, user.getUsername()), user);
         }
     }
 
@@ -461,7 +505,7 @@ public class CognitoService {
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        userStore.put(userKey(client.getUserPoolId(), username), user);
+        userStore.put(userKey(client.getUserPoolId(), user.getUsername()), user);
     }
 
     // ──────────────────────────── Auth ────────────────────────────
@@ -473,7 +517,7 @@ public class CognitoService {
 
         return switch (authFlow) {
             case "USER_PASSWORD_AUTH" -> authenticateWithPassword(pool, authParameters, clientId);
-            case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, authParameters);
+            case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, authParameters, clientId);
             default -> {
                 // For other flows (USER_SRP_AUTH, etc.), if user exists return tokens
                 String username = authParameters.get("USERNAME");
@@ -482,7 +526,7 @@ public class CognitoService {
                 }
                 CognitoUser user = adminGetUser(pool.getId(), username);
                 Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult", generateAuthResult(user, pool));
+                result.put("AuthenticationResult", generateAuthResult(user, pool, clientId));
                 yield result;
             }
         };
@@ -496,12 +540,12 @@ public class CognitoService {
         return switch (authFlow) {
             case "ADMIN_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH" ->
                     authenticateWithPassword(pool, authParameters, clientId);
-            case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, authParameters);
+            case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, authParameters, clientId);
             default -> {
                 String username = authParameters.get("USERNAME");
                 CognitoUser user = adminGetUser(userPoolId, username);
                 Map<String, Object> result = new HashMap<>();
-                result.put("AuthenticationResult", generateAuthResult(user, pool));
+                result.put("AuthenticationResult", generateAuthResult(user, pool, clientId));
                 yield result;
             }
         };
@@ -522,7 +566,7 @@ public class CognitoService {
             adminSetUserPassword(pool.getId(), username, newPassword, true);
             CognitoUser user = adminGetUser(pool.getId(), username);
             Map<String, Object> result = new HashMap<>();
-            result.put("AuthenticationResult", generateAuthResult(user, pool));
+            result.put("AuthenticationResult", generateAuthResult(user, pool, clientId));
             return result;
         }
 
@@ -545,7 +589,7 @@ public class CognitoService {
         user.setTemporaryPassword(false);
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        userStore.put(userKey(poolId, username), user);
+        userStore.put(userKey(poolId, user.getUsername()), user);
     }
 
     public void forgotPassword(String clientId, String username) {
@@ -636,7 +680,7 @@ public class CognitoService {
             throw new AwsException("UserNotConfirmedException", "User is not confirmed", 400);
         }
 
-        if (user.getPasswordHash() != null && !user.getPasswordHash().equals(hashPassword(password))) {
+        if (user.getPasswordHash() == null || !user.getPasswordHash().equals(hashPassword(password))) {
             throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
         }
 
@@ -655,18 +699,32 @@ public class CognitoService {
         }
 
         Map<String, Object> result = new HashMap<>();
-        result.put("AuthenticationResult", generateAuthResult(user, pool));
+        result.put("AuthenticationResult", generateAuthResult(user, pool, clientId));
         return result;
     }
 
-    private Map<String, Object> handleRefreshToken(UserPool pool, Map<String, String> params) {
-        // In the emulator, accept any refresh token and return new tokens
-        // A real implementation would validate the refresh token
+    private Map<String, Object> handleRefreshToken(UserPool pool, Map<String, String> params, String clientId) {
         String refreshToken = params.get("REFRESH_TOKEN");
         if (refreshToken == null) {
             throw new AwsException("InvalidParameterException", "REFRESH_TOKEN is required", 400);
         }
-        // We can't look up the user from a stub refresh token, so return a minimal result
+        String[] parts = parseRefreshToken(refreshToken);
+        if (parts != null) {
+            String username = parts[1];
+            String tokenClientId = parts[2];
+            try {
+                CognitoUser user = adminGetUser(pool.getId(), username);
+                Map<String, Object> auth = new HashMap<>();
+                auth.put("AccessToken", generateSignedJwt(user, pool, "access", tokenClientId));
+                auth.put("IdToken", generateSignedJwt(user, pool, "id", tokenClientId));
+                auth.put("ExpiresIn", 3600);
+                auth.put("TokenType", "Bearer");
+                Map<String, Object> result = new HashMap<>();
+                result.put("AuthenticationResult", auth);
+                return result;
+            } catch (AwsException ignored) { }
+        }
+        // Fallback for legacy tokens: emit minimal tokens using clientId from request
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateTokenString("access", "unknown", pool));
         auth.put("IdToken", generateTokenString("id", "unknown", pool));
@@ -677,17 +735,44 @@ public class CognitoService {
         return result;
     }
 
-    private Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool) {
+    public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken) {
+        if (refreshToken == null) {
+            throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
+        }
+        UserPoolClient client = clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+        String[] parts = parseRefreshToken(refreshToken);
+        if (parts == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
+        }
+        String poolId = parts[0];
+        String username = parts[1];
+        if (!client.getUserPoolId().equals(poolId)) {
+            throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
+        }
+        UserPool pool = describeUserPool(poolId);
+        CognitoUser user = adminGetUser(poolId, username);
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", generateSignedJwt(user, pool, "access"));
-        auth.put("IdToken", generateSignedJwt(user, pool, "id"));
-        auth.put("RefreshToken", UUID.randomUUID().toString());
+        auth.put("AccessToken", generateSignedJwt(user, pool, "access", clientId));
+        auth.put("IdToken", generateSignedJwt(user, pool, "id", clientId));
+        auth.put("ExpiresIn", 3600);
+        auth.put("TokenType", "Bearer");
+        Map<String, Object> result = new HashMap<>();
+        result.put("AuthenticationResult", auth);
+        return result;
+    }
+
+    private Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, String clientId) {
+        Map<String, Object> auth = new HashMap<>();
+        auth.put("AccessToken", generateSignedJwt(user, pool, "access", clientId));
+        auth.put("IdToken", generateSignedJwt(user, pool, "id", clientId));
+        auth.put("RefreshToken", buildRefreshToken(pool.getId(), user.getUsername(), clientId));
         auth.put("ExpiresIn", 3600);
         auth.put("TokenType", "Bearer");
         return auth;
     }
 
-    private String generateSignedJwt(CognitoUser user, UserPool pool, String type) {
+    private String generateSignedJwt(CognitoUser user, UserPool pool, String type, String clientId) {
         String headerJson = String.format(
                 "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
                 escapeJson(getSigningKeyId(pool)));
@@ -704,13 +789,16 @@ public class CognitoService {
             groupsFragment = ",\"cognito:groups\":" + groupsJson;
         }
         String sub = user.getAttributes().getOrDefault("sub", user.getUsername());
+        String clientIdFragment = (clientId != null && !clientId.isBlank() && "access".equals(type))
+                ? ",\"client_id\":\"" + escapeJson(clientId) + "\""
+                : "";
         String payloadJson = String.format(
                 "{\"sub\":\"%s\",\"event_id\":\"%s\",\"token_use\":\"%s\",\"auth_time\":%d," +
                 "\"iss\":\"%s\",\"exp\":%d,\"iat\":%d," +
-                "\"username\":\"%s\",\"email\":\"%s\",\"cognito:username\":\"%s\"%s}",
+                "\"username\":\"%s\",\"email\":\"%s\",\"cognito:username\":\"%s\"%s%s}",
                 escapeJson(sub), UUID.randomUUID(), type, now,
                 escapeJson(getIssuer(pool.getId())), now + 3600, now,
-                user.getUsername(), email, user.getUsername(), groupsFragment
+                user.getUsername(), email, user.getUsername(), clientIdFragment, groupsFragment
         );
         String payload = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
@@ -982,6 +1070,23 @@ public class CognitoService {
     private String buildSessionToken(String poolId, String username, String clientId) {
         String raw = poolId + "|" + username + "|" + clientId + "|" + UUID.randomUUID();
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String buildRefreshToken(String poolId, String username, String clientId) {
+        String raw = poolId + "|" + username + "|" + clientId + "|" + UUID.randomUUID();
+        return Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private String[] parseRefreshToken(String refreshToken) {
+        try {
+            byte[] decoded = Base64.getDecoder().decode(refreshToken);
+            String raw = new String(decoded, StandardCharsets.UTF_8);
+            String[] parts = raw.split("\\|", 4);
+            if (parts.length == 4) {
+                return parts; // [poolId, username, clientId, nonce]
+            }
+        } catch (Exception ignored) { }
+        return null;
     }
 
     private String extractUsernameFromToken(String token) {

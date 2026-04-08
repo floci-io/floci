@@ -137,6 +137,7 @@ class S3VersioningIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<ListVersionsResult"))
+            .body(containsString("<IsTruncated>false</IsTruncated>"))
             .body(containsString("<Version>"))
             .body(containsString(versionId1))
             .body(containsString(versionId2));

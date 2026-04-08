@@ -33,6 +33,9 @@ public class Identity {
     @JsonProperty("NotificationAttributes")
     private Map<String, String> notificationAttributes = new HashMap<>();
 
+    @JsonProperty("FeedbackForwardingEnabled")
+    private boolean feedbackForwardingEnabled = true;
+
     @JsonProperty("CreatedAt")
     private Instant createdAt;
 
@@ -68,6 +71,9 @@ public class Identity {
 
     public Map<String, String> getNotificationAttributes() { return notificationAttributes; }
     public void setNotificationAttributes(Map<String, String> notificationAttributes) { this.notificationAttributes = notificationAttributes; }
+
+    public boolean isFeedbackForwardingEnabled() { return feedbackForwardingEnabled; }
+    public void setFeedbackForwardingEnabled(boolean feedbackForwardingEnabled) { this.feedbackForwardingEnabled = feedbackForwardingEnabled; }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

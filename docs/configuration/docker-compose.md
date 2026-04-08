@@ -2,7 +2,7 @@
 
 ## Minimal Setup
 
-For most services (SSM, SQS, SNS, S3, DynamoDB, Lambda, API Gateway, Cognito, KMS, Kinesis, Secrets Manager, CloudFormation, Step Functions, IAM, STS, EventBridge, CloudWatch) a single port is enough:
+For most services (SSM, SQS, SNS, S3, DynamoDB, Lambda, API Gateway, Cognito, KMS, Kinesis, Secrets Manager, CloudFormation, Step Functions, IAM, STS, EventBridge, Scheduler, CloudWatch) a single port is enough:
 
 ```yaml title="docker-compose.yml"
 services:

@@ -26,6 +26,7 @@ class HealthControllerIntegrationTest {
                 "elasticache": "running",
                 "rds": "running",
                 "events": "running",
+                "scheduler": "running",
                 "logs": "running",
                 "monitoring": "running",
                 "secretsmanager": "running",

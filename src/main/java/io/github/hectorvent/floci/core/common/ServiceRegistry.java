@@ -38,6 +38,7 @@ public class ServiceRegistry {
             case "elasticache" -> config.services().elasticache().enabled();
             case "rds" -> config.services().rds().enabled();
             case "events" -> config.services().eventbridge().enabled();
+            case "scheduler" -> config.services().scheduler().enabled();
             case "logs" -> config.services().cloudwatchlogs().enabled();
             case "monitoring" -> config.services().cloudwatchmetrics().enabled();
             case "secretsmanager" -> config.services().secretsmanager().enabled();
@@ -69,6 +70,7 @@ public class ServiceRegistry {
         if (config.services().elasticache().enabled()) enabled.add("elasticache");
         if (config.services().rds().enabled()) enabled.add("rds");
         if (config.services().eventbridge().enabled()) enabled.add("events");
+        if (config.services().scheduler().enabled()) enabled.add("scheduler");
         if (config.services().cloudwatchlogs().enabled()) enabled.add("logs");
         if (config.services().cloudwatchmetrics().enabled()) enabled.add("monitoring");
         if (config.services().secretsmanager().enabled()) enabled.add("secretsmanager");
@@ -100,6 +102,7 @@ public class ServiceRegistry {
         services.put("elasticache", status(config.services().elasticache().enabled()));
         services.put("rds", status(config.services().rds().enabled()));
         services.put("events", status(config.services().eventbridge().enabled()));
+        services.put("scheduler", status(config.services().scheduler().enabled()));
         services.put("logs", status(config.services().cloudwatchlogs().enabled()));
         services.put("monitoring", status(config.services().cloudwatchmetrics().enabled()));
         services.put("secretsmanager", status(config.services().secretsmanager().enabled()));

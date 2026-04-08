@@ -682,10 +682,12 @@ public class SnsService {
                                     Map<String, MessageAttributeValue> messageAttributes,
                                     String topicArn, String messageId) {
         try {
+            String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
             ObjectNode node = objectMapper.createObjectNode();
             node.put("Type", "Notification");
             node.put("MessageId", messageId);
             node.put("TopicArn", topicArn);
+            node.put("Timestamp", timestamp);
             if (subject != null) {
                 node.put("Subject", subject);
             }

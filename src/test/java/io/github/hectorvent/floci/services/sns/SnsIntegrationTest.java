@@ -12,6 +12,7 @@ import java.util.UUID;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for SNS via the query (form-encoded) protocol.
@@ -191,7 +192,7 @@ class SnsIntegrationTest {
             .body(containsString("<MessageId>"));
 
         // Verify the message arrived in the SQS queue
-        given()
+        String jsonBodyInResponse = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "ReceiveMessage")
             .formParam("QueueUrl", sqsQueueUrl)
@@ -200,8 +201,14 @@ class SnsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("Hello from SNS!"))
-            .body(containsString("Notification"));
+              .log().body()
+                .body(containsString("Hello from SNS!"))
+            .body(containsString("Notification"))
+                .extract().xmlPath().getString(
+                        "ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
+        ;
+
+        assertTrue(jsonBodyInResponse.contains("\"Timestamp\""));
     }
 
     @Test

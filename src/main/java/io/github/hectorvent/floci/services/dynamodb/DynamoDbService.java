@@ -961,6 +961,28 @@ public class DynamoDbService {
                         item.set(attrName, resolved);
                     }
                 }
+            } else if (valuePart.startsWith("list_append(")) {
+                String[] args = extractFunctionArgs(valuePart);
+                if (args.length == 2) {
+                    String arg1 = args[0].trim();
+                    String arg2 = args[1].trim();
+                    JsonNode list1 = arg1.startsWith(":") && exprAttrValues != null
+                        ? exprAttrValues.get(arg1)
+                        : item.get(resolveAttributeName(arg1, exprAttrNames));
+                    JsonNode list2 = arg2.startsWith(":") && exprAttrValues != null
+                        ? exprAttrValues.get(arg2)
+                        : item.get(resolveAttributeName(arg2, exprAttrNames));
+                    if (list1 != null && list2 != null && list1.has("L") && list2.has("L")) {
+                        com.fasterxml.jackson.databind.node.ArrayNode merged =
+                            com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
+                        list1.get("L").forEach(merged::add);
+                        list2.get("L").forEach(merged::add);
+                        com.fasterxml.jackson.databind.node.ObjectNode result =
+                            com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+                        result.set("L", merged);
+                        item.set(attrName, result);
+                    }
+                }
             } else if (valuePart.startsWith(":") && exprAttrValues != null) {
                 JsonNode value = exprAttrValues.get(valuePart);
                 if (value != null) {
@@ -1010,7 +1032,7 @@ public class DynamoDbService {
     }
 
     private String applyAddClause(ObjectNode item, String clause,
-                                   JsonNode exprAttrNames, JsonNode exprAttrValues) {
+                                  JsonNode exprAttrNames, JsonNode exprAttrValues) {
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("SET ") || upper.startsWith("REMOVE ") || upper.startsWith("DELETE ")) {
@@ -1025,9 +1047,11 @@ public class DynamoDbService {
             String valuePlaceholder = parts[1].replaceAll(",.*", "").trim();
 
             if (valuePlaceholder.startsWith(":") && exprAttrValues != null) {
-                JsonNode value = exprAttrValues.get(valuePlaceholder);
-                if (value != null) {
-                    item.set(attrName, value);
+                JsonNode addValue = exprAttrValues.get(valuePlaceholder);
+                if (addValue != null) {
+                    JsonNode existingValue = item.get(attrName);
+                    JsonNode newValue = applyAddOperation(existingValue, addValue);
+                    item.set(attrName, newValue);
                 }
             }
 
@@ -1041,6 +1065,77 @@ public class DynamoDbService {
             }
         }
         return clause;
+    }
+
+    /**
+     * Implements DynamoDB ADD operation semantics:
+     * - For numbers (N): adds the value to the existing number, or sets it if attribute doesn't exist
+     * - For sets (SS, NS, BS): adds elements to the existing set, or creates the set if it doesn't exist
+     */
+    private JsonNode applyAddOperation(JsonNode existingValue, JsonNode addValue) {
+        ObjectNode result = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+
+        // Handle number addition
+        if (addValue.has("N")) {
+            String addNumStr = addValue.get("N").asText();
+            if (existingValue == null || !existingValue.has("N")) {
+                // Attribute doesn't exist — set to the add value
+                return addValue;
+            }
+            // Add the numbers
+            String existingNumStr = existingValue.get("N").asText();
+            try {
+                java.math.BigDecimal existingNum = new java.math.BigDecimal(existingNumStr);
+                java.math.BigDecimal addNum = new java.math.BigDecimal(addNumStr);
+                result.put("N", existingNum.add(addNum).toPlainString());
+                return result;
+            } catch (NumberFormatException e) {
+                // Fall back to just setting the value
+                return addValue;
+            }
+        }
+
+        // Handle string set (SS) addition
+        if (addValue.has("SS")) {
+            if (existingValue == null || !existingValue.has("SS")) {
+                return addValue;
+            }
+            java.util.Set<String> combined = new java.util.LinkedHashSet<>();
+            existingValue.get("SS").forEach(n -> combined.add(n.asText()));
+            addValue.get("SS").forEach(n -> combined.add(n.asText()));
+            var arrayNode = result.putArray("SS");
+            combined.forEach(arrayNode::add);
+            return result;
+        }
+
+        // Handle number set (NS) addition
+        if (addValue.has("NS")) {
+            if (existingValue == null || !existingValue.has("NS")) {
+                return addValue;
+            }
+            java.util.Set<String> combined = new java.util.LinkedHashSet<>();
+            existingValue.get("NS").forEach(n -> combined.add(n.asText()));
+            addValue.get("NS").forEach(n -> combined.add(n.asText()));
+            var arrayNode = result.putArray("NS");
+            combined.forEach(arrayNode::add);
+            return result;
+        }
+
+        // Handle binary set (BS) addition
+        if (addValue.has("BS")) {
+            if (existingValue == null || !existingValue.has("BS")) {
+                return addValue;
+            }
+            java.util.Set<String> combined = new java.util.LinkedHashSet<>();
+            existingValue.get("BS").forEach(n -> combined.add(n.asText()));
+            addValue.get("BS").forEach(n -> combined.add(n.asText()));
+            var arrayNode = result.putArray("BS");
+            combined.forEach(arrayNode::add);
+            return result;
+        }
+
+        // Unsupported type for ADD — just set the value
+        return addValue;
     }
 
     String resolveAttributeName(String nameOrPlaceholder, JsonNode exprAttrNames) {
