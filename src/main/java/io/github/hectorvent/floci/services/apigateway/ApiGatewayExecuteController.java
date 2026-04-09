@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.*;
@@ -37,6 +38,7 @@ import java.util.regex.Pattern;
  * <p>This mirrors the real AWS execute-api URL format:
  * {@code https://{apiId}.execute-api.{region}.amazonaws.com/{stageName}/{path}}
  */
+@ApplicationScoped
 @Path("/execute-api/{apiId}/{stageName}")
 @Produces(MediaType.WILDCARD)
 public class ApiGatewayExecuteController {
@@ -115,7 +117,7 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── Core dispatch ────────────────────────────
 
-    private Response dispatch(String httpMethod, String apiId, String stageName,
+    Response dispatch(String httpMethod, String apiId, String stageName,
                               String proxy, HttpHeaders headers, UriInfo uriInfo, byte[] body) {
         String region = regionResolver.resolveRegion(headers);
 
