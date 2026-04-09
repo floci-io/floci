@@ -39,10 +39,15 @@ import java.util.UUID;
  */
 public final class TestFixtures {
 
-    private static final URI ENDPOINT = URI.create(
-            System.getenv("FLOCI_ENDPOINT") != null
-                    ? System.getenv("FLOCI_ENDPOINT")
-                    : "http://localhost:4566");
+    private static final URI ENDPOINT;
+
+    static {
+        String endpointStr = System.getenv("FLOCI_ENDPOINT");
+        if (endpointStr == null || endpointStr.trim().isEmpty()) {
+            endpointStr = "http://localhost:4566";
+        }
+        ENDPOINT = URI.create(endpointStr);
+    }
 
     private static final Region REGION = Region.US_EAST_1;
 
