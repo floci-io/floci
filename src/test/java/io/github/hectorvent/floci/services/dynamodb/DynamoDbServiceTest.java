@@ -738,6 +738,51 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void listAppendIfNotExistsCreatesListWhenAttributeMissing() {
+        createUsersTable();
+
+        ObjectNode key = item("userId", "u-list-new");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":e", listAttributeValue());
+        exprValues.set(":val", listAttributeValue("a"));
+
+        service.updateItem("Users", key, null,
+                "SET items = list_append(if_not_exists(items, :e), :val)",
+                null, exprValues, null);
+
+        JsonNode stored = service.getItem("Users", key);
+        assertNotNull(stored);
+        assertTrue(stored.has("items"), "items attribute must be created");
+        assertEquals(1, stored.get("items").get("L").size());
+        assertEquals("a", stored.get("items").get("L").get(0).get("S").asText());
+    }
+
+    @Test
+    void listAppendIfNotExistsAppendsWhenAttributePresent() {
+        createUsersTable();
+
+        ObjectNode existing = item("userId", "u-list-existing");
+        existing.set("items", listAttributeValue("a"));
+        service.putItem("Users", existing);
+
+        ObjectNode key = item("userId", "u-list-existing");
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":e", listAttributeValue());
+        exprValues.set(":val", listAttributeValue("b"));
+
+        service.updateItem("Users", key, null,
+                "SET items = list_append(if_not_exists(items, :e), :val)",
+                null, exprValues, null);
+
+        JsonNode stored = service.getItem("Users", key);
+        assertNotNull(stored);
+        assertEquals(2, stored.get("items").get("L").size());
+        assertEquals("a", stored.get("items").get("L").get(0).get("S").asText());
+        assertEquals("b", stored.get("items").get("L").get(1).get("S").asText());
+    }
+
+    @Test
     void scanContainsOnListWithNumericElements() {
         createUsersTable();
         ObjectNode u1 = item("userId", "u1");

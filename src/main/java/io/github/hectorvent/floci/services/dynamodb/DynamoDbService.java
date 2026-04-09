@@ -961,6 +961,29 @@ public class DynamoDbService {
                         item.set(attrName, resolved);
                     }
                 }
+            } else if (valuePart.toLowerCase().startsWith("list_append(")) {
+                int open = valuePart.indexOf('(');
+                int close = valuePart.lastIndexOf(')');
+                if (open >= 0 && close > open) {
+                    String inner = valuePart.substring(open + 1, close);
+                    int commaPos = findNextComma(inner);
+                    if (commaPos >= 0) {
+                        String arg1 = inner.substring(0, commaPos).trim();
+                        String arg2 = inner.substring(commaPos + 1).trim();
+                        JsonNode list1 = evaluateSetExpr(item, arg1, exprAttrNames, exprAttrValues);
+                        JsonNode list2 = evaluateSetExpr(item, arg2, exprAttrNames, exprAttrValues);
+                        if (list1 != null && list2 != null && list1.has("L") && list2.has("L")) {
+                            com.fasterxml.jackson.databind.node.ArrayNode merged =
+                                    com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
+                            list1.get("L").forEach(merged::add);
+                            list2.get("L").forEach(merged::add);
+                            com.fasterxml.jackson.databind.node.ObjectNode result =
+                                    com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+                            result.set("L", merged);
+                            item.set(attrName, result);
+                        }
+                    }
+                }
             } else if (valuePart.startsWith(":") && exprAttrValues != null) {
                 JsonNode value = exprAttrValues.get(valuePart);
                 if (value != null) {
@@ -978,6 +1001,29 @@ public class DynamoDbService {
             clause = rest;
         }
         return clause;
+    }
+
+    private JsonNode evaluateSetExpr(ObjectNode item, String expr,
+                                     JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        if (expr.toLowerCase().startsWith("if_not_exists(")) {
+            String[] args = extractFunctionArgs(expr);
+            if (args.length == 2) {
+                String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
+                String fallbackExpr = args[1].trim();
+                if (item.has(checkAttr)) {
+                    return item.get(checkAttr);
+                } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
+                    return exprAttrValues.get(fallbackExpr);
+                } else {
+                    return item.get(resolveAttributeName(fallbackExpr, exprAttrNames));
+                }
+            }
+            return null;
+        } else if (expr.startsWith(":") && exprAttrValues != null) {
+            return exprAttrValues.get(expr);
+        } else {
+            return item.get(resolveAttributeName(expr, exprAttrNames));
+        }
     }
 
     private String applyRemoveClause(ObjectNode item, String clause, JsonNode exprAttrNames) {
