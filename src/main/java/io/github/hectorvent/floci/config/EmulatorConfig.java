@@ -35,6 +35,9 @@ public interface EmulatorConfig {
     @WithDefault("us-east-1")
     String defaultRegion();
 
+    @WithDefault("us-east-1a")
+    String defaultAvailabilityZone();
+
     @WithDefault("000000000000")
     String defaultAccountId();
 

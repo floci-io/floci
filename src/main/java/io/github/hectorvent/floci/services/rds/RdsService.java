@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.rds;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
@@ -38,15 +39,18 @@ public class RdsService {
     private final StorageBackend<String, DbParameterGroup> parameterGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
+    private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
     public RdsService(RdsContainerManager containerManager,
                       RdsProxyManager proxyManager,
+                      RegionResolver regionResolver,
                       EmulatorConfig config) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
+        this.regionResolver = regionResolver;
         this.config = config;
         this.instances = new InMemoryStorage<>();
         this.clusters = new InMemoryStorage<>();
@@ -103,6 +107,10 @@ public class RdsService {
         instance.setContainerHost(containerHost);
         instance.setContainerPort(containerPort);
 
+        String region = regionResolver.getDefaultRegion();
+        instance.setDbiResourceId("db-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
+        instance.setDbInstanceArn(regionResolver.buildArn("rds", region, "db:" + id));
+
         String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
         proxyManager.startProxy(id, engine, iamEnabled, proxyPort, backendHost, backendPort,
                 effectiveMasterUser, masterPassword, dbName,
@@ -129,7 +137,7 @@ public class RdsService {
 
     public Collection<DbInstance> listDbInstances(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
-            return instances.get(filterId).map(List::of).orElse(List.of());
+            return instances.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return instances.scan(k -> true);
     }
@@ -246,6 +254,10 @@ public class RdsService {
         cluster.setContainerHost(handle.getHost());
         cluster.setContainerPort(handle.getPort());
 
+        String region = regionResolver.getDefaultRegion();
+        cluster.setDbClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
+        cluster.setDbClusterArn(regionResolver.buildArn("rds", region, "cluster:" + id));
+
         String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
         proxyManager.startProxy(id, engine, iamEnabled, proxyPort, handle.getHost(), handle.getPort(),
                 effectiveMasterUser, masterPassword, databaseName,
@@ -264,7 +276,7 @@ public class RdsService {
 
     public Collection<DbCluster> listDbClusters(String filterId) {
         if (filterId != null && !filterId.isBlank()) {
-            return clusters.get(filterId).map(List::of).orElse(List.of());
+            return clusters.scan(k -> k.equalsIgnoreCase(filterId));
         }
         return clusters.scan(k -> true);
     }

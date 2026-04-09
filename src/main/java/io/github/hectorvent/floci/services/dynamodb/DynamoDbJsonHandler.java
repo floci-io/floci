@@ -95,7 +95,14 @@ public class DynamoDbJsonHandler {
                                 ks.path("AttributeName").asText(),
                                 ks.path("KeyType").asText())));
                 String projectionType = gsiNode.path("Projection").path("ProjectionType").asText("ALL");
-                GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType);
+                JsonNode nonKeyAttrArray = gsiNode.path("Projection").path("NonKeyAttributes");
+                List<String> nonKeyAttributes = new ArrayList<>();
+                if (!nonKeyAttrArray.isMissingNode() && nonKeyAttrArray.isArray()){
+                    for (JsonNode nonKeyAttr : nonKeyAttrArray){
+                        nonKeyAttributes.add(nonKeyAttr.asText());
+                    }
+                }
+                GlobalSecondaryIndex gsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                 JsonNode gsiPt = gsiNode.path("ProvisionedThroughput");
                 if (!gsiPt.isMissingNode()) {
                     gsi.getProvisionedThroughput().setReadCapacityUnits(gsiPt.path("ReadCapacityUnits").asLong(0));
@@ -416,7 +423,14 @@ public class DynamoDbJsonHandler {
                                     ks.path("AttributeName").asText(),
                                     ks.path("KeyType").asText())));
                     String projectionType = createNode.path("Projection").path("ProjectionType").asText("ALL");
-                    GlobalSecondaryIndex newGsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType);
+                    JsonNode nonKeyAttrArray = createNode.path("Projection").path("NonKeyAttributes");
+                    List<String> nonKeyAttributes = new ArrayList<>();
+                    if (!nonKeyAttrArray.isMissingNode() && nonKeyAttrArray.isArray()){
+                        for (JsonNode nonKeyAttr : nonKeyAttrArray){
+                            nonKeyAttributes.add(nonKeyAttr.asText());
+                        }
+                    }
+                    GlobalSecondaryIndex newGsi = new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes);
                     JsonNode newGsiPt = createNode.path("ProvisionedThroughput");
                     if (!newGsiPt.isMissingNode()) {
                         newGsi.getProvisionedThroughput().setReadCapacityUnits(newGsiPt.path("ReadCapacityUnits").asLong(0));
@@ -665,6 +679,13 @@ public class DynamoDbJsonHandler {
                 ObjectNode projection = objectMapper.createObjectNode();
                 projection.put("ProjectionType",
                         gsi.getProjectionType() != null ? gsi.getProjectionType() : "ALL");
+                if ("INCLUDE".equals(gsi.getProjectionType())){
+                    ArrayNode nonKeyAttributes = objectMapper.createArrayNode();
+                    for (var attr : gsi.getNonKeyAttributes()){
+                        nonKeyAttributes.add(attr);
+                    }
+                    projection.put("NonKeyAttributes", nonKeyAttributes);
+                }
                 gsiNode.set("Projection", projection);
 
                 ObjectNode gsiPt = objectMapper.createObjectNode();

@@ -450,6 +450,53 @@ class CognitoServiceTest {
     }
 
     // =========================================================================
+    // USER_SRP_AUTH flow
+    // =========================================================================
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void initiateAuthWithUserSrpAuthFlow() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        String password = "Password123!";
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        service.adminSetUserPassword(pool.getId(), "bob", password, true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_SRP_AUTH",
+                Map.of("USERNAME", "bob", "SRP_A", "ABCDEF1234567890"));
+
+        assertEquals("PASSWORD_VERIFIER", initResult.get("ChallengeName"));
+        assertNotNull(initResult.get("Session"));
+        Map<String, String> params = (Map<String, String>) initResult.get("ChallengeParameters");
+        assertNotNull(params.get("SALT"));
+        assertNotNull(params.get("SRP_B"));
+        assertNotNull(params.get("SECRET_BLOCK"));
+        assertEquals("bob", params.get("USER_ID_FOR_SRP"));
+    }
+
+    @Test
+    void respondToAuthChallengeWithInvalidSrpSignatureRejects() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        String password = "Password123!";
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        service.adminSetUserPassword(pool.getId(), "bob", password, true);
+        UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "USER_SRP_AUTH",
+                Map.of("USERNAME", "bob", "SRP_A", "ABCDEF1234567890"));
+        String session = (String) initResult.get("Session");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.respondToAuthChallenge(client.getClientId(), "PASSWORD_VERIFIER", session,
+                        Map.of(
+                                "USERNAME", "bob",
+                                "PASSWORD_CLAIM_SIGNATURE", "invalid-sig",
+                                "TIMESTAMP", "Wed Apr 8 12:00:00 UTC 2026"
+                        )));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    // =========================================================================
     // Issue #228 — AccessToken contains client_id claim
     // =========================================================================
 

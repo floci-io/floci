@@ -1,8 +1,13 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
+import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
+import io.github.hectorvent.floci.services.s3.model.NotificationConfiguration;
 import io.github.hectorvent.floci.services.s3.model.ObjectAttributeName;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
@@ -373,6 +378,69 @@ class S3ServiceTest {
 
         S3Object retrieved = s3Service.getObject("test-bucket", destKey);
         assertArrayEquals("image-data".getBytes(), retrieved.getData());
+    }
+
+    @Test
+    void putObjectTriggersLambdaNotificationWhenKeyMatches() {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("notif-s3"),
+                false, lambdaInvoker, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"));
+
+        service.putObject("test-bucket", "uploads/test.json", "{\"ok\":true}".getBytes(StandardCharsets.UTF_8),
+                "application/json", null);
+
+        assertEquals("ap-northeast-1", lambdaInvoker.region);
+        assertEquals("s3-notif-test", lambdaInvoker.functionName);
+        assertEquals(InvocationType.Event, lambdaInvoker.type);
+        assertNotNull(lambdaInvoker.payload);
+    }
+
+    @Test
+    void putObjectDoesNotTriggerLambdaNotificationWhenKeyDoesNotMatch() {
+        RecordingLambdaInvoker lambdaInvoker = new RecordingLambdaInvoker();
+        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+
+        S3Service service = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir.resolve("notif-s3-no-match"),
+                false, lambdaInvoker, regionResolver);
+        service.createBucket("test-bucket", "ap-northeast-1");
+        service.putBucketNotificationConfiguration("test-bucket", lambdaNotificationConfig("uploads/", ".json"));
+
+        service.putObject("test-bucket", "incoming/test.txt", "ignored".getBytes(StandardCharsets.UTF_8),
+                "text/plain", null);
+
+        assertNull(lambdaInvoker.functionName);
+    }
+
+    private static NotificationConfiguration lambdaNotificationConfig(String prefix, String suffix) {
+        NotificationConfiguration config = new NotificationConfiguration();
+        config.getLambdaFunctionConfigurations().add(new LambdaNotification(
+                "lambda-notif",
+                "arn:aws:lambda:ap-northeast-1:000000000000:function:s3-notif-test",
+                List.of("s3:ObjectCreated:Put"),
+                List.of(
+                        new FilterRule("prefix", prefix),
+                        new FilterRule("suffix", suffix)
+                )));
+        return config;
+    }
+
+    private static final class RecordingLambdaInvoker implements S3Service.LambdaInvoker {
+        private String region;
+        private String functionName;
+        private byte[] payload;
+        private InvocationType type;
+
+        @Override
+        public void invoke(String region, String functionName, byte[] payload, InvocationType type) {
+            this.region = region;
+            this.functionName = functionName;
+            this.payload = payload;
+            this.type = type;
+        }
     }
 
     @Test

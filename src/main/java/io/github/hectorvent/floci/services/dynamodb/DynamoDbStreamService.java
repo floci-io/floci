@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
@@ -8,6 +10,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -18,6 +21,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
@@ -42,20 +46,50 @@ public class DynamoDbStreamService {
     private final ObjectMapper objectMapper;
 
     @Inject
-    public DynamoDbStreamService(ObjectMapper objectMapper) {
+    public DynamoDbStreamService(ObjectMapper objectMapper, StorageFactory storageFactory) {
+        this(objectMapper, storageFactory.create("dynamodb", "dynamodb-tables.json",
+                new TypeReference<Map<String, TableDefinition>>() {}));
+    }
+
+    /** Package-private constructor for testing. */
+    DynamoDbStreamService(ObjectMapper objectMapper, StorageBackend<String, TableDefinition> tableStore) {
         this.objectMapper = objectMapper;
+        loadPersistedStreams(tableStore);
+    }
+
+
+    private void loadPersistedStreams(StorageBackend<String, TableDefinition> tableStore) {
+        if (tableStore == null) return;
+        for (String tableKey : tableStore.keys()){
+                String region = tableKey.split("::", 2)[0];
+                tableStore.get(tableKey).ifPresent(table -> {
+                        if (!table.isStreamEnabled()) return;
+                        this.enableStream(table.getTableName(), table.getTableArn(), table.getStreamViewType(), region, table.getStreamArn());
+                    });
+        }
     }
 
     public StreamDescription enableStream(String tableName, String tableArn, String viewType, String region) {
+        return enableStream(tableName, tableArn, viewType, region, null);
+    }
+
+    public StreamDescription enableStream(String tableName, String tableArn, String viewType, String region, String streamArnInput) {
         String key = streamKey(region, tableName);
         StreamDescription existing = streams.get(key);
         if (existing != null && "ENABLED".equals(existing.getStreamStatus())) {
             return existing;
         }
 
+        String streamArn = streamArnInput;
         Instant now = Instant.now();
-        String label = STREAM_LABEL_FORMAT.format(now);
-        String streamArn = tableArn + "/stream/" + label;
+        String label;
+        if (streamArn == null){
+            label = STREAM_LABEL_FORMAT.format(now);
+            streamArn = tableArn + "/stream/" + label;
+        }
+        else {
+            label = streamArn.split("/stream/", 2)[1];
+        }
 
         StreamDescription sd = new StreamDescription();
         sd.setStreamArn(streamArn);

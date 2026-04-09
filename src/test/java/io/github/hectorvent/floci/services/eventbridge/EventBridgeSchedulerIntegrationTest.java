@@ -37,7 +37,7 @@ class EventBridgeSchedulerIntegrationTest {
         StorageBackend<String, Rule> ruleStore = new InMemoryStorage<>();
         StorageBackend<String, List<Target>> targetStore = new InMemoryStorage<>();
 
-        EventBridgeInvoker invoker = new EventBridgeInvoker(null, null, null, createConfig());
+        EventBridgeInvoker invoker = new EventBridgeInvoker(null, null, null, new ObjectMapper(), createConfig());
         scheduler = new RuleScheduler(vertx, createConfig(), new ObjectMapper(), invoker);
 
         eventBridgeService = new EventBridgeService(
@@ -281,6 +281,8 @@ class EventBridgeSchedulerIntegrationTest {
             public Optional<String> hostname() { return Optional.empty(); }
             @Override
             public String defaultRegion() { return REGION; }
+            @Override
+            public String defaultAvailabilityZone() { return REGION + "a"; }
             @Override
             public String defaultAccountId() { return ACCOUNT; }
             @Override

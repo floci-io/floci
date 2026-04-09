@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.s3;
 
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
@@ -9,7 +10,7 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class S3VirtualHostFilterTest {
 
-    // ── Virtual-hosted style: bucket prefix + matching baseHostname ─────────
+    // --- extractBucket with baseHostname ---
 
     @ParameterizedTest
     @CsvSource({
@@ -33,7 +34,7 @@ class S3VirtualHostFilterTest {
         assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, baseHostname));
     }
 
-    // ── Path-style: service hostname alone — must NOT extract a bucket ───────
+    // --- Path-style: service hostname alone — must NOT extract a bucket ---
 
     @ParameterizedTest
     @CsvSource({
@@ -70,7 +71,14 @@ class S3VirtualHostFilterTest {
         assertNull(S3VirtualHostFilter.extractBucket(host, "localhost"));
     }
 
-    // ── Hostname extraction from URL ─────────────────────────────────────────
+    @Test
+    void returnsNullForNullBaseHostname() {
+        // Without a baseHostname, only AWS S3 domains should match
+        assertNull(S3VirtualHostFilter.extractBucket("my-bucket.localhost:4566", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.amazonaws.com", null));
+    }
+
+    // --- Hostname extraction from URL ---
 
     @ParameterizedTest
     @CsvSource({
@@ -82,5 +90,10 @@ class S3VirtualHostFilterTest {
     })
     void extractsHostnameFromUrl(String url, String expectedHostname) {
         assertEquals(expectedHostname, S3VirtualHostFilter.extractHostnameFromUrl(url));
+    }
+
+    @Test
+    void extractHostnameFromUrlReturnsNullForNull() {
+        assertNull(S3VirtualHostFilter.extractHostnameFromUrl(null));
     }
 }

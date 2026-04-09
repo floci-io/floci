@@ -96,6 +96,22 @@ public final class LambdaUtils {
     }
 
     /**
+     * ZIP containing a Node.js handler that logs the first S3 event record.
+     */
+    public static byte[] s3NotificationLoggerZip() {
+        String code = """
+                exports.handler = async (event) => {
+                    const record = (event && event.Records && event.Records[0]) ? event.Records[0] : null;
+                    const bucket = record?.s3?.bucket?.name || 'unknown-bucket';
+                    const key = record?.s3?.object?.key || 'unknown-key';
+                    console.log(`[s3-notification] received ${bucket}/${key}`);
+                    return { statusCode: 200, body: JSON.stringify({ bucket, key }) };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
+    /**
      * ZIP containing a Node.js handler that checks whether a file at a deeply nested
      * long path (> 100 chars) exists inside the container.
      *

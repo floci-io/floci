@@ -2,6 +2,9 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
+import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
@@ -45,13 +48,15 @@ public class CloudFormationResourceProvisioner {
     private final SsmService ssmService;
     private final KmsService kmsService;
     private final SecretsManagerService secretsManagerService;
+    private final EventBridgeService eventBridgeService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
                                              SnsService snsService, DynamoDbService dynamoDbService,
                                              LambdaService lambdaService, IamService iamService,
                                              SsmService ssmService, KmsService kmsService,
-                                             SecretsManagerService secretsManagerService) {
+                                             SecretsManagerService secretsManagerService,
+                                             EventBridgeService eventBridgeService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -61,6 +66,7 @@ public class CloudFormationResourceProvisioner {
         this.ssmService = ssmService;
         this.kmsService = kmsService;
         this.secretsManagerService = secretsManagerService;
+        this.eventBridgeService = eventBridgeService;
     }
 
     /**
@@ -99,6 +105,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ECR::Repository" -> provisionEcrRepository(resource, properties, engine, stackName);
                 case "AWS::Route53::HostedZone" -> provisionRoute53HostedZone(resource, properties, engine);
                 case "AWS::Route53::RecordSet" -> provisionRoute53RecordSet(resource, properties, engine);
+                case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
                 default -> {
                     LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
                     resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
@@ -131,6 +138,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
                 case "AWS::SecretsManager::Secret" ->
                         secretsManagerService.deleteSecret(physicalId, null, true, region);
+                case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -231,10 +239,17 @@ public class CloudFormationResourceProvisioner {
                 }
                 String projectionType = "ALL";
                 JsonNode projection = gsiNode.get("Projection");
+                List<String> nonKeyAttributes = new ArrayList<>();
                 if (projection != null && projection.has("ProjectionType")) {
                     projectionType = engine.resolve(projection.get("ProjectionType"));
+                    JsonNode nonKeyAttrArray = projection.path("NonKeyAttributes");
+                    if (!nonKeyAttrArray.isMissingNode() && nonKeyAttrArray.isArray()){
+                        for (JsonNode nonKeyAttr : nonKeyAttrArray){
+                            nonKeyAttributes.add(nonKeyAttr.asText());
+                        }
+                    }
                 }
-                gsis.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType));
+                gsis.add(new GlobalSecondaryIndex(indexName, gsiKeySchema, null, projectionType, nonKeyAttributes));
             }
         }
 
@@ -556,6 +571,67 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(nestedId);
         r.getAttributes().put("Arn", nestedId);
         r.getAttributes().put("Outputs.BootstrapVersion", "21");
+    }
+
+    // ── EventBridge ─────────────────────────────────────────────────────────
+
+    private void provisionEventBridgeRule(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                          String region, String stackName) {
+        String ruleName = resolveOptional(props, "Name", engine);
+        if (ruleName == null || ruleName.isBlank()) {
+            ruleName = generatePhysicalName(stackName, r.getLogicalId(), 64, false);
+        }
+
+        String busName = resolveOptional(props, "EventBusName", engine);
+        String description = resolveOptional(props, "Description", engine);
+        String roleArn = resolveOptional(props, "RoleArn", engine);
+        String scheduleExpression = resolveOptional(props, "ScheduleExpression", engine);
+
+        String eventPattern = null;
+        if (props != null && props.has("EventPattern") && !props.get("EventPattern").isNull()) {
+            JsonNode patternNode = engine.resolveNode(props.get("EventPattern"));
+            eventPattern = patternNode.toString();
+        }
+
+        String stateStr = resolveOptional(props, "State", engine);
+        RuleState state = "DISABLED".equals(stateStr) ? RuleState.DISABLED : RuleState.ENABLED;
+
+        var rule = eventBridgeService.putRule(ruleName, busName, eventPattern, scheduleExpression,
+                state, description, roleArn, Map.of(), region);
+        r.setPhysicalId(ruleName);
+        r.getAttributes().put("Arn", rule.getArn());
+
+        // Provision inline targets
+        if (props != null && props.has("Targets")) {
+            List<Target> targets = new ArrayList<>();
+            for (JsonNode targetNode : props.get("Targets")) {
+                JsonNode resolved = engine.resolveNode(targetNode);
+                String targetId = resolved.path("Id").asText(null);
+                String targetArn = resolved.path("Arn").asText(null);
+                String input = resolved.path("Input").asText(null);
+                String inputPath = resolved.path("InputPath").asText(null);
+                if (targetId != null && targetArn != null) {
+                    targets.add(new Target(targetId, targetArn, input, inputPath));
+                }
+            }
+            if (!targets.isEmpty()) {
+                eventBridgeService.putTargets(ruleName, busName, targets, region);
+            }
+        }
+    }
+
+    private void deleteEventBridgeRuleSafe(String ruleName, String region) {
+        try {
+            // Remove all targets before deleting the rule
+            var targets = eventBridgeService.listTargetsByRule(ruleName, null, region);
+            if (!targets.isEmpty()) {
+                List<String> targetIds = targets.stream().map(Target::getId).toList();
+                eventBridgeService.removeTargets(ruleName, null, targetIds, region);
+            }
+            eventBridgeService.deleteRule(ruleName, null, region);
+        } catch (Exception e) {
+            LOG.debugv("Could not delete EventBridge rule {0}: {1}", ruleName, e.getMessage());
+        }
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

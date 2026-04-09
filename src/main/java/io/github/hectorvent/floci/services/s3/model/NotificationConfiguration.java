@@ -12,20 +12,49 @@ public class NotificationConfiguration {
 
     private List<QueueNotification> queueConfigurations = new ArrayList<>();
     private List<TopicNotification> topicConfigurations = new ArrayList<>();
+    private List<LambdaNotification> lambdaFunctionConfigurations = new ArrayList<>();
+    private boolean eventBridgeEnabled;
 
-    public NotificationConfiguration() {}
+    public NotificationConfiguration() {
+    }
 
-    public List<QueueNotification> getQueueConfigurations() { return queueConfigurations; }
+    public List<QueueNotification> getQueueConfigurations() {
+        return queueConfigurations;
+    }
+
     public void setQueueConfigurations(List<QueueNotification> queueConfigurations) {
         this.queueConfigurations = queueConfigurations != null ? queueConfigurations : new ArrayList<>();
     }
 
-    public List<TopicNotification> getTopicConfigurations() { return topicConfigurations; }
+    public List<TopicNotification> getTopicConfigurations() {
+        return topicConfigurations;
+    }
+
     public void setTopicConfigurations(List<TopicNotification> topicConfigurations) {
         this.topicConfigurations = topicConfigurations != null ? topicConfigurations : new ArrayList<>();
     }
 
+    public List<LambdaNotification> getLambdaFunctionConfigurations() {
+        return lambdaFunctionConfigurations;
+    }
+
+    public void setLambdaFunctionConfigurations(List<LambdaNotification> lambdaFunctionConfigurations) {
+        this.lambdaFunctionConfigurations = lambdaFunctionConfigurations != null
+                ? lambdaFunctionConfigurations : new ArrayList<>();
+    }
+
+    public boolean isEventBridgeEnabled() {
+        return eventBridgeEnabled;
+    }
+
+    public void setEventBridgeEnabled(boolean eventBridgeEnabled) {
+        this.eventBridgeEnabled = eventBridgeEnabled;
+    }
+
     public boolean isEmpty() {
-        return queueConfigurations.isEmpty() && topicConfigurations.isEmpty();
+        return queueConfigurations.isEmpty()
+                && topicConfigurations.isEmpty()
+                && lambdaFunctionConfigurations.isEmpty()
+                && !eventBridgeEnabled;
     }
 }

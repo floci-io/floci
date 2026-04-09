@@ -57,7 +57,7 @@ jobs:
           github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build native executable
-        run: mvn clean package -Dnative -DskipTests -B
+        run: mvn clean package -Dnative -DskipTests -B -Dquarkus.native.additional-build-args-append="-march=x86-64-v2"
 
       - uses: actions/upload-artifact@v4
         with:

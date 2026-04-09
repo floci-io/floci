@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.services.s3.model.FilterRule;
+import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
 import io.github.hectorvent.floci.services.s3.model.QueueNotification;
 import io.github.hectorvent.floci.services.s3.model.TopicNotification;
 import org.junit.jupiter.api.Test;
@@ -22,6 +23,10 @@ class S3NotificationModelTest {
         var tn = new TopicNotification("id", "arn:aws:sns:us-east-1:000000000000:t",
                 List.of("s3:ObjectCreated:*"), null);
         assertTrue(tn.matchesKey("anything"));
+
+        var ln = new LambdaNotification("id", "arn:aws:lambda:us-east-1:000000000000:function:test",
+                List.of("s3:ObjectCreated:*"), null);
+        assertTrue(ln.matchesKey("anything"));
     }
 
     @Test
@@ -37,6 +42,12 @@ class S3NotificationModelTest {
         assertTrue(qn.matchesKey("images/photo.jpg"));
         assertFalse(qn.matchesKey("images/photo.png"));
         assertFalse(qn.matchesKey("docs/photo.jpg"));
+
+        var ln = new LambdaNotification("id", "arn", List.of("s3:ObjectCreated:*"),
+                List.of(new FilterRule("prefix", "images/"), new FilterRule("suffix", ".jpg")));
+        assertTrue(ln.matchesKey("images/photo.jpg"));
+        assertFalse(ln.matchesKey("images/photo.png"));
+        assertFalse(ln.matchesKey("docs/photo.jpg"));
     }
 
     // --- FilterRule.matches ---
