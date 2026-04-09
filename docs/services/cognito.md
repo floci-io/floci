@@ -14,7 +14,7 @@ Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth to
 | **Resource Servers** | CreateResourceServer, DescribeResourceServer, ListResourceServers, DeleteResourceServer |
 | **Admin User Management** | AdminCreateUser, AdminGetUser, AdminDeleteUser, AdminSetUserPassword, AdminUpdateUserAttributes |
 | **User Operations** | SignUp, ConfirmSignUp, GetUser, UpdateUserAttributes, ChangePassword, ForgotPassword, ConfirmForgotPassword |
-| **Authentication** | InitiateAuth, AdminInitiateAuth, RespondToAuthChallenge |
+| **Authentication** | InitiateAuth, AdminInitiateAuth, RespondToAuthChallenge (supports USER_PASSWORD_AUTH, USER_SRP_AUTH, ADMIN_USER_SRP_AUTH) |
 | **User Listing** | ListUsers |
 | **Groups** | CreateGroup, GetGroup, ListGroups, DeleteGroup, AdminAddUserToGroup, AdminRemoveUserFromGroup, AdminListGroupsForUser |
 

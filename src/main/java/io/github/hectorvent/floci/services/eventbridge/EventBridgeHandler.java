@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsJson11Controller;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
+import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -178,6 +179,16 @@ public class EventBridgeHandler {
                         input.isEmpty() ? null : input,
                         inputPath.isEmpty() ? null : inputPath
                 );
+                JsonNode transformerNode = t.path("InputTransformer");
+                if (!transformerNode.isMissingNode() && transformerNode.isObject()) {
+                    Map<String, String> pathsMap = new HashMap<>();
+                    JsonNode pathsNode = transformerNode.path("InputPathsMap");
+                    if (pathsNode.isObject()) {
+                        pathsNode.fields().forEachRemaining(e -> pathsMap.put(e.getKey(), e.getValue().asText()));
+                    }
+                    String template = transformerNode.path("InputTemplate").asText(null);
+                    target.setInputTransformer(new InputTransformer(pathsMap, template));
+                }
                 targets.add(target);
             }
         }
@@ -223,6 +234,14 @@ public class EventBridgeHandler {
             }
             if (t.getInputPath() != null) {
                 node.put("InputPath", t.getInputPath());
+            }
+            if (t.getInputTransformer() != null) {
+                ObjectNode transformerNode = node.putObject("InputTransformer");
+                ObjectNode pathsNode = transformerNode.putObject("InputPathsMap");
+                t.getInputTransformer().getInputPathsMap().forEach(pathsNode::put);
+                if (t.getInputTransformer().getInputTemplate() != null) {
+                    transformerNode.put("InputTemplate", t.getInputTransformer().getInputTemplate());
+                }
             }
             targetsArray.add(node);
         }

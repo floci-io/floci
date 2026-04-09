@@ -1439,4 +1439,201 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body(containsString("arn:aws:secretsmanager:"));
     }
+
+    @Test
+    void createStack_withEventBridgeRule() {
+        // First, create an SQS queue to use as a target
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "cfn-eventbridge-target-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            {
+              "Resources": {
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-test-rule",
+                    "Description": "Test rule created via CloudFormation",
+                    "EventPattern": {
+                      "source": ["my.application"],
+                      "detail-type": ["MyEvent"]
+                    },
+                    "Targets": [
+                      {
+                        "Id": "Target0",
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:cfn-eventbridge-target-queue"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        // 1. Create Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eventbridge-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // 2. Verify stack is CREATE_COMPLETE
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eventbridge-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // 3. Verify the EventBridge rule was actually created
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-test-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Name", equalTo("cfn-test-rule"))
+            .body("Description", equalTo("Test rule created via CloudFormation"))
+            .body("State", equalTo("ENABLED"))
+            .body("Arn", notNullValue());
+
+        // 4. Verify targets were attached to the rule
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-test-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("Target0"))
+            .body("Targets[0].Arn", equalTo("arn:aws:sqs:us-east-1:000000000000:cfn-eventbridge-target-queue"));
+    }
+
+    @Test
+    void createStack_withEventBridgeRuleAutoName() {
+        String template = """
+            {
+              "Resources": {
+                "AutoNamedRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "EventPattern": {
+                      "source": ["auto.test"]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-autoname-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eb-autoname-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // Verify the rule was created via ListRules — should find one matching the auto-generated name
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListRules")
+            .body("{\"NamePrefix\":\"cfn-eb-autoname-stack\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Rules.size()", equalTo(1));
+    }
+
+    @Test
+    void deleteStack_withEventBridgeRule() {
+        String template = """
+            {
+              "Resources": {
+                "DeleteTestRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-delete-test-rule",
+                    "EventPattern": {
+                      "source": ["delete.test"]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        // Create
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-delete-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify rule exists
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-delete-test-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Name", equalTo("cfn-delete-test-rule"));
+
+        // Delete stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-eb-delete-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify rule is gone
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"cfn-delete-test-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+    }
 }

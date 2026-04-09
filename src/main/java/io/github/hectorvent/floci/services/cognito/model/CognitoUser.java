@@ -21,6 +21,8 @@ public class CognitoUser {
     private String passwordHash;
     private boolean temporaryPassword;
     private List<String> groupNames = new ArrayList<>();
+    private String srpSalt;
+    private String srpVerifier;
 
     public CognitoUser() {
         long now = System.currentTimeMillis() / 1000L;
@@ -59,4 +61,10 @@ public class CognitoUser {
 
     public List<String> getGroupNames() { return groupNames; }
     public void setGroupNames(List<String> groupNames) { this.groupNames = groupNames == null ? new ArrayList<>() : new ArrayList<>(groupNames); }
+
+    public String getSrpSalt() { return srpSalt; }
+    public void setSrpSalt(String srpSalt) { this.srpSalt = srpSalt; }
+
+    public String getSrpVerifier() { return srpVerifier; }
+    public void setSrpVerifier(String srpVerifier) { this.srpVerifier = srpVerifier; }
 }

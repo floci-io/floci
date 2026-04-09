@@ -91,7 +91,7 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (XMLStreamException ignored) {}
+        } catch (Exception ignored) {}
         return result;
     }
 
@@ -160,7 +160,7 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (XMLStreamException ignored) {}
+        } catch (Exception ignored) {}
         return result;
     }
 
@@ -206,7 +206,7 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (XMLStreamException ignored) {}
+        } catch (Exception ignored) {}
         return result;
     }
 
@@ -256,7 +256,7 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (XMLStreamException ignored) {}
+        } catch (Exception ignored) {}
         return result;
     }
 
@@ -312,7 +312,7 @@ public final class XmlParser {
                 }
             }
             r.close();
-        } catch (XMLStreamException ignored) {}
+        } catch (Exception ignored) {}
         return result;
     }
 }

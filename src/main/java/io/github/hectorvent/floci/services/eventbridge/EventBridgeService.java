@@ -458,6 +458,7 @@ public class EventBridgeService {
 
     // ──────────────────────────── Target Routing ────────────────────────────
 
+
     private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId) {
         try {
             String source = (String) entry.getOrDefault("Source", "");

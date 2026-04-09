@@ -28,6 +28,7 @@ import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
@@ -42,6 +43,13 @@ public class CognitoService {
     private final StorageBackend<String, CognitoGroup> groupStore;
     private final String baseUrl;
     private final RegionResolver regionResolver;
+
+    // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
+    private final ConcurrentHashMap<String, SrpSession> srpSessions = new ConcurrentHashMap<>();
+
+    private record SrpSession(String userPoolId, String username, String clientId,
+                               String aHex, String bHex, String bPublicHex,
+                               String secretBlockBase64) {}
 
     @Inject
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig, RegionResolver regionResolver) {
@@ -280,7 +288,7 @@ public class CognitoService {
         }
 
         if (temporaryPassword != null && !temporaryPassword.isEmpty()) {
-            user.setPasswordHash(hashPassword(temporaryPassword));
+            updateUserPassword(user, temporaryPassword);
             user.setTemporaryPassword(true);
             user.setUserStatus("FORCE_CHANGE_PASSWORD");
         }
@@ -323,7 +331,7 @@ public class CognitoService {
 
     public void adminSetUserPassword(String userPoolId, String username, String password, boolean permanent) {
         CognitoUser user = adminGetUser(userPoolId, username);
-        user.setPasswordHash(hashPassword(password));
+        updateUserPassword(user, password);
         user.setTemporaryPassword(!permanent);
         user.setUserStatus(permanent ? "CONFIRMED" : "FORCE_CHANGE_PASSWORD");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -483,7 +491,7 @@ public class CognitoService {
         CognitoUser user = new CognitoUser();
         user.setUsername(username);
         user.setUserPoolId(userPoolId);
-        user.setPasswordHash(hashPassword(password));
+        updateUserPassword(user, password);
         user.setUserStatus("UNCONFIRMED");
         if (attributes != null) {
             user.getAttributes().putAll(attributes);
@@ -518,8 +526,9 @@ public class CognitoService {
         return switch (authFlow) {
             case "USER_PASSWORD_AUTH" -> authenticateWithPassword(pool, authParameters, clientId);
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, authParameters, clientId);
+            case "USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters);
             default -> {
-                // For other flows (USER_SRP_AUTH, etc.), if user exists return tokens
+                // For other flows, if user exists return tokens
                 String username = authParameters.get("USERNAME");
                 if (username == null) {
                     throw new AwsException("InvalidParameterException", "USERNAME is required", 400);
@@ -534,13 +543,14 @@ public class CognitoService {
 
     public Map<String, Object> adminInitiateAuth(String userPoolId, String clientId, String authFlow,
                                                   Map<String, String> authParameters) {
-        describeUserPoolClient(userPoolId, clientId);
+        UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
         UserPool pool = describeUserPool(userPoolId);
 
         return switch (authFlow) {
             case "ADMIN_USER_PASSWORD_AUTH", "USER_PASSWORD_AUTH" ->
                     authenticateWithPassword(pool, authParameters, clientId);
             case "REFRESH_TOKEN_AUTH", "REFRESH_TOKEN" -> handleRefreshToken(pool, authParameters, clientId);
+            case "ADMIN_USER_SRP_AUTH" -> handleUserSrpAuth(pool, client, authParameters);
             default -> {
                 String username = authParameters.get("USERNAME");
                 CognitoUser user = adminGetUser(userPoolId, username);
@@ -551,11 +561,110 @@ public class CognitoService {
         };
     }
 
+    private Map<String, Object> handleUserSrpAuth(UserPool pool, UserPoolClient client, Map<String, String> authParameters) {
+        String username = authParameters.get("USERNAME");
+        String aHex = authParameters.get("SRP_A");
+
+        if (username == null || aHex == null) {
+            throw new AwsException("InvalidParameterException", "USERNAME and SRP_A are required", 400);
+        }
+
+        CognitoUser user = adminGetUser(pool.getId(), username);
+        if (user.getSrpVerifier() == null) {
+            throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
+        }
+
+        String[] serverB = CognitoSrpHelper.generateServerB(user.getSrpVerifier());
+        String bHex = serverB[0];
+        String bPublicHex = serverB[1];
+
+        String sessionToken = buildSessionToken(pool.getId(), user.getUsername(), client.getClientId());
+
+        byte[] secretBlock = new byte[16];
+        new java.security.SecureRandom().nextBytes(secretBlock);
+        String secretBlockBase64 = Base64.getEncoder().encodeToString(secretBlock);
+
+        srpSessions.put(sessionToken, new SrpSession(
+                pool.getId(),
+                user.getUsername(),
+                client.getClientId(),
+                aHex,
+                bHex,
+                bPublicHex,
+                secretBlockBase64
+        ));
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("ChallengeName", "PASSWORD_VERIFIER");
+        result.put("Session", sessionToken);
+        result.put("ChallengeParameters", Map.of(
+                "SALT", user.getSrpSalt(),
+                "SRP_B", bPublicHex,
+                "SECRET_BLOCK", secretBlockBase64,
+                "USER_ID_FOR_SRP", user.getUsername()
+        ));
+        return result;
+    }
+
+    private Map<String, Object> handlePasswordVerifierChallenge(UserPool pool, UserPoolClient client,
+                                                                 String session, Map<String, String> responses) {
+        SrpSession srp = srpSessions.get(session);
+        if (srp == null) {
+            throw new AwsException("NotAuthorizedException", "Session not found", 400);
+        }
+
+        String username = responses.get("USERNAME");
+        String claimSignature = responses.get("PASSWORD_CLAIM_SIGNATURE");
+        String timestamp = responses.get("TIMESTAMP");
+
+        if (username == null || claimSignature == null || timestamp == null) {
+            throw new AwsException("InvalidParameterException", "USERNAME, PASSWORD_CLAIM_SIGNATURE and TIMESTAMP are required", 400);
+        }
+
+        CognitoUser user = adminGetUser(pool.getId(), username);
+        if (user.getSrpVerifier() == null) {
+            throw new AwsException("NotAuthorizedException", "User does not support SRP auth", 400);
+        }
+
+        byte[] sessionKey = CognitoSrpHelper.computeSessionKey(srp.aHex(), srp.bHex(), srp.bPublicHex(), user.getSrpVerifier());
+        byte[] secretBlock = Base64.getDecoder().decode(srp.secretBlockBase64());
+
+        boolean valid = CognitoSrpHelper.verifySignature(sessionKey, pool.getId(), user.getUsername(), secretBlock, timestamp, claimSignature);
+
+        if (!valid) {
+            throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
+        }
+
+        // Session consumed
+        srpSessions.remove(session);
+
+        if (user.isTemporaryPassword() || "FORCE_CHANGE_PASSWORD".equals(user.getUserStatus())) {
+            String newSession = buildSessionToken(pool.getId(), username, client.getClientId());
+            Map<String, Object> result = new HashMap<>();
+            result.put("ChallengeName", "NEW_PASSWORD_REQUIRED");
+            result.put("Session", newSession);
+            result.put("ChallengeParameters", Map.of(
+                    "USER_ID_FOR_SRP", username,
+                    "requiredAttributes", "[]",
+                    "userAttributes", "{}"
+            ));
+            return result;
+        }
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("AuthenticationResult", generateAuthResult(user, pool, client.getClientId()));
+        return result;
+    }
+
     public Map<String, Object> respondToAuthChallenge(String clientId, String challengeName,
                                                        String session, Map<String, String> responses) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
         UserPool pool = describeUserPool(client.getUserPoolId());
+
+        if ("PASSWORD_VERIFIER".equals(challengeName)) {
+            return handlePasswordVerifierChallenge(pool, client, session, responses);
+        }
 
         if ("NEW_PASSWORD_REQUIRED".equals(challengeName)) {
             String username = responses.get("USERNAME");
@@ -585,7 +694,7 @@ public class CognitoService {
             throw new AwsException("NotAuthorizedException", "Incorrect username or password", 400);
         }
 
-        user.setPasswordHash(hashPassword(proposedPassword));
+        updateUserPassword(user, proposedPassword);
         user.setTemporaryPassword(false);
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -1065,6 +1174,19 @@ public class CognitoService {
         } catch (Exception e) {
             throw new RuntimeException("Password hashing failed", e);
         }
+    }
+
+    private void updateUserPassword(CognitoUser user, String password) {
+        String saltHex = CognitoSrpHelper.generateSalt();
+        String verifierHex = CognitoSrpHelper.computeVerifier(
+                CognitoSrpHelper.extractPoolName(user.getUserPoolId()),
+                user.getUsername(),
+                password,
+                saltHex
+        );
+        user.setPasswordHash(hashPassword(password));
+        user.setSrpSalt(saltHex);
+        user.setSrpVerifier(verifierHex);
     }
 
     private String buildSessionToken(String poolId, String username, String clientId) {

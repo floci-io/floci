@@ -8,6 +8,7 @@ export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-test}"
 export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-test}"
 export FLOCI_ENDPOINT="${FLOCI_ENDPOINT:-http://localhost:4566}"
 export AWS_ENDPOINT_URL="$FLOCI_ENDPOINT"
+export AWS_ENDPOINT_URL_S3="$FLOCI_ENDPOINT"
 # CDK-specific: derive hostname and port from endpoint
 export LOCALSTACK_HOSTNAME="${FLOCI_ENDPOINT#http://}"
 export LOCALSTACK_HOSTNAME="${LOCALSTACK_HOSTNAME%:*}"

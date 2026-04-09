@@ -8,6 +8,7 @@
   },
   "dependencies": {
     "@aws-sdk/client-acm": "^3.500.0",
+    "@aws-sdk/client-eventbridge": "^3.500.0",
     "@aws-sdk/client-cloudformation": "^3.500.0",
     "@aws-sdk/client-cloudwatch": "^3.500.0",
     "@aws-sdk/client-cognito-identity-provider": "^3.500.0",

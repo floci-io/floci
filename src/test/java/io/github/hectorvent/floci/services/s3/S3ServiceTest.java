@@ -441,6 +441,9 @@ class S3ServiceTest {
             this.payload = payload;
             this.type = type;
         }
+    }
+
+    @Test
     void listObjectsWithStartAfterFiltersResults() {
         s3Service.createBucket("test-bucket", "us-east-1");
         s3Service.putObject("test-bucket", "a.txt", "a".getBytes(), null, null);

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.s3.model.*;
+import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -57,13 +58,16 @@ public class S3Service {
     private final LambdaService lambdaService;
     private final Instance<LambdaService> lambdaServiceProvider;
     private final LambdaInvoker lambdaInvoker;
+    private final EventBridgeService eventBridgeService;
     private final RegionResolver regionResolver;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
 
     @Inject
     public S3Service(StorageFactory storageFactory, EmulatorConfig config,
-                     SqsService sqsService, SnsService snsService, Instance<LambdaService> lambdaServiceProvider,
+                     SqsService sqsService, SnsService snsService,
+                     Instance<LambdaService> lambdaServiceProvider,
+                     EventBridgeService eventBridgeService,
                      RegionResolver regionResolver,
                      ObjectMapper objectMapper) {
         this(
@@ -75,7 +79,9 @@ public class S3Service {
                         }),
                 Path.of(config.storage().persistentPath()).resolve("s3"),
                 "memory".equals(config.storage().services().s3().mode().orElse(config.storage().mode())),
-                sqsService, snsService, null, lambdaServiceProvider, null, regionResolver,
+                sqsService, snsService, null, lambdaServiceProvider, null,
+                eventBridgeService,
+                regionResolver,
                 config.effectiveBaseUrl(), objectMapper
         );
     }
@@ -86,7 +92,7 @@ public class S3Service {
     S3Service(StorageBackend<String, Bucket> bucketStore,
               StorageBackend<String, S3Object> objectStore,
               Path dataRoot, boolean inMemory) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null,
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, null, null, null,
                 "http://localhost:4566", new ObjectMapper());
     }
 
@@ -95,7 +101,7 @@ public class S3Service {
               Path dataRoot, boolean inMemory,
               LambdaService lambdaService,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, lambdaService, null, null, regionResolver,
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, lambdaService, null, null, null, regionResolver,
                 "http://localhost:4566", new ObjectMapper());
     }
 
@@ -104,7 +110,7 @@ public class S3Service {
               Path dataRoot, boolean inMemory,
               LambdaInvoker lambdaInvoker,
               RegionResolver regionResolver) {
-        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, lambdaInvoker, regionResolver,
+        this(bucketStore, objectStore, dataRoot, inMemory, null, null, null, null, lambdaInvoker, null, regionResolver,
                 "http://localhost:4566", new ObjectMapper());
     }
 
@@ -114,6 +120,7 @@ public class S3Service {
                       LambdaService lambdaService,
                       Instance<LambdaService> lambdaServiceProvider,
                       LambdaInvoker lambdaInvoker,
+                      EventBridgeService eventBridgeService,
                       RegionResolver regionResolver, String baseUrl, ObjectMapper objectMapper) {
         this.bucketStore = bucketStore;
         this.objectStore = objectStore;
@@ -124,6 +131,7 @@ public class S3Service {
         this.lambdaService = lambdaService;
         this.lambdaServiceProvider = lambdaServiceProvider;
         this.lambdaInvoker = lambdaInvoker;
+        this.eventBridgeService = eventBridgeService;
         this.regionResolver = regionResolver;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
@@ -1331,7 +1339,7 @@ public class S3Service {
 
     private void fireNotifications(String bucketName, String key, String eventName, S3Object obj) {
         if (sqsService == null && snsService == null && lambdaService == null
-                && lambdaServiceProvider == null && lambdaInvoker == null) {
+                && lambdaServiceProvider == null && lambdaInvoker == null && eventBridgeService == null) {
             return;
         }
         Bucket bucket = bucketStore.get(bucketName).orElse(null);
@@ -1368,25 +1376,60 @@ public class S3Service {
             }
         }
 
-        if (lambdaInvoker == null && resolveLambdaService() == null) {
-            return;
-        }
-
-        for (LambdaNotification ln : config.getLambdaFunctionConfigurations()) {
-            if (ln.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && ln.matchesKey(key)) {
-                try {
-                    String lambdaRegion = extractRegionFromArn(ln.functionArn());
-                    String functionName = extractLambdaFunctionName(ln.functionArn());
-                    if (lambdaRegion == null || functionName == null) {
-                        throw new AwsException("InvalidParameterValueException",
-                                "Invalid Lambda function ARN: " + ln.functionArn(), 400);
+        if (lambdaInvoker != null || resolveLambdaService() != null) {
+            for (LambdaNotification ln : config.getLambdaFunctionConfigurations()) {
+                if (ln.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && ln.matchesKey(key)) {
+                    try {
+                        String lambdaRegion = extractRegionFromArn(ln.functionArn());
+                        String functionName = extractLambdaFunctionName(ln.functionArn());
+                        if (lambdaRegion == null || functionName == null) {
+                            throw new AwsException("InvalidParameterValueException",
+                                    "Invalid Lambda function ARN: " + ln.functionArn(), 400);
+                        }
+                        invokeLambda(lambdaRegion, functionName, eventJson.getBytes(StandardCharsets.UTF_8));
+                        LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
+                    } catch (Exception e) {
+                        LOG.warnv("Failed to deliver S3 event to Lambda {0}: {1}", ln.functionArn(), e.getMessage());
                     }
-                    invokeLambda(lambdaRegion, functionName, eventJson.getBytes(StandardCharsets.UTF_8));
-                    LOG.debugv("Fired S3 event {0} to Lambda {1}", eventName, ln.functionArn());
-                } catch (Exception e) {
-                    LOG.warnv("Failed to deliver S3 event to Lambda {0}: {1}", ln.functionArn(), e.getMessage());
                 }
             }
+        }
+
+        if (config.isEventBridgeEnabled() && eventBridgeService != null) {
+            try {
+                String detailType = eventName.startsWith("ObjectCreated") ? "Object Created" : "Object Deleted";
+                Map<String, Object> entry = new java.util.HashMap<>();
+                entry.put("Source", "aws.s3");
+                entry.put("DetailType", detailType);
+                entry.put("Detail", buildS3EventBridgeDetail(bucketName, key, eventName, obj, region));
+                eventBridgeService.putEvents(List.of(entry), region);
+                LOG.debugv("Fired S3 event {0} to EventBridge default bus", eventName);
+            } catch (Exception e) {
+                LOG.warnv("Failed to deliver S3 event to EventBridge: {0}", e.getMessage());
+            }
+        }
+    }
+
+    private String buildS3EventBridgeDetail(String bucketName, String key, String eventName,
+                                            S3Object obj, String region) {
+        try {
+            long size = obj != null ? obj.getSize() : 0;
+            String eTag = obj != null && obj.getETag() != null ? obj.getETag().replace("\"", "") : "";
+            ObjectNode detail = objectMapper.createObjectNode();
+            detail.put("version", "0");
+            ObjectNode bucketNode = detail.putObject("bucket");
+            bucketNode.put("name", bucketName);
+            ObjectNode objectNode = detail.putObject("object");
+            objectNode.put("key", key);
+            objectNode.put("size", size);
+            objectNode.put("etag", eTag);
+            detail.put("request-id", UUID.randomUUID().toString());
+            detail.put("requester", "aws:emulator");
+            detail.put("source-ip-address", "127.0.0.1");
+            detail.put("reason", eventName);
+            return objectMapper.writeValueAsString(detail);
+        } catch (Exception e) {
+            return "{}";
         }
     }
 
