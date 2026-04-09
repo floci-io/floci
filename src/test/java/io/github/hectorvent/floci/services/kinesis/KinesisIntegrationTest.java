@@ -147,6 +147,137 @@ class KinesisIntegrationTest {
 
     @Test
     @Order(7)
+    void increaseStreamRetentionPeriod() {
+        // Create a dedicated stream for retention tests
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Increase from default 24 to 48
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 48}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify via DescribeStream
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.RetentionPeriodHours", equalTo(48));
+    }
+
+    @Test
+    @Order(8)
+    void decreaseStreamRetentionPeriod() {
+        // Decrease from 48 back to 24
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DecreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 24}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("StreamDescription.RetentionPeriodHours", equalTo(24));
+    }
+
+    @Test
+    @Order(9)
+    void increaseRetentionPeriodRejectsTooHigh() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 9999}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(10)
+    void decreaseRetentionPeriodRejectsTooLow() {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.DecreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 12}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(11)
+    void increaseRetentionPeriodRejectsLowerValue() {
+        // First increase to 48
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 48}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Try to "increase" to 24 (lower) - should fail
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.IncreaseStreamRetentionPeriod")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "retention-test", "RetentionPeriodHours": 24}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(12)
     void listShardsForNonExistentStream() {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.ListShards")

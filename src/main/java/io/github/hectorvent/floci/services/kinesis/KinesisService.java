@@ -141,6 +141,40 @@ public class KinesisService {
         store.put(regionKey(region, streamName), stream);
     }
 
+    public void increaseStreamRetentionPeriod(String streamName, int retentionPeriodHours, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        if (retentionPeriodHours > 8760) {
+            throw new AwsException("InvalidArgumentException",
+                    "Retention period must not exceed 8760 hours (365 days)", 400);
+        }
+        if (retentionPeriodHours <= stream.getRetentionPeriodHours()) {
+            throw new AwsException("InvalidArgumentException",
+                    "Requested retention period (" + retentionPeriodHours +
+                    " hours) must be greater than current retention period (" +
+                    stream.getRetentionPeriodHours() + " hours)", 400);
+        }
+        stream.setRetentionPeriodHours(retentionPeriodHours);
+        store.put(regionKey(region, streamName), stream);
+        LOG.infov("Increased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
+    }
+
+    public void decreaseStreamRetentionPeriod(String streamName, int retentionPeriodHours, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        if (retentionPeriodHours < 24) {
+            throw new AwsException("InvalidArgumentException",
+                    "Retention period must not be less than 24 hours", 400);
+        }
+        if (retentionPeriodHours >= stream.getRetentionPeriodHours()) {
+            throw new AwsException("InvalidArgumentException",
+                    "Requested retention period (" + retentionPeriodHours +
+                    " hours) must be less than current retention period (" +
+                    stream.getRetentionPeriodHours() + " hours)", 400);
+        }
+        stream.setRetentionPeriodHours(retentionPeriodHours);
+        store.put(regionKey(region, streamName), stream);
+        LOG.infov("Decreased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
+    }
+
     public void stopStreamEncryption(String streamName, String region) {
         KinesisStream stream = resolveStream(streamName, region);
         stream.setEncryptionType("NONE");

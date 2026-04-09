@@ -55,6 +55,8 @@ public class KinesisJsonHandler {
             case "GetShardIterator" -> handleGetShardIterator(request, region);
             case "GetRecords" -> handleGetRecords(request, region);
             case "ListShards" -> handleListShards(request, region);
+            case "IncreaseStreamRetentionPeriod" -> handleIncreaseStreamRetentionPeriod(request, region);
+            case "DecreaseStreamRetentionPeriod" -> handleDecreaseStreamRetentionPeriod(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -328,21 +330,38 @@ public class KinesisJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleListShards(JsonNode request, String region) {
+    private Response handleIncreaseStreamRetentionPeriod(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        int retentionPeriodHours = request.path("RetentionPeriodHours").asInt();
+        service.increaseStreamRetentionPeriod(streamName, retentionPeriodHours, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDecreaseStreamRetentionPeriod(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+        int retentionPeriodHours = request.path("RetentionPeriodHours").asInt();
+        service.decreaseStreamRetentionPeriod(streamName, retentionPeriodHours, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private String resolveStreamName(JsonNode request) {
         String streamName = request.has("StreamName") ? request.path("StreamName").asText(null) : null;
         String streamArn = request.has("StreamARN") ? request.path("StreamARN").asText(null) : null;
-
-        String resolvedStreamName = streamName;
-        if (resolvedStreamName == null && streamArn != null) {
+        if (streamName == null && streamArn != null) {
             int idx = streamArn.lastIndexOf("/");
             if (idx >= 0) {
-                resolvedStreamName = streamArn.substring(idx + 1);
+                streamName = streamArn.substring(idx + 1);
             }
         }
-        if (resolvedStreamName == null) {
+        if (streamName == null) {
             throw new AwsException("InvalidArgumentException",
                     "StreamName or StreamARN must be provided", 400);
         }
+        return streamName;
+    }
+
+    private Response handleListShards(JsonNode request, String region) {
+        String resolvedStreamName = resolveStreamName(request);
 
         KinesisStream stream = service.describeStream(resolvedStreamName, region);
 

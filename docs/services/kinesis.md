@@ -26,6 +26,8 @@
 | `AddTagsToStream` | Tag a stream |
 | `RemoveTagsFromStream` | Remove tags |
 | `ListTagsForStream` | List tags |
+| `IncreaseStreamRetentionPeriod` | Increase retention up to 8760 hours (365 days) |
+| `DecreaseStreamRetentionPeriod` | Decrease retention down to 24 hours |
 | `StartStreamEncryption` | Enable KMS encryption |
 | `StopStreamEncryption` | Disable encryption |
 
