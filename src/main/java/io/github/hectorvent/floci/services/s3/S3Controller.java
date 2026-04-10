@@ -1590,6 +1590,16 @@ public class S3Controller {
     }
 
     private Response handlePresignedPost(String bucket, String contentType, byte[] body) {
+        try {
+            return doHandlePresignedPost(bucket, contentType, body);
+        } catch (AwsException e) {
+            // Presigned POST errors must be returned as XML (matching LocalStack/AWS),
+            // not JSON which is what the global AwsExceptionMapper would produce.
+            return xmlErrorResponse(e);
+        }
+    }
+
+    private Response doHandlePresignedPost(String bucket, String contentType, byte[] body) {
         String boundary = extractBoundary(contentType);
         if (boundary == null) {
             throw new AwsException("InvalidArgument",
