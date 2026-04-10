@@ -34,7 +34,6 @@ import java.util.Map;
  */
 @Path("/tags")
 @Produces(MediaType.APPLICATION_JSON)
-@Consumes(MediaType.APPLICATION_JSON)
 public class SharedTagsController {
 
     private final Map<String, TagHandler> handlersByServiceKey;
@@ -47,7 +46,14 @@ public class SharedTagsController {
                                 ObjectMapper objectMapper) {
         Map<String, TagHandler> map = new HashMap<>();
         for (TagHandler h : handlers) {
-            map.put(h.serviceKey(), h);
+            String serviceKey = h.serviceKey();
+            TagHandler existing = map.putIfAbsent(serviceKey, h);
+            if (existing != null) {
+                throw new IllegalStateException(
+                        "Duplicate TagHandler registration for service key '" + serviceKey
+                                + "': " + existing.getClass().getName()
+                                + " and " + h.getClass().getName());
+            }
         }
         this.handlersByServiceKey = Map.copyOf(map);
         this.regionResolver = regionResolver;
@@ -68,6 +74,7 @@ public class SharedTagsController {
 
     @PUT
     @Path("/{arn: .*}")
+    @Consumes(MediaType.APPLICATION_JSON)
     public Response tagResource(@Context HttpHeaders headers,
                                 @PathParam("arn") String arn,
                                 String body) {
