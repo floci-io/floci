@@ -51,6 +51,31 @@ class EventBridgeInvokerTest {
     }
 
     @Test
+    void applyInputPath_extractsNestedField() {
+        String event = "{\"source\":\"aws.s3\",\"detail\":{\"bucket\":\"my-bucket\",\"key\":\"file.txt\"}}";
+        String result = invoker.applyInputPath("$.detail", event);
+        assertEquals("{\"bucket\":\"my-bucket\",\"key\":\"file.txt\"}", result);
+    }
+
+    @Test
+    void applyInputPath_dollarSignReturnsFullEvent() {
+        String event = "{\"source\":\"aws.s3\"}";
+        assertEquals(event, invoker.applyInputPath("$", event));
+    }
+
+    @Test
+    void applyInputPath_missingField_returnsFullEvent() {
+        String event = "{\"source\":\"aws.s3\"}";
+        assertEquals(event, invoker.applyInputPath("$.detail", event));
+    }
+
+    @Test
+    void applyInputPath_scalarField_returnsText() {
+        String event = "{\"detail\":{\"name\":\"test\"}}";
+        assertEquals("test", invoker.applyInputPath("$.detail.name", event));
+    }
+
+    @Test
     void applyInputTransformer_substitutesVariables() {
         String eventJson = "{\"source\":\"aws.s3\",\"detail\":{\"bucket\":{\"name\":\"my-bucket\"},\"object\":{\"key\":\"photos/cat.jpg\"}}}";
         InputTransformer transformer = new InputTransformer(
