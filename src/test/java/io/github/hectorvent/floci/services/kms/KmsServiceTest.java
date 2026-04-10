@@ -287,4 +287,43 @@ class KmsServiceTest {
         assertThrows(AwsException.class, () ->
                 kmsService.putKeyPolicy("non-existent", "{}", REGION));
     }
+
+    // ── Issue #290 — Key Rotation ───────────────────────────────────────────
+
+    @Test
+    void getKeyRotationStatusDefaultFalse() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        assertFalse(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
+    }
+
+    @Test
+    void enableAndGetKeyRotationStatus() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.enableKeyRotation(key.getKeyId(), REGION);
+        assertTrue(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
+    }
+
+    @Test
+    void disableKeyRotationAfterEnable() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        kmsService.enableKeyRotation(key.getKeyId(), REGION);
+        kmsService.disableKeyRotation(key.getKeyId(), REGION);
+        assertFalse(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
+    }
+
+    @Test
+    void keyRotationOnNonExistentKeyThrows() {
+        assertThrows(AwsException.class, () ->
+                kmsService.getKeyRotationStatus("non-existent", REGION));
+    }
+
+    @Test
+    void keyRotationOnAsymmetricKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        key.setCustomerMasterKeySpec("RSA_2048");
+        key.setKeyUsage("SIGN_VERIFY");
+        // Persist the modified key
+        assertThrows(AwsException.class, () ->
+                kmsService.enableKeyRotation(key.getKeyId(), REGION));
+    }
 }

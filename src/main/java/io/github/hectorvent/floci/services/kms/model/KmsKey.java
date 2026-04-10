@@ -20,6 +20,7 @@ public class KmsKey {
     private long creationDate;
     private long deletionDate;
     private String policy;
+    private boolean keyRotationEnabled = false;
     private Map<String, String> tags = new HashMap<>();
 
     public KmsKey() {
@@ -55,6 +56,9 @@ public class KmsKey {
 
     public String getPolicy() { return policy; }
     public void setPolicy(String policy) { this.policy = policy; }
+
+    public boolean isKeyRotationEnabled() { return keyRotationEnabled; }
+    public void setKeyRotationEnabled(boolean keyRotationEnabled) { this.keyRotationEnabled = keyRotationEnabled; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

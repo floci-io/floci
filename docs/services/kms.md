@@ -25,6 +25,11 @@
 | `TagResource` | Tag a key |
 | `UntagResource` | Remove tags |
 | `ListResourceTags` | List tags |
+| `GetKeyPolicy` | Get a key's resource policy |
+| `PutKeyPolicy` | Update a key's resource policy |
+| `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
+| `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
+| `DisableKeyRotation` | Disable automatic key rotation |
 
 ## Examples
 

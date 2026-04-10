@@ -107,6 +107,40 @@ public class KmsService {
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    // ──────────────────────────── Key Rotation ────────────────────────────
+
+    public boolean getKeyRotationStatus(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        validateRotationSupported(key);
+        return key.isKeyRotationEnabled();
+    }
+
+    public void enableKeyRotation(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        validateRotationSupported(key);
+        key.setKeyRotationEnabled(true);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Enabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
+    public void disableKeyRotation(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        validateRotationSupported(key);
+        key.setKeyRotationEnabled(false);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
+    private void validateRotationSupported(KmsKey key) {
+        if (!"ENCRYPT_DECRYPT".equals(key.getKeyUsage())
+                || !"SYMMETRIC_DEFAULT".equals(key.getCustomerMasterKeySpec())) {
+            throw new AwsException(
+                    "UnsupportedOperationException",
+                    "You cannot perform this operation on a non-symmetric key or a key with non-ENCRYPT_DECRYPT key usage.",
+                    400);
+        }
+    }
+
     // ──────────────────────────── Aliases ────────────────────────────
 
     public void createAlias(String aliasName, String targetKeyId, String region) {
