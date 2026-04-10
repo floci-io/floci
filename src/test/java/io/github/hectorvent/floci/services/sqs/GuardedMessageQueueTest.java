@@ -182,17 +182,23 @@ class GuardedMessageQueueTest {
     // --- DLQ ---
 
     @Test
-    void dlqCandidatesReturnedWhenMaxReceiveCountExceeded() {
+    void dlqCandidatesReturnedButNotRemovedFromSource() {
         queue.addMessage(new Message("msg"));
 
         // Claim and release (visibility=0) to bump receiveCount
         var r1 = queue.claimVisibleMessages(1, 0, false, -1, null);
         assertEquals(1, r1.claimed().get(0).getReceiveCount());
 
-        // Claim again — now receiveCount = 2, maxReceiveCount = 1 → DLQ
+        // Claim again — now receiveCount = 2, maxReceiveCount = 1 → DLQ candidate
         var r2 = queue.claimVisibleMessages(1, 0, false, 1, "arn:aws:sqs:us-east-1:000000000000:dlq");
         assertTrue(r2.claimed().isEmpty());
         assertEquals(1, r2.dlqCandidates().size());
+
+        // Message stays in source until explicitly removed
+        assertFalse(queue.isEmpty());
+
+        queue.removeMessages(r2.dlqCandidates());
+        assertTrue(queue.isEmpty());
     }
 
     // --- Concurrency: the core bug fix ---
@@ -259,7 +265,6 @@ class GuardedMessageQueueTest {
         ExecutorService executor = Executors.newFixedThreadPool(threadCount);
         CyclicBarrier barrier = new CyclicBarrier(threadCount);
         AtomicInteger claimedCount = new AtomicInteger();
-        AtomicInteger deletedCount = new AtomicInteger();
 
         List<Future<?>> futures = new ArrayList<>();
         // Half the threads receive, half delete
@@ -277,9 +282,7 @@ class GuardedMessageQueueTest {
                     claimedCount.addAndGet(result.claimed().size());
                     // Immediately delete claimed messages
                     for (Message m : result.claimed()) {
-                        if (queue.removeByReceiptHandle(m.getReceiptHandle())) {
-                            deletedCount.incrementAndGet();
-                        }
+                        queue.removeByReceiptHandle(m.getReceiptHandle());
                     }
                 } else {
                     // Competitor — also tries to receive

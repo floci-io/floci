@@ -73,14 +73,7 @@ class GuardedMessageQueue {
                         claimed, dlqCandidates);
             }
 
-            if (!dlqCandidates.isEmpty()) {
-                messages.removeAll(dlqCandidates);
-                for (Message msg : dlqCandidates) {
-                    msg.setVisibleAt(null);
-                    msg.setReceiptHandle(null);
-                }
-                persist();
-            } else if (!claimed.isEmpty()) {
+            if (!claimed.isEmpty() || !dlqCandidates.isEmpty()) {
                 persist();
             }
 
@@ -160,6 +153,13 @@ class GuardedMessageQueue {
                 }
             }
             return false;
+        }
+    }
+
+    void removeMessages(List<Message> toRemove) {
+        try (var _ = hold()) {
+            messages.removeAll(toRemove);
+            persist();
         }
     }
 

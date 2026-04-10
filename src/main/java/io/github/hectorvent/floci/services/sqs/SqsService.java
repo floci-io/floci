@@ -486,13 +486,19 @@ public class SqsService {
         var claimResult = guardedQueue.claimVisibleMessages(
                 maxMessages, effectiveTimeout, queue.isFifo(), maxReceiveCount, deadLetterTargetArn);
 
-        // Route DLQ candidates to the dead-letter queue
+        // Route DLQ candidates to the dead-letter queue only if the destination resolves
         if (!claimResult.dlqCandidates().isEmpty() && deadLetterTargetArn != null) {
             String dlqUrl = queueUrlFromArn(deadLetterTargetArn, region);
             if (dlqUrl != null) {
+                var dlqCandidates = claimResult.dlqCandidates();
+                guardedQueue.removeMessages(dlqCandidates);
+                for (Message msg : dlqCandidates) {
+                    msg.setVisibleAt(null);
+                    msg.setReceiptHandle(null);
+                }
                 String dlqStorageKey = regionKey(region, dlqUrl);
-                getOrCreateQueue(dlqStorageKey).addAll(claimResult.dlqCandidates());
-                LOG.infov("Moved {0} messages to DLQ {1}", claimResult.dlqCandidates().size(), dlqUrl);
+                getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
+                LOG.infov("Moved {0} messages to DLQ {1}", dlqCandidates.size(), dlqUrl);
             }
         }
 
