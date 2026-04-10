@@ -85,7 +85,7 @@ class KinesisIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(20)
     void describeStreamByArn() {
         String streamArn = given()
             .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
@@ -112,13 +112,25 @@ class KinesisIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(21)
     void putAndGetRecordsByArn() {
+        // Use a dedicated stream to avoid interference from shard splits on list-shards-test
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("""
+                {"StreamName": "arn-put-get-test", "ShardCount": 1}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         String streamArn = given()
             .header("X-Amz-Target", "Kinesis_20131202.DescribeStreamSummary")
             .contentType(KINESIS_CONTENT_TYPE)
             .body("""
-                {"StreamName": "list-shards-test"}
+                {"StreamName": "arn-put-get-test"}
                 """)
         .when()
             .post("/")
@@ -157,11 +169,13 @@ class KinesisIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Records.size()", greaterThanOrEqualTo(1));
+            .body("Records.size()", equalTo(1))
+            .body("Records[0].PartitionKey", equalTo("pk1"))
+            .body("Records[0].Data", equalTo("dGVzdA=="));
     }
 
     @Test
-    @Order(12)
+    @Order(22)
     void operationWithoutStreamNameOrArnReturns400() {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
@@ -174,7 +188,7 @@ class KinesisIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(23)
     void operationWithMalformedArnReturns400() {
         given()
             .header("X-Amz-Target", "Kinesis_20131202.DescribeStream")
