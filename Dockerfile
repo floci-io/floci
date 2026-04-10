@@ -21,6 +21,9 @@ VOLUME /app/data
 
 EXPOSE 4566 6379-6399
 
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+    CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
+
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
 

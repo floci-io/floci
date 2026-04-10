@@ -18,6 +18,9 @@ COPY --chown=1001:root target/*-runner /app/application
 
 EXPOSE 4566
 
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+    CMD curl -f http://localhost:4566/_floci/health || exit 1
+
 USER 1001
 
 CMD ["./application", "-Dquarkus.http.host=0.0.0.0"]

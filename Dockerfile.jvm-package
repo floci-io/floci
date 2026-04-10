@@ -21,6 +21,9 @@ COPY --chown=1001:root target/quarkus-app quarkus-app/
 
 EXPOSE 4566 6379-6399
 
+HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
+    CMD wget -q --spider http://localhost:4566/_floci/health || exit 1
+
 USER 1001
 
 ENTRYPOINT ["java", "-jar", "quarkus-app/quarkus-run.jar", "-Dquarkus.http.host=0.0.0.0"]
