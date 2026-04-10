@@ -965,28 +965,6 @@ public class DynamoDbService {
                         setValueAtPath(item, attrPath, resolved, exprAttrNames);
                     }
                 }
-            } else if (valuePart.startsWith("list_append(")) {
-                String[] args = extractFunctionArgs(valuePart);
-                if (args.length == 2) {
-                    String arg1 = args[0].trim();
-                    String arg2 = args[1].trim();
-                    JsonNode list1 = arg1.startsWith(":") && exprAttrValues != null
-                        ? exprAttrValues.get(arg1)
-                        : item.get(resolveAttributeName(arg1, exprAttrNames));
-                    JsonNode list2 = arg2.startsWith(":") && exprAttrValues != null
-                        ? exprAttrValues.get(arg2)
-                        : item.get(resolveAttributeName(arg2, exprAttrNames));
-                    if (list1 != null && list2 != null && list1.has("L") && list2.has("L")) {
-                        com.fasterxml.jackson.databind.node.ArrayNode merged =
-                            com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
-                        list1.get("L").forEach(merged::add);
-                        list2.get("L").forEach(merged::add);
-                        com.fasterxml.jackson.databind.node.ObjectNode result =
-                            com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
-                        result.set("L", merged);
-                        item.set(attrName, result);
-                    }
-                }
             } else if (valuePart.toLowerCase().startsWith("list_append(")) {
                 int open = valuePart.indexOf('(');
                 int close = valuePart.lastIndexOf(')');
