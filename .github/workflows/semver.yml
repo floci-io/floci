@@ -31,10 +31,18 @@ on:
 permissions:
   contents: write
 
+# Static group so racing version bumps serialize. If two commits land on
+# main in quick succession, the second run cancels the first rather than
+# both racing to tag and push back to main.
+concurrency:
+  group: semver-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   release:
     name: Semantic Release
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4

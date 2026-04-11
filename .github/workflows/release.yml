@@ -17,11 +17,20 @@ on:
 permissions:
   contents: read
 
+# Per-tag concurrency. Back-to-back tag pushes (e.g. 1.5.3 and 1.6.0 landing
+# minutes apart) resolve to different ${{ github.ref }} values, so they run
+# in parallel rather than cancelling each other. Re-runs of the same tag
+# supersede in-flight builds of that tag.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   # ── Build JVM artifact ────────────────────────────────────────────────────
   build-jvm:
     name: Build JVM artifact
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -45,6 +54,7 @@ jobs:
   build-native-amd64:
     name: Build native artifact (amd64)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -73,6 +83,7 @@ jobs:
   build-native-arm64:
     name: Build native artifact (arm64)
     runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
@@ -102,6 +113,7 @@ jobs:
     name: Push JVM Docker image
     needs: build-jvm
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
@@ -156,6 +168,7 @@ jobs:
     name: Push native Docker images
     needs: [build-native-amd64, build-native-arm64]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
