@@ -153,7 +153,7 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         return true;
     }
 
-    /** Returns true for *.s3.amazonaws.com and *.s3.region.amazonaws.com domains. */
+    /** Returns true for *.s3.amazonaws.com and other well-known S3 domains. */
     private static boolean isAwsS3Domain(String remainder) {
         if ("s3.amazonaws.com".equals(remainder)) {
             return true;
@@ -161,6 +161,11 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // s3.<region>.amazonaws.com
         if (remainder.startsWith("s3.") && remainder.endsWith(".amazonaws.com")) {
             return true;
+        }
+        // Support localstack.cloud subdomains (used by cdklocal and other tools)
+        // Example: bucket.s3.localhost.localstack.cloud
+        if (remainder.endsWith(".localstack.cloud")) {
+            return remainder.startsWith("s3.");
         }
         return false;
     }

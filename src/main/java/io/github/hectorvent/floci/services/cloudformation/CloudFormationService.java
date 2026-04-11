@@ -13,6 +13,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URI;
 import java.time.Instant;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -426,20 +427,29 @@ public class CloudFormationService {
 
     private String fetchTemplateFromS3(String url) {
         try {
-            // Parse S3 URL: http://host:port/bucket/key or https://bucket.s3.amazonaws.com/key
+            // Parse S3 URL:
+            // Virtual-hosted local: http://bucket.localhost:4566/key
+            // Virtual-hosted AWS:   https://bucket.s3.region.amazonaws.com/key
+            // Path-style:           http://host:port/bucket/key
             String bucket;
             String key;
-            if (url.contains(".s3.amazonaws.com") || url.contains(".s3.")) {
-                // Virtual-hosted: https://bucket.s3.region.amazonaws.com/key
-                String host = url.replaceFirst("https?://", "").split("/")[0];
+
+            URI uri = URI.create(url);
+            String host = uri.getHost();
+            String path = uri.getRawPath();
+
+            if (host != null && (host.contains(".s3.") || host.endsWith(".amazonaws.com") ||
+                    (config.hostname().isPresent() && host.endsWith("." + config.hostname().get())) ||
+                    (host.endsWith(".localhost")))) {
+                // Virtual-hosted style
                 bucket = host.split("\\.")[0];
-                key = url.substring(url.indexOf('/', url.indexOf("://") + 3) + 1);
+                key = path.startsWith("/") ? path.substring(1) : path;
             } else {
-                // Path-style: http://host:port/bucket/key
-                String path = url.replaceFirst("https?://[^/]+/", "");
-                int slash = path.indexOf('/');
-                bucket = slash > 0 ? path.substring(0, slash) : path;
-                key = slash > 0 ? path.substring(slash + 1) : "";
+                // Path-style: /bucket/key
+                String rawPath = path.startsWith("/") ? path.substring(1) : path;
+                int slash = rawPath.indexOf('/');
+                bucket = slash > 0 ? rawPath.substring(0, slash) : rawPath;
+                key = slash > 0 ? rawPath.substring(slash + 1) : "";
             }
             var obj = s3Service.getObject(bucket, key);
             return new String(obj.getData());

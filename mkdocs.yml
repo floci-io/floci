@@ -90,6 +90,7 @@ nav:
     - CloudWatch: services/cloudwatch.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
+    - ECR: services/ecr.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
     - AppConfig: services/appconfig.md

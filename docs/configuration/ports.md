@@ -5,6 +5,7 @@
 | Port / Range | Protocol | Purpose |
 |---|---|---|
 | `4566` | HTTP | All AWS API calls (every service) |
+| `5100–5199` | HTTP | ECR Registry port, for `docker push` / `docker pull` |
 | `6379–6399` | TCP | ElastiCache Redis proxy, one port per replication group |
 | `7001–7099` | TCP | RDS proxy, one port per DB instance |
 | `9200–9299` | HTTP | Lambda Runtime API (internal: consumed by spawned Lambda containers, not host-mapped) |
@@ -84,6 +85,7 @@ services:
     image: hectorvent/floci:latest
     ports:
       - "4566:4566"
+      - "5100-5199:5100-5199"
       - "6379-6399:6379-6399"
       - "7001-7099:7001-7099"
 ```

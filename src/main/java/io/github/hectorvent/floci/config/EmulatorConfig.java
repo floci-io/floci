@@ -425,10 +425,10 @@ public interface EmulatorConfig {
         @WithDefault("floci-ecr-registry")
         String registryContainerName();
 
-        @WithDefault("5000")
+        @WithDefault("5100")
         int registryBasePort();
 
-        @WithDefault("5099")
+        @WithDefault("5199")
         int registryMaxPort();
 
         @WithDefault("./data/ecr")

@@ -48,8 +48,8 @@ floci:
       enabled: true
       registry-image: "registry:2"
       registry-container-name: floci-ecr-registry
-      registry-base-port: 5000
-      registry-max-port: 5099
+      registry-base-port: 5100
+      registry-max-port: 5199
       data-path: ./data/ecr
       tls-enabled: false
       keep-running-on-shutdown: true
@@ -61,7 +61,7 @@ floci:
 | `enabled` | `true` | Enable the ECR control plane and lazy registry start |
 | `registry-image` | `registry:2` | Backing OCI registry image |
 | `registry-container-name` | `floci-ecr-registry` | Name used for idempotent reuse across restarts |
-| `registry-base-port` / `-max-port` | `5000` / `5099` | Port range allocated for the published registry port |
+| `registry-base-port` / `-max-port` | `5100` / `5199` | Port range allocated for the published registry port |
 | `data-path` | `./data/ecr` | Bind-mount root for `<data-path>/registry` (the registry's `/var/lib/registry`) |
 | `keep-running-on-shutdown` | `true` | Leave the container up so the next Floci start adopts it |
 | `uri-style` | `hostname` | `hostname` returns `*.dkr.ecr.<region>.localhost`; `path` returns `localhost:<port>/<account>/<region>/<repo>` |
@@ -79,7 +79,7 @@ aws ecr create-repository \
 # {
 #   "repository": {
 #     "repositoryArn":  "arn:aws:ecr:us-east-1:000000000000:repository/floci-it/app",
-#     "repositoryUri":  "000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app",
+#     "repositoryUri":  "000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app",
 #     "imageTagMutability": "MUTABLE",
 #     ...
 #   }
@@ -88,27 +88,27 @@ aws ecr create-repository \
 # Authenticate stock docker against the emulated registry
 aws ecr get-login-password --endpoint-url $AWS_ENDPOINT \
   | docker login --username AWS --password-stdin \
-        000000000000.dkr.ecr.us-east-1.localhost:5000
+        000000000000.dkr.ecr.us-east-1.localhost:5100
 
 # Push an image
 docker pull alpine:3.19
 docker tag  alpine:3.19 \
-            000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
-docker push 000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+            000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+docker push 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
 
 # Inspect via the AWS CLI
 aws ecr list-images     --repository-name floci-it/app --endpoint-url $AWS_ENDPOINT
 aws ecr describe-images --repository-name floci-it/app --endpoint-url $AWS_ENDPOINT
 
 # Pull from a clean local image store
-docker rmi  000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
-docker pull 000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1
+docker rmi  000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
+docker pull 000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1
 
 # Use the image as a Lambda function
 aws lambda create-function \
   --function-name my-image-fn \
   --package-type Image \
-  --code ImageUri=000000000000.dkr.ecr.us-east-1.localhost:5000/floci-it/app:v1 \
+  --code ImageUri=000000000000.dkr.ecr.us-east-1.localhost:5100/floci-it/app:v1 \
   --role arn:aws:iam::000000000000:role/lambda-role \
   --endpoint-url $AWS_ENDPOINT
 
