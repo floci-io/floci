@@ -43,6 +43,8 @@ public class EventBridgeInvoker {
         String payload;
         if (target.getInput() != null) {
             payload = target.getInput();
+        } else if (target.getInputPath() != null) {
+            payload = applyInputPath(target.getInputPath(), eventJson);
         } else if (target.getInputTransformer() != null) {
             payload = applyInputTransformer(target.getInputTransformer(), eventJson);
         } else {
@@ -69,6 +71,14 @@ public class EventBridgeInvoker {
         } catch (Exception e) {
             LOG.warnv("EventBridge failed to deliver to target {0}: {1}", arn, e.getMessage());
         }
+    }
+
+    String applyInputPath(String inputPath, String eventJson) {
+        if (inputPath == null || "$".equals(inputPath)) {
+            return eventJson;
+        }
+        String extracted = extractJsonPath(inputPath, eventJson);
+        return extracted != null ? extracted : eventJson;
     }
 
     String applyInputTransformer(InputTransformer transformer, String eventJson) {
