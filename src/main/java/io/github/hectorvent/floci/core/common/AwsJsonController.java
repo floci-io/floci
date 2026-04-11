@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
+import io.github.hectorvent.floci.services.dynamodb.DynamoDbResponses;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
@@ -102,11 +103,12 @@ public class AwsJsonController {
         action = target.substring(prefix.length());
         LOG.debugv("{0} JSON action: {1}", serviceName, action);
 
+        Response response;
         try {
             JsonNode request = objectMapper.readTree(body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
-            return switch (serviceName) {
+            response = switch (serviceName) {
                 case "DynamoDB" -> dynamoDbJsonHandler.handle(action, request, region);
                 case "DynamoDBStreams" -> dynamoDbStreamsJsonHandler.handle(action, request, region);
                 case "SQS" -> sqsJsonHandler.handle(action, request, region);
@@ -116,10 +118,20 @@ public class AwsJsonController {
                 default -> null;
             };
         } catch (AwsException e) {
-            return JsonErrorResponseUtils.createErrorResponse(e);
+            response = JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
             LOG.error("Error processing " + serviceName + " JSON request", e);
-            return JsonErrorResponseUtils.createErrorResponse(e);
+            response = JsonErrorResponseUtils.createErrorResponse(e);
         }
+
+        // Real AWS DynamoDB attaches X-Amz-Crc32 to every response. The Go SDK DynamoDB
+        // client verifies this header on body Close() and logs "failed to close HTTP
+        // response body" when the header is missing — attach it here at the JSON protocol
+        // boundary so other callers of DynamoDbJsonHandler (CBOR, API Gateway proxy,
+        // Step Functions tasks) keep their original ObjectNode entity.
+        if ("DynamoDB".equals(serviceName) || "DynamoDBStreams".equals(serviceName)) {
+            return DynamoDbResponses.withCrc32(response, objectMapper);
+        }
+        return response;
     }
 }

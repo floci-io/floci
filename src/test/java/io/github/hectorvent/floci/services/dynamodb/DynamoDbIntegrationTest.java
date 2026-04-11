@@ -2,14 +2,19 @@ package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.zip.CRC32;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -891,5 +896,42 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("UnknownOperationException"));
+    }
+
+    @Test
+    void responseIncludesCorrectXAmzCrc32Header() {
+        // The AWS SDK for Go v2 DynamoDB client wraps the response body in a CRC32-verifying
+        // reader and emits "failed to close HTTP response body" warnings when the header is
+        // missing. Verify floci attaches the header on both success and error responses and
+        // that the value matches the CRC32 of the response body bytes.
+        Response listResponse = given()
+                .header("X-Amz-Target", "DynamoDB_20120810.ListTables")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("{}")
+                .when()
+                .post("/");
+
+        listResponse.then().statusCode(200);
+        String crcHeader = listResponse.getHeader("X-Amz-Crc32");
+        assertNotNull(crcHeader, "ListTables response must carry X-Amz-Crc32");
+        assertEquals(Long.toString(crc32Of(listResponse.asByteArray())), crcHeader);
+
+        Response errorResponse = given()
+                .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("{\"TableName\":\"does-not-exist-crc32-check\"}")
+                .when()
+                .post("/");
+
+        errorResponse.then().statusCode(400);
+        String errorCrc = errorResponse.getHeader("X-Amz-Crc32");
+        assertNotNull(errorCrc, "Error response must carry X-Amz-Crc32");
+        assertEquals(Long.toString(crc32Of(errorResponse.asByteArray())), errorCrc);
+    }
+
+    private static long crc32Of(byte[] bytes) {
+        CRC32 crc = new CRC32();
+        crc.update(bytes);
+        return crc.getValue();
     }
 }
