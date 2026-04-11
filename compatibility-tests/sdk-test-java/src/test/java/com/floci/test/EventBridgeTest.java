@@ -193,6 +193,46 @@ class EventBridgeTest {
         assertThat(msg.messages()).isEmpty();
     }
 
+    @Test
+    @Order(25)
+    void putEventsWithPrefixPatternDeliveredToSqsTarget() {
+        String prefixRuleName = TestFixtures.uniqueName("eb-prefix-rule");
+        eb.putRule(PutRuleRequest.builder()
+                .name(prefixRuleName)
+                .eventPattern("{\"source\":[{\"prefix\":\"com.example\"}]}")
+                .state(RuleState.ENABLED)
+                .build());
+
+        eb.putTargets(PutTargetsRequest.builder()
+                .rule(prefixRuleName)
+                .targets(Target.builder().id("prefix-sqs-target").arn(sinkQueueArn).build())
+                .build());
+
+        // Matching source
+        eb.putEvents(PutEventsRequest.builder()
+                .entries(PutEventsRequestEntry.builder()
+                        .source("com.example.myapp")
+                        .detailType("Test")
+                        .detail("{}")
+                        .build())
+                .build());
+
+        ReceiveMessageResponse msg = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                .queueUrl(sinkQueueUrl)
+                .maxNumberOfMessages(1)
+                .waitTimeSeconds(2)
+                .build());
+        
+        try {
+            assertThat(msg.messages()).hasSize(1);
+            assertThat(msg.messages().get(0).body()).contains("com.example.myapp");
+        } finally {
+            // Cleanup for this specific test
+            eb.removeTargets(RemoveTargetsRequest.builder().rule(prefixRuleName).ids("prefix-sqs-target").build());
+            eb.deleteRule(DeleteRuleRequest.builder().name(prefixRuleName).build());
+        }
+    }
+
     // ──────────────────────────── InputTransformer ────────────────────────────
 
     @Test

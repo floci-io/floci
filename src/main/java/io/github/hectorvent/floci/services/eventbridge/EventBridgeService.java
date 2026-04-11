@@ -447,10 +447,49 @@ public class EventBridgeService {
     }
 
     private boolean matchesArrayField(JsonNode arrayNode, String value) {
-        if (value == null) return false;
         for (JsonNode element : arrayNode) {
-            if (value.equals(element.asText())) {
+            if (matchesSingleElement(element, value)) {
                 return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesSingleElement(JsonNode element, String value) {
+        // Exact string match
+        if (element.isTextual()) {
+            return value != null && value.equals(element.asText());
+        }
+        // Null literal match
+        if (element.isNull()) {
+            return value == null;
+        }
+        // Content filter object
+        if (element.isObject()) {
+            if (element.has("prefix")) {
+                return value != null && value.startsWith(element.get("prefix").asText());
+            }
+            if (element.has("suffix")) {
+                return value != null && value.endsWith(element.get("suffix").asText());
+            }
+            if (element.has("equals-ignore-case")) {
+                return value != null && value.equalsIgnoreCase(element.get("equals-ignore-case").asText());
+            }
+            if (element.has("anything-but")) {
+                JsonNode anythingBut = element.get("anything-but");
+                if (anythingBut.isArray()) {
+                    for (JsonNode v : anythingBut) {
+                        if (v.isTextual() && v.asText().equals(value)) return false;
+                    }
+                    return value != null;
+                }
+                if (anythingBut.isObject() && anythingBut.has("prefix")) {
+                    return value != null && !value.startsWith(anythingBut.get("prefix").asText());
+                }
+            }
+            if (element.has("exists")) {
+                boolean shouldExist = element.get("exists").asBoolean();
+                return shouldExist ? (value != null) : (value == null);
             }
         }
         return false;

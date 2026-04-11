@@ -401,4 +401,83 @@ class EventBridgeServiceTest {
         assertNotNull(result.entries().getFirst().get("EventId"));
         verify(invokerMock).invokeTarget(eq(target), any(String.class), eq(REGION));
     }
-}
+
+    @Test
+    void matchesPatternBySourcePrefix_matches() {
+        Map<String, Object> event = Map.of("Source", "com.example.myapp", "DetailType", "Order");
+        assertTrue(service.matchesPattern(event, "{\"source\":[{\"prefix\":\"com.example\"}]}"));
+    }
+
+    @Test
+    void matchesPatternBySourcePrefix_noMatch() {
+        Map<String, Object> event = Map.of("Source", "org.example.myapp", "DetailType", "Order");
+        assertFalse(service.matchesPattern(event, "{\"source\":[{\"prefix\":\"com.example\"}]}"));
+    }
+
+    @Test
+    void matchesPatternBySuffix_matches() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "order.json");
+        assertTrue(service.matchesPattern(event, "{\"detail-type\":[{\"suffix\":\".json\"}]}"));
+    }
+
+    @Test
+    void matchesPatternBySuffix_noMatch() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "order.xml");
+        assertFalse(service.matchesPattern(event, "{\"detail-type\":[{\"suffix\":\".json\"}]}"));
+    }
+
+    @Test
+    void matchesPatternByEqualsIgnoreCase_matches() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "PROD");
+        assertTrue(service.matchesPattern(event, "{\"detail-type\":[{\"equals-ignore-case\":\"prod\"}]}"));
+    }
+
+    @Test
+    void matchesPatternByEqualsIgnoreCase_noMatch() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "PROD");
+        assertFalse(service.matchesPattern(event, "{\"detail-type\":[{\"equals-ignore-case\":\"dev\"}]}"));
+    }
+
+    @Test
+    void matchesPatternByAnythingBut_matches() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
+        assertTrue(service.matchesPattern(event, "{\"detail-type\":[{\"anything-but\":[\"Payment\"]}]}"));
+    }
+
+    @Test
+    void matchesPatternByAnythingBut_noMatch() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Payment");
+        assertFalse(service.matchesPattern(event, "{\"detail-type\":[{\"anything-but\":[\"Payment\"]}]}"));
+    }
+
+    @Test
+    void matchesPatternByAnythingButPrefix_matches() {
+        Map<String, Object> event = Map.of("Source", "com.example.app", "DetailType", "Order");
+        assertTrue(service.matchesPattern(event, "{\"source\":[{\"anything-but\":{\"prefix\":\"aws.\"}}]}"));
+    }
+
+    @Test
+    void matchesPatternByAnythingButPrefix_noMatch() {
+        Map<String, Object> event = Map.of("Source", "aws.events", "DetailType", "Order");
+        assertFalse(service.matchesPattern(event, "{\"source\":[{\"anything-but\":{\"prefix\":\"aws.\"}}]}"));
+    }
+
+    @Test
+    void matchesPatternByDetailPrefixField_matches() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"status\":\"CONFIRMED_BY_USER\"}"
+        );
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"status\":[{\"prefix\":\"CONFIRMED\"}]}}"));
+    }
+
+    @Test
+    void matchesPatternByExists_matches() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"status\":\"CONFIRMED\"}"
+        );
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"status\":[{\"exists\":true}]}}"));
+        assertTrue(service.matchesPattern(event, "{\"detail\":{\"other\":[{\"exists\":false}]}}"));
+    }
+    }
