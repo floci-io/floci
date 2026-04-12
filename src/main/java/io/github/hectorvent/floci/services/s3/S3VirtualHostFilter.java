@@ -55,6 +55,12 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         URI uri = requestContext.getUriInfo().getRequestUri();
         String path = uri.getRawPath();
 
+        // Do not rewrite S3 Control API paths — the account ID appears as a host label
+        // in the S3ControlClient but the path belongs to the S3 Control service, not S3.
+        if (path.startsWith("/v20180820/")) {
+            return;
+        }
+
         // Rewrite path from /key to /bucket/key
         String newPath = "/" + bucket + (path.startsWith("/") ? "" : "/") + path;
 
