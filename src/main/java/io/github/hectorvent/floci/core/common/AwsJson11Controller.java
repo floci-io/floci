@@ -34,19 +34,8 @@ public class AwsJson11Controller {
 
     private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
 
-    private static final String SSM_TARGET_PREFIX = "AmazonSSM.";
-    private static final String EVENTBRIDGE_TARGET_PREFIX = "AWSEvents.";
-    private static final String LOGS_TARGET_PREFIX = "Logs_20140328.";
-    private static final String SECRETS_MANAGER_TARGET_PREFIX = "secretsmanager.";
-    private static final String KINESIS_TARGET_PREFIX = "Kinesis_20131202.";
-    private static final String APIGW_V2_TARGET_PREFIX = "AmazonApiGatewayV2.";
-    private static final String KMS_TARGET_PREFIX = "TrentService.";
-    private static final String COGNITO_TARGET_PREFIX = "AWSCognitoIdentityProviderService.";
-    private static final String ACM_TARGET_PREFIX = "CertificateManager.";
-    private static final String ECS_TARGET_PREFIX = "AmazonEC2ContainerServiceV20141113.";
-    private static final String ECR_TARGET_PREFIX = "AmazonEC2ContainerRegistry_V20150921.";
-
     private final ObjectMapper objectMapper;
+    private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
     private final SsmJsonHandler ssmJsonHandler;
     private final EventBridgeHandler eventBridgeHandler;
@@ -61,7 +50,8 @@ public class AwsJson11Controller {
     private final EcrJsonHandler ecrJsonHandler;
 
     @Inject
-    public AwsJson11Controller(ObjectMapper objectMapper, RegionResolver regionResolver,
+    public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
+                               RegionResolver regionResolver,
                                SsmJsonHandler ssmJsonHandler, EventBridgeHandler eventBridgeHandler,
                                CloudWatchLogsHandler cloudWatchLogsHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
@@ -71,6 +61,7 @@ public class AwsJson11Controller {
                                AcmJsonHandler acmJsonHandler, EcsJsonHandler ecsJsonHandler,
                                EcrJsonHandler ecrJsonHandler) {
         this.objectMapper = objectMapper;
+        this.catalog = catalog;
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
         this.eventBridgeHandler = eventBridgeHandler;
@@ -97,71 +88,44 @@ public class AwsJson11Controller {
             return null;
         }
 
-        String prefix;
-        String serviceName;
-
-        if (target.startsWith(SSM_TARGET_PREFIX)) {
-            prefix = SSM_TARGET_PREFIX;
-            serviceName = "SSM";
-        } else if (target.startsWith(EVENTBRIDGE_TARGET_PREFIX)) {
-            prefix = EVENTBRIDGE_TARGET_PREFIX;
-            serviceName = "EventBridge";
-        } else if (target.startsWith(LOGS_TARGET_PREFIX)) {
-            prefix = LOGS_TARGET_PREFIX;
-            serviceName = "Logs";
-        } else if (target.startsWith(SECRETS_MANAGER_TARGET_PREFIX)) {
-            prefix = SECRETS_MANAGER_TARGET_PREFIX;
-            serviceName = "SecretsManager";
-        } else if (target.startsWith(KINESIS_TARGET_PREFIX)) {
-            prefix = KINESIS_TARGET_PREFIX;
-            serviceName = "Kinesis";
-        } else if (target.startsWith(APIGW_V2_TARGET_PREFIX)) {
-            prefix = APIGW_V2_TARGET_PREFIX;
-            serviceName = "ApiGatewayV2";
-        } else if (target.startsWith(KMS_TARGET_PREFIX)) {
-            prefix = KMS_TARGET_PREFIX;
-            serviceName = "KMS";
-        } else if (target.startsWith(COGNITO_TARGET_PREFIX)) {
-            prefix = COGNITO_TARGET_PREFIX;
-            serviceName = "Cognito";
-        } else if (target.startsWith(ACM_TARGET_PREFIX)) {
-            prefix = ACM_TARGET_PREFIX;
-            serviceName = "ACM";
-        } else if (target.startsWith(ECS_TARGET_PREFIX)) {
-            prefix = ECS_TARGET_PREFIX;
-            serviceName = "ECS";
-        } else if (target.startsWith(ECR_TARGET_PREFIX)) {
-            prefix = ECR_TARGET_PREFIX;
-            serviceName = "ECR";
-        } else {
+        ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);
+        if (targetMatch == null) {
             return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
         }
 
-        String action = target.substring(prefix.length());
-        LOG.infov("AwsJson11Controller {0} action: {1}", serviceName, action);
+        String serviceKey = targetMatch.descriptor().externalKey();
+        String action = targetMatch.action();
+        LOG.infov("AwsJson11Controller {0} action: {1}", serviceKey, action);
 
         try {
             JsonNode request = objectMapper.readTree(body);
             String region = regionResolver.resolveRegion(httpHeaders);
 
-            return switch (serviceName) {
-                case "SSM" -> ssmJsonHandler.handle(action, request, region);
-                case "EventBridge" -> eventBridgeHandler.handle(action, request, region);
-                case "Logs" -> cloudWatchLogsHandler.handle(action, request, region);
-                case "SecretsManager" -> secretsManagerJsonHandler.handle(action, request, region);
-                case "Kinesis" -> kinesisJsonHandler.handle(action, request, region);
-                case "ApiGatewayV2" -> apigwV2JsonHandler.handle(action, request, region);
-                case "KMS" -> kmsJsonHandler.handle(action, request, region);
-                case "Cognito" -> cognitoJsonHandler.handle(action, request, region);
-                case "ACM" -> acmJsonHandler.handle(action, request, region);
-                case "ECS" -> ecsJsonHandler.handle(action, request, region);
-                case "ECR" -> ecrJsonHandler.handle(action, request, region);
+            Response delegated = switch (serviceKey) {
+                case "ssm" -> ssmJsonHandler.handle(action, request, region);
+                case "events" -> eventBridgeHandler.handle(action, request, region);
+                case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
+                case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
+                case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
+                case "apigatewayv2" -> apigwV2JsonHandler.handle(action, request, region);
+                case "kms" -> kmsJsonHandler.handle(action, request, region);
+                case "cognito-idp" -> cognitoJsonHandler.handle(action, request, region);
+                case "acm" -> acmJsonHandler.handle(action, request, region);
+                case "ecs" -> ecsJsonHandler.handle(action, request, region);
+                case "ecr" -> ecrJsonHandler.handle(action, request, region);
                 default -> null;
             };
+            // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target
+            // (e.g. DynamoDB_20120810.*) can match here under @Consumes json-1.1.
+            // Return the AWS-style unknown-operation error rather than null.
+            if (delegated == null) {
+                return JsonErrorResponseUtils.createUnknownOperationErrorResponse(target);
+            }
+            return delegated;
         } catch (AwsException e) {
             return JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
-            LOG.errorf("Error processing %s request", serviceName, e);
+            LOG.errorf("Error processing %s request", serviceKey, e);
             return JsonErrorResponseUtils.createErrorResponse(e);
         }
     }

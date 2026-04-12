@@ -16,12 +16,16 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesIntegrationTest {
 
+    private static String authorization(String service) {
+        return "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/" + service + "/aws4_request";
+    }
+
     @Test
     @Order(1)
     void verifyEmailIdentity() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", authorization("email"))
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", "sender@example.com")
         .when()
@@ -37,7 +41,7 @@ class SesIntegrationTest {
     void verifyEmailIdentity_second() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", authorization("email"))
             .formParam("Action", "VerifyEmailIdentity")
             .formParam("EmailAddress", "recipient@example.com")
         .when()
@@ -51,7 +55,7 @@ class SesIntegrationTest {
     void verifyDomainIdentity() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", authorization("email"))
             .formParam("Action", "VerifyDomainIdentity")
             .formParam("Domain", "example.com")
         .when()
@@ -228,7 +232,21 @@ class SesIntegrationTest {
     void getAccountSendingEnabled() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", authorization("email"))
+            .formParam("Action", "GetAccountSendingEnabled")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Enabled>true</Enabled>"));
+    }
+
+    @Test
+    @Order(14)
+    void getAccountSendingEnabled_acceptsSesv2CredentialScopeAlias() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", authorization("sesv2"))
             .formParam("Action", "GetAccountSendingEnabled")
         .when()
             .post("/")
@@ -242,7 +260,7 @@ class SesIntegrationTest {
     void getIdentityDkimAttributes() {
         given()
             .contentType("application/x-www-form-urlencoded")
-            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .header("Authorization", authorization("email"))
             .formParam("Action", "GetIdentityDkimAttributes")
             .formParam("Identities.member.1", "example.com")
         .when()

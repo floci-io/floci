@@ -35,15 +35,8 @@ public class AwsJsonCborController {
     private static final Logger LOG = Logger.getLogger(AwsJsonCborController.class);
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
 
-    private static final String DYNAMODB_TARGET_PREFIX = "DynamoDB_20120810.";
-    private static final String DYNAMODB_STREAMS_TARGET_PREFIX = "DynamoDBStreams_20120810.";
-    private static final String SQS_TARGET_PREFIX = "AmazonSQS.";
-    private static final String SNS_TARGET_PREFIX = "SNS_20100331.";
-    private static final String STEPFUNCTIONS_TARGET_PREFIX = "AWSStepFunctions.";
-    private static final String CLOUDWATCH_TARGET_PREFIX = "GraniteServiceVersion20100801.";
-    private static final String CLOUDWATCH_SERVICE_ID = "GraniteServiceVersion20100801";
-
     private final ObjectMapper objectMapper;
+    private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final DynamoDbStreamsJsonHandler dynamoDbStreamsJsonHandler;
@@ -53,13 +46,15 @@ public class AwsJsonCborController {
     private final CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler;
 
     @Inject
-    public AwsJsonCborController(ObjectMapper objectMapper, RegionResolver regionResolver,
+    public AwsJsonCborController(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
+                                 RegionResolver regionResolver,
                                  DynamoDbJsonHandler dynamoDbJsonHandler,
                                  DynamoDbStreamsJsonHandler dynamoDbStreamsJsonHandler,
                                  SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
                                  StepFunctionsJsonHandler sfnJsonHandler,
                                  CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler) {
         this.objectMapper = objectMapper;
+        this.catalog = catalog;
         this.regionResolver = regionResolver;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.dynamoDbStreamsJsonHandler = dynamoDbStreamsJsonHandler;
@@ -180,33 +175,18 @@ public class AwsJsonCborController {
             return null;
         }
 
-        String prefix;
-        String serviceName;
-
-        if (target.startsWith(DYNAMODB_STREAMS_TARGET_PREFIX)) {
-            prefix = DYNAMODB_STREAMS_TARGET_PREFIX;
-            serviceName = "DynamoDBStreams";
-        } else if (target.startsWith(DYNAMODB_TARGET_PREFIX)) {
-            prefix = DYNAMODB_TARGET_PREFIX;
-            serviceName = "DynamoDB";
-        } else if (target.startsWith(SQS_TARGET_PREFIX)) {
-            prefix = SQS_TARGET_PREFIX;
-            serviceName = "SQS";
-        } else if (target.startsWith(SNS_TARGET_PREFIX)) {
-            prefix = SNS_TARGET_PREFIX;
-            serviceName = "SNS";
-        } else if (target.startsWith(STEPFUNCTIONS_TARGET_PREFIX)) {
-            prefix = STEPFUNCTIONS_TARGET_PREFIX;
-            serviceName = "StepFunctions";
-        } else if (target.startsWith(CLOUDWATCH_TARGET_PREFIX)) {
-            prefix = CLOUDWATCH_TARGET_PREFIX;
-            serviceName = "CloudWatch";
-        } else {
+        // Upstream CBOR behavior is to return null for targets this controller
+        // does not dispatch (JAX-RS then serves 204). The JSON 1.0/1.1
+        // controllers return UnknownOperationException instead; CBOR stays on
+        // null here to preserve pre-refactor semantics.
+        ServiceCatalog.TargetMatch targetMatch = catalog.matchTarget(target).orElse(null);
+        if (targetMatch == null) {
             return null;
         }
 
-        String action = target.substring(prefix.length());
-        LOG.debugv("{0} CBOR action: {1}", serviceName, action);
+        String serviceKey = targetMatch.descriptor().externalKey();
+        String action = targetMatch.action();
+        LOG.debugv("{0} CBOR action: {1}", serviceKey, action);
 
         try {
             JsonNode request = (body != null && body.length > 0)
@@ -214,13 +194,17 @@ public class AwsJsonCborController {
                     : objectMapper.createObjectNode();
             String region = regionResolver.resolveRegion(httpHeaders);
 
-            Response delegated = switch (serviceName) {
-                case "DynamoDB" -> dynamoDbJsonHandler.handle(action, request, region);
-                case "DynamoDBStreams" -> dynamoDbStreamsJsonHandler.handle(action, request, region);
-                case "SQS" -> sqsJsonHandler.handle(action, request, region);
-                case "SNS" -> snsJsonHandler.handle(action, request, region);
-                case "StepFunctions" -> sfnJsonHandler.handle(action, request, region);
-                case "CloudWatch" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
+            Response delegated = switch (serviceKey) {
+                case "dynamodb" -> {
+                    if (targetMatch.prefix().startsWith("DynamoDBStreams_")) {
+                        yield dynamoDbStreamsJsonHandler.handle(action, request, region);
+                    }
+                    yield dynamoDbJsonHandler.handle(action, request, region);
+                }
+                case "sqs" -> sqsJsonHandler.handle(action, request, region);
+                case "sns" -> snsJsonHandler.handle(action, request, region);
+                case "states" -> sfnJsonHandler.handle(action, request, region);
+                case "monitoring" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
                 default -> null;
             };
             if (delegated == null) {
@@ -239,7 +223,7 @@ public class AwsJsonCborController {
         } catch (AwsException e) {
             return cborErrorResponse(e, "smithy-protocol");
         } catch (Exception e) {
-            LOG.error("Error processing CBOR request: " + serviceName + "." + action, e);
+            LOG.error("Error processing CBOR request: " + serviceKey + "." + action, e);
             return Response.status(500).build();
         }
     }
@@ -248,13 +232,21 @@ public class AwsJsonCborController {
      * Dispatches a CBOR request to the appropriate service handler by SDK service ID.
      */
     private Response dispatchCbor(String serviceId, String operation, JsonNode request, String region) throws Exception {
-        return switch (serviceId) {
-            case "DynamoDB" -> dynamoDbJsonHandler.handle(operation, request, region);
-            case "DynamoDB Streams" -> dynamoDbStreamsJsonHandler.handle(operation, request, region);
-            case "SQS" -> sqsJsonHandler.handle(operation, request, region);
-            case "SNS" -> snsJsonHandler.handle(operation, request, region);
-            case "SFN" -> sfnJsonHandler.handle(operation, request, region);
-            case CLOUDWATCH_SERVICE_ID -> cloudWatchMetricsJsonHandler.handle(operation, request, region);
+        ServiceDescriptor descriptor = catalog.byCborSdkServiceId(serviceId).orElse(null);
+        if (descriptor == null) {
+            return null;
+        }
+        return switch (descriptor.externalKey()) {
+            case "dynamodb" -> {
+                if ("DynamoDB Streams".equals(serviceId)) {
+                    yield dynamoDbStreamsJsonHandler.handle(operation, request, region);
+                }
+                yield dynamoDbJsonHandler.handle(operation, request, region);
+            }
+            case "sqs" -> sqsJsonHandler.handle(operation, request, region);
+            case "sns" -> snsJsonHandler.handle(operation, request, region);
+            case "states" -> sfnJsonHandler.handle(operation, request, region);
+            case "monitoring" -> cloudWatchMetricsJsonHandler.handle(operation, request, region);
             default -> null;
         };
     }

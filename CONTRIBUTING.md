@@ -95,9 +95,12 @@ ln -s AGENT.md COPILOT.md
 1. Create a package under `src/main/java/.../services/<service>/`
 2. Add a Controller (follow the correct protocol — Query, JSON 1.1, REST JSON, or REST XML)
 3. Add a Service (`@ApplicationScoped`) and model POJOs
-4. Register in `ServiceRegistry`
-5. Add config entries in `EmulatorConfig.java` and `application.yml`
-6. Add integration tests in `*IntegrationTest.java`
+4. Add config entries in `EmulatorConfig.java` and `application.yml`
+5. Register a `ServiceDescriptor` in `ResolvedServiceCatalog`
+6. Wire controller/handler dispatch for the service
+7. Add integration tests in `*IntegrationTest.java`
+
+`ServiceRegistry`, `ServiceEnabledFilter`, and `StorageFactory` now resolve service metadata from the descriptor catalog. Adding a service should not require new service-keyed switch statements in those consumers.
 
 Always implement the **real AWS wire protocol** — never invent custom endpoints. The AWS SDK must work against Floci without modification.
 

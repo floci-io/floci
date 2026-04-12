@@ -136,6 +136,7 @@ public class AwsQueryController {
     private final CloudWatchMetricsQueryHandler cloudWatchMetricsQueryHandler;
     private final CognitoJsonHandler cognitoJsonHandler;
     private final Ec2QueryHandler ec2QueryHandler;
+    private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -148,6 +149,7 @@ public class AwsQueryController {
                               CloudWatchMetricsQueryHandler cloudWatchMetricsQueryHandler,
                               CognitoJsonHandler cognitoJsonHandler,
                               Ec2QueryHandler ec2QueryHandler,
+                              ResolvedServiceCatalog catalog,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
         this.elastiCacheQueryHandler = elastiCacheQueryHandler;
@@ -160,6 +162,7 @@ public class AwsQueryController {
         this.cloudWatchMetricsQueryHandler = cloudWatchMetricsQueryHandler;
         this.cognitoJsonHandler = cognitoJsonHandler;
         this.ec2QueryHandler = ec2QueryHandler;
+        this.catalog = catalog;
         this.regionResolver = regionResolver;
     }
 
@@ -269,15 +272,14 @@ public class AwsQueryController {
             "AdminAddUserToGroup", "AdminRemoveUserFromGroup", "AdminListGroupsForUser"
     );
 
-    private static final Set<String> QUERY_PROTOCOL_SERVICES = Set.of("sqs", "sns", "iam", "sts", "elasticache", "rds", "monitoring", "cloudformation", "email", "cognito-idp", "ec2");
-
     private String resolveService(String authorization, String action) {
         if (authorization != null && !authorization.isEmpty()) {
             Matcher m = SERVICE_PATTERN.matcher(authorization);
             if (m.find()) {
-                String svc = m.group(1).toLowerCase();
-                if (QUERY_PROTOCOL_SERVICES.contains(svc)) {
-                    return svc;
+                String scope = m.group(1).toLowerCase();
+                ServiceDescriptor descriptor = catalog.byCredentialScope(scope).orElse(null);
+                if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
+                    return descriptor.externalKey();
                 }
             }
         }

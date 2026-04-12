@@ -1,3 +1,13 @@
+## [Unreleased]
+
+
+### Bug Fixes
+
+* unify service metadata behind a descriptor-backed catalog for enablement, routing, and storage lookups
+* include `ec2` and `ecs` in enabled-service reporting and enforce disabled gating for ACM and ECS targeted requests
+* return protocol-correct JSON disabled responses for auth-only REST GETs instead of falling back to XML
+* honor `floci.storage.services.acm.*` overrides in `StorageFactory`
+
 ## [1.5.2](https://github.com/floci-io/floci/compare/1.5.1...1.5.2) (2026-04-10)
 
 
