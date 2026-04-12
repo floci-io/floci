@@ -228,6 +228,7 @@ public class ApiGatewayV2Service {
         getApi(region, apiId);
         Stage stage = new Stage();
         stage.setStageName((String) request.getOrDefault("stageName", "$default"));
+        stage.setDeploymentId((String) request.get("deploymentId"));
         stage.setAutoDeploy(Boolean.parseBoolean(String.valueOf(request.getOrDefault("autoDeploy", "false"))));
         stage.setCreatedDate(System.currentTimeMillis());
         stage.setLastUpdatedDate(System.currentTimeMillis());
