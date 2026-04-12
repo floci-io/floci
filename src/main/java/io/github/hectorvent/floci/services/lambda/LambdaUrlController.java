@@ -25,7 +25,7 @@ import java.util.Map;
 /**
  * AWS Lambda Function URL configuration API.
  */
-@Path("/2021-10-31/functions/{FunctionName}/url-config")
+@Path("/2021-10-31/functions/{FunctionName}/url")
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 public class LambdaUrlController {

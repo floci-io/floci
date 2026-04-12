@@ -467,7 +467,10 @@ public class LambdaService {
     public LambdaUrlConfig createFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
         LambdaUrlConfig urlConfig = new LambdaUrlConfig();
         urlConfig.setAuthType((String) request.getOrDefault("AuthType", "NONE"));
-        
+        if (request.containsKey("InvokeMode")) {
+            urlConfig.setInvokeMode((String) request.get("InvokeMode"));
+        }
+
         String urlId = UUID.nameUUIDFromBytes((region + functionName + (qualifier != null ? qualifier : "")).getBytes()).toString().replace("-", "").substring(0, 32);
         String baseHost = config.effectiveBaseUrl().replaceFirst("https?://", "");
         String url = String.format("http://%s.lambda-url.%s.%s/", urlId, region, baseHost);
@@ -496,6 +499,7 @@ public class LambdaService {
             if (alias.getUrlConfig() != null) {
                 throw new AwsException("ResourceConflictException", "Function URL config already exists for alias: " + qualifier, 409);
             }
+            urlConfig.setFunctionArn(alias.getAliasArn());
             alias.setUrlConfig(urlConfig);
             if (aliasStore != null) aliasStore.save(region, alias);
         } else {
@@ -503,6 +507,7 @@ public class LambdaService {
             if (fn.getUrlConfig() != null) {
                 throw new AwsException("ResourceConflictException", "Function URL config already exists for function: " + functionName, 409);
             }
+            urlConfig.setFunctionArn(fn.getFunctionArn());
             fn.setUrlConfig(urlConfig);
             functionStore.save(region, fn);
         }
@@ -530,6 +535,9 @@ public class LambdaService {
         
         if (request.containsKey("AuthType")) {
             urlConfig.setAuthType((String) request.get("AuthType"));
+        }
+        if (request.containsKey("InvokeMode")) {
+            urlConfig.setInvokeMode((String) request.get("InvokeMode"));
         }
 
         String now = DateTimeFormatter.ISO_INSTANT.format(Instant.now().atOffset(ZoneOffset.UTC));
