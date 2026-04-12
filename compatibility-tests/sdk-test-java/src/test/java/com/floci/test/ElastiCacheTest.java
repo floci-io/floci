@@ -17,6 +17,7 @@ import software.amazon.awssdk.services.elasticache.model.DeleteUserRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeReplicationGroupsRequest;
 import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
 import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
+import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
 import software.amazon.awssdk.services.elasticache.model.ReplicationGroupAlreadyExistsException;
 import software.amazon.awssdk.services.elasticache.model.ReplicationGroupNotFoundException;
@@ -191,10 +192,23 @@ class ElastiCacheTest {
 
     @Test
     @Order(8)
-    void userPasswordAllowsProxyAuth() throws Exception {
+    void associateUserWithGroupThenAuthSucceeds() throws Exception {
         requireUser();
         requireGroup();
 
+        // Before association, user auth should fail
+        String rejectReply = sendCommand(firstProxyPort, respArray("AUTH", userName, "user-password-1"));
+        assertThat(rejectReply).isEqualTo("-ERR invalid username-password pair or user is disabled.\r\n");
+
+        // Associate user with group via ModifyReplicationGroup
+        var response = elasticache.modifyReplicationGroup(ModifyReplicationGroupRequest.builder()
+                .replicationGroupId(groupId)
+                .userGroupIdsToAdd(userId)
+                .build());
+
+        assertThat(response.replicationGroup().replicationGroupId()).isEqualTo(groupId);
+
+        // After association, user auth should succeed
         try (Socket socket = openSocket(firstProxyPort)) {
             write(socket, respArray("AUTH", userName, "user-password-1"));
             assertThat(readLine(socket)).isEqualTo("+OK\r\n");
