@@ -341,6 +341,12 @@ class ApiGatewayV2ManagementTest {
         assertThat(listResponse.items())
                 .extracting(item -> item.stageName())
                 .contains(stageName);
+        // Verify deploymentId is present in the list response
+        assertThat(listResponse.items())
+                .filteredOn(item -> stageName.equals(item.stageName()))
+                .first()
+                .extracting(item -> item.deploymentId())
+                .isEqualTo(deploymentId);
     }
 
     @Test
