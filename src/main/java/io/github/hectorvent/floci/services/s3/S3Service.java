@@ -663,6 +663,15 @@ public class S3Service {
         List<S3Object> versions = new ArrayList<>(objectStore.scan(key ->
                 key.startsWith(fullPrefix) && key.contains("#v#")));
 
+        // Also include non-versioned objects (no #v# in storage key, versionId == null).
+        // These are objects uploaded when versioning was disabled or before versioning was enabled.
+        // Versioned latest-pointer entries (also stored at the plain key) are excluded because
+        // they have a non-null versionId; their #v# entry is already captured above.
+        objectStore.scan(key -> key.startsWith(fullPrefix) && !key.contains("#v#"))
+                .stream()
+                .filter(obj -> obj.getVersionId() == null)
+                .forEach(versions::add);
+
         // Sort by key, then by lastModified descending
         versions.sort((a, b) -> {
             int keyCompare = a.getKey().compareTo(b.getKey());

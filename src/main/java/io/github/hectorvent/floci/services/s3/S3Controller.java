@@ -949,7 +949,7 @@ public class S3Controller {
             } else {
                 xml.start("Version")
                    .elem("Key", obj.getKey())
-                   .elem("VersionId", obj.getVersionId())
+                   .elem("VersionId", obj.getVersionId() != null ? obj.getVersionId() : "null")
                    .elem("IsLatest", obj.isLatest())
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .elem("ETag", obj.getETag())

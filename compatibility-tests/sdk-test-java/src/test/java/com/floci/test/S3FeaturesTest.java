@@ -25,6 +25,7 @@ class S3FeaturesTest {
     private static final String BUCKET_VERSIONS  = "compat-versions-bucket";
     private static final String BUCKET_PAB       = "compat-pab-bucket";
     private static final String BUCKET_PAGINATE  = "compat-paginate-bucket";
+    private static final String BUCKET_334       = "compat-334-bucket";
 
     @BeforeAll
     static void setup() {
@@ -32,6 +33,7 @@ class S3FeaturesTest {
         createBucket(BUCKET_VERSIONS);
         createBucket(BUCKET_PAB);
         createBucket(BUCKET_PAGINATE);
+        createBucket(BUCKET_334);
     }
 
     @AfterAll
@@ -40,9 +42,11 @@ class S3FeaturesTest {
         deleteBucketContents(BUCKET_VERSIONS);
         deleteBucketContents(BUCKET_PAB);
         deleteBucketContents(BUCKET_PAGINATE);
+        deleteBucketContents(BUCKET_334);
         quietDeleteBucket(BUCKET_VERSIONS);
         quietDeleteBucket(BUCKET_PAB);
         quietDeleteBucket(BUCKET_PAGINATE);
+        quietDeleteBucket(BUCKET_334);
         s3.close();
     }
 
@@ -127,6 +131,69 @@ class S3FeaturesTest {
 
         // We put at least 5 versions total — should all be collected across pages
         assertThat(allVersions.size()).isGreaterThanOrEqualTo(5);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Issue #334 — listObjectVersions must return non-versioned objects
+    // ─────────────────────────────────────────────────────────────────────────
+
+    /**
+     * Objects uploaded to a bucket that has never had versioning enabled must appear in
+     * ListObjectVersions with VersionId="null" (the literal string, per AWS spec).
+     */
+    @Test
+    @Order(13)
+    @DisplayName("#334 listObjectVersions: non-versioned bucket returns objects with VersionId=null")
+    void listObjectVersionsNonVersionedBucketReturnsObjects() {
+        s3.putObject(PutObjectRequest.builder().bucket(BUCKET_334).key("file-a.txt").build(),
+                RequestBody.fromString("content-a"));
+        s3.putObject(PutObjectRequest.builder().bucket(BUCKET_334).key("file-b.txt").build(),
+                RequestBody.fromString("content-b"));
+
+        ListObjectVersionsResponse response = s3.listObjectVersions(
+                ListObjectVersionsRequest.builder().bucket(BUCKET_334).build());
+
+        List<ObjectVersion> versions = response.versions();
+        assertThat(versions).hasSize(2);
+
+        List<String> keys = versions.stream().map(ObjectVersion::key).toList();
+        assertThat(keys).containsExactlyInAnyOrder("file-a.txt", "file-b.txt");
+
+        // AWS returns the literal string "null" for objects uploaded without versioning
+        assertThat(versions).allMatch(v -> "null".equals(v.versionId()));
+        assertThat(versions).allMatch(ObjectVersion::isLatest);
+    }
+
+    /**
+     * Objects uploaded before versioning was enabled must appear in ListObjectVersions
+     * alongside objects uploaded after versioning was enabled.
+     * Pre-versioning objects appear with VersionId="null"; post-versioning objects have a UUID.
+     */
+    @Test
+    @Order(14)
+    @DisplayName("#334 listObjectVersions: pre-versioning objects appear alongside versioned entries")
+    void listObjectVersionsPreVersioningObjectsAppearsWithNullVersionId() {
+        // plain.txt was put at order 10, before versioning was enabled at order 11.
+        // It should appear in the listing with VersionId="null".
+        ListObjectVersionsResponse response = s3.listObjectVersions(
+                ListObjectVersionsRequest.builder().bucket(BUCKET_VERSIONS).build());
+
+        List<ObjectVersion> all = response.versions();
+
+        // Pre-versioning object
+        List<ObjectVersion> plainVersions = all.stream()
+                .filter(v -> "plain.txt".equals(v.key()))
+                .toList();
+        assertThat(plainVersions).hasSize(1);
+        assertThat(plainVersions.get(0).versionId()).isEqualTo("null");
+        assertThat(plainVersions.get(0).isLatest()).isTrue();
+
+        // Versioned objects uploaded after versioning was enabled must have UUID version IDs
+        List<ObjectVersion> versioned = all.stream()
+                .filter(v -> "versioned.txt".equals(v.key()))
+                .toList();
+        assertThat(versioned).hasSizeGreaterThanOrEqualTo(2);
+        assertThat(versioned).allMatch(v -> v.versionId() != null && !"null".equals(v.versionId()));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
