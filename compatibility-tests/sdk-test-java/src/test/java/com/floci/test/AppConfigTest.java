@@ -5,6 +5,7 @@ import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfig.model.*;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
+import software.amazon.awssdk.services.appconfigdata.model.BadRequestException;
 import software.amazon.awssdk.services.appconfigdata.model.GetLatestConfigurationRequest;
 import software.amazon.awssdk.services.appconfigdata.model.GetLatestConfigurationResponse;
 import software.amazon.awssdk.services.appconfigdata.model.StartConfigurationSessionRequest;
@@ -12,6 +13,7 @@ import software.amazon.awssdk.services.appconfigdata.model.StartConfigurationSes
 import java.nio.charset.StandardCharsets;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 @DisplayName("AppConfig")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -25,6 +27,11 @@ class AppConfigTest {
     private static String configurationProfileId;
     private static String deploymentStrategyId;
     private static String configurationToken;
+    private static String secondConfigurationToken;
+    private static String intervalSessionToken;
+    private static String emptyAppId;
+    private static String emptyEnvId;
+    private static String emptyProfileId;
 
     @BeforeAll
     static void setup() {
@@ -146,5 +153,108 @@ class AppConfigTest {
         assertThat(response.contentType()).startsWith("application/json");
         assertThat(response.versionLabel()).isEqualTo("1");
         assertThat(response.nextPollConfigurationToken()).isNotNull();
+        secondConfigurationToken = response.nextPollConfigurationToken();
+    }
+
+    @Test
+    @Order(9)
+    void staleConfigurationTokenIsRejected() {
+        assertThrows(BadRequestException.class, () -> appConfigData.getLatestConfiguration(
+                GetLatestConfigurationRequest.builder()
+                        .configurationToken(configurationToken)
+                        .build()));
+    }
+
+    @Test
+    @Order(10)
+    void invalidConfigurationTokenIsRejected() {
+        assertThrows(BadRequestException.class, () -> appConfigData.getLatestConfiguration(
+                GetLatestConfigurationRequest.builder()
+                        .configurationToken("not-a-real-token")
+                        .build()));
+    }
+
+    @Test
+    @Order(11)
+    void updatedDeploymentIsVisibleOnNextPollToken() {
+        CreateHostedConfigurationVersionResponse versionResponse = appConfig.createHostedConfigurationVersion(
+                CreateHostedConfigurationVersionRequest.builder()
+                        .applicationId(applicationId)
+                        .configurationProfileId(configurationProfileId)
+                        .content(SdkBytes.fromString("{\"key\": \"value-2\"}", StandardCharsets.UTF_8))
+                        .contentType("application/json")
+                        .build());
+        assertThat(versionResponse.versionNumber()).isEqualTo(2);
+
+        appConfig.startDeployment(StartDeploymentRequest.builder()
+                .applicationId(applicationId)
+                .environmentId(environmentId)
+                .configurationProfileId(configurationProfileId)
+                .configurationVersion("2")
+                .deploymentStrategyId(deploymentStrategyId)
+                .build());
+
+        GetLatestConfigurationResponse response = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
+                .configurationToken(secondConfigurationToken)
+                .build());
+
+        assertThat(response.configuration().asString(StandardCharsets.UTF_8)).isEqualTo("{\"key\": \"value-2\"}");
+        assertThat(response.versionLabel()).isEqualTo("2");
+    }
+
+    @Test
+    @Order(12)
+    void requiredMinimumPollIntervalIsAcceptedButNotEnforced() {
+        var sessionResponse = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
+                .applicationIdentifier(applicationId)
+                .environmentIdentifier(environmentId)
+                .configurationProfileIdentifier(configurationProfileId)
+                .requiredMinimumPollIntervalInSeconds(60)
+                .build());
+
+        intervalSessionToken = sessionResponse.initialConfigurationToken();
+        GetLatestConfigurationResponse firstResponse = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
+                .configurationToken(intervalSessionToken)
+                .build());
+        GetLatestConfigurationResponse secondResponse = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
+                .configurationToken(firstResponse.nextPollConfigurationToken())
+                .build());
+
+        assertThat(firstResponse.nextPollConfigurationToken()).isNotNull();
+        assertThat(secondResponse.nextPollConfigurationToken()).isNotNull();
+    }
+
+    @Test
+    @Order(13)
+    void emptyConfigurationReturnsEmptyPayload() {
+        emptyAppId = appConfig.createApplication(CreateApplicationRequest.builder()
+                .name(TestFixtures.uniqueName("empty-app"))
+                .build()).id();
+
+        emptyEnvId = appConfig.createEnvironment(CreateEnvironmentRequest.builder()
+                .applicationId(emptyAppId)
+                .name("empty-env")
+                .build()).id();
+
+        emptyProfileId = appConfig.createConfigurationProfile(CreateConfigurationProfileRequest.builder()
+                .applicationId(emptyAppId)
+                .name("empty-config")
+                .locationUri("hosted")
+                .type("AWS.Freeform")
+                .build()).id();
+
+        String emptyToken = appConfigData.startConfigurationSession(StartConfigurationSessionRequest.builder()
+                .applicationIdentifier(emptyAppId)
+                .environmentIdentifier(emptyEnvId)
+                .configurationProfileIdentifier(emptyProfileId)
+                .build()).initialConfigurationToken();
+
+        GetLatestConfigurationResponse response = appConfigData.getLatestConfiguration(GetLatestConfigurationRequest.builder()
+                .configurationToken(emptyToken)
+                .build());
+
+        assertThat(response.configuration().asByteArray()).isEmpty();
+        assertThat(response.contentType()).isEqualTo("application/octet-stream");
+        assertThat(response.versionLabel()).isNull();
     }
 }
