@@ -66,7 +66,13 @@ public class LambdaService {
      */
     private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
 
-    /** Package-private constructor for testing without CDI. Config defaults (timeout=3, memory=128) apply. */
+    /**
+     * Package-private constructor for testing without CDI. Config defaults
+     * (timeout=3, memory=128) apply. A real {@link LambdaConcurrencyLimiter}
+     * with AWS-default limits is wired so concurrency operations exercise
+     * the same validation and bookkeeping as production rather than
+     * silently no-op'ing past null checks.
+     */
     LambdaService(LambdaFunctionStore functionStore,
                   WarmPool warmPool,
                   CodeStore codeStore,
@@ -74,7 +80,7 @@ public class LambdaService {
                   RegionResolver regionResolver) {
         this.functionStore = functionStore;
         this.executorService = null;
-        this.concurrencyLimiter = null;
+        this.concurrencyLimiter = new LambdaConcurrencyLimiter();
         this.warmPool = warmPool;
         this.codeStore = codeStore;
         this.zipExtractor = zipExtractor;
