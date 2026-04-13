@@ -29,6 +29,8 @@ floci:
         flush-interval-ms: 60000
       secretsmanager:
         flush-interval-ms: 60000
+      acm:
+        flush-interval-ms: 60000
       opensearch:
         flush-interval-ms: 60000
 
@@ -60,6 +62,8 @@ floci:
       enabled: true
     apigateway:
       enabled: true
+    apigatewayv2:
+      enabled: true
     iam:
       enabled: true
     elasticache:
@@ -69,7 +73,7 @@ floci:
       default-image: "valkey/valkey:8"
     rds:
       enabled: true
-      proxy-base-port: 7000
+      proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
@@ -96,11 +100,17 @@ floci:
       enabled: true
     cloudformation:
       enabled: true
+    acm:
+      enabled: true
+      validation-wait-seconds: 0
     ses:
       enabled: true
     opensearch:
       enabled: true
       mode: mock
+      default-image: "opensearchproject/opensearch:2"
+      proxy-base-port: 9400
+      proxy-max-port: 9499
     ec2:
       enabled: true
     ecs:
@@ -109,5 +119,6 @@ floci:
     appconfig:
       enabled: true
     appconfigdata:
+      enabled: true
     ecr:
       enabled: true

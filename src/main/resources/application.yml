@@ -81,6 +81,8 @@ floci:
       container-idle-timeout-seconds: 300
     apigateway:
       enabled: true
+    apigatewayv2:
+      enabled: true
     iam:
       enabled: true
     elasticache:

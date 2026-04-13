@@ -29,7 +29,7 @@ See [Docker Compose — Multi-container networking](./docker-compose.md#multi-co
 
 ## Full Reference
 
-The block below mirrors `src/main/resources/application.yml`, it's the effective set of keys Floci ships with. Any key not listed here (for example `floci.init-hooks.*` or some `ecs.*` knobs) is available only as a code-level override via environment variables.
+The block below mirrors `src/main/resources/application.yml`, it's the effective set of keys Floci ships with. Some supported keys are omitted here (for example `floci.init-hooks.*`) but can still be provided via YAML or environment variables.
 
 ```yaml
 floci:
@@ -103,6 +103,9 @@ floci:
     apigateway:
       enabled: true
 
+    apigatewayv2:
+      enabled: true
+
     iam:
       enabled: true
 
@@ -172,6 +175,23 @@ floci:
     ecs:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
+
+    appconfig:
+      enabled: true
+
+    appconfigdata:
+      enabled: true
+
+    ecr:
+      enabled: true
+      registry-image: "registry:2"
+      registry-container-name: floci-ecr-registry
+      registry-base-port: 5100
+      registry-max-port: 5199
+      data-path: ./data/ecr
+      tls-enabled: false
+      keep-running-on-shutdown: true
+      uri-style: hostname                     # hostname | path
 ```
 
 ### Initialization hooks
