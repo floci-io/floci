@@ -135,7 +135,7 @@ jobs:
           path: target/quarkus-app/
 
       - name: Build and push JVM image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: Dockerfile.jvm-package
@@ -150,7 +150,7 @@ jobs:
             VERSION=${{ steps.version.outputs.version }}
 
       - name: Build and push JVM image (With AWS CLI)
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: Dockerfile.jvm-package
@@ -201,7 +201,7 @@ jobs:
           chmod +x target/*-runner
 
       - name: Build and push amd64 native image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: Dockerfile.native-package
@@ -219,7 +219,7 @@ jobs:
           chmod +x target/*-runner
 
       - name: Build and push arm64 native image
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         with:
           context: .
           file: Dockerfile.native-package
