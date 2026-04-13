@@ -70,7 +70,8 @@ public class StsQueryHandler {
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
         // Register session so IAM enforcement can resolve the role's policies
-        iamService.registerSession(accessKeyId, roleArn, expiration);
+        String sessionPolicy = getParam(params, "Policy");
+        iamService.registerSession(accessKeyId, roleArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -125,6 +126,9 @@ public class StsQueryHandler {
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
         String provider = providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com";
 
+        String sessionPolicy = getParam(params, "Policy");
+        iamService.registerSession(accessKeyId, roleArn, expiration, sessionPolicy);
+
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
                 .start("AssumedRoleUser")
@@ -158,6 +162,8 @@ public class StsQueryHandler {
         String assumedRoleArn = "arn:aws:sts::" + accountId + ":assumed-role/" + roleName + "/" + sessionName;
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
+        iamService.registerSession(accessKeyId, roleArn, expiration, null);
+
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
                 .start("AssumedRoleUser")
@@ -189,6 +195,10 @@ public class StsQueryHandler {
         String accountId = iamService.getAccountId();
         String federatedUserId = accountId + ":" + name;
         String federatedUserArn = "arn:aws:sts::" + accountId + ":federated-user/" + name;
+
+        String sessionPolicy = getParam(params, "Policy");
+        // Register federation token so enforcement can scope its policies via session policy
+        iamService.registerSession(accessKeyId, federatedUserArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))

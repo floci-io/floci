@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
@@ -821,19 +822,28 @@ public class IamService {
     }
 
     /**
-     * Collects all identity-based policy documents applicable to the caller identified
-     * by {@code accessKeyId}.
+     * Stores an assumed-role session with an optional inline session policy document.
+     */
+    public void registerSession(String sessionAccessKeyId, String roleArn, java.time.Instant expiration,
+                                String sessionPolicyDocument) {
+        sessions.put(sessionAccessKeyId,
+                new SessionCredential(sessionAccessKeyId, roleArn, expiration, sessionPolicyDocument));
+    }
+
+    /**
+     * Resolves the full caller context for the given access key, including identity policies,
+     * optional session policy, and optional permission boundary.
      *
      * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
-     * Returns an empty list if the key is known but has no policies attached (implicit deny).
-     *
-     * <p>Order: inline policies first, then attached managed policies.
      */
-    public List<String> resolveCallerPolicies(String accessKeyId) {
+    public CallerContext resolveCallerContext(String accessKeyId) {
         // Check user access keys
         Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
         if (akOpt.isPresent()) {
-            return collectUserPolicies(akOpt.get().getUserName());
+            String userName = akOpt.get().getUserName();
+            List<String> identityPolicies = collectUserPolicies(userName);
+            String boundaryDoc = resolveUserBoundaryDocument(userName);
+            return new CallerContext(identityPolicies, null, boundaryDoc);
         }
 
         // Check assumed-role sessions
@@ -844,11 +854,86 @@ public class IamService {
                 sessions.delete(accessKeyId);
                 return null; // expired — unknown key → bypass
             }
-            return collectRolePolicies(session.getRoleArn());
+            List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
+            String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
+            return new CallerContext(identityPolicies, session.getSessionPolicyDocument(), boundaryDoc);
         }
 
         // Unknown key — bypass
         return null;
+    }
+
+    /**
+     * Collects all identity-based policy documents applicable to the caller identified
+     * by {@code accessKeyId}.
+     *
+     * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
+     * Returns an empty list if the key is known but has no policies attached (implicit deny).
+     *
+     * <p>Order: inline policies first, then attached managed policies.
+     */
+    public List<String> resolveCallerPolicies(String accessKeyId) {
+        CallerContext ctx = resolveCallerContext(accessKeyId);
+        return ctx == null ? null : ctx.identityPolicies();
+    }
+
+    private String resolveUserBoundaryDocument(String userName) {
+        return users.get(userName)
+                .map(IamUser::getPermissionsBoundaryArn)
+                .flatMap(arn -> policies.get(arn))
+                .map(IamPolicy::getDefaultDocument)
+                .orElse(null);
+    }
+
+    private String resolveRoleBoundaryDocument(String roleArn) {
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+        return roles.get(roleName)
+                .map(IamRole::getPermissionsBoundaryArn)
+                .flatMap(arn -> policies.get(arn))
+                .map(IamPolicy::getDefaultDocument)
+                .orElse(null);
+    }
+
+    // =========================================================================
+    // Permission Boundaries
+    // =========================================================================
+
+    public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn) {
+        getPolicy(permissionsBoundaryArn); // validate policy exists
+        IamUser user = getUser(userName);
+        user.setPermissionsBoundaryArn(permissionsBoundaryArn);
+        users.put(userName, user);
+        LOG.infov("Set permissions boundary for user {0}: {1}", userName, permissionsBoundaryArn);
+    }
+
+    public void deleteUserPermissionsBoundary(String userName) {
+        IamUser user = getUser(userName);
+        if (user.getPermissionsBoundaryArn() == null) {
+            throw new AwsException("NoSuchEntity",
+                    "User " + userName + " does not have a permissions boundary.", 404);
+        }
+        user.setPermissionsBoundaryArn(null);
+        users.put(userName, user);
+        LOG.infov("Deleted permissions boundary for user: {0}", userName);
+    }
+
+    public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn) {
+        getPolicy(permissionsBoundaryArn); // validate policy exists
+        IamRole role = getRole(roleName);
+        role.setPermissionsBoundaryArn(permissionsBoundaryArn);
+        roles.put(roleName, role);
+        LOG.infov("Set permissions boundary for role {0}: {1}", roleName, permissionsBoundaryArn);
+    }
+
+    public void deleteRolePermissionsBoundary(String roleName) {
+        IamRole role = getRole(roleName);
+        if (role.getPermissionsBoundaryArn() == null) {
+            throw new AwsException("NoSuchEntity",
+                    "Role " + roleName + " does not have a permissions boundary.", 404);
+        }
+        role.setPermissionsBoundaryArn(null);
+        roles.put(roleName, role);
+        LOG.infov("Deleted permissions boundary for role: {0}", roleName);
     }
 
     private List<String> collectUserPolicies(String userName) {
