@@ -107,18 +107,18 @@ class StepFunctionsSqsIntegrationTest {
 
     @Test
     @Order(4)
-    void awsSdk_unsupportedOperation_fails_withSqsPrefix() throws Exception {
-        String definition = buildStateMachineDefinition("arn:aws:states:::aws-sdk:sqs:unsupportedAction", """
+    void awsSdk_nonExistentQueue_fails_withSdkStyleErrorName() throws Exception {
+        String definition = buildStateMachineDefinition("arn:aws:states:::aws-sdk:sqs:sendMessage", """
                 {
-                    "QueueUrl": "%s",
+                    "QueueUrl": "http://localhost:4566/000000000000/does-not-exist",
                     "MessageBody": "noop"
                 }
-                """.formatted(queueUrl));
+                """);
 
-        String smArn = createStateMachine("aws-sdk-sqs-unsupported-" + System.currentTimeMillis(), definition);
+        String smArn = createStateMachine("aws-sdk-sqs-missing-queue-" + System.currentTimeMillis(), definition);
         String execArn = startExecution(smArn, "{}");
         Response failed = waitForFailedExecution(execArn);
-        assertEquals("Sqs.UnsupportedOperation", failed.jsonPath().getString("error"));
+        assertEquals("Sqs.QueueDoesNotExistException", failed.jsonPath().getString("error"));
     }
 
     @Test

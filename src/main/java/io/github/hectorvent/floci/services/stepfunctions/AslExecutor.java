@@ -351,11 +351,10 @@ public class AslExecutor {
             return invokeOptimizedSqsSendMessage(input, region);
         }
 
-        // AWS SDK service integrations: SQS
-        if (resource.startsWith("arn:aws:states:::aws-sdk:sqs:")) {
-            String camelCaseAction = resource.substring("arn:aws:states:::aws-sdk:sqs:".length());
+        // AWS SDK service integration: SQS SendMessage
+        if (resource.equals("arn:aws:states:::aws-sdk:sqs:sendMessage")) {
             String region = extractRegionFromArn(sm.getStateMachineArn());
-            return invokeAwsSdkSqs(camelCaseAction, input, region);
+            return invokeAwsSdkSqsSendMessage(input, region);
         }
 
         // Nested state machine integration
@@ -588,17 +587,20 @@ public class AslExecutor {
         return invokeSqsAction("SendMessage", request, region, "SQS.");
     }
 
-    private JsonNode invokeAwsSdkSqs(String camelCaseAction, JsonNode input, String region) {
-        String pascalAction = Character.toUpperCase(camelCaseAction.charAt(0)) + camelCaseAction.substring(1);
-        return invokeSqsAction(pascalAction, input, region, "Sqs.");
+    private JsonNode invokeAwsSdkSqsSendMessage(JsonNode input, String region) {
+        return invokeSqsAction("SendMessage", input, region, "Sqs.", true);
     }
 
     private JsonNode invokeSqsAction(String action, JsonNode input, String region, String errorPrefix) {
+        return invokeSqsAction(action, input, region, errorPrefix, false);
+    }
+
+    private JsonNode invokeSqsAction(String action, JsonNode input, String region, String errorPrefix, boolean awsSdkStyleErrors) {
         jakarta.ws.rs.core.Response response;
         try {
             response = sqsJsonHandler.handle(action, input, region);
         } catch (AwsException e) {
-            throw new FailStateException(errorPrefix + e.getErrorCode(), e.getMessage());
+            throw new FailStateException(errorPrefix + normalizeSqsErrorCode(e.getErrorCode(), awsSdkStyleErrors), e.getMessage());
         } catch (Exception e) {
             throw new FailStateException(errorPrefix + "InternalServerError",
                     e.getMessage() != null ? e.getMessage() : "SQS error");
@@ -609,10 +611,10 @@ public class AslExecutor {
 
         if (status >= 400) {
             if (entity instanceof AwsErrorResponse err) {
-                throw new FailStateException(errorPrefix + err.type(), err.message());
+                throw new FailStateException(errorPrefix + normalizeSqsErrorCode(err.type(), awsSdkStyleErrors), err.message());
             }
             if (entity instanceof JsonNode errorNode) {
-                String errorName = errorNode.path("__type").asText("UnknownError");
+                String errorName = normalizeSqsErrorCode(errorNode.path("__type").asText("UnknownError"), awsSdkStyleErrors);
                 String errorMessage = errorNode.path("message").asText(
                         errorNode.path("Message").asText("SQS operation failed"));
                 throw new FailStateException(errorPrefix + errorName, errorMessage);
@@ -624,6 +626,24 @@ public class AslExecutor {
             return jsonNode;
         }
         return objectMapper.createObjectNode();
+    }
+
+    private String normalizeSqsErrorCode(String errorCode, boolean awsSdkStyleErrors) {
+        if (!awsSdkStyleErrors || errorCode == null || errorCode.isBlank()) {
+            return errorCode;
+        }
+        return switch (errorCode) {
+            case "AWS.SimpleQueueService.NonExistentQueue" -> "QueueDoesNotExistException";
+            case "UnsupportedOperation" -> "UnsupportedOperationException";
+            case "ReceiptHandleIsInvalid" -> "ReceiptHandleIsInvalidException";
+            case "QueueAlreadyExists" -> "QueueNameExistsException";
+            case "InvalidAddress" -> "InvalidAddressException";
+            case "InvalidSecurity" -> "InvalidSecurityException";
+            case "InvalidMessageContents" -> "InvalidMessageContentsException";
+            case "OverLimit" -> "OverLimitException";
+            case "RequestThrottled" -> "RequestThrottledException";
+            default -> errorCode;
+        };
     }
 
     private StateResult executeChoiceState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context) throws Exception {
