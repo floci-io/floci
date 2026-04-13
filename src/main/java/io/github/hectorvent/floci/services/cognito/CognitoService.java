@@ -1,29 +1,18 @@
 package io.github.hectorvent.floci.services.cognito;
 
-import io.github.hectorvent.floci.core.common.AwsException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import com.fasterxml.jackson.core.type.TypeReference;
-import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
-import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
-import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
-import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
-import io.github.hectorvent.floci.services.cognito.model.UserPool;
-import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cognito.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
-import java.security.KeyFactory;
-import java.security.KeyPair;
-import java.security.KeyPairGenerator;
-import java.security.MessageDigest;
-import java.security.PrivateKey;
-import java.security.PublicKey;
-import java.security.Signature;
+import java.security.*;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
@@ -177,7 +166,17 @@ public class CognitoService {
         client.setAllowedOAuthFlows(normalizeStringList(allowedOAuthFlows));
         client.setAllowedOAuthScopes(normalizeStringList(allowedOAuthScopes));
         if (generateSecret) {
-            client.setClientSecret(generateSecretValue());
+            String clientSecret = generateSecretValue();
+            client.setClientSecret(clientSecret);
+
+            long epochMillis = System.currentTimeMillis();
+            UserPoolClientSecret userPoolClientSecret = new UserPoolClientSecret(
+                    clientId + "--" + epochMillis,
+                    epochMillis / 1000,
+                    clientSecret
+            );
+
+            client.getUserPoolClientSecrets().add(userPoolClientSecret);
         }
         clientStore.put(clientId, client);
         LOG.infov("Created User Pool Client: {0} for pool {1}", clientId, userPoolId);
@@ -200,6 +199,68 @@ public class CognitoService {
     public void deleteUserPoolClient(String userPoolId, String clientId) {
         describeUserPoolClient(userPoolId, clientId);
         clientStore.delete(clientId);
+    }
+
+    public List<UserPoolClientSecret> listUserPoolClientSecrets(String userPoolId, String clientId) {
+        UserPoolClient client = clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+        if (!client.getUserPoolId().equals(userPoolId)) {
+            throw new AwsException("ResourceNotFoundException", "User pool client not found", 404);
+        }
+        return client.getUserPoolClientSecrets();
+    }
+
+    public UserPoolClientSecret addUserPoolClientSecret(String clientId, String clientSecret, String userPoolId) {
+        UserPoolClient client = clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+        if (!client.getUserPoolId().equals(userPoolId)) {
+            throw new AwsException("ResourceNotFoundException", "User pool client not found", 404);
+        }
+
+        if (client.getUserPoolClientSecrets().size() >= 2) {
+            throw new AwsException("LimitExceededException", "Client secrets cannot exceed limit of 2 secrets.", 400);
+        }
+
+        if (clientSecret == null) {
+            clientSecret = generateSecretValue();
+        }
+        long epochMillis = System.currentTimeMillis();
+        UserPoolClientSecret userPoolClientSecret = new UserPoolClientSecret(
+                clientId + "--" + epochMillis,
+                epochMillis / 1000,
+                clientSecret
+        );
+
+        client.getUserPoolClientSecrets().add(userPoolClientSecret);
+
+        return userPoolClientSecret;
+    }
+
+    public void deleteUserPoolClientSecret(String clientId, String clientSecretId, String userPoolId) {
+        UserPoolClient client = clientStore.get(clientId)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+        if (!client.getUserPoolId().equals(userPoolId)) {
+            throw new AwsException("ResourceNotFoundException", "User pool client not found", 404);
+        }
+
+        UserPoolClientSecret userPoolClientSecret = client.getUserPoolClientSecrets().stream()
+                .filter(s -> s.getClientSecretId().equals(clientSecretId))
+                .findFirst()
+                .orElseThrow(() -> new AwsException(
+                        "ResourceNotFoundException", "Client secret does not exist", 404));
+
+        if (client.getUserPoolClientSecrets().size() <= 1) {
+            throw new AwsException(
+                    "InvalidParameterException", "Cannot delete the only " +
+                    "client secret.", 400
+            );
+        }
+
+        if (userPoolClientSecret.getClientSecretValue().equals(client.getClientSecret())) {
+            client.setClientSecret(null);
+        }
+
+        client.getUserPoolClientSecrets().remove(userPoolClientSecret);
     }
 
     // ──────────────────────────── Resource Servers ────────────────────────────
@@ -961,15 +1022,23 @@ public class CognitoService {
 
     private void validateClientSecret(UserPoolClient client, String clientSecret) {
         String expectedSecret = client.getClientSecret();
-        if (expectedSecret == null || expectedSecret.isBlank() || !client.isGenerateSecret()) {
+        if (client.getUserPoolClientSecrets().isEmpty()
+                && (expectedSecret == null || expectedSecret.isBlank() || !client.isGenerateSecret())) {
             throw new AwsException("InvalidClientException", "Client must have a secret for client_credentials", 400);
         }
         if (clientSecret == null || clientSecret.isBlank()) {
             throw new AwsException("InvalidClientException", "Client secret is required", 400);
         }
-        if (!expectedSecret.equals(clientSecret)) {
-            throw new AwsException("InvalidClientException", "Client secret is invalid", 400);
+        for (UserPoolClientSecret userPoolClientSecret : client.getUserPoolClientSecrets()) {
+            if (clientSecret.equals(userPoolClientSecret.getClientSecretValue())) {
+                return;
+            }
         }
+        // for "legacy" clients
+        if (expectedSecret != null && expectedSecret.equals(clientSecret)) {
+            return;
+        }
+        throw new AwsException("InvalidClientException", "Client secret is invalid", 400);
     }
 
     private void validateClientAllowsClientCredentials(UserPoolClient client) {

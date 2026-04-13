@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServerScope;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolClientSecret;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -73,6 +74,9 @@ public class CognitoJsonHandler {
             case "AdminRemoveUserFromGroup" -> handleAdminRemoveUserFromGroup(request);
             case "AdminListGroupsForUser" -> handleAdminListGroupsForUser(request);
             case "GetTokensFromRefreshToken" -> handleGetTokensFromRefreshToken(request);
+            case "ListUserPoolClientSecrets" -> handleListUserPoolClientSecrets(request);
+            case "AddUserPoolClientSecret" -> handleAddUserPoolClientSecret(request);
+            case "DeleteUserPoolClientSecret" -> handleDeleteUserPoolClientSecret(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -615,6 +619,53 @@ public class CognitoJsonHandler {
         if (g.getRoleArn() != null) node.put("RoleArn", g.getRoleArn());
         node.put("CreationDate", g.getCreationDate());
         node.put("LastModifiedDate", g.getLastModifiedDate());
+        return node;
+    }
+
+    private Response handleListUserPoolClientSecrets(JsonNode request) {
+        List<UserPoolClientSecret> clientSecrets =
+                service.listUserPoolClientSecrets(
+                        request.path("UserPoolId").asText(),
+                        request.path("ClientId").asText()
+                );
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("ClientSecrets");
+        clientSecrets.forEach(cs -> items.add(clientSecretToNode(cs, false)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleAddUserPoolClientSecret(JsonNode request) {
+        String clientId = request.path("ClientId").asText();
+        String clientSecret = request.path("ClientSecret").asText(null);
+        String userPoolId = request.path("UserPoolId").asText();
+
+        UserPoolClientSecret cs = service.addUserPoolClientSecret(
+                clientId, clientSecret, userPoolId
+        );
+
+        boolean includeClientSecretValue = clientSecret == null;
+        ObjectNode response = clientSecretToNode(cs, includeClientSecretValue);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteUserPoolClientSecret(JsonNode request) {
+        String clientId = request.path("ClientId").asText();
+        String clientSecretId = request.path("ClientSecretId").asText();
+        String userPoolId = request.path("UserPoolId").asText();
+
+        service.deleteUserPoolClientSecret(clientId, clientSecretId, userPoolId);
+
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private ObjectNode clientSecretToNode(UserPoolClientSecret cs,
+                                          boolean includeClientSecretValue) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("ClientSecretId", cs.getClientSecretId());
+        if (includeClientSecretValue) {
+            node.put("ClientSecretValue", cs.getClientSecretValue());
+        }
+        node.put("ClientSecretCreateDate", cs.getClientSecretCreateDate());
         return node;
     }
 

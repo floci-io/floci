@@ -13,6 +13,7 @@ public class UserPoolClient {
     private String userPoolId;
     private String clientName;
     private String clientSecret;
+    private List<UserPoolClientSecret> userPoolClientSecrets = new ArrayList<>();
     private boolean generateSecret;
     private boolean allowedOAuthFlowsUserPoolClient;
     private List<String> allowedOAuthFlows = new ArrayList<>();
@@ -37,6 +38,13 @@ public class UserPoolClient {
 
     public String getClientSecret() { return clientSecret; }
     public void setClientSecret(String clientSecret) { this.clientSecret = clientSecret; }
+
+    public List<UserPoolClientSecret> getUserPoolClientSecrets() {
+        return userPoolClientSecrets;
+    }
+    public void setUserPoolClientSecrets(List<UserPoolClientSecret> userPoolClientSecrets) {
+        this.userPoolClientSecrets = userPoolClientSecrets;
+    }
 
     public boolean isGenerateSecret() { return generateSecret; }
     public void setGenerateSecret(boolean generateSecret) { this.generateSecret = generateSecret; }
