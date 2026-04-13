@@ -345,7 +345,15 @@ public class IamService {
                         "Policy " + policyArn + " does not exist.", 404));
     }
 
+    private void rejectIfAwsManaged(String policyArn) {
+        if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            throw new AwsException("AccessDenied",
+                    "Cannot modify or delete AWS managed policy: " + policyArn, 403);
+        }
+    }
+
     public void deletePolicy(String policyArn) {
+        rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
         if (policy.getAttachmentCount() > 0) {
             throw new AwsException("DeleteConflict",
@@ -356,6 +364,14 @@ public class IamService {
     }
 
     public List<IamPolicy> listPolicies(String scope, String pathPrefix) {
+        if (scope != null && !scope.isBlank()
+                && !"All".equalsIgnoreCase(scope)
+                && !"AWS".equalsIgnoreCase(scope)
+                && !"Local".equalsIgnoreCase(scope)) {
+            throw new AwsException("ValidationError",
+                    "Value '" + scope + "' at 'scope' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [All, AWS, Local]", 400);
+        }
         String prefix = pathPrefix != null ? pathPrefix : "/";
         return policies.scan(k -> true).stream()
                 .filter(p -> p.getPath().startsWith(prefix))
@@ -371,6 +387,7 @@ public class IamService {
     }
 
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
+        rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
         int nextVersionNum = policy.getVersions().size() + 1;
         if (nextVersionNum > 5) {
@@ -400,6 +417,7 @@ public class IamService {
     }
 
     public void deletePolicyVersion(String policyArn, String versionId) {
+        rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
         if (versionId.equals(policy.getDefaultVersionId())) {
             throw new AwsException("DeleteConflict",
@@ -418,6 +436,7 @@ public class IamService {
     }
 
     public void setDefaultPolicyVersion(String policyArn, String versionId) {
+        rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
         if (!policy.getVersions().containsKey(versionId)) {
             throw new AwsException("NoSuchEntity",
@@ -430,12 +449,14 @@ public class IamService {
     }
 
     public void tagPolicy(String policyArn, Map<String, String> newTags) {
+        rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
         policy.getTags().putAll(newTags);
         policies.put(policyArn, policy);
     }
 
     public void untagPolicy(String policyArn, List<String> tagKeys) {
+        rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
         tagKeys.forEach(policy.getTags()::remove);
         policies.put(policyArn, policy);

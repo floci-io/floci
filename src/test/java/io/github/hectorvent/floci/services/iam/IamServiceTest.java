@@ -491,6 +491,42 @@ class IamServiceTest {
     }
 
     @Test
+    void awsManagedPolicyDeleteRejected() {
+        iamService.seedAwsManagedPolicies();
+        String arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+        AwsException ex = assertThrows(AwsException.class, () -> iamService.deletePolicy(arn));
+        assertEquals("AccessDenied", ex.getErrorCode());
+    }
+
+    @Test
+    void awsManagedPolicyCreateVersionRejected() {
+        iamService.seedAwsManagedPolicies();
+        String arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+        assertThrows(AwsException.class, () -> iamService.createPolicyVersion(arn, "{}", false));
+    }
+
+    @Test
+    void awsManagedPolicyTagRejected() {
+        iamService.seedAwsManagedPolicies();
+        String arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+        assertThrows(AwsException.class, () -> iamService.tagPolicy(arn, Map.of("k", "v")));
+    }
+
+    @Test
+    void awsManagedPolicyUntagRejected() {
+        iamService.seedAwsManagedPolicies();
+        String arn = "arn:aws:iam::aws:policy/AdministratorAccess";
+        assertThrows(AwsException.class, () -> iamService.untagPolicy(arn, List.of("k")));
+    }
+
+    @Test
+    void listPoliciesInvalidScopeRejected() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.listPolicies("Invalid", "/"));
+        assertEquals("ValidationError", ex.getErrorCode());
+    }
+
+    @Test
     void listPoliciesScopeFiltering() {
         iamService.seedAwsManagedPolicies();
         iamService.createPolicy("MyCustomPolicy", "/", null, "{}", null);
