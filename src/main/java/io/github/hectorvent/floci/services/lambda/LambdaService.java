@@ -634,11 +634,24 @@ public class LambdaService {
                     "ReservedConcurrentExecutions must be a non-negative integer", 400);
         }
         LambdaFunction fn = getFunction(region, functionName);
+        Integer previousReserved = null;
+        boolean limiterUpdated = false;
         if (concurrencyLimiter != null) {
-            concurrencyLimiter.validateAndSetReserved(fn.getFunctionArn(), reservedConcurrentExecutions);
+            // Validate and apply under the limiter's lock so that two concurrent
+            // Puts for different functions cannot both pass a stale-total check.
+            previousReserved = concurrencyLimiter.validateAndSetReserved(
+                    fn.getFunctionArn(), reservedConcurrentExecutions);
+            limiterUpdated = true;
         }
         fn.setReservedConcurrentExecutions(reservedConcurrentExecutions);
-        functionStore.save(region, fn);
+        try {
+            functionStore.save(region, fn);
+        } catch (RuntimeException e) {
+            if (limiterUpdated) {
+                rollbackReserved(fn.getFunctionArn(), previousReserved);
+            }
+            throw e;
+        }
         return fn;
     }
 
@@ -649,11 +662,29 @@ public class LambdaService {
 
     public void deleteFunctionConcurrency(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName);
+        Integer previousReserved = null;
+        boolean limiterCleared = false;
         if (concurrencyLimiter != null) {
-            concurrencyLimiter.clearReserved(fn.getFunctionArn());
+            previousReserved = concurrencyLimiter.clearReserved(fn.getFunctionArn());
+            limiterCleared = true;
         }
         fn.setReservedConcurrentExecutions(null);
-        functionStore.save(region, fn);
+        try {
+            functionStore.save(region, fn);
+        } catch (RuntimeException e) {
+            if (limiterCleared && previousReserved != null) {
+                concurrencyLimiter.setReserved(fn.getFunctionArn(), previousReserved);
+            }
+            throw e;
+        }
+    }
+
+    private void rollbackReserved(String functionArn, Integer previousReserved) {
+        if (previousReserved == null) {
+            concurrencyLimiter.clearReserved(functionArn);
+        } else {
+            concurrencyLimiter.setReserved(functionArn, previousReserved);
+        }
     }
 
     public LambdaFunction getFunctionByUrlId(String urlId) {

@@ -129,7 +129,7 @@ public class DynamoDbStreamsEventSourcePoller {
                         esm.getUuid(), records.size(), esm.getFunctionName());
 
                 String eventJson = buildDynamoDbEvent(records, esm);
-                var invokeResult = (io.github.hectorvent.floci.services.lambda.model.InvokeResult) null;
+                io.github.hectorvent.floci.services.lambda.model.InvokeResult invokeResult;
                 try {
                     invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse);
                 } catch (io.github.hectorvent.floci.core.common.AwsException e) {

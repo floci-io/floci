@@ -6,12 +6,16 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class LambdaConcurrencyLimiterTest {
 
+    private static final String REGION = "us-east-1";
+    private static final String OTHER_REGION = "ap-northeast-1";
     private static final String ARN = "arn:aws:lambda:us-east-1:000000000000:function:fn";
     private static final String ARN2 = "arn:aws:lambda:us-east-1:000000000000:function:other";
+    private static final String ARN_OTHER_REGION = "arn:aws:lambda:ap-northeast-1:000000000000:function:fn-apne1";
 
     private LambdaFunction fn(String arn, Integer reserved) {
         LambdaFunction fn = new LambdaFunction();
@@ -34,7 +38,7 @@ class LambdaConcurrencyLimiterTest {
         assertEquals(429, ex.getHttpStatus());
         p1.close();
         p2.close();
-        assertEquals(0, limiter.unreservedInflightCount());
+        assertEquals(0, limiter.unreservedInflightCount(REGION));
     }
 
     @Test
@@ -110,6 +114,39 @@ class LambdaConcurrencyLimiterTest {
         limiter.acquire(f);
         limiter.reset(ARN);
         assertEquals(0, limiter.inflightCount(ARN));
-        assertEquals(0, limiter.totalReserved());
+        assertEquals(0, limiter.totalReserved(REGION));
+    }
+
+    @Test
+    void setReserved_returnsPreviousValue() {
+        LambdaConcurrencyLimiter limiter = new LambdaConcurrencyLimiter();
+        assertNull(limiter.setReserved(ARN, 5));
+        assertEquals(5, limiter.setReserved(ARN, 10));
+    }
+
+    @Test
+    void clearReserved_returnsClearedValue() {
+        LambdaConcurrencyLimiter limiter = new LambdaConcurrencyLimiter();
+        limiter.setReserved(ARN, 7);
+        assertEquals(7, limiter.clearReserved(ARN));
+        assertNull(limiter.clearReserved(ARN));
+    }
+
+    @Test
+    void regions_areIndependent() {
+        LambdaConcurrencyLimiter limiter = new LambdaConcurrencyLimiter(1000, 100);
+        // Fill one region's reserved pool near the limit
+        limiter.validateAndSetReserved(ARN, 900);
+        // Another region starts fresh — Put up to 900 still allowed
+        assertDoesNotThrow(() -> limiter.validateAndSetReserved(ARN_OTHER_REGION, 900));
+        assertEquals(900, limiter.totalReserved(REGION));
+        assertEquals(900, limiter.totalReserved(OTHER_REGION));
+
+        // Unreserved pool is also per-region
+        LambdaConcurrencyLimiter small = new LambdaConcurrencyLimiter(1, 0);
+        small.acquire(fn(ARN, null));
+        // Same exhaustion in us-east-1, but ap-northeast-1 still has a slot
+        assertThrows(AwsException.class, () -> small.acquire(fn(ARN2, null)));
+        assertDoesNotThrow(() -> small.acquire(fn(ARN_OTHER_REGION, null)));
     }
 }
