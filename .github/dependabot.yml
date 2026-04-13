@@ -10,6 +10,9 @@ updates:
         update-types:
           - "minor"
           - "patch"
+    ignore:
+      - dependency-name: "com.networknt:json-schema-validator"
+        versions: [">=2.0.0"]
     labels:
       - "dependencies"
       - "java"
