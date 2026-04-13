@@ -46,12 +46,15 @@ Lambda runs your function code inside real Docker containers — the same way re
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced: invocations beyond the reserved value
     return `TooManyRequestsException` (HTTP 429). Functions without a reserved
-    value share an account-wide pool (default 1000, configurable via
-    `floci.services.lambda.account-concurrency-limit`). `PutFunctionConcurrency`
+    value share a **per-region** pool — AWS Lambda's "account-level" limit is
+    in fact a per-account-per-region quota, and Floci mirrors that by
+    partitioning counters on the ARN's region segment. The pool size (default
+    1000) is configurable via `floci.services.lambda.region-concurrency-limit`
+    and applies independently to each region. `PutFunctionConcurrency`
     validates that the requested value leaves at least
     `floci.services.lambda.unreserved-concurrency-min` (default 100) available
-    for unreserved functions. `PutProvisionedConcurrencyConfig` and related
-    provisioned-concurrency operations remain unimplemented.
+    for unreserved functions in that region. `PutProvisionedConcurrencyConfig`
+    and related provisioned-concurrency operations remain unimplemented.
 
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 

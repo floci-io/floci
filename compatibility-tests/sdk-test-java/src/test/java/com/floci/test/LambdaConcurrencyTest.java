@@ -139,7 +139,7 @@ class LambdaConcurrencyTest {
     @Test
     @Order(9)
     void putFunctionConcurrency_exceedsAccountUnreservedMin_throwsLimitExceeded() {
-        // Floci default: accountLimit=1000, unreservedMin=100 → max single Put = 900
+        // Floci default: regionLimit=1000, unreservedMin=100 → max single Put = 900
         assertThatThrownBy(() -> lambda.putFunctionConcurrency(
                 PutFunctionConcurrencyRequest.builder()
                         .functionName(FUNCTION_NAME)

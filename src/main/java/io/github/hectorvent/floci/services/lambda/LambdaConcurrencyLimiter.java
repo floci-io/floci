@@ -15,7 +15,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * <p>AWS Lambda concurrency is scoped to an account <b>per region</b>; a
  * function's reserved value does not compete with functions in other regions.
  * Accordingly this limiter partitions its state by region (extracted from the
- * function ARN), and the configured {@code accountLimit}/{@code unreservedMin}
+ * function ARN), and the configured {@code regionLimit}/{@code unreservedMin}
  * apply independently to each region.
  *
  * <p>Two layers of enforcement:
@@ -24,7 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  *       inflight invocations are counted against that value and do not consume
  *       the region's unreserved pool.</li>
  *   <li><b>Unreserved (region-shared)</b>: functions without a reserved value
- *       share {@code accountLimit - Σreserved} permits within their region.</li>
+ *       share {@code regionLimit - Σreserved} permits within their region.</li>
  * </ul>
  */
 @ApplicationScoped
@@ -39,18 +39,18 @@ public class LambdaConcurrencyLimiter {
     private final ConcurrentHashMap<String, AtomicInteger> unreservedByRegion = new ConcurrentHashMap<>();
     /** Guards atomic validate-then-set operations on the reserved maps. */
     private final Object reservedLock = new Object();
-    private final int accountLimit;
+    private final int regionLimit;
     private final int unreservedMin;
 
     @Inject
     public LambdaConcurrencyLimiter(EmulatorConfig config) {
-        this(config.services().lambda().accountConcurrencyLimit(),
+        this(config.services().lambda().regionConcurrencyLimit(),
              config.services().lambda().unreservedConcurrencyMin());
     }
 
     /** Test-only constructor with explicit limits. */
-    LambdaConcurrencyLimiter(int accountLimit, int unreservedMin) {
-        this.accountLimit = accountLimit;
+    LambdaConcurrencyLimiter(int regionLimit, int unreservedMin) {
+        this.regionLimit = regionLimit;
         this.unreservedMin = unreservedMin;
     }
 
@@ -87,7 +87,7 @@ public class LambdaConcurrencyLimiter {
             int current = counter.get();
             // Recompute cap each spin so a concurrent setReserved is observed
             // promptly and we do not grant permits above the live pool.
-            int cap = Math.max(0, accountLimit - totalReserved(region));
+            int cap = Math.max(0, regionLimit - totalReserved(region));
             if (current >= cap) {
                 throw throttle();
             }
@@ -134,7 +134,7 @@ public class LambdaConcurrencyLimiter {
         synchronized (reservedLock) {
             ConcurrentHashMap<String, Integer> regionReserved = reservedOf(region);
             int otherReserved = sum(regionReserved) - regionReserved.getOrDefault(functionArn, 0);
-            int maxAllowed = accountLimit - unreservedMin - otherReserved;
+            int maxAllowed = regionLimit - unreservedMin - otherReserved;
             if (target > maxAllowed) {
                 throw new AwsException("LimitExceededException",
                         "Specified ReservedConcurrentExecutions for function decreases account's "
@@ -160,7 +160,7 @@ public class LambdaConcurrencyLimiter {
     public int availableUnreserved(String region) {
         AtomicInteger counter = unreservedByRegion.get(region);
         int inflightNow = counter == null ? 0 : counter.get();
-        return Math.max(0, accountLimit - totalReserved(region) - inflightNow);
+        return Math.max(0, regionLimit - totalReserved(region) - inflightNow);
     }
 
     int inflightCount(String functionArn) {

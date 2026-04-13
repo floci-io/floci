@@ -80,7 +80,7 @@ floci:
       code-path: ./data/lambda-code
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300
-      account-concurrency-limit: 1000
+      region-concurrency-limit: 1000
       unreserved-concurrency-min: 100
     apigateway:
       enabled: true
