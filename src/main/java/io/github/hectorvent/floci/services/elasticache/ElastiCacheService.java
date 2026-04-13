@@ -194,9 +194,10 @@ public class ElastiCacheService {
 
     /**
      * Validates a Redis AUTH password for the given group.
-     * Checks the group-level authToken first, then falls back to users associated
-     * with the group. Only users explicitly added via ModifyReplicationGroup are
-     * checked, preventing cross-group credential leakage.
+     * Checks the group-level authToken first, then falls back to the "default" user
+     * associated with the group (per Redis 6+ ACL spec, single-arg AUTH only
+     * authenticates the default user). Only users explicitly added via
+     * ModifyReplicationGroup are checked, preventing cross-group credential leakage.
      */
     public boolean validatePassword(String groupId, String username, String password) {
         ReplicationGroup group = groups.get(groupId).orElse(null);
@@ -209,11 +210,13 @@ public class ElastiCacheService {
             if (group.getAuthToken() != null && password.equals(group.getAuthToken())) {
                 return true;
             }
-            // Fall back to PASSWORD users associated with this group
+            // Fall back to the "default" PASSWORD user associated with this group
             Set<String> groupUserIds = group.getAssociatedUserIds();
             return groupUserIds.stream()
                     .map(id -> users.get(id).orElse(null))
-                    .filter(u -> u != null && u.getAuthMode() == AuthMode.PASSWORD)
+                    .filter(u -> u != null
+                            && "default".equals(u.getUserName())
+                            && u.getAuthMode() == AuthMode.PASSWORD)
                     .anyMatch(u -> u.getPasswords() != null && u.getPasswords().contains(password));
         }
         // AUTH username password form: find user by userName, scoped to group
