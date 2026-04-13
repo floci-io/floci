@@ -1058,8 +1058,7 @@ public class DynamoDbService {
                 }
             }
 
-            String attrName = resolveAttributeName(attrPart, exprAttrNames);
-            item.remove(attrName);
+            removeValueAtPath(item, attrPart, exprAttrNames);
         }
         return clause;
     }
@@ -1363,6 +1362,45 @@ public class DynamoDbService {
      */
     private boolean hasValueAtPath(JsonNode item, String path, JsonNode exprAttrNames) {
         return getValueAtPath(item, path, exprAttrNames) != null;
+    }
+
+    /**
+     * Removes a value at a potentially nested attribute path.
+     * Supports paths like "attr", "parent.child", "#alias.nested" etc.
+     * For nested paths, navigates into the DynamoDB Map structure (M field)
+     * and removes the final key from its parent.
+     */
+    private void removeValueAtPath(ObjectNode item, String path, JsonNode exprAttrNames) {
+        String[] segments = path.split("\\.");
+        for (int i = 0; i < segments.length; i++) {
+            segments[i] = resolveAttributeName(segments[i].trim(), exprAttrNames);
+        }
+
+        if (segments.length == 1) {
+            item.remove(segments[0]);
+            return;
+        }
+
+        // Navigate to the parent of the target attribute
+        ObjectNode current = item;
+        for (int i = 0; i < segments.length - 1; i++) {
+            String segment = segments[i];
+            JsonNode child = current.get(segment);
+
+            if (child == null || !child.has("M")) {
+                // Path doesn't exist, nothing to remove
+                return;
+            }
+
+            JsonNode mapContent = child.get("M");
+            if (mapContent instanceof ObjectNode) {
+                current = (ObjectNode) mapContent;
+            } else {
+                return;
+            }
+        }
+
+        current.remove(segments[segments.length - 1]);
     }
 
     private int findNextComma(String s) {

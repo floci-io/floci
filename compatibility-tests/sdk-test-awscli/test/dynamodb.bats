@@ -597,3 +597,38 @@ teardown() {
     count=$(json_get "$output" '.Count')
     [ "$count" = "1" ]
 }
+
+# --- DynamoDB REMOVE nested map key tests (GH #402) ---
+
+@test "DynamoDB: REMOVE key from nested map" {
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S AttributeName=sk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH AttributeName=sk,KeyType=RANGE \
+        --billing-mode PAY_PER_REQUEST >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    # Set a map attribute with a key
+    aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"user1"},"sk":{"S":"sort1"}}' \
+        --update-expression 'SET ratings = :ratings' \
+        --expression-attribute-values '{":ratings":{"M":{"foo":{"S":"5"},"bar":{"S":"3"}}}}' >/dev/null
+
+    # REMOVE ratings.foo
+    aws_cmd dynamodb update-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"user1"},"sk":{"S":"sort1"}}' \
+        --update-expression 'REMOVE ratings.foo' >/dev/null
+
+    # Verify foo is removed but bar remains
+    run aws_cmd dynamodb get-item \
+        --table-name "$TABLE_NAME" \
+        --key '{"pk":{"S":"user1"},"sk":{"S":"sort1"}}'
+    assert_success
+    foo=$(echo "$output" | jq -r '.Item.ratings.M.foo // "null"')
+    bar=$(echo "$output" | jq -r '.Item.ratings.M.bar.S')
+    [ "$foo" = "null" ]
+    [ "$bar" = "3" ]
+}

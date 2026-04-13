@@ -924,4 +924,140 @@ class DynamoDbServiceTest {
                 "isActive should still be true after get");
     }
 
+    /**
+     * Test REMOVE with nested map paths (e.g. "ratings.foo").
+     * Reproduces GitHub issue #402: REMOVE on a map key succeeds but data is unchanged.
+     */
+    @Test
+    void testRemoveNestedMapKey() {
+        createUsersTable();
+
+        // Put item with a map attribute containing two keys
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-1"));
+        ObjectNode ratingsInner = mapper.createObjectNode();
+        ratingsInner.set("foo", attributeValue("S", "5"));
+        ratingsInner.set("bar", attributeValue("S", "3"));
+        ObjectNode ratingsMap = mapper.createObjectNode();
+        ratingsMap.set("M", ratingsInner);
+        initialItem.set("ratings", ratingsMap);
+        service.putItem("Users", initialItem);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-1"));
+
+        // Verify both keys exist
+        JsonNode before = service.getItem("Users", key);
+        assertTrue(before.get("ratings").get("M").has("foo"));
+        assertTrue(before.get("ratings").get("M").has("bar"));
+
+        // REMOVE ratings.foo
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE ratings.foo", null, null, "ALL_NEW");
+
+        JsonNode updated = result.newItem();
+        assertFalse(updated.get("ratings").get("M").has("foo"),
+                "foo should be removed from ratings map");
+        assertTrue(updated.get("ratings").get("M").has("bar"),
+                "bar should still exist in ratings map");
+        assertEquals("3", updated.get("ratings").get("M").get("bar").get("S").asText());
+    }
+
+    /**
+     * Test REMOVE with nested map paths using expression attribute names.
+     */
+    @Test
+    void testRemoveNestedMapKeyWithExpressionNames() {
+        createUsersTable();
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-2"));
+        ObjectNode metaInner = mapper.createObjectNode();
+        metaInner.set("temp", attributeValue("S", "value"));
+        metaInner.set("keep", attributeValue("S", "important"));
+        ObjectNode metaMap = mapper.createObjectNode();
+        metaMap.set("M", metaInner);
+        initialItem.set("metadata", metaMap);
+        service.putItem("Users", initialItem);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-2"));
+
+        // REMOVE #meta.#tmp using expression attribute names
+        ObjectNode exprAttrNames = mapper.createObjectNode();
+        exprAttrNames.put("#meta", "metadata");
+        exprAttrNames.put("#tmp", "temp");
+
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE #meta.#tmp", exprAttrNames, null, "ALL_NEW");
+
+        JsonNode updated = result.newItem();
+        assertFalse(updated.get("metadata").get("M").has("temp"),
+                "temp should be removed from metadata map");
+        assertTrue(updated.get("metadata").get("M").has("keep"),
+                "keep should still exist in metadata map");
+    }
+
+    /**
+     * Test REMOVE on a non-existent nested path does not fail.
+     */
+    @Test
+    void testRemoveNonExistentNestedPath() {
+        createUsersTable();
+
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-3"));
+        initialItem.set("name", attributeValue("S", "Alice"));
+        service.putItem("Users", initialItem);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-3"));
+
+        // REMOVE on a path where the parent map doesn't exist - should not fail
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE nonexistent.child", null, null, "ALL_NEW");
+
+        JsonNode updated = result.newItem();
+        assertEquals("Alice", updated.get("name").get("S").asText(),
+                "existing attributes should be unchanged");
+    }
+
+    /**
+     * Test REMOVE with deeply nested map paths (3 levels).
+     */
+    @Test
+    void testRemoveDeeplyNestedMapKey() {
+        createUsersTable();
+
+        // Build: settings.notifications.email = "on", settings.notifications.sms = "off"
+        ObjectNode initialItem = mapper.createObjectNode();
+        initialItem.set("userId", attributeValue("S", "user-4"));
+
+        ObjectNode notifInner = mapper.createObjectNode();
+        notifInner.set("email", attributeValue("S", "on"));
+        notifInner.set("sms", attributeValue("S", "off"));
+        ObjectNode notifMap = mapper.createObjectNode();
+        notifMap.set("M", notifInner);
+
+        ObjectNode settingsInner = mapper.createObjectNode();
+        settingsInner.set("notifications", notifMap);
+        ObjectNode settingsMap = mapper.createObjectNode();
+        settingsMap.set("M", settingsInner);
+
+        initialItem.set("settings", settingsMap);
+        service.putItem("Users", initialItem);
+
+        ObjectNode key = mapper.createObjectNode();
+        key.set("userId", attributeValue("S", "user-4"));
+
+        // REMOVE settings.notifications.sms
+        DynamoDbService.UpdateResult result = service.updateItem("Users", key, null,
+                "REMOVE settings.notifications.sms", null, null, "ALL_NEW");
+
+        JsonNode updated = result.newItem();
+        JsonNode notifs = updated.get("settings").get("M").get("notifications").get("M");
+        assertTrue(notifs.has("email"), "email should still exist");
+        assertFalse(notifs.has("sms"), "sms should be removed");
+    }
+
 }
