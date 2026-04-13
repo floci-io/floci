@@ -180,7 +180,9 @@ class StepFunctionsSqsIntegrationTest {
                         {"QueueUrl":"%s"}
                         """.formatted(queue))
                 .when()
-                .post("/");
+                .post("/")
+                .then()
+                .statusCode(200);
     }
 
     private String executeSfn(String nameSuffix, String resource, String parameters) throws Exception {
