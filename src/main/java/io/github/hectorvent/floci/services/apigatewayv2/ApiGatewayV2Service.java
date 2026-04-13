@@ -264,6 +264,16 @@ public class ApiGatewayV2Service {
 
     public Deployment createDeployment(String region, String apiId, Map<String, Object> request) {
         getApi(region, apiId);
+
+        // Validate stage exists before creating deployment to avoid orphans
+        String stageName = (String) request.get("stageName");
+        Stage stage = null;
+        if (stageName != null && !stageName.isBlank()) {
+            stage = stageStore.get(stageKey(region, apiId, stageName))
+                    .orElseThrow(() -> new AwsException("NotFoundException",
+                            "Stage " + stageName + " not found", 404));
+        }
+
         Deployment deployment = new Deployment();
         deployment.setDeploymentId(shortId(8));
         deployment.setDeploymentStatus("DEPLOYED");
@@ -272,11 +282,7 @@ public class ApiGatewayV2Service {
 
         deploymentStore.put(deploymentKey(region, apiId, deployment.getDeploymentId()), deployment);
 
-        String stageName = (String) request.get("stageName");
-        if (stageName != null && !stageName.isBlank()) {
-            Stage stage = stageStore.get(stageKey(region, apiId, stageName))
-                    .orElseThrow(() -> new AwsException("NotFoundException",
-                            "Stage " + stageName + " not found", 404));
+        if (stage != null) {
             stage.setDeploymentId(deployment.getDeploymentId());
             stage.setLastUpdatedDate(System.currentTimeMillis());
             stageStore.put(stageKey(region, apiId, stageName), stage);

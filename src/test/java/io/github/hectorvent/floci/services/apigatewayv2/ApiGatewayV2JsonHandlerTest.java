@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -15,85 +17,113 @@ import static org.hamcrest.Matchers.notNullValue;
 /**
  * Tests for API Gateway v2 fixes:
  * - createDeployment stageName auto-deploy
- * - GetDeployment, DeleteDeployment, DeleteIntegration via REST path
- *
- * The JSON 1.1 handler's PascalCase normalization and missing switch cases
- * delegate to the same service methods tested here.
+ * - GetDeployment, DeleteDeployment, DeleteIntegration
+ * - JSON 1.1 handler PascalCase normalization and missing switch cases
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayV2JsonHandlerTest {
 
+    private static final String AMZ_JSON = "application/x-amz-json-1.1";
+    private static final String TARGET_PREFIX = "AmazonApiGatewayV2.";
+    private static final String AUTH_HEADER =
+            "AWS4-HMAC-SHA256 Credential=test/20260413/us-east-1/apigatewayv2/aws4_request";
+
     private static String apiId;
     private static String integrationId;
     private static String deploymentId;
 
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    // ──────────────────────────── JSON 1.1 handler path ────────────────────────────
+
     @Test
     @Order(1)
-    void createApi() {
+    void json11CreateApiWithPascalCaseKeys() {
         apiId = given()
-                .contentType(ContentType.JSON)
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateApi")
+                .header("Authorization", AUTH_HEADER)
                 .body("""
-                        {"name":"v2-handler-test","protocolType":"HTTP"}
+                        {"Name":"json11-test","ProtocolType":"HTTP"}
                         """)
-                .when().post("/v2/apis")
+                .when().post("/")
                 .then()
                 .statusCode(201)
-                .body("apiId", notNullValue())
-                .extract().path("apiId");
+                .body("ApiId", notNullValue())
+                .body("Name", equalTo("json11-test"))
+                .body("ProtocolType", equalTo("HTTP"))
+                .extract().path("ApiId");
     }
 
     @Test
     @Order(2)
-    void createIntegration() {
+    void json11CreateIntegrationWithPascalCaseKeys() {
         integrationId = given()
-                .contentType(ContentType.JSON)
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateIntegration")
+                .header("Authorization", AUTH_HEADER)
                 .body("""
-                        {"integrationType":"AWS_PROXY","integrationUri":"arn:aws:lambda:us-east-1:000000000000:function:test","payloadFormatVersion":"2.0"}
-                        """)
-                .when().post("/v2/apis/" + apiId + "/integrations")
+                        {"ApiId":"%s","IntegrationType":"AWS_PROXY","IntegrationUri":"arn:aws:lambda:us-east-1:000000000000:function:test","PayloadFormatVersion":"2.0"}
+                        """.formatted(apiId))
+                .when().post("/")
                 .then()
                 .statusCode(201)
-                .body("integrationId", notNullValue())
-                .extract().path("integrationId");
+                .body("IntegrationId", notNullValue())
+                .extract().path("IntegrationId");
     }
 
     @Test
     @Order(3)
-    void createDeploymentAndStage() {
+    void json11CreateDeploymentAndStage() {
         deploymentId = given()
-                .contentType(ContentType.JSON)
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateDeployment")
+                .header("Authorization", AUTH_HEADER)
                 .body("""
-                        {"description":"initial"}
-                        """)
-                .when().post("/v2/apis/" + apiId + "/deployments")
+                        {"ApiId":"%s","Description":"initial"}
+                        """.formatted(apiId))
+                .when().post("/")
                 .then()
                 .statusCode(201)
-                .body("deploymentId", notNullValue())
-                .extract().path("deploymentId");
+                .body("DeploymentId", notNullValue())
+                .extract().path("DeploymentId");
 
         given()
-                .contentType(ContentType.JSON)
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateStage")
+                .header("Authorization", AUTH_HEADER)
                 .body("""
-                        {"stageName":"prod","deploymentId":"%s"}
-                        """.formatted(deploymentId))
-                .when().post("/v2/apis/" + apiId + "/stages")
+                        {"ApiId":"%s","StageName":"prod","DeploymentId":"%s"}
+                        """.formatted(apiId, deploymentId))
+                .when().post("/")
                 .then()
                 .statusCode(201)
-                .body("stageName", equalTo("prod"))
-                .body("deploymentId", equalTo(deploymentId));
+                .body("StageName", equalTo("prod"))
+                .body("DeploymentId", equalTo(deploymentId));
     }
 
     @Test
     @Order(4)
-    void getDeploymentReturnsCreatedDeployment() {
+    void json11GetDeployment() {
         given()
-                .when().get("/v2/apis/" + apiId + "/deployments/" + deploymentId)
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "GetDeployment")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s","DeploymentId":"%s"}
+                        """.formatted(apiId, deploymentId))
+                .when().post("/")
                 .then()
                 .statusCode(200)
-                .body("deploymentId", equalTo(deploymentId))
-                .body("description", equalTo("initial"));
+                .body("DeploymentId", equalTo(deploymentId))
+                .body("Description", equalTo("initial"));
     }
+
+    // ──────────────────────────── stageName auto-deploy ────────────────────────────
 
     @Test
     @Order(5)
@@ -109,7 +139,6 @@ class ApiGatewayV2JsonHandlerTest {
                 .body("deploymentId", notNullValue())
                 .extract().path("deploymentId");
 
-        // Verify the stage's deploymentId was updated
         given()
                 .when().get("/v2/apis/" + apiId + "/stages/prod")
                 .then()
@@ -120,7 +149,13 @@ class ApiGatewayV2JsonHandlerTest {
 
     @Test
     @Order(6)
-    void createDeploymentWithMissingStageName404s() {
+    void createDeploymentWithMissingStageName404sWithoutOrphan() {
+        // Count deployments before
+        int beforeCount = given()
+                .when().get("/v2/apis/" + apiId + "/deployments")
+                .then().statusCode(200)
+                .extract().jsonPath().getList("items").size();
+
         given()
                 .contentType(ContentType.JSON)
                 .body("""
@@ -129,26 +164,47 @@ class ApiGatewayV2JsonHandlerTest {
                 .when().post("/v2/apis/" + apiId + "/deployments")
                 .then()
                 .statusCode(404);
+
+        // Verify no orphan deployment was created
+        int afterCount = given()
+                .when().get("/v2/apis/" + apiId + "/deployments")
+                .then().statusCode(200)
+                .extract().jsonPath().getList("items").size();
+
+        org.junit.jupiter.api.Assertions.assertEquals(beforeCount, afterCount,
+                "No orphan deployment should be created when stageName is invalid");
     }
+
+    // ──────────────────────────── JSON 1.1 delete operations ────────────────────────────
 
     @Test
     @Order(7)
-    void deleteIntegrationRemovesIntegration() {
-        given().when().delete("/v2/apis/" + apiId + "/integrations/" + integrationId)
-                .then().statusCode(204);
-
-        given().when().get("/v2/apis/" + apiId + "/integrations/" + integrationId)
-                .then().statusCode(404);
+    void json11DeleteIntegration() {
+        given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "DeleteIntegration")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s","IntegrationId":"%s"}
+                        """.formatted(apiId, integrationId))
+                .when().post("/")
+                .then()
+                .statusCode(204);
     }
 
     @Test
     @Order(8)
-    void deleteDeploymentRemovesDeployment() {
-        given().when().delete("/v2/apis/" + apiId + "/deployments/" + deploymentId)
-                .then().statusCode(204);
-
-        given().when().get("/v2/apis/" + apiId + "/deployments/" + deploymentId)
-                .then().statusCode(404);
+    void json11DeleteDeployment() {
+        given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "DeleteDeployment")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s","DeploymentId":"%s"}
+                        """.formatted(apiId, deploymentId))
+                .when().post("/")
+                .then()
+                .statusCode(204);
     }
 
     @Test

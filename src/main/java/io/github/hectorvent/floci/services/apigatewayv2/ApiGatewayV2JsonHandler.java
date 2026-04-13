@@ -334,13 +334,20 @@ public class ApiGatewayV2JsonHandler {
             if (!key.isEmpty() && Character.isUpperCase(key.charAt(0))) {
                 key = Character.toLowerCase(key.charAt(0)) + key.substring(1);
             }
-            Object value = entry.getValue();
-            if (value instanceof Map) {
-                value = toLowerCamelCase((Map<String, Object>) value);
-            }
-            result.put(key, value);
+            result.put(key, normalizeValue(entry.getValue()));
         }
         return result;
+    }
+
+    @SuppressWarnings("unchecked")
+    private Object normalizeValue(Object value) {
+        if (value instanceof Map) {
+            return toLowerCamelCase((Map<String, Object>) value);
+        }
+        if (value instanceof List<?> list) {
+            return list.stream().map(this::normalizeValue).toList();
+        }
+        return value;
     }
 
 }
