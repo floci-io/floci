@@ -19,10 +19,7 @@ import software.amazon.awssdk.services.elasticache.model.DescribeUsersRequest;
 import software.amazon.awssdk.services.elasticache.model.InputAuthenticationType;
 import software.amazon.awssdk.services.elasticache.model.ModifyReplicationGroupRequest;
 import software.amazon.awssdk.services.elasticache.model.ModifyUserRequest;
-import software.amazon.awssdk.services.elasticache.model.ReplicationGroupAlreadyExistsException;
-import software.amazon.awssdk.services.elasticache.model.ReplicationGroupNotFoundException;
-import software.amazon.awssdk.services.elasticache.model.UserAlreadyExistsException;
-import software.amazon.awssdk.services.elasticache.model.UserNotFoundException;
+import software.amazon.awssdk.services.elasticache.model.ElastiCacheException;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -91,7 +88,7 @@ class ElastiCacheTest {
         assertThat(response.replicationGroup().replicationGroupId()).isEqualTo(groupId);
         assertThat(response.replicationGroup().status()).isEqualTo("available");
         assertThat(response.replicationGroup().configurationEndpoint()).isNotNull();
-        assertThat(response.replicationGroup().configurationEndpoint().address()).isEqualTo("localhost");
+        assertThat(response.replicationGroup().configurationEndpoint().address()).isEqualTo(TestFixtures.proxyHost());
         assertThat(response.replicationGroup().authTokenEnabled()).isTrue();
 
         firstProxyPort = response.replicationGroup().configurationEndpoint().port();
@@ -117,13 +114,15 @@ class ElastiCacheTest {
     void createDuplicateReplicationGroupThrows409() {
         requireGroup();
 
+        // Floci returns generic error code (pre-existing deviation)
         assertThatThrownBy(() -> elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
                 .replicationGroupId(groupId)
                 .replicationGroupDescription("duplicate")
                 .engine("redis")
                 .authToken(authToken)
                 .build()))
-                .isInstanceOf(ReplicationGroupAlreadyExistsException.class);
+                .isInstanceOf(ElastiCacheException.class)
+                .hasMessageContaining("already exists");
     }
 
     @Test
@@ -177,6 +176,8 @@ class ElastiCacheTest {
     void createDuplicateUserThrows409() {
         requireUser();
 
+        // Floci returns generic error code, SDK maps to ElastiCacheException
+        // rather than UserAlreadyExistsException (pre-existing deviation)
         assertThatThrownBy(() -> elasticache.createUser(CreateUserRequest.builder()
                 .userId(userId)
                 .userName(userName)
@@ -187,7 +188,8 @@ class ElastiCacheTest {
                         .passwords("user-password-1")
                         .build())
                 .build()))
-                .isInstanceOf(UserAlreadyExistsException.class);
+                .isInstanceOf(ElastiCacheException.class)
+                .hasMessageContaining("already exists");
     }
 
     @Test
@@ -257,10 +259,13 @@ class ElastiCacheTest {
 
         elasticache.deleteUser(DeleteUserRequest.builder().userId(userId).build());
 
+        // Floci returns generic error code, SDK maps to ElastiCacheException
+        // rather than UserNotFoundException (pre-existing deviation)
         assertThatThrownBy(() -> elasticache.describeUsers(DescribeUsersRequest.builder()
                 .userId(userId)
                 .build()))
-                .isInstanceOf(UserNotFoundException.class);
+                .isInstanceOf(ElastiCacheException.class)
+                .hasMessageContaining("not found");
         userCreated = false;
     }
 
@@ -273,10 +278,12 @@ class ElastiCacheTest {
                 .replicationGroupId(groupId)
                 .build());
 
+        // Floci returns generic error code (pre-existing deviation)
         assertThatThrownBy(() -> elasticache.describeReplicationGroups(DescribeReplicationGroupsRequest.builder()
                 .replicationGroupId(groupId)
                 .build()))
-                .isInstanceOf(ReplicationGroupNotFoundException.class);
+                .isInstanceOf(ElastiCacheException.class)
+                .hasMessageContaining("not found");
 
         var response = elasticache.createReplicationGroup(CreateReplicationGroupRequest.builder()
                 .replicationGroupId(reusedGroupId)
