@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -189,6 +190,76 @@ class KinesisServiceTest {
         assertTrue(updated.getShards().get(0).isClosed());
         assertTrue(updated.getShards().get(1).isClosed());
         assertFalse(updated.getShards().get(2).isClosed());
+    }
+
+    @Test
+    void enableEnhancedMonitoring() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        Set<String> before = kinesisService.enableEnhancedMonitoring(
+                "my-stream", List.of("IncomingBytes", "OutgoingBytes"), REGION);
+
+        assertTrue(before.isEmpty());
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        assertTrue(stream.getEnhancedMonitoringMetrics().contains("IncomingBytes"));
+        assertTrue(stream.getEnhancedMonitoringMetrics().contains("OutgoingBytes"));
+    }
+
+    @Test
+    void enableEnhancedMonitoringAll() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.enableEnhancedMonitoring("my-stream", List.of("ALL"), REGION);
+
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        assertEquals(7, stream.getEnhancedMonitoringMetrics().size());
+        assertTrue(stream.getEnhancedMonitoringMetrics().contains("IncomingBytes"));
+        assertTrue(stream.getEnhancedMonitoringMetrics().contains("IteratorAgeMilliseconds"));
+    }
+
+    @Test
+    void disableEnhancedMonitoring() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.enableEnhancedMonitoring(
+                "my-stream", List.of("IncomingBytes", "OutgoingBytes", "IncomingRecords"), REGION);
+        Set<String> before = kinesisService.disableEnhancedMonitoring(
+                "my-stream", List.of("OutgoingBytes"), REGION);
+
+        assertEquals(3, before.size());
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        assertTrue(stream.getEnhancedMonitoringMetrics().contains("IncomingBytes"));
+        assertTrue(stream.getEnhancedMonitoringMetrics().contains("IncomingRecords"));
+        assertFalse(stream.getEnhancedMonitoringMetrics().contains("OutgoingBytes"));
+    }
+
+    @Test
+    void disableEnhancedMonitoringAll() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.enableEnhancedMonitoring(
+                "my-stream", List.of("IncomingBytes", "OutgoingBytes"), REGION);
+        kinesisService.disableEnhancedMonitoring("my-stream", List.of("ALL"), REGION);
+
+        KinesisStream stream = kinesisService.describeStream("my-stream", REGION);
+        assertTrue(stream.getEnhancedMonitoringMetrics().isEmpty());
+    }
+
+    @Test
+    void enableEnhancedMonitoringInvalidMetric() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        assertThrows(AwsException.class, () ->
+                kinesisService.enableEnhancedMonitoring("my-stream", List.of("BogusMetric"), REGION));
+    }
+
+    @Test
+    void enableEnhancedMonitoringEmptyListThrows() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        assertThrows(AwsException.class, () ->
+                kinesisService.enableEnhancedMonitoring("my-stream", List.of(), REGION));
+    }
+
+    @Test
+    void enableEnhancedMonitoringAllWithInvalidThrows() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        assertThrows(AwsException.class, () ->
+                kinesisService.enableEnhancedMonitoring("my-stream", List.of("ALL", "BogusMetric"), REGION));
     }
 
     @Test

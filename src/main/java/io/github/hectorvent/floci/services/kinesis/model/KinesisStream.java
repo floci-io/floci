@@ -6,8 +6,10 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -22,6 +24,7 @@ public class KinesisStream {
     private String encryptionType = "NONE";
     private String keyId;
     private String streamMode = "PROVISIONED";
+    private Set<String> enhancedMonitoringMetrics = new HashSet<>();
 
     public KinesisStream() {}
 
@@ -61,4 +64,7 @@ public class KinesisStream {
 
     public String getStreamMode() { return streamMode; }
     public void setStreamMode(String streamMode) { this.streamMode = streamMode; }
+
+    public Set<String> getEnhancedMonitoringMetrics() { return enhancedMonitoringMetrics; }
+    public void setEnhancedMonitoringMetrics(Set<String> enhancedMonitoringMetrics) { this.enhancedMonitoringMetrics = enhancedMonitoringMetrics; }
 }

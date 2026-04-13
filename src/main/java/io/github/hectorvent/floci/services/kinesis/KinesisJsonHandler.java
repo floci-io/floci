@@ -14,10 +14,12 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 @ApplicationScoped
 public class KinesisJsonHandler {
@@ -57,6 +59,8 @@ public class KinesisJsonHandler {
             case "ListShards" -> handleListShards(request, region);
             case "IncreaseStreamRetentionPeriod" -> handleIncreaseStreamRetentionPeriod(request, region);
             case "DecreaseStreamRetentionPeriod" -> handleDecreaseStreamRetentionPeriod(request, region);
+            case "EnableEnhancedMonitoring" -> handleEnableEnhancedMonitoring(request, region);
+            case "DisableEnhancedMonitoring" -> handleDisableEnhancedMonitoring(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -125,6 +129,8 @@ public class KinesisJsonHandler {
             desc.put("KeyId", stream.getKeyId());
         }
 
+        addEnhancedMonitoringNode(desc, stream);
+
         ArrayNode shards = desc.putArray("Shards");
         for (KinesisShard shard : stream.getShards()) {
             ObjectNode sNode = shards.addObject();
@@ -163,7 +169,15 @@ public class KinesisJsonHandler {
         if (stream.getKeyId() != null) {
             summary.put("KeyId", stream.getKeyId());
         }
+
+        addEnhancedMonitoringNode(summary, stream);
+
         return Response.ok(response).build();
+    }
+
+    private void addEnhancedMonitoringNode(ObjectNode parent, KinesisStream stream) {
+        ArrayNode shardLevelMetrics = parent.putArray("EnhancedMonitoring").addObject().putArray("ShardLevelMetrics");
+        stream.getEnhancedMonitoringMetrics().stream().sorted().forEach(shardLevelMetrics::add);
     }
 
     private Response handleRegisterStreamConsumer(JsonNode request, String region) {
@@ -406,6 +420,44 @@ public class KinesisJsonHandler {
 
         response.putNull("NextToken");
 
+        return Response.ok(response).build();
+    }
+
+    private Response handleEnableEnhancedMonitoring(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+
+        List<String> metrics = new ArrayList<>();
+        request.path("ShardLevelMetrics").forEach(m -> metrics.add(m.asText()));
+
+        Set<String> currentMetrics = service.enableEnhancedMonitoring(streamName, metrics, region);
+        KinesisStream updated = service.describeStream(streamName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StreamName", streamName);
+        response.put("StreamARN", updated.getStreamArn());
+        ArrayNode current = response.putArray("CurrentShardLevelMetrics");
+        currentMetrics.stream().sorted().forEach(current::add);
+        ArrayNode desired = response.putArray("DesiredShardLevelMetrics");
+        updated.getEnhancedMonitoringMetrics().stream().sorted().forEach(desired::add);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDisableEnhancedMonitoring(JsonNode request, String region) {
+        String streamName = resolveStreamName(request);
+
+        List<String> metrics = new ArrayList<>();
+        request.path("ShardLevelMetrics").forEach(m -> metrics.add(m.asText()));
+
+        Set<String> currentMetrics = service.disableEnhancedMonitoring(streamName, metrics, region);
+        KinesisStream updated = service.describeStream(streamName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("StreamName", streamName);
+        response.put("StreamARN", updated.getStreamArn());
+        ArrayNode current = response.putArray("CurrentShardLevelMetrics");
+        currentMetrics.stream().sorted().forEach(current::add);
+        ArrayNode desired = response.putArray("DesiredShardLevelMetrics");
+        updated.getEnhancedMonitoringMetrics().stream().sorted().forEach(desired::add);
         return Response.ok(response).build();
     }
 

@@ -156,6 +156,72 @@ class KinesisJsonHandlerTest {
     }
 
     @Test
+    void enableEnhancedMonitoringReturnsMetrics() {
+        createStream("test-stream");
+
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("StreamName", "test-stream");
+        req.putArray("ShardLevelMetrics").add("IncomingBytes").add("OutgoingBytes");
+        Response resp = handler.handle("EnableEnhancedMonitoring", req, REGION);
+        assertThat(resp.getStatus(), is(200));
+
+        ObjectNode body = responseEntity(resp);
+        assertEquals("test-stream", body.get("StreamName").asText());
+        assertEquals(0, body.get("CurrentShardLevelMetrics").size());
+        assertEquals(2, body.get("DesiredShardLevelMetrics").size());
+    }
+
+    @Test
+    void disableEnhancedMonitoringReturnsMetrics() {
+        createStream("test-stream");
+
+        ObjectNode enableReq = MAPPER.createObjectNode();
+        enableReq.put("StreamName", "test-stream");
+        enableReq.putArray("ShardLevelMetrics").add("IncomingBytes").add("OutgoingBytes");
+        handler.handle("EnableEnhancedMonitoring", enableReq, REGION);
+
+        ObjectNode disableReq = MAPPER.createObjectNode();
+        disableReq.put("StreamName", "test-stream");
+        disableReq.putArray("ShardLevelMetrics").add("IncomingBytes");
+        Response resp = handler.handle("DisableEnhancedMonitoring", disableReq, REGION);
+        assertThat(resp.getStatus(), is(200));
+
+        ObjectNode body = responseEntity(resp);
+        assertEquals(2, body.get("CurrentShardLevelMetrics").size());
+        assertEquals(1, body.get("DesiredShardLevelMetrics").size());
+    }
+
+    @Test
+    void describeStreamIncludesEnhancedMonitoring() {
+        createStream("test-stream");
+
+        ObjectNode enableReq = MAPPER.createObjectNode();
+        enableReq.put("StreamName", "test-stream");
+        enableReq.putArray("ShardLevelMetrics").add("IncomingBytes");
+        handler.handle("EnableEnhancedMonitoring", enableReq, REGION);
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        Response resp = handler.handle("DescribeStream", descReq, REGION);
+        ObjectNode desc = (ObjectNode) responseEntity(resp).get("StreamDescription");
+        assertEquals(1, desc.get("EnhancedMonitoring").size());
+        assertEquals(1, desc.get("EnhancedMonitoring").get(0).get("ShardLevelMetrics").size());
+        assertEquals("IncomingBytes", desc.get("EnhancedMonitoring").get(0).get("ShardLevelMetrics").get(0).asText());
+    }
+
+    @Test
+    void describeStreamSummaryIncludesEnhancedMonitoring() {
+        createStream("test-stream");
+
+        ObjectNode descReq = MAPPER.createObjectNode();
+        descReq.put("StreamName", "test-stream");
+        Response resp = handler.handle("DescribeStreamSummary", descReq, REGION);
+        ObjectNode summary = (ObjectNode) responseEntity(resp).get("StreamDescriptionSummary");
+        assertEquals(1, summary.get("EnhancedMonitoring").size());
+        assertEquals(0, summary.get("EnhancedMonitoring").get(0).get("ShardLevelMetrics").size());
+    }
+
+    @Test
     void streamNameTakesPrecedenceOverArn() {
         createStream("by-name");
 

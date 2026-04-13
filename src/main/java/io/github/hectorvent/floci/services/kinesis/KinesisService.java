@@ -21,6 +21,11 @@ import java.util.concurrent.atomic.AtomicLong;
 @ApplicationScoped
 public class KinesisService {
     private static final Logger LOG = Logger.getLogger(KinesisService.class);
+    private static final Set<String> VALID_SHARD_LEVEL_METRICS = Set.of(
+            "IncomingBytes", "IncomingRecords", "OutgoingBytes", "OutgoingRecords",
+            "WriteProvisionedThroughputExceeded", "ReadProvisionedThroughputExceeded",
+            "IteratorAgeMilliseconds", "ALL");
+
     private final StorageBackend<String, KinesisStream> store;
     private final StorageBackend<String, KinesisConsumer> consumerStore;
     private final RegionResolver regionResolver;
@@ -184,6 +189,46 @@ public class KinesisService {
         stream.setRetentionPeriodHours(retentionPeriodHours);
         store.put(regionKey(region, streamName), stream);
         LOG.infov("Decreased retention period for stream {0} to {1} hours", streamName, retentionPeriodHours);
+    }
+
+    public Set<String> enableEnhancedMonitoring(String streamName, List<String> metrics, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        Set<String> current = new HashSet<>(stream.getEnhancedMonitoringMetrics());
+        Set<String> desired = resolveMetrics(metrics);
+        stream.getEnhancedMonitoringMetrics().addAll(desired);
+        store.put(regionKey(region, streamName), stream);
+        LOG.infov("Enabled enhanced monitoring for stream {0}: {1}", streamName, desired);
+        return current;
+    }
+
+    public Set<String> disableEnhancedMonitoring(String streamName, List<String> metrics, String region) {
+        KinesisStream stream = resolveStream(streamName, region);
+        Set<String> current = new HashSet<>(stream.getEnhancedMonitoringMetrics());
+        Set<String> toRemove = resolveMetrics(metrics);
+        stream.getEnhancedMonitoringMetrics().removeAll(toRemove);
+        store.put(regionKey(region, streamName), stream);
+        LOG.infov("Disabled enhanced monitoring for stream {0}: {1}", streamName, toRemove);
+        return current;
+    }
+
+    private Set<String> resolveMetrics(List<String> metrics) {
+        if (metrics.isEmpty()) {
+            throw new AwsException("InvalidArgumentException",
+                    "ShardLevelMetrics must contain at least one metric", 400);
+        }
+        // Validate all entries before expanding ALL
+        for (String m : metrics) {
+            if (!VALID_SHARD_LEVEL_METRICS.contains(m)) {
+                throw new AwsException("InvalidArgumentException",
+                        "Invalid ShardLevelMetric: " + m, 400);
+            }
+        }
+        if (metrics.contains("ALL")) {
+            Set<String> all = new HashSet<>(VALID_SHARD_LEVEL_METRICS);
+            all.remove("ALL");
+            return all;
+        }
+        return new HashSet<>(metrics);
     }
 
     public void stopStreamEncryption(String streamName, String region) {
