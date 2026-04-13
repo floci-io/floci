@@ -135,4 +135,60 @@ class LambdaConcurrencyTest {
                         .build()))
                 .isInstanceOf(ResourceNotFoundException.class);
     }
+
+    @Test
+    @Order(9)
+    void putFunctionConcurrency_exceedsAccountUnreservedMin_throwsLimitExceeded() {
+        // Floci default: accountLimit=1000, unreservedMin=100 → max single Put = 900
+        assertThatThrownBy(() -> lambda.putFunctionConcurrency(
+                PutFunctionConcurrencyRequest.builder()
+                        .functionName(FUNCTION_NAME)
+                        .reservedConcurrentExecutions(901)
+                        .build()))
+                .isInstanceOf(LambdaException.class)
+                .hasMessageContaining("UnreservedConcurrentExecution");
+    }
+
+    @Test
+    @Order(10)
+    void invoke_whenReservedZero_throwsTooManyRequests() {
+        lambda.putFunctionConcurrency(PutFunctionConcurrencyRequest.builder()
+                .functionName(FUNCTION_NAME)
+                .reservedConcurrentExecutions(0)
+                .build());
+
+        // Event-type invoke still goes through the concurrency gate; reserved=0
+        // should throttle every request regardless of invocation type.
+        assertThatThrownBy(() -> lambda.invoke(InvokeRequest.builder()
+                .functionName(FUNCTION_NAME)
+                .invocationType(InvocationType.EVENT)
+                .payload(SdkBytes.fromUtf8String("{}"))
+                .build()))
+                .isInstanceOf(TooManyRequestsException.class);
+
+        // Clear so teardown and other tests are not affected
+        lambda.deleteFunctionConcurrency(DeleteFunctionConcurrencyRequest.builder()
+                .functionName(FUNCTION_NAME).build());
+    }
+
+    @Test
+    @Order(11)
+    void invoke_dryRunBypassesConcurrencyGate() {
+        lambda.putFunctionConcurrency(PutFunctionConcurrencyRequest.builder()
+                .functionName(FUNCTION_NAME)
+                .reservedConcurrentExecutions(0)
+                .build());
+
+        // DryRun validates inputs without dispatching; it must not be throttled.
+        InvokeResponse response = lambda.invoke(InvokeRequest.builder()
+                .functionName(FUNCTION_NAME)
+                .invocationType(InvocationType.DRY_RUN)
+                .payload(SdkBytes.fromUtf8String("{}"))
+                .build());
+
+        assertThat(response.statusCode()).isEqualTo(204);
+
+        lambda.deleteFunctionConcurrency(DeleteFunctionConcurrencyRequest.builder()
+                .functionName(FUNCTION_NAME).build());
+    }
 }
