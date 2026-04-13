@@ -22,6 +22,7 @@ public class S3Object {
     private Map<String, String> metadata;
     private String contentType;
     private String contentEncoding;
+    private String contentDisposition;
     private String cacheControl;
     private long size;
     private Instant lastModified;
@@ -81,6 +82,9 @@ public class S3Object {
 
     public String getContentEncoding() { return contentEncoding; }
     public void setContentEncoding(String contentEncoding) { this.contentEncoding = contentEncoding; }
+
+    public String getContentDisposition() { return contentDisposition; }
+    public void setContentDisposition(String contentDisposition) { this.contentDisposition = contentDisposition; }
 
     public String getCacheControl() { return cacheControl; }
     public void setCacheControl(String cacheControl) { this.cacheControl = cacheControl; }

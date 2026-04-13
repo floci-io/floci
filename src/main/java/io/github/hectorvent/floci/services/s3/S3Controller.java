@@ -397,11 +397,13 @@ public class S3Controller {
             byte[] data = decodeAwsChunked(body, contentEncoding, contentSha256);
             validateChecksumHeaders(httpHeaders, data);
             String persistedEncoding = toPersistedContentEncoding(contentEncoding);
+            String contentDisposition = httpHeaders.getHeaderString("Content-Disposition");
             String cacheControl = httpHeaders.getHeaderString("Cache-Control");
             S3Object obj = s3Service.putObject(bucket, key, data, contentType, extractUserMetadata(httpHeaders),
                     httpHeaders.getHeaderString("x-amz-storage-class"),
                     persistedEncoding,
                     lockMode, retainUntil, legalHold,
+                    contentDisposition,
                     cacheControl);
             var resp = Response.ok().header("ETag", obj.getETag());
             if (obj.getVersionId() != null) {
@@ -727,7 +729,9 @@ public class S3Controller {
 
             if (hasQueryParam(uriInfo, "uploads")) {
                 MultipartUpload upload = s3Service.initiateMultipartUpload(bucket, key, contentType,
-                        extractUserMetadata(httpHeaders), httpHeaders.getHeaderString("x-amz-storage-class"));
+                        extractUserMetadata(httpHeaders),
+                        httpHeaders.getHeaderString("x-amz-storage-class"),
+                        httpHeaders.getHeaderString("Content-Disposition"));
                 String xml = new XmlBuilder()
                         .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                         .start("InitiateMultipartUploadResult", AwsNamespaces.S3)
@@ -1303,6 +1307,9 @@ public class S3Controller {
         if (obj.getContentEncoding() != null) {
             resp.header("Content-Encoding", obj.getContentEncoding());
         }
+        if (obj.getContentDisposition() != null) {
+            resp.header("Content-Disposition", obj.getContentDisposition());
+        }
         if (obj.getCacheControl() != null) {
             resp.header("Cache-Control", obj.getCacheControl());
         }
@@ -1350,6 +1357,7 @@ public class S3Controller {
         String sourceKey = decodedSource.substring(slashIndex + 1);
 
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
+        String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
         S3Object copy = s3Service.copyObject(sourceBucket, sourceKey, destBucket, destKey,
                 httpHeaders.getHeaderString("x-amz-metadata-directive"),
@@ -1357,6 +1365,7 @@ public class S3Controller {
                 httpHeaders.getHeaderString("x-amz-storage-class"),
                 contentType,
                 copyContentEncoding,
+                copyContentDisposition,
                 copyCacheControl);
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")

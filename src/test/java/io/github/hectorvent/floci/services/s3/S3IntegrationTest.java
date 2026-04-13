@@ -990,6 +990,100 @@ class S3IntegrationTest {
         given().delete("/cache-control-bucket");
     }
 
+    // --- Content-Disposition header preservation ---
+
+    @Test
+    @Order(130)
+    void createContentDispositionBucketAndPutObject() {
+        String disposition = "attachment; filename=\"download.txt\"";
+
+        given()
+            .put("/content-disposition-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("text/plain")
+            .header("Content-Disposition", disposition)
+            .body("disposition-content")
+        .when()
+            .put("/content-disposition-bucket/disposition.txt")
+        .then()
+            .statusCode(200)
+            .header("ETag", notNullValue());
+    }
+
+    @Test
+    @Order(131)
+    void getObjectReturnsContentDisposition() {
+        given()
+        .when()
+            .get("/content-disposition-bucket/disposition.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("attachment; filename=\"download.txt\""));
+    }
+
+    @Test
+    @Order(132)
+    void headObjectReturnsContentDisposition() {
+        given()
+        .when()
+            .head("/content-disposition-bucket/disposition.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("attachment; filename=\"download.txt\""));
+    }
+
+    @Test
+    @Order(133)
+    void copyObjectPreservesContentDisposition() {
+        given()
+            .header("x-amz-copy-source", "/content-disposition-bucket/disposition.txt")
+        .when()
+            .put("/content-disposition-bucket/disposition-copy.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/content-disposition-bucket/disposition-copy.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("attachment; filename=\"download.txt\""));
+    }
+
+    @Test
+    @Order(134)
+    void copyObjectReplaceContentDisposition() {
+        given()
+            .header("x-amz-copy-source", "/content-disposition-bucket/disposition.txt")
+            .header("x-amz-metadata-directive", "REPLACE")
+            .header("Content-Disposition", "inline; filename=\"inline.txt\"")
+        .when()
+            .put("/content-disposition-bucket/disposition-inline.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/content-disposition-bucket/disposition-inline.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("inline; filename=\"inline.txt\""));
+    }
+
+    @Test
+    @Order(135)
+    void cleanupContentDispositionBucket() {
+        given().delete("/content-disposition-bucket/disposition.txt");
+        given().delete("/content-disposition-bucket/disposition-copy.txt");
+        given().delete("/content-disposition-bucket/disposition-inline.txt");
+        given().delete("/content-disposition-bucket");
+    }
+
     // --- S3 Notification Configuration with Filter ---
 
     @Test

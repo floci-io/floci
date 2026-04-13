@@ -32,6 +32,7 @@ class S3MultipartIntegrationTest {
             .contentType("application/octet-stream")
             .header("x-amz-meta-owner", "team-a")
             .header("x-amz-storage-class", "STANDARD_IA")
+            .header("Content-Disposition", "attachment; filename=\"multipart.bin\"")
         .when()
             .post("/" + BUCKET + "/" + KEY + "?uploads")
         .then()
@@ -125,6 +126,7 @@ class S3MultipartIntegrationTest {
             .get("/" + BUCKET + "/" + KEY)
         .then()
             .statusCode(200)
+            .header("Content-Disposition", equalTo("attachment; filename=\"multipart.bin\""))
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
             .body(equalTo("Part1Data-HelloPart2Data-World"));
