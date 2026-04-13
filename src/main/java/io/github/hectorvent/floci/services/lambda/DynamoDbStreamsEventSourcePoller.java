@@ -1,10 +1,12 @@
 package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -129,10 +131,10 @@ public class DynamoDbStreamsEventSourcePoller {
                         esm.getUuid(), records.size(), esm.getFunctionName());
 
                 String eventJson = buildDynamoDbEvent(records, esm);
-                io.github.hectorvent.floci.services.lambda.model.InvokeResult invokeResult;
+                InvokeResult invokeResult;
                 try {
                     invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse);
-                } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                } catch (AwsException e) {
                     if ("TooManyRequestsException".equals(e.getErrorCode())) {
                         LOG.infov("DynamoDB Streams ESM {0}: function {1} throttled, shard iterator not advanced",
                                 esm.getUuid(), fn.getFunctionName());

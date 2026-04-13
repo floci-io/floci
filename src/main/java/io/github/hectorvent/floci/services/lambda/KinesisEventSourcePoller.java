@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
@@ -121,7 +122,7 @@ public class KinesisEventSourcePoller {
                         InvokeResult invokeResult;
                         try {
                             invokeResult = executorService.invoke(fn, eventJson.getBytes(), InvocationType.RequestResponse);
-                        } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                        } catch (AwsException e) {
                             if ("TooManyRequestsException".equals(e.getErrorCode())) {
                                 LOG.infov("Kinesis ESM {0}: function {1} throttled, shard iterator not advanced",
                                         esm.getUuid(), fn.getFunctionName());

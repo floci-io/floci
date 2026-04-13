@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
@@ -150,7 +151,7 @@ public class SqsEventSourcePoller {
                 try {
                     result = executorService.invoke(
                             fn, eventJson.getBytes(), InvocationType.RequestResponse);
-                } catch (io.github.hectorvent.floci.core.common.AwsException e) {
+                } catch (AwsException e) {
                     if ("TooManyRequestsException".equals(e.getErrorCode())) {
                         LOG.infov("ESM {0}: function {1} throttled, messages will return to queue after visibility timeout",
                                 esm.getUuid(), fn.getFunctionName());

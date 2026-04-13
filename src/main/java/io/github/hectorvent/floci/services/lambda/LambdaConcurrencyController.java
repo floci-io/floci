@@ -31,7 +31,7 @@ import java.util.Map;
  * version prefix rather than inheriting a single one.
  *
  * The stored value is enforced at invocation time by
- * {@link LambdaConcurrencyLimiter}; Put also validates against the account-wide
+ * {@link LambdaConcurrencyLimiter}; Put also validates against the per-region
  * unreserved-minimum.
  */
 @Path("/")

@@ -70,10 +70,10 @@ class LambdaConcurrencyLimiterTest {
     void reservedPool_doesNotConsumeUnreserved() {
         LambdaConcurrencyLimiter limiter = new LambdaConcurrencyLimiter(3, 0);
         limiter.setReserved(ARN, 2);
-        // Reserved function consumes its own pool, not the account pool
+        // Reserved function consumes its own pool, not the region pool
         limiter.acquire(fn(ARN, 2));
         limiter.acquire(fn(ARN, 2));
-        // Unreserved function can still use the full accountLimit - totalReserved = 1
+        // Unreserved function can still use the full regionLimit - totalReserved = 1
         limiter.acquire(fn(ARN2, null));
         AwsException ex = assertThrows(AwsException.class, () -> limiter.acquire(fn(ARN2, null)));
         assertEquals(429, ex.getHttpStatus());

@@ -56,6 +56,12 @@ Lambda runs your function code inside real Docker containers — the same way re
     for unreserved functions in that region. `PutProvisionedConcurrencyConfig`
     and related provisioned-concurrency operations remain unimplemented.
 
+    Reducing or clearing a function's reserved value does not kill
+    invocations that are already in flight — this matches AWS, which
+    applies changes only to new invocations. As a consequence, during the
+    drain window `Σreserved-inflight + unreserved-inflight` can briefly
+    exceed `region-concurrency-limit`.
+
 Function URLs are also reachable directly on `/{proxy:.*}` under the Lambda URL controller, which routes the request into the normal `Invoke` path.
 
 **Stubbed:** `ListLayers` and `ListLayerVersions` return empty arrays. No layer storage exists.
