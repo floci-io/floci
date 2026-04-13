@@ -43,6 +43,7 @@ public class LambdaService {
 
     private final LambdaFunctionStore functionStore;
     private final LambdaExecutorService executorService;
+    private final LambdaConcurrencyLimiter concurrencyLimiter;
     private final WarmPool warmPool;
     private final CodeStore codeStore;
     private final ZipExtractor zipExtractor;
@@ -65,6 +66,7 @@ public class LambdaService {
                   RegionResolver regionResolver) {
         this.functionStore = functionStore;
         this.executorService = null;
+        this.concurrencyLimiter = null;
         this.warmPool = warmPool;
         this.codeStore = codeStore;
         this.zipExtractor = zipExtractor;
@@ -82,6 +84,7 @@ public class LambdaService {
     @Inject
     public LambdaService(LambdaFunctionStore functionStore,
                           LambdaExecutorService executorService,
+                          LambdaConcurrencyLimiter concurrencyLimiter,
                           WarmPool warmPool,
                           CodeStore codeStore,
                           ZipExtractor zipExtractor,
@@ -96,6 +99,7 @@ public class LambdaService {
                           DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller) {
         this.functionStore = functionStore;
         this.executorService = executorService;
+        this.concurrencyLimiter = concurrencyLimiter;
         this.warmPool = warmPool;
         this.codeStore = codeStore;
         this.zipExtractor = zipExtractor;
@@ -230,8 +234,11 @@ public class LambdaService {
     }
 
     public void deleteFunction(String region, String functionName) {
-        getFunction(region, functionName); // throws 404 if not found
+        LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
         warmPool.drainFunction(functionName);
+        if (concurrencyLimiter != null) {
+            concurrencyLimiter.reset(fn.getFunctionArn());
+        }
         codeStore.delete(functionName);
         functionStore.delete(region, functionName);
         LOG.infov("Deleted Lambda function: {0}", functionName);

@@ -32,6 +32,7 @@ public class LambdaExecutorService {
 
     private final WarmPool warmPool;
     private final ObjectMapper objectMapper;
+    private final LambdaConcurrencyLimiter concurrencyLimiter;
     private final ExecutorService asyncExecutor = new ThreadPoolExecutor(
             Math.max(4, Runtime.getRuntime().availableProcessors() * 2),
             Math.max(8, Runtime.getRuntime().availableProcessors() * 4),
@@ -40,25 +41,43 @@ public class LambdaExecutorService {
             new ThreadPoolExecutor.CallerRunsPolicy());
 
     @Inject
-    public LambdaExecutorService(WarmPool warmPool, ObjectMapper objectMapper) {
+    public LambdaExecutorService(WarmPool warmPool,
+                                 ObjectMapper objectMapper,
+                                 LambdaConcurrencyLimiter concurrencyLimiter) {
         this.warmPool = warmPool;
         this.objectMapper = objectMapper;
+        this.concurrencyLimiter = concurrencyLimiter;
     }
 
     public InvokeResult invoke(LambdaFunction fn, byte[] payload, InvocationType type) {
         String requestId = UUID.randomUUID().toString();
 
-        switch (type) {
-            case DryRun -> {
-                return new InvokeResult(204, null, new byte[0], null, requestId);
+        if (type == InvocationType.DryRun) {
+            return new InvokeResult(204, null, new byte[0], null, requestId);
+        }
+
+        LambdaConcurrencyLimiter.Permit permit = concurrencyLimiter.acquire(fn);
+
+        if (type == InvocationType.Event) {
+            try {
+                asyncExecutor.submit(() -> {
+                    try {
+                        executeSync(fn, payload, requestId);
+                    } finally {
+                        permit.close();
+                    }
+                });
+            } catch (RuntimeException e) {
+                permit.close();
+                throw e;
             }
-            case Event -> {
-                asyncExecutor.submit(() -> executeSync(fn, payload, requestId));
-                return new InvokeResult(202, null, new byte[0], null, requestId);
-            }
-            default -> {
-                return executeSync(fn, payload, requestId);
-            }
+            return new InvokeResult(202, null, new byte[0], null, requestId);
+        }
+
+        try {
+            return executeSync(fn, payload, requestId);
+        } finally {
+            permit.close();
         }
     }
 
