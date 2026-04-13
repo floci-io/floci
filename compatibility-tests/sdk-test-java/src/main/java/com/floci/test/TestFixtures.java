@@ -16,6 +16,9 @@ import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.endpoints.Endpoint;
+import software.amazon.awssdk.services.s3control.S3ControlClient;
+import software.amazon.awssdk.services.s3control.endpoints.S3ControlEndpointProvider;
 import software.amazon.awssdk.services.secretsmanager.SecretsManagerClient;
 import software.amazon.awssdk.services.ses.SesClient;
 import software.amazon.awssdk.services.sfn.SfnClient;
@@ -128,6 +131,22 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .forcePathStyle(true)
+                .build();
+    }
+
+    /**
+     * S3 Control client for the S3 Control API (/v20180820/...).
+     * Host prefix injection (account-ID prepended to host) is disabled so requests
+     * go to the configured endpoint directly rather than 000000000000.localhost:4566.
+     */
+    public static S3ControlClient s3ControlClient() {
+        URI endpoint = ENDPOINT;
+        return S3ControlClient.builder()
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .endpointProvider((S3ControlEndpointProvider) params ->
+                        java.util.concurrent.CompletableFuture.completedFuture(
+                                Endpoint.builder().url(endpoint).build()))
                 .build();
     }
 
