@@ -993,7 +993,7 @@ class S3IntegrationTest {
     // --- Content-Disposition header preservation ---
 
     @Test
-    @Order(93)
+    @Order(130)
     void createContentDispositionBucketAndPutObject() {
         String disposition = "attachment; filename=\"download.txt\"";
 
@@ -1014,7 +1014,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(94)
+    @Order(131)
     void getObjectReturnsContentDisposition() {
         given()
         .when()
@@ -1025,7 +1025,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(95)
+    @Order(132)
     void headObjectReturnsContentDisposition() {
         given()
         .when()
@@ -1036,7 +1036,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(96)
+    @Order(133)
     void copyObjectPreservesContentDisposition() {
         given()
             .header("x-amz-copy-source", "/content-disposition-bucket/disposition.txt")
@@ -1055,7 +1055,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(97)
+    @Order(134)
     void copyObjectReplaceContentDisposition() {
         given()
             .header("x-amz-copy-source", "/content-disposition-bucket/disposition.txt")
@@ -1076,7 +1076,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(98)
+    @Order(135)
     void cleanupContentDispositionBucket() {
         given().delete("/content-disposition-bucket/disposition.txt");
         given().delete("/content-disposition-bucket/disposition-copy.txt");
