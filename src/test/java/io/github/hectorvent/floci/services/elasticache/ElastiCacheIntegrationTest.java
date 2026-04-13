@@ -18,7 +18,6 @@ import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.notNullValue;
 
 @QuarkusTest
@@ -83,7 +82,7 @@ class ElastiCacheIntegrationTest {
             .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ReplicationGroupId",
                     equalTo(GROUP_ID))
             .body("DescribeReplicationGroupsResponse.DescribeReplicationGroupsResult.ReplicationGroups.ReplicationGroup.ConfigurationEndpoint.Port",
-                    equalTo(firstProxyPort));
+                    equalTo(String.valueOf(firstProxyPort)));
     }
 
     @Test
@@ -166,8 +165,8 @@ class ElastiCacheIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", hasItem(USER_ID))
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserName", hasItem(USER_NAME));
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", equalTo(USER_ID))
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserName", equalTo(USER_NAME));
     }
 
     @Test
@@ -262,7 +261,7 @@ class ElastiCacheIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", org.hamcrest.Matchers.not(hasItem(USER_ID)));
+            .body("DescribeUsersResponse.DescribeUsersResult.Users.member.UserId", org.hamcrest.Matchers.not(equalTo(USER_ID)));
     }
 
     @Test
