@@ -107,6 +107,35 @@ class StepFunctionsSqsIntegrationTest {
 
     @Test
     @Order(4)
+    void awsSdk_waitForTaskToken_serializesMessageBodyObject() throws Exception {
+        String definition = buildStateMachineDefinition("arn:aws:states:::aws-sdk:sqs:sendMessage.waitForTaskToken", """
+                {
+                    "QueueUrl": "%s",
+                    "MessageBody": {
+                        "Message": "aws sdk callback requested",
+                        "TaskToken.$": "$$.Task.Token"
+                    }
+                }
+                """.formatted(callbackQueueUrl));
+
+        String smArn = createStateMachine("aws-sdk-wait-token-" + System.currentTimeMillis(), definition);
+        String execArn = startExecution(smArn, "{}");
+
+        JsonNode message = receiveSingleMessage(callbackQueueUrl);
+        JsonNode body = mapper.readTree(message.path("Body").asText());
+        assertEquals("aws sdk callback requested", body.path("Message").asText());
+        String taskToken = body.path("TaskToken").asText();
+        assertFalse(taskToken.isBlank());
+
+        sendTaskSuccess(taskToken, "{\"delivered\":true}");
+        String output = waitForExecution(execArn);
+        assertTrue(mapper.readTree(output).path("delivered").asBoolean());
+
+        deleteMessage(callbackQueueUrl, message.path("ReceiptHandle").asText());
+    }
+
+    @Test
+    @Order(5)
     void awsSdk_nonExistentQueue_fails_withSdkStyleErrorName() throws Exception {
         String definition = buildStateMachineDefinition("arn:aws:states:::aws-sdk:sqs:sendMessage", """
                 {
@@ -122,7 +151,7 @@ class StepFunctionsSqsIntegrationTest {
     }
 
     @Test
-    @Order(5)
+    @Order(6)
     void cleanup_deleteQueues() {
         deleteQueue(queueUrl);
         deleteQueue(callbackQueueUrl);

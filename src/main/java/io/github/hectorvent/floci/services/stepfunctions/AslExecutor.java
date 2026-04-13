@@ -575,6 +575,15 @@ public class AslExecutor {
     }
 
     private JsonNode invokeOptimizedSqsSendMessage(JsonNode input, String region) {
+        ObjectNode request = normalizeSqsSendMessageInput(input);
+        return invokeSqsAction("SendMessage", request, region, "SQS.");
+    }
+
+    private JsonNode invokeAwsSdkSqsSendMessage(JsonNode input, String region) {
+        return invokeSqsAction("SendMessage", normalizeSqsSendMessageInput(input), region, "Sqs.", true);
+    }
+
+    private ObjectNode normalizeSqsSendMessageInput(JsonNode input) {
         ObjectNode request = input != null && input.isObject()
                 ? ((ObjectNode) input.deepCopy())
                 : objectMapper.createObjectNode();
@@ -583,12 +592,7 @@ public class AslExecutor {
         if (messageBody != null && !messageBody.isTextual() && !messageBody.isNull()) {
             request.put("MessageBody", messageBody.toString());
         }
-
-        return invokeSqsAction("SendMessage", request, region, "SQS.");
-    }
-
-    private JsonNode invokeAwsSdkSqsSendMessage(JsonNode input, String region) {
-        return invokeSqsAction("SendMessage", input, region, "Sqs.", true);
+        return request;
     }
 
     private JsonNode invokeSqsAction(String action, JsonNode input, String region, String errorPrefix) {
