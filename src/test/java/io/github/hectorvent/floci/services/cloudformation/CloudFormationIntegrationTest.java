@@ -1583,6 +1583,73 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_withEventBridgeRule_resolvesFnGetAttOnTargetArn() {
+        // This template uses Fn::GetAtt to reference the SQS queue's ARN as an EventBridge
+        // rule target — the pattern produced by AWS CDK when wiring an SqsQueue target.
+        // The queue ARN must be resolved during target provisioning, otherwise the rule
+        // ends up with an empty target ARN and events are never delivered.
+        String template = """
+            {
+              "Resources": {
+                "TargetQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-getatt-queue"
+                  }
+                },
+                "MyRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-getatt-rule",
+                    "EventPattern": {
+                      "source": ["my.getatt.test"]
+                    },
+                    "Targets": [
+                      {
+                        "Id": "Target0",
+                        "Arn": {"Fn::GetAtt": ["TargetQueue", "Arn"]}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-getatt-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eb-getatt-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-getatt-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("Target0"))
+            .body("Targets[0].Arn", equalTo("arn:aws:sqs:us-east-1:000000000000:cfn-eb-getatt-queue"));
+    }
+
+    @Test
     void createStack_withEventBridgeRuleAutoName() {
         String template = """
             {

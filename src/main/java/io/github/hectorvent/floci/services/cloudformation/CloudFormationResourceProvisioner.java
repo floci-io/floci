@@ -204,7 +204,10 @@ public class CloudFormationResourceProvisioner {
             attrs.put("VisibilityTimeout", engine.resolve(props.get("VisibilityTimeout")));
         }
         var queue = sqsService.createQueue(queueName, attrs, region);
-        String queueArn = queue.getAttributes().getOrDefault("QueueArn", "");
+        // QueueArn is computed on demand in SqsService#getQueueAttributes and is not
+        // stored on the Queue object, so build it here from region + accountId + queueName.
+        // Without this, Fn::GetAtt [Queue, Arn] references resolve to an empty string.
+        String queueArn = "arn:aws:sqs:" + region + ":" + accountId + ":" + queueName;
         r.setPhysicalId(queue.getQueueUrl());
         r.getAttributes().put("Arn", queueArn);
         r.getAttributes().put("QueueName", queueName);
