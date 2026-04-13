@@ -30,6 +30,7 @@ class IamServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 "000000000000"
         );
     }

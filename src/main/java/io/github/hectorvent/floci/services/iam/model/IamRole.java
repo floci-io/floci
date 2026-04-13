@@ -24,6 +24,7 @@ public class IamRole {
     private Map<String, String> tags = new HashMap<>();
     private List<String> attachedPolicyArns = new ArrayList<>();
     private Map<String, String> inlinePolicies = new HashMap<>();
+    private String permissionsBoundaryArn;
 
     public IamRole() {}
 
@@ -69,4 +70,7 @@ public class IamRole {
 
     public Map<String, String> getInlinePolicies() { return inlinePolicies; }
     public void setInlinePolicies(Map<String, String> inlinePolicies) { this.inlinePolicies = inlinePolicies; }
+
+    public String getPermissionsBoundaryArn() { return permissionsBoundaryArn; }
+    public void setPermissionsBoundaryArn(String permissionsBoundaryArn) { this.permissionsBoundaryArn = permissionsBoundaryArn; }
 }

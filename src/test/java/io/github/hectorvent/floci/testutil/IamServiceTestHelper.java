@@ -22,6 +22,7 @@ public final class IamServiceTestHelper {
                     StorageBackend.class,
                     StorageBackend.class,
                     StorageBackend.class,
+                    StorageBackend.class,
                     String.class
             );
             constructor.setAccessible(true);
@@ -35,6 +36,7 @@ public final class IamServiceTestHelper {
                     null,
                     null,
                     accessKeys,
+                    null,
                     null,
                     "123456789012"
             );

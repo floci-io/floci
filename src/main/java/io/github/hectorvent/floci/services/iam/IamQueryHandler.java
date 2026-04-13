@@ -136,6 +136,12 @@ public class IamQueryHandler {
             case "RemoveRoleFromInstanceProfile" -> handleRemoveRoleFromInstanceProfile(params);
             case "ListInstanceProfilesForRole" -> handleListInstanceProfilesForRole(params);
 
+            // Permission Boundaries
+            case "PutUserPermissionsBoundary"    -> handlePutUserPermissionsBoundary(params);
+            case "DeleteUserPermissionsBoundary" -> handleDeleteUserPermissionsBoundary(params);
+            case "PutRolePermissionsBoundary"    -> handlePutRolePermissionsBoundary(params);
+            case "DeleteRolePermissionsBoundary" -> handleDeleteRolePermissionsBoundary(params);
+
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.IAM, 400);
             };
@@ -673,6 +679,36 @@ public class IamQueryHandler {
         }
         xml.end("InstanceProfiles").elem("IsTruncated", false);
         return Response.ok(AwsQueryResponse.envelope("ListInstanceProfilesForRole", AwsNamespaces.IAM, xml.build())).build();
+    }
+
+    // =========================================================================
+    // Permission Boundaries
+    // =========================================================================
+
+    private Response handlePutUserPermissionsBoundary(MultivaluedMap<String, String> params) {
+        String userName = getParam(params, "UserName");
+        String boundaryArn = getParam(params, "PermissionsBoundary");
+        iamService.putUserPermissionsBoundary(userName, boundaryArn);
+        return Response.ok(AwsQueryResponse.envelope("PutUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
+    }
+
+    private Response handleDeleteUserPermissionsBoundary(MultivaluedMap<String, String> params) {
+        String userName = getParam(params, "UserName");
+        iamService.deleteUserPermissionsBoundary(userName);
+        return Response.ok(AwsQueryResponse.envelope("DeleteUserPermissionsBoundary", AwsNamespaces.IAM, "")).build();
+    }
+
+    private Response handlePutRolePermissionsBoundary(MultivaluedMap<String, String> params) {
+        String roleName = getParam(params, "RoleName");
+        String boundaryArn = getParam(params, "PermissionsBoundary");
+        iamService.putRolePermissionsBoundary(roleName, boundaryArn);
+        return Response.ok(AwsQueryResponse.envelope("PutRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
+    }
+
+    private Response handleDeleteRolePermissionsBoundary(MultivaluedMap<String, String> params) {
+        String roleName = getParam(params, "RoleName");
+        iamService.deleteRolePermissionsBoundary(roleName);
+        return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
     // =========================================================================

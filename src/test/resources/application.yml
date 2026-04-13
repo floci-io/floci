@@ -66,6 +66,7 @@ floci:
       enabled: true
     iam:
       enabled: true
+      enforcement-enabled: false
     elasticache:
       enabled: true
       proxy-base-port: 6379

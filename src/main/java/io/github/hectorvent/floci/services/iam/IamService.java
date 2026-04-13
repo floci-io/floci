@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.SessionCredential;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -18,6 +20,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
 import java.util.List;
@@ -39,6 +42,7 @@ public class IamService {
     private final StorageBackend<String, IamPolicy> policies;
     private final StorageBackend<String, AccessKey> accessKeys;
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
+    private final StorageBackend<String, SessionCredential> sessions;
     private final String accountId;
 
     @Inject
@@ -50,6 +54,7 @@ public class IamService {
             storageFactory.create("iam", "iam-policies.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
+            storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
             config.defaultAccountId()
         );
     }
@@ -60,6 +65,7 @@ public class IamService {
                StorageBackend<String, IamPolicy> policies,
                StorageBackend<String, AccessKey> accessKeys,
                StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
                String accountId) {
         this.users = users;
         this.groups = groups;
@@ -67,6 +73,7 @@ public class IamService {
         this.policies = policies;
         this.accessKeys = accessKeys;
         this.instanceProfiles = instanceProfiles;
+        this.sessions = sessions;
         this.accountId = accountId;
     }
 
@@ -799,8 +806,192 @@ public class IamService {
         return accountId;
     }
 
-    public java.util.Optional<String> findSecretKey(String accessKeyId) {
+    public Optional<String> findSecretKey(String accessKeyId) {
         return accessKeys.get(accessKeyId).map(AccessKey::getSecretAccessKey);
+    }
+
+    // =========================================================================
+    // IAM Enforcement — session tracking and policy collection
+    // =========================================================================
+
+    /**
+     * Stores an assumed-role session so the enforcement filter can resolve its policies.
+     */
+    public void registerSession(String sessionAccessKeyId, String roleArn, java.time.Instant expiration) {
+        sessions.put(sessionAccessKeyId, new SessionCredential(sessionAccessKeyId, roleArn, expiration));
+    }
+
+    /**
+     * Stores an assumed-role session with an optional inline session policy document.
+     */
+    public void registerSession(String sessionAccessKeyId, String roleArn, java.time.Instant expiration,
+                                String sessionPolicyDocument) {
+        sessions.put(sessionAccessKeyId,
+                new SessionCredential(sessionAccessKeyId, roleArn, expiration, sessionPolicyDocument));
+    }
+
+    /**
+     * Resolves the full caller context for the given access key, including identity policies,
+     * optional session policy, and optional permission boundary.
+     *
+     * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
+     */
+    public CallerContext resolveCallerContext(String accessKeyId) {
+        // Check user access keys
+        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        if (akOpt.isPresent()) {
+            String userName = akOpt.get().getUserName();
+            List<String> identityPolicies = collectUserPolicies(userName);
+            String boundaryDoc = resolveUserBoundaryDocument(userName);
+            return new CallerContext(identityPolicies, null, boundaryDoc);
+        }
+
+        // Check assumed-role sessions
+        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        if (sessionOpt.isPresent()) {
+            SessionCredential session = sessionOpt.get();
+            if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
+                sessions.delete(accessKeyId);
+                return null; // expired — unknown key → bypass
+            }
+            List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
+            String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
+            return new CallerContext(identityPolicies, session.getSessionPolicyDocument(), boundaryDoc);
+        }
+
+        // Unknown key — bypass
+        return null;
+    }
+
+    /**
+     * Collects all identity-based policy documents applicable to the caller identified
+     * by {@code accessKeyId}.
+     *
+     * <p>Returns {@code null} if the access key is unknown (bypass — backward-compatible).
+     * Returns an empty list if the key is known but has no policies attached (implicit deny).
+     *
+     * <p>Order: inline policies first, then attached managed policies.
+     */
+    public List<String> resolveCallerPolicies(String accessKeyId) {
+        CallerContext ctx = resolveCallerContext(accessKeyId);
+        return ctx == null ? null : ctx.identityPolicies();
+    }
+
+    private String resolveUserBoundaryDocument(String userName) {
+        return users.get(userName)
+                .map(IamUser::getPermissionsBoundaryArn)
+                .flatMap(arn -> policies.get(arn))
+                .map(IamPolicy::getDefaultDocument)
+                .orElse(null);
+    }
+
+    private String resolveRoleBoundaryDocument(String roleArn) {
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+        return roles.get(roleName)
+                .map(IamRole::getPermissionsBoundaryArn)
+                .flatMap(arn -> policies.get(arn))
+                .map(IamPolicy::getDefaultDocument)
+                .orElse(null);
+    }
+
+    // =========================================================================
+    // Permission Boundaries
+    // =========================================================================
+
+    public void putUserPermissionsBoundary(String userName, String permissionsBoundaryArn) {
+        getPolicy(permissionsBoundaryArn); // validate policy exists
+        IamUser user = getUser(userName);
+        user.setPermissionsBoundaryArn(permissionsBoundaryArn);
+        users.put(userName, user);
+        LOG.infov("Set permissions boundary for user {0}: {1}", userName, permissionsBoundaryArn);
+    }
+
+    public void deleteUserPermissionsBoundary(String userName) {
+        IamUser user = getUser(userName);
+        if (user.getPermissionsBoundaryArn() == null) {
+            throw new AwsException("NoSuchEntity",
+                    "User " + userName + " does not have a permissions boundary.", 404);
+        }
+        user.setPermissionsBoundaryArn(null);
+        users.put(userName, user);
+        LOG.infov("Deleted permissions boundary for user: {0}", userName);
+    }
+
+    public void putRolePermissionsBoundary(String roleName, String permissionsBoundaryArn) {
+        getPolicy(permissionsBoundaryArn); // validate policy exists
+        IamRole role = getRole(roleName);
+        role.setPermissionsBoundaryArn(permissionsBoundaryArn);
+        roles.put(roleName, role);
+        LOG.infov("Set permissions boundary for role {0}: {1}", roleName, permissionsBoundaryArn);
+    }
+
+    public void deleteRolePermissionsBoundary(String roleName) {
+        IamRole role = getRole(roleName);
+        if (role.getPermissionsBoundaryArn() == null) {
+            throw new AwsException("NoSuchEntity",
+                    "Role " + roleName + " does not have a permissions boundary.", 404);
+        }
+        role.setPermissionsBoundaryArn(null);
+        roles.put(roleName, role);
+        LOG.infov("Deleted permissions boundary for role: {0}", roleName);
+    }
+
+    private List<String> collectUserPolicies(String userName) {
+        Optional<IamUser> userOpt = users.get(userName);
+        if (userOpt.isEmpty()) {
+            return null;
+        }
+        IamUser user = userOpt.get();
+
+        // User inline policies
+        List<String> docs = new ArrayList<>(user.getInlinePolicies().values());
+
+        // User attached managed policies
+        for (String arn : user.getAttachedPolicyArns()) {
+            Optional<IamPolicy> p = policies.get(arn);
+            if (p.isPresent() && p.get().getDefaultDocument() != null) {
+                docs.add(p.get().getDefaultDocument());
+            }
+        }
+
+        // Group policies
+        for (String groupName : user.getGroupNames()) {
+            Optional<IamGroup> groupOpt = groups.get(groupName);
+            if (groupOpt.isEmpty()) continue;
+            IamGroup group = groupOpt.get();
+            docs.addAll(group.getInlinePolicies().values());
+            for (String arn : group.getAttachedPolicyArns()) {
+                Optional<IamPolicy> p = policies.get(arn);
+                if (p.isPresent() && p.get().getDefaultDocument() != null) {
+                    docs.add(p.get().getDefaultDocument());
+                }
+            }
+        }
+
+        return docs;
+    }
+
+    private List<String> collectRolePolicies(String roleArn) {
+        String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
+        Optional<IamRole> roleOpt = roles.get(roleName);
+        if (roleOpt.isEmpty()) {
+            return null;
+        }
+        IamRole role = roleOpt.get();
+        List<String> docs = new ArrayList<>();
+
+        // Role inline policies
+        docs.addAll(role.getInlinePolicies().values());
+
+        // Role attached managed policies
+        for (String arn : role.getAttachedPolicyArns()) {
+            Optional<IamPolicy> p = policies.get(arn);
+            if (p.isPresent() && p.get().getDefaultDocument() != null) {
+                docs.add(p.get().getDefaultDocument());
+            }
+        }
+
+        return docs;
     }
 
     private String iamArn(String resourceType, String path, String name) {

@@ -270,6 +270,9 @@ public interface EmulatorConfig {
     interface IamServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean enforcementEnabled();
     }
 
     interface ElastiCacheServiceConfig {

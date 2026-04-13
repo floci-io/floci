@@ -108,6 +108,7 @@ floci:
 
     iam:
       enabled: true
+      enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
 
     elasticache:
       enabled: true
@@ -218,6 +219,7 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |
 | `FLOCI_SERVICES_ECS_DEFAULT_CPU_UNITS`             | `256`            | Default CPU units when task definition omits it               |
+| `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED`           | `false`          | Enforce IAM identity-based policies on every request when `true` |
 
 Per-queue SQS redrive policy (`maxReceiveCount`) is configured at queue creation time via `SetQueueAttributes` / `CreateQueue`, not as a global default.
 
