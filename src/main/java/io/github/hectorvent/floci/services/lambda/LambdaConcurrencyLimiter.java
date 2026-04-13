@@ -246,13 +246,29 @@ public class LambdaConcurrencyLimiter {
      * Extracts the region segment from a Lambda function ARN. Falls back to
      * {@code "unknown"} if the ARN is malformed so state still partitions
      * cleanly rather than mixing with another region's data.
+     *
+     * <p>This is called on every acquire/release, so the parse avoids the
+     * regex machinery and array allocation of {@code String.split(":")} by
+     * scanning for the fourth ':' segment (index 3 in an ARN:
+     * {@code arn:aws:lambda:REGION:account:function:name}).
      */
     private static String regionOf(String arn) {
         if (arn == null) {
             return "unknown";
         }
-        String[] parts = arn.split(":");
-        return parts.length >= 4 ? parts[3] : "unknown";
+        int segmentStart = 0;
+        int delimiters = 0;
+        for (int i = 0; i < arn.length(); i++) {
+            if (arn.charAt(i) == ':') {
+                if (delimiters == 2) {
+                    segmentStart = i + 1;
+                } else if (delimiters == 3) {
+                    return arn.substring(segmentStart, i);
+                }
+                delimiters++;
+            }
+        }
+        return "unknown";
     }
 
     private static AwsException throttle() {
