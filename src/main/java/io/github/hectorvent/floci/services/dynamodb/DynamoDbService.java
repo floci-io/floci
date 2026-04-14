@@ -38,40 +38,44 @@ public class DynamoDbService {
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
     private DynamoDbStreamService streamService;
+    private KinesisStreamingForwarder kinesisForwarder;
 
     @Inject
     public DynamoDbService(StorageFactory storageFactory, RegionResolver regionResolver,
-                           DynamoDbStreamService streamService) {
+                           DynamoDbStreamService streamService,
+                           KinesisStreamingForwarder kinesisForwarder) {
         this(storageFactory.create("dynamodb", "dynamodb-tables.json",
                 new TypeReference<Map<String, TableDefinition>>() {}),
              storageFactory.create("dynamodb", "dynamodb-items.json",
                 new TypeReference<Map<String, Map<String, JsonNode>>>() {}),
-             regionResolver, streamService);
+             regionResolver, streamService, kinesisForwarder);
     }
 
     /** Package-private constructor for testing. */
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore) {
-        this(tableStore, null, new RegionResolver("us-east-1", "000000000000"), null);
+        this(tableStore, null, new RegionResolver("us-east-1", "000000000000"), null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore, RegionResolver regionResolver) {
-        this(tableStore, null, regionResolver, null);
+        this(tableStore, null, regionResolver, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
                     StorageBackend<String, Map<String, JsonNode>> itemStore,
                     RegionResolver regionResolver) {
-        this(tableStore, itemStore, regionResolver, null);
+        this(tableStore, itemStore, regionResolver, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
                     StorageBackend<String, Map<String, JsonNode>> itemStore,
                     RegionResolver regionResolver,
-                    DynamoDbStreamService streamService) {
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder) {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
         this.regionResolver = regionResolver;
         this.streamService = streamService;
+        this.kinesisForwarder = kinesisForwarder;
         loadPersistedItems();
     }
 
@@ -248,7 +252,9 @@ public class DynamoDbService {
         String eventName = existing == null ? "INSERT" : "MODIFY";
         if (streamService != null) {
             streamService.captureEvent(tableName, eventName, existing, item, table, region);
-            streamService.forwardToKinesisDestinations(eventName, existing, item, table, region);
+        }
+        if (kinesisForwarder != null) {
+            kinesisForwarder.forward(eventName, existing, item, table, region);
         }
     }
 
@@ -298,9 +304,13 @@ public class DynamoDbService {
         persistItems(storageKey);
         LOG.debugv("Deleted item from {0}: key={1}", tableName, itemKey);
 
-        if (streamService != null && removed != null) {
-            streamService.captureEvent(tableName, "REMOVE", removed, null, table, region);
-            streamService.forwardToKinesisDestinations("REMOVE", removed, null, table, region);
+        if (removed != null) {
+            if (streamService != null) {
+                streamService.captureEvent(tableName, "REMOVE", removed, null, table, region);
+            }
+            if (kinesisForwarder != null) {
+                kinesisForwarder.forward("REMOVE", removed, null, table, region);
+            }
         }
 
         return removed;
@@ -377,7 +387,9 @@ public class DynamoDbService {
 
         if (streamService != null) {
             streamService.captureEvent(tableName, "MODIFY", existing, item, table, region);
-            streamService.forwardToKinesisDestinations("MODIFY", existing, item, table, region);
+        }
+        if (kinesisForwarder != null) {
+            kinesisForwarder.forward("MODIFY", existing, item, table, region);
         }
 
         return new UpdateResult(item, existing);
@@ -818,9 +830,13 @@ public class DynamoDbService {
             String region = storageKey.split("::", 2)[0];
             for (String itemKey : expiredKeys) {
                 JsonNode removed = items.remove(itemKey);
-                if (removed != null && streamService != null) {
-                    streamService.captureEvent(table.getTableName(), "REMOVE", removed, null, table, region);
-                    streamService.forwardToKinesisDestinations("REMOVE", removed, null, table, region);
+                if (removed != null) {
+                    if (streamService != null) {
+                        streamService.captureEvent(table.getTableName(), "REMOVE", removed, null, table, region);
+                    }
+                    if (kinesisForwarder != null) {
+                        kinesisForwarder.forward("REMOVE", removed, null, table, region);
+                    }
                 }
             }
             persistItems(storageKey);
