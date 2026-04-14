@@ -239,6 +239,82 @@ class LambdaServiceTest {
     }
 
     @Test
+    void rehydrateConcurrency_restoresReservedFromStore() {
+        // Simulate a persisted state: functions already live in the store
+        // with reserved values before the limiter is populated.
+        service.createFunction(REGION, baseRequest("persisted-a"));
+        service.createFunction(REGION, baseRequest("persisted-b"));
+        service.putFunctionConcurrency(REGION, "persisted-a", 300);
+        service.putFunctionConcurrency(REGION, "persisted-b", 200);
+
+        // Build a second service over the same store with a fresh limiter.
+        LambdaFunctionStore store = new LambdaFunctionStore(new InMemoryStorage<>());
+        // Copy the two persisted functions into the new store to emulate a
+        // restart with the same disk state.
+        for (LambdaFunction fn : new java.util.ArrayList<>(
+                service.listFunctions(REGION))) {
+            store.save(REGION, fn);
+        }
+        LambdaService rebooted = new LambdaService(store, new WarmPool(),
+                new CodeStore(Path.of("target/test-data/lambda-code")),
+                new ZipExtractor(), new RegionResolver(REGION, "000000000000"));
+
+        // Starts empty…
+        assertEquals(0, rebooted.concurrencyLimiter().totalReserved(REGION));
+        // …until rehydrate walks the store and re-registers the reserved values.
+        rebooted.rehydrateConcurrency();
+        assertEquals(500, rebooted.concurrencyLimiter().totalReserved(REGION));
+    }
+
+    @Test
+    void multiArnPutFunctionConcurrency_respectsRegionTotalUnderContention() throws Exception {
+        // Two different functions racing a Put near the unreserved floor.
+        // Both try to reserve an amount that — summed — would push the
+        // region below unreserved-min. reservedLock must serialize so that
+        // only one wins.
+        service.createFunction(REGION, baseRequest("multi-a"));
+        service.createFunction(REGION, baseRequest("multi-b"));
+
+        // Defaults: regionLimit=1000, unreservedMin=100. Each Put asks for
+        // 500; together they would leave 0 unreserved.
+        java.util.concurrent.ExecutorService pool = java.util.concurrent.Executors.newFixedThreadPool(2);
+        java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
+        try {
+            java.util.concurrent.Future<Throwable> fA = pool.submit(() -> {
+                start.await();
+                try {
+                    service.putFunctionConcurrency(REGION, "multi-a", 500);
+                    return null;
+                } catch (Throwable t) { return t; }
+            });
+            java.util.concurrent.Future<Throwable> fB = pool.submit(() -> {
+                start.await();
+                try {
+                    service.putFunctionConcurrency(REGION, "multi-b", 500);
+                    return null;
+                } catch (Throwable t) { return t; }
+            });
+            start.countDown();
+
+            Throwable rA = fA.get();
+            Throwable rB = fB.get();
+
+            // Exactly one must have been rejected with LimitExceededException.
+            int successes = (rA == null ? 1 : 0) + (rB == null ? 1 : 0);
+            assertEquals(1, successes, "exactly one Put must win");
+            Throwable rejected = rA != null ? rA : rB;
+            assertTrue(rejected instanceof AwsException
+                            && "LimitExceededException".equals(((AwsException) rejected).getErrorCode()),
+                    "other Put must be rejected, got " + rejected);
+            assertEquals(500,
+                    service.concurrencyLimiter().totalReserved(REGION),
+                    "limiter total must reflect only the winning Put");
+        } finally {
+            pool.shutdownNow();
+        }
+    }
+
+    @Test
     void concurrentPutFunctionConcurrency_endsInConsistentState() throws Exception {
         // Exercise the per-function serialization in concurrencyOpLocks:
         // two threads racing Put on the same function must leave the
