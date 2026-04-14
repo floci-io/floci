@@ -4,11 +4,14 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisConsumer;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisRecord;
+import io.github.hectorvent.floci.services.kinesis.model.KinesisShard;
 import io.github.hectorvent.floci.services.kinesis.model.KinesisStream;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -104,6 +107,78 @@ class KinesisServiceTest {
         @SuppressWarnings("unchecked")
         var records = (List<?>) result.get("Records");
         assertTrue(records.isEmpty());
+        assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
+    }
+
+    @Test
+    void millisBehindLatestIsZeroOnEmptyShard() {
+        kinesisService.createStream("empty", 1, REGION);
+        String shardId = kinesisService.describeStream("empty", REGION).getShards().getFirst().getShardId();
+        String iterator = kinesisService.getShardIterator("empty", shardId, "TRIM_HORIZON", null, REGION);
+
+        Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
+
+        assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
+    }
+
+    @Test
+    void millisBehindLatestIsZeroWhenCaughtUp() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        kinesisService.putRecord("my-stream", "b".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        String shardId = kinesisService.describeStream("my-stream", REGION).getShards().getFirst().getShardId();
+        String iterator = kinesisService.getShardIterator("my-stream", shardId, "TRIM_HORIZON", null, REGION);
+
+        Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
+
+        @SuppressWarnings("unchecked")
+        var records = (List<?>) result.get("Records");
+        assertEquals(2, records.size());
+        assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
+    }
+
+    @Test
+    void millisBehindLatestIsTimeDeltaWhenBatchLimitHit() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        kinesisService.putRecord("my-stream", "b".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        kinesisService.putRecord("my-stream", "c".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        // Overwrite timestamps so we can assert a deterministic delta.
+        KinesisShard shard = kinesisService.describeStream("my-stream", REGION).getShards().getFirst();
+        List<KinesisRecord> records = shard.getRecords();
+        Instant base = Instant.parse("2026-01-01T00:00:00Z");
+        records.get(0).setApproximateArrivalTimestamp(base);
+        records.get(1).setApproximateArrivalTimestamp(base.plusMillis(1500));
+        records.get(2).setApproximateArrivalTimestamp(base.plusMillis(4000));
+
+        String iterator = kinesisService.getShardIterator("my-stream", shard.getShardId(), "TRIM_HORIZON", null, REGION);
+
+        Map<String, Object> result = kinesisService.getRecords(iterator, 2, REGION);
+
+        @SuppressWarnings("unchecked")
+        var returned = (List<?>) result.get("Records");
+        assertEquals(2, returned.size());
+        // Last returned = records[1] at +1500ms, tip = records[2] at +4000ms, delta = 2500ms
+        assertEquals(2500L, ((Number) result.get("MillisBehindLatest")).longValue());
+    }
+
+    @Test
+    void millisBehindLatestIsZeroWhenTimestampsMissing() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        kinesisService.putRecord("my-stream", "b".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        KinesisShard shard = kinesisService.describeStream("my-stream", REGION).getShards().getFirst();
+        // Simulate a record with no arrival timestamp (e.g. legacy data or a partial put).
+        shard.getRecords().getFirst().setApproximateArrivalTimestamp(null);
+
+        String iterator = kinesisService.getShardIterator("my-stream", shard.getShardId(), "TRIM_HORIZON", null, REGION);
+        Map<String, Object> result = kinesisService.getRecords(iterator, 1, REGION);
+
+        // First record returned, second still ahead; null timestamp must not NPE.
+        assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
     }
 
     @Test

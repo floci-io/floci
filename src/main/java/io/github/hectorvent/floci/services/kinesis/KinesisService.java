@@ -393,8 +393,24 @@ public class KinesisService {
         Map<String, Object> response = new HashMap<>();
         response.put("Records", result);
         response.put("NextShardIterator", nextIterator);
-        response.put("MillisBehindLatest", Math.max(0, allRecords.size() - nextIndex));
+        response.put("MillisBehindLatest", computeMillisBehindLatest(allRecords, nextIndex));
         return response;
+    }
+
+    /**
+     * Time delta in ms between the last record returned and the shard tip.
+     * Zero when caught up, the shard is empty, or no records were returned.
+     */
+    private long computeMillisBehindLatest(List<KinesisRecord> allRecords, int nextIndex) {
+        if (nextIndex <= 0 || nextIndex >= allRecords.size()) {
+            return 0L;
+        }
+        Instant lastReturned = allRecords.get(nextIndex - 1).getApproximateArrivalTimestamp();
+        Instant tip = allRecords.get(allRecords.size() - 1).getApproximateArrivalTimestamp();
+        if (lastReturned == null || tip == null) {
+            return 0L;
+        }
+        return Math.max(0L, tip.toEpochMilli() - lastReturned.toEpochMilli());
     }
 
     private KinesisStream resolveStream(String streamName, String region) {
