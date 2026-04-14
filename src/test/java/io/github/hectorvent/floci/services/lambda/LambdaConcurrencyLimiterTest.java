@@ -219,6 +219,22 @@ class LambdaConcurrencyLimiterTest {
     }
 
     @Test
+    void permit_closeIsIdempotent() {
+        // Future callers must not be able to drive the inflight counter
+        // negative by double-closing a permit (try-with-resources +
+        // explicit close, retry logic, etc.).
+        LambdaConcurrencyLimiter limiter = new LambdaConcurrencyLimiter();
+        LambdaConcurrencyLimiter.Permit p = limiter.acquire(fn(3));
+        assertEquals(1, limiter.inflightCount(ARN));
+        p.close();
+        assertEquals(0, limiter.inflightCount(ARN));
+        p.close(); // second close must be a no-op
+        assertEquals(0, limiter.inflightCount(ARN));
+        p.close(); // ...and so must the third
+        assertEquals(0, limiter.inflightCount(ARN));
+    }
+
+    @Test
     void regions_areIndependent() {
         LambdaConcurrencyLimiter limiter = new LambdaConcurrencyLimiter(1000, 100);
         // Fill one region's reserved pool near the limit

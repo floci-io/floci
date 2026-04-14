@@ -5,9 +5,13 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 
+import java.util.Collections;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -30,6 +34,11 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 @ApplicationScoped
 public class LambdaConcurrencyLimiter {
+
+    private static final Logger LOG = Logger.getLogger(LambdaConcurrencyLimiter.class);
+    /** Tracks malformed ARNs already logged so the warn fires once per unique input. */
+    private static final Set<String> LOGGED_MALFORMED_ARNS =
+            Collections.newSetFromMap(new ConcurrentHashMap<>());
 
     /**
      * Inflight counts per function ARN (globally unique). Entries are
@@ -90,7 +99,7 @@ public class LambdaConcurrencyLimiter {
                 throw throttle();
             }
             if (counter.compareAndSet(current, current + 1)) {
-                return counter::decrementAndGet;
+                return idempotentPermit(counter);
             }
         }
     }
@@ -108,9 +117,23 @@ public class LambdaConcurrencyLimiter {
                 throw throttle();
             }
             if (counter.compareAndSet(current, current + 1)) {
-                return counter::decrementAndGet;
+                return idempotentPermit(counter);
             }
         }
+    }
+
+    /**
+     * Wraps {@code counter.decrementAndGet()} in a close-once guard so a
+     * future caller that accidentally double-closes a permit cannot drive
+     * the inflight counter negative.
+     */
+    private static Permit idempotentPermit(AtomicInteger counter) {
+        AtomicBoolean closed = new AtomicBoolean(false);
+        return () -> {
+            if (closed.compareAndSet(false, true)) {
+                counter.decrementAndGet();
+            }
+        };
     }
 
     /**
@@ -268,6 +291,7 @@ public class LambdaConcurrencyLimiter {
      */
     private static String regionOf(String arn) {
         if (arn == null) {
+            warnMalformed("<null>");
             return "unknown";
         }
         int segmentStart = 0;
@@ -282,7 +306,16 @@ public class LambdaConcurrencyLimiter {
                 delimiters++;
             }
         }
+        warnMalformed(arn);
         return "unknown";
+    }
+
+    private static void warnMalformed(String arn) {
+        if (LOGGED_MALFORMED_ARNS.add(arn)) {
+            LOG.warnv("Concurrency limiter received non-ARN function identifier "
+                    + "\"{0}\"; bucketing under region=\"unknown\". This likely "
+                    + "indicates a bare function name reached the limiter.", arn);
+        }
     }
 
     private static AwsException throttle() {

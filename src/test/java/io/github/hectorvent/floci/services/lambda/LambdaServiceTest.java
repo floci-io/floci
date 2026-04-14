@@ -315,6 +315,74 @@ class LambdaServiceTest {
     }
 
     @Test
+    void putFunctionConcurrency_rollsBackLimiterIfSaveFails() {
+        // If functionStore.save throws after the limiter has been updated,
+        // the limiter must be restored so Σreserved stays consistent with
+        // what the store actually persisted.
+        FailingStore failing = new FailingStore();
+        LambdaService svc = new LambdaService(failing, new WarmPool(),
+                new CodeStore(Path.of("target/test-data/lambda-code")),
+                new ZipExtractor(), new RegionResolver(REGION, "000000000000"));
+        svc.createFunction(REGION, baseRequest("rb-fn"));
+        // Baseline: Put of 300 succeeds
+        svc.putFunctionConcurrency(REGION, "rb-fn", 300);
+        assertEquals(300, svc.concurrencyLimiter().totalReserved(REGION));
+
+        // Now make the next save() explode and try to Put 500
+        failing.shouldFail = true;
+        assertThrows(RuntimeException.class,
+                () -> svc.putFunctionConcurrency(REGION, "rb-fn", 500));
+
+        // Limiter must have rolled back to the previous 300
+        assertEquals(300, svc.concurrencyLimiter().totalReserved(REGION),
+                "limiter must unwind on save failure");
+    }
+
+    @Test
+    void deleteFunction_preservesInflightPermitUntilItCloses() {
+        // A deleteFunction that lands while an invocation is still holding a
+        // permit must not drop the counter — the permit close() at the end
+        // of the running invocation still has to decrement something valid.
+        service.createFunction(REGION, baseRequest("del-inflight"));
+        service.putFunctionConcurrency(REGION, "del-inflight", 2);
+
+        LambdaFunction fn = service.getFunction(REGION, "del-inflight");
+        String arn = fn.getFunctionArn();
+        LambdaConcurrencyLimiter.Permit held =
+                service.concurrencyLimiter().acquire(fn);
+        assertEquals(1, service.concurrencyLimiter().inflightCount(arn));
+
+        service.deleteFunction(REGION, "del-inflight");
+
+        // Reserved is cleared from the limiter, but the inflight counter
+        // must still be live for the held permit to decrement into.
+        assertEquals(0, service.concurrencyLimiter().totalReserved(REGION));
+        assertEquals(1, service.concurrencyLimiter().inflightCount(arn),
+                "inflight must survive delete until the permit closes");
+
+        held.close();
+        assertEquals(0, service.concurrencyLimiter().inflightCount(arn));
+    }
+
+    /**
+     * Test helper: a LambdaFunctionStore whose save() throws on demand so
+     * tests can exercise the LambdaService rollback path.
+     */
+    private static final class FailingStore extends LambdaFunctionStore {
+        boolean shouldFail = false;
+        FailingStore() {
+            super(new InMemoryStorage<String, LambdaFunction>());
+        }
+        @Override
+        public void save(String region, LambdaFunction fn) {
+            if (shouldFail) {
+                throw new RuntimeException("injected save failure");
+            }
+            super.save(region, fn);
+        }
+    }
+
+    @Test
     void concurrentPutFunctionConcurrency_endsInConsistentState() throws Exception {
         // Exercise the per-function serialization in concurrencyOpLocks:
         // two threads racing Put on the same function must leave the
