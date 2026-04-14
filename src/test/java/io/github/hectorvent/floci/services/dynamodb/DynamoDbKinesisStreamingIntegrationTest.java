@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.Base64;
 
 import static io.restassured.RestAssured.given;
@@ -160,7 +163,7 @@ class DynamoDbKinesisStreamingIntegrationTest {
 
     @Test
     @Order(10)
-    void putItemForwardsToKinesis() {
+    void putItemForwardsToKinesis() throws Exception {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -201,9 +204,28 @@ class DynamoDbKinesisStreamingIntegrationTest {
 
         String encodedData = recordsResponse.jsonPath().getString("Records[0].Data");
         String decoded = new String(Base64.getDecoder().decode(encodedData));
-        assertTrue(decoded.contains("\"eventName\":\"INSERT\""), "Expected INSERT event, got: " + decoded);
-        assertTrue(decoded.contains("\"tableName\":\"StreamingTable\""), "Expected table name in payload");
-        assertTrue(decoded.contains("\"pk\""), "Expected partition key in payload");
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode payload = mapper.readTree(decoded);
+        assertEquals("INSERT", payload.get("eventName").asText());
+        assertEquals("StreamingTable", payload.get("tableName").asText());
+        assertEquals("aws:dynamodb", payload.get("eventSource").asText());
+
+        JsonNode dynamodb = payload.get("dynamodb");
+        assertNotNull(dynamodb, "dynamodb node must be present");
+        assertNotNull(dynamodb.get("Keys"), "Keys must be present");
+        assertNotNull(dynamodb.get("NewImage"), "NewImage must be present");
+        assertNotNull(dynamodb.get("SizeBytes"), "SizeBytes must be present");
+        assertNotNull(dynamodb.get("ApproximateCreationDateTimePrecision"),
+                "ApproximateCreationDateTimePrecision must be present in dynamodb node");
+
+        long timestamp = dynamodb.get("ApproximateCreationDateTime").asLong();
+        long nowMillis = System.currentTimeMillis();
+        assertTrue(timestamp > nowMillis - 60_000 && timestamp <= nowMillis + 5_000,
+                "ApproximateCreationDateTime should be in milliseconds (recent), got: " + timestamp);
+
+        assertFalse(dynamodb.has("SequenceNumber"), "SequenceNumber should not be in Kinesis payload");
+        assertFalse(dynamodb.has("StreamViewType"), "StreamViewType should not be in Kinesis payload");
     }
 
     @Test
@@ -394,6 +416,20 @@ class DynamoDbKinesisStreamingIntegrationTest {
 
     @Test
     @Order(23)
+    void disableAlreadyDisabledFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DisableKinesisStreamingDestination")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("{\"TableName\": \"StreamingTable\", \"StreamArn\": \"" + kinesisStreamArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    @Order(24)
     void disableNonExistentDestinationFails() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DisableKinesisStreamingDestination")

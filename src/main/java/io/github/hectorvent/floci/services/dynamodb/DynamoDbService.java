@@ -181,9 +181,8 @@ public class DynamoDbService {
         return table;
     }
 
-    public void persistTable(String tableName, String region) {
-        String storageKey = regionKey(region, tableName);
-        tableStore.get(storageKey).ifPresent(table -> tableStore.put(storageKey, table));
+    public void persistTable(String tableName, TableDefinition table, String region) {
+        tableStore.put(regionKey(region, tableName), table);
     }
 
     public void deleteTable(String tableName) {
@@ -246,9 +245,10 @@ public class DynamoDbService {
         persistItems(storageKey);
         LOG.debugv("Put item in {0}: key={1}", tableName, itemKey);
 
+        String eventName = existing == null ? "INSERT" : "MODIFY";
         if (streamService != null) {
-            streamService.captureEvent(tableName,
-                    existing == null ? "INSERT" : "MODIFY", existing, item, table, region);
+            streamService.captureEvent(tableName, eventName, existing, item, table, region);
+            streamService.forwardToKinesisDestinations(eventName, existing, item, table, region);
         }
     }
 
@@ -300,6 +300,7 @@ public class DynamoDbService {
 
         if (streamService != null && removed != null) {
             streamService.captureEvent(tableName, "REMOVE", removed, null, table, region);
+            streamService.forwardToKinesisDestinations("REMOVE", removed, null, table, region);
         }
 
         return removed;
@@ -376,6 +377,7 @@ public class DynamoDbService {
 
         if (streamService != null) {
             streamService.captureEvent(tableName, "MODIFY", existing, item, table, region);
+            streamService.forwardToKinesisDestinations("MODIFY", existing, item, table, region);
         }
 
         return new UpdateResult(item, existing);
@@ -818,6 +820,7 @@ public class DynamoDbService {
                 JsonNode removed = items.remove(itemKey);
                 if (removed != null && streamService != null) {
                     streamService.captureEvent(table.getTableName(), "REMOVE", removed, null, table, region);
+                    streamService.forwardToKinesisDestinations("REMOVE", removed, null, table, region);
                 }
             }
             persistItems(storageKey);

@@ -173,30 +173,33 @@ public class DynamoDbStreamService {
                 deque.pollFirst();
             }
         }
-
-        forwardToKinesisDestinations(record, table, region);
     }
 
-    private void forwardToKinesisDestinations(DynamoDbStreamRecord record,
-                                               TableDefinition table, String region) {
+    public void forwardToKinesisDestinations(String eventName, JsonNode oldItem, JsonNode newItem,
+                                              TableDefinition table, String region) {
         if (kinesisService == null) return;
 
         List<KinesisStreamingDestination> destinations = table.getKinesisStreamingDestinations();
         if (destinations == null || destinations.isEmpty()) return;
 
+        Instant now = Instant.now();
+        JsonNode sourceItem = newItem != null ? newItem : oldItem;
+        ObjectNode keys = buildKeys(sourceItem, table);
+
         for (KinesisStreamingDestination dest : destinations) {
             if (!"ACTIVE".equals(dest.getDestinationStatus())) continue;
 
             try {
-                ObjectNode payload = buildKinesisPayload(record, table.getTableName(), region);
+                ObjectNode payload = buildKinesisPayload(eventName, keys, newItem, oldItem,
+                        table.getTableName(), region, now);
                 byte[] data = objectMapper.writeValueAsBytes(payload);
 
-                String partitionKey = extractPartitionKey(record.getKeys(), table);
+                String partitionKey = extractPartitionKey(keys, table);
                 String streamName = extractStreamName(dest.getStreamArn());
 
                 kinesisService.putRecord(streamName, data, partitionKey, region);
                 LOG.debugv("Forwarded DynamoDB event to Kinesis stream {0}: {1} on {2}",
-                        streamName, record.getEventName(), table.getTableName());
+                        streamName, eventName, table.getTableName());
             } catch (Exception e) {
                 LOG.warnv("Failed to forward DynamoDB event to Kinesis destination {0}: {1}",
                         dest.getStreamArn(), e.getMessage());
@@ -204,30 +207,31 @@ public class DynamoDbStreamService {
         }
     }
 
-    private ObjectNode buildKinesisPayload(DynamoDbStreamRecord record, String tableName, String region) {
+    private ObjectNode buildKinesisPayload(String eventName, JsonNode keys,
+                                            JsonNode newImage, JsonNode oldImage,
+                                            String tableName, String region, Instant timestamp) {
         ObjectNode payload = objectMapper.createObjectNode();
         payload.put("awsRegion", region);
-        payload.put("eventID", record.getEventId());
-        payload.put("eventName", record.getEventName());
+        payload.put("eventID", UUID.randomUUID().toString());
+        payload.put("eventName", eventName);
         payload.putNull("userIdentity");
         payload.put("recordFormat", "application/json");
         payload.put("tableName", tableName);
         payload.put("eventSource", "aws:dynamodb");
 
         ObjectNode dynamodb = objectMapper.createObjectNode();
-        dynamodb.put("ApproximateCreationDateTime", record.getApproximateCreationDateTime());
-        if (record.getKeys() != null) {
-            dynamodb.set("Keys", record.getKeys());
+        dynamodb.put("ApproximateCreationDateTime", timestamp.toEpochMilli());
+        if (keys != null) {
+            dynamodb.set("Keys", keys);
         }
-        if (record.getNewImage() != null) {
-            dynamodb.set("NewImage", record.getNewImage());
+        if (newImage != null) {
+            dynamodb.set("NewImage", newImage);
         }
-        if (record.getOldImage() != null) {
-            dynamodb.set("OldImage", record.getOldImage());
+        if (oldImage != null) {
+            dynamodb.set("OldImage", oldImage);
         }
-        dynamodb.put("SequenceNumber", record.getSequenceNumber());
         dynamodb.put("SizeBytes", 0);
-        dynamodb.put("StreamViewType", record.getStreamViewType());
+        dynamodb.put("ApproximateCreationDateTimePrecision", "MILLISECOND");
         payload.set("dynamodb", dynamodb);
 
         return payload;

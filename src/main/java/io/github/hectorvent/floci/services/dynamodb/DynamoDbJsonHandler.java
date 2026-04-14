@@ -652,7 +652,7 @@ public class DynamoDbJsonHandler {
             table.setStreamViewType("NEW_AND_OLD_IMAGES");
         }
 
-        dynamoDbService.persistTable(tableName, region);
+        dynamoDbService.persistTable(tableName, table, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("TableName", tableName);
@@ -674,9 +674,14 @@ public class DynamoDbJsonHandler {
                     "Kinesis streaming destination not found for stream: " + streamArn, 400);
         }
 
+        if ("DISABLED".equals(existing.get().getDestinationStatus())) {
+            throw new AwsException("ValidationException",
+                    "Kinesis streaming destination is already disabled for stream: " + streamArn, 400);
+        }
+
         existing.get().setDestinationStatus("DISABLED");
         existing.get().setDestinationStatusDescription("Kinesis streaming is disabled for this table");
-        dynamoDbService.persistTable(tableName, region);
+        dynamoDbService.persistTable(tableName, table, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("TableName", tableName);
