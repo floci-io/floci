@@ -39,7 +39,7 @@ Lambda runs your function code inside real Docker containers — the same way re
 | `ListTags` | List tags on a function |
 | `TagResource` | Tag a function |
 | `UntagResource` | Untag a function |
-| `PutFunctionConcurrency` | Set reserved concurrent executions (enforced at invocation) |
+| `PutFunctionConcurrency` | Set reserved concurrent executions |
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
 
@@ -94,6 +94,8 @@ floci:
       code-path: ./data/lambda-code        # ZIP storage location
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300  # Idle container cleanup
+      region-concurrency-limit: 1000       # Concurrent executions ceiling per region
+      unreserved-concurrency-min: 100      # Min unreserved capacity PutFunctionConcurrency must leave
 ```
 
 ### Docker socket requirement

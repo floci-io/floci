@@ -99,6 +99,8 @@ floci:
       code-path: ./data/lambda-code           # Where ZIP archives are stored
       poll-interval-ms: 1000
       container-idle-timeout-seconds: 300     # Remove idle containers after this
+      region-concurrency-limit: 1000          # Concurrent executions ceiling per region
+      unreserved-concurrency-min: 100         # Minimum unreserved capacity PutFunctionConcurrency must leave
 
     apigateway:
       enabled: true
