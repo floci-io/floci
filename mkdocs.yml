@@ -86,6 +86,9 @@ nav:
     - ElastiCache: services/elasticache.md
     - RDS: services/rds.md
     - MSK (Kafka): services/msk.md
+    - Glue: services/glue.md
+    - Athena: services/athena.md
+    - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
