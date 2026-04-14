@@ -5,8 +5,10 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
+import io.github.hectorvent.floci.services.dynamodb.model.KinesisStreamingDestination;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -44,16 +46,24 @@ public class DynamoDbStreamService {
     private final AtomicLong sequenceCounter = new AtomicLong(0);
 
     private final ObjectMapper objectMapper;
+    private KinesisService kinesisService;
 
     @Inject
-    public DynamoDbStreamService(ObjectMapper objectMapper, StorageFactory storageFactory) {
+    public DynamoDbStreamService(ObjectMapper objectMapper, StorageFactory storageFactory,
+                                 KinesisService kinesisService) {
         this(objectMapper, storageFactory.create("dynamodb", "dynamodb-tables.json",
-                new TypeReference<Map<String, TableDefinition>>() {}));
+                new TypeReference<Map<String, TableDefinition>>() {}), kinesisService);
     }
 
     /** Package-private constructor for testing. */
     DynamoDbStreamService(ObjectMapper objectMapper, StorageBackend<String, TableDefinition> tableStore) {
+        this(objectMapper, tableStore, null);
+    }
+
+    DynamoDbStreamService(ObjectMapper objectMapper, StorageBackend<String, TableDefinition> tableStore,
+                          KinesisService kinesisService) {
         this.objectMapper = objectMapper;
+        this.kinesisService = kinesisService;
         loadPersistedStreams(tableStore);
     }
 
@@ -163,6 +173,81 @@ public class DynamoDbStreamService {
                 deque.pollFirst();
             }
         }
+
+        forwardToKinesisDestinations(record, table, region);
+    }
+
+    private void forwardToKinesisDestinations(DynamoDbStreamRecord record,
+                                               TableDefinition table, String region) {
+        if (kinesisService == null) return;
+
+        List<KinesisStreamingDestination> destinations = table.getKinesisStreamingDestinations();
+        if (destinations == null || destinations.isEmpty()) return;
+
+        for (KinesisStreamingDestination dest : destinations) {
+            if (!"ACTIVE".equals(dest.getDestinationStatus())) continue;
+
+            try {
+                ObjectNode payload = buildKinesisPayload(record, table.getTableName(), region);
+                byte[] data = objectMapper.writeValueAsBytes(payload);
+
+                String partitionKey = extractPartitionKey(record.getKeys(), table);
+                String streamName = extractStreamName(dest.getStreamArn());
+
+                kinesisService.putRecord(streamName, data, partitionKey, region);
+                LOG.debugv("Forwarded DynamoDB event to Kinesis stream {0}: {1} on {2}",
+                        streamName, record.getEventName(), table.getTableName());
+            } catch (Exception e) {
+                LOG.warnv("Failed to forward DynamoDB event to Kinesis destination {0}: {1}",
+                        dest.getStreamArn(), e.getMessage());
+            }
+        }
+    }
+
+    private ObjectNode buildKinesisPayload(DynamoDbStreamRecord record, String tableName, String region) {
+        ObjectNode payload = objectMapper.createObjectNode();
+        payload.put("awsRegion", region);
+        payload.put("eventID", record.getEventId());
+        payload.put("eventName", record.getEventName());
+        payload.putNull("userIdentity");
+        payload.put("recordFormat", "application/json");
+        payload.put("tableName", tableName);
+        payload.put("eventSource", "aws:dynamodb");
+
+        ObjectNode dynamodb = objectMapper.createObjectNode();
+        dynamodb.put("ApproximateCreationDateTime", record.getApproximateCreationDateTime());
+        if (record.getKeys() != null) {
+            dynamodb.set("Keys", record.getKeys());
+        }
+        if (record.getNewImage() != null) {
+            dynamodb.set("NewImage", record.getNewImage());
+        }
+        if (record.getOldImage() != null) {
+            dynamodb.set("OldImage", record.getOldImage());
+        }
+        dynamodb.put("SequenceNumber", record.getSequenceNumber());
+        dynamodb.put("SizeBytes", 0);
+        dynamodb.put("StreamViewType", record.getStreamViewType());
+        payload.set("dynamodb", dynamodb);
+
+        return payload;
+    }
+
+    private String extractPartitionKey(JsonNode keys, TableDefinition table) {
+        if (keys == null || keys.isEmpty()) return "default";
+        String pkName = table.getPartitionKeyName();
+        JsonNode pkValue = keys.get(pkName);
+        if (pkValue == null) return "default";
+        if (pkValue.has("S")) return pkValue.get("S").asText();
+        if (pkValue.has("N")) return pkValue.get("N").asText();
+        if (pkValue.has("B")) return pkValue.get("B").asText();
+        return pkValue.toString();
+    }
+
+    private String extractStreamName(String streamArn) {
+        int idx = streamArn.lastIndexOf('/');
+        if (idx >= 0) return streamArn.substring(idx + 1);
+        return streamArn;
     }
 
     private ObjectNode buildKeys(JsonNode item, TableDefinition table) {

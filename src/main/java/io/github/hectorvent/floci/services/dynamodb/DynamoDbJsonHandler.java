@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsJsonController;
 import io.github.hectorvent.floci.services.dynamodb.model.*;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -22,13 +24,15 @@ public class DynamoDbJsonHandler {
 
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService dynamoDbStreamService;
+    private final KinesisService kinesisService;
     private final ObjectMapper objectMapper;
 
     @Inject
     public DynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
-                               ObjectMapper objectMapper) {
+                               KinesisService kinesisService, ObjectMapper objectMapper) {
         this.dynamoDbService = dynamoDbService;
         this.dynamoDbStreamService = dynamoDbStreamService;
+        this.kinesisService = kinesisService;
         this.objectMapper = objectMapper;
     }
 
@@ -54,6 +58,9 @@ public class DynamoDbJsonHandler {
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
             case "ListTagsOfResource" -> handleListTagsOfResource(request, region);
+            case "EnableKinesisStreamingDestination" -> handleEnableKinesisStreamingDestination(request, region);
+            case "DisableKinesisStreamingDestination" -> handleDisableKinesisStreamingDestination(request, region);
+            case "DescribeKinesisStreamingDestination" -> handleDescribeKinesisStreamingDestination(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException", "Operation " + action + " is not supported."))
                     .build();
@@ -607,6 +614,96 @@ public class DynamoDbJsonHandler {
             tagsArray.add(tagNode);
         }
         response.set("Tags", tagsArray);
+        return Response.ok(response).build();
+    }
+
+    private Response handleEnableKinesisStreamingDestination(JsonNode request, String region) {
+        String tableName = request.path("TableName").asText();
+        String streamArn = request.path("StreamArn").asText();
+
+        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+
+        String streamName = streamArn.substring(streamArn.lastIndexOf('/') + 1);
+        try {
+            kinesisService.describeStream(streamName, region);
+        } catch (AwsException e) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Kinesis stream not found: " + streamArn, 400);
+        }
+
+        Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
+        if (existing.isPresent() && "ACTIVE".equals(existing.get().getDestinationStatus())) {
+            throw new AwsException("ValidationException",
+                    "Table already has an active Kinesis streaming destination with this stream ARN", 400);
+        }
+
+        if (existing.isPresent()) {
+            existing.get().setDestinationStatus("ACTIVE");
+            existing.get().setDestinationStatusDescription("Kinesis streaming is enabled for this table");
+        } else {
+            table.getKinesisStreamingDestinations().add(new KinesisStreamingDestination(streamArn));
+        }
+
+        if (!table.isStreamEnabled()) {
+            StreamDescription sd = dynamoDbStreamService.enableStream(
+                    tableName, table.getTableArn(), "NEW_AND_OLD_IMAGES", region);
+            table.setStreamEnabled(true);
+            table.setStreamArn(sd.getStreamArn());
+            table.setStreamViewType("NEW_AND_OLD_IMAGES");
+        }
+
+        dynamoDbService.persistTable(tableName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("TableName", tableName);
+        response.put("StreamArn", streamArn);
+        response.put("DestinationStatus", "ACTIVE");
+        response.put("DestinationStatusDescription", "Kinesis streaming is enabled for this table");
+        return Response.ok(response).build();
+    }
+
+    private Response handleDisableKinesisStreamingDestination(JsonNode request, String region) {
+        String tableName = request.path("TableName").asText();
+        String streamArn = request.path("StreamArn").asText();
+
+        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+
+        Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
+        if (existing.isEmpty()) {
+            throw new AwsException("ResourceNotFoundException",
+                    "Kinesis streaming destination not found for stream: " + streamArn, 400);
+        }
+
+        existing.get().setDestinationStatus("DISABLED");
+        existing.get().setDestinationStatusDescription("Kinesis streaming is disabled for this table");
+        dynamoDbService.persistTable(tableName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("TableName", tableName);
+        response.put("StreamArn", streamArn);
+        response.put("DestinationStatus", "DISABLED");
+        response.put("DestinationStatusDescription", "Kinesis streaming is disabled for this table");
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeKinesisStreamingDestination(JsonNode request, String region) {
+        String tableName = request.path("TableName").asText();
+        TableDefinition table = dynamoDbService.describeTable(tableName, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("TableName", tableName);
+
+        ArrayNode destinations = objectMapper.createArrayNode();
+        for (KinesisStreamingDestination dest : table.getKinesisStreamingDestinations()) {
+            ObjectNode destNode = objectMapper.createObjectNode();
+            destNode.put("StreamArn", dest.getStreamArn());
+            destNode.put("DestinationStatus", dest.getDestinationStatus());
+            destNode.put("DestinationStatusDescription", dest.getDestinationStatusDescription());
+            destNode.put("ApproximateCreationDateTimePrecision",
+                    dest.getApproximateCreationDateTimePrecision());
+            destinations.add(destNode);
+        }
+        response.set("KinesisDataStreamDestinations", destinations);
         return Response.ok(response).build();
     }
 

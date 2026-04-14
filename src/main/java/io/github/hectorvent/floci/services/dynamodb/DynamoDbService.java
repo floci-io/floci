@@ -181,6 +181,11 @@ public class DynamoDbService {
         return table;
     }
 
+    public void persistTable(String tableName, String region) {
+        String storageKey = regionKey(region, tableName);
+        tableStore.get(storageKey).ifPresent(table -> tableStore.put(storageKey, table));
+    }
+
     public void deleteTable(String tableName) {
         deleteTable(tableName, regionResolver.getDefaultRegion());
     }

@@ -35,6 +35,7 @@ public class TableDefinition {
     private boolean streamEnabled;
     private String streamArn;
     private String streamViewType;
+    private List<KinesisStreamingDestination> kinesisStreamingDestinations;
 
     public TableDefinition() {
         this.keySchema = new ArrayList<>();
@@ -42,6 +43,7 @@ public class TableDefinition {
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
         this.localSecondaryIndexes = new ArrayList<>();
+        this.kinesisStreamingDestinations = new ArrayList<>();
     }
 
     public TableDefinition(String tableName,
@@ -66,6 +68,7 @@ public class TableDefinition {
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
         this.localSecondaryIndexes = new ArrayList<>();
+        this.kinesisStreamingDestinations = new ArrayList<>();
     }
 
     public String getTableName() { return tableName; }
@@ -125,6 +128,19 @@ public class TableDefinition {
 
     public String getStreamViewType() { return streamViewType; }
     public void setStreamViewType(String streamViewType) { this.streamViewType = streamViewType; }
+
+    public List<KinesisStreamingDestination> getKinesisStreamingDestinations() {
+        return kinesisStreamingDestinations != null ? kinesisStreamingDestinations : new ArrayList<>();
+    }
+    public void setKinesisStreamingDestinations(List<KinesisStreamingDestination> destinations) {
+        this.kinesisStreamingDestinations = destinations != null ? destinations : new ArrayList<>();
+    }
+
+    public Optional<KinesisStreamingDestination> findKinesisStreamingDestination(String streamArn) {
+        return getKinesisStreamingDestinations().stream()
+                .filter(d -> streamArn.equals(d.getStreamArn()))
+                .findFirst();
+    }
 
     /** Returns the partition key attribute name. */
     public String getPartitionKeyName() {

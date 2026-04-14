@@ -575,6 +575,95 @@ teardown() {
     [ "$count" = "1" ]
 }
 
+# --- DynamoDB Kinesis Streaming Destination Tests ---
+
+@test "DynamoDB: enable kinesis streaming destination" {
+    STREAM_NAME="bats-kinesis-$(unique_name)"
+
+    aws_cmd kinesis create-stream --stream-name "$STREAM_NAME" --shard-count 1 >/dev/null
+
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH \
+        --billing-mode PAY_PER_REQUEST \
+        --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    STREAM_ARN=$(aws_cmd kinesis describe-stream-summary --stream-name "$STREAM_NAME" | jq -r '.StreamDescriptionSummary.StreamARN')
+
+    run aws_cmd dynamodb enable-kinesis-streaming-destination \
+        --table-name "$TABLE_NAME" \
+        --stream-arn "$STREAM_ARN"
+    assert_success
+    status=$(json_get "$output" '.DestinationStatus')
+    [ "$status" = "ACTIVE" ]
+
+    aws_cmd kinesis delete-stream --stream-name "$STREAM_NAME" >/dev/null 2>&1 || true
+}
+
+@test "DynamoDB: describe kinesis streaming destination" {
+    STREAM_NAME="bats-kinesis-$(unique_name)"
+
+    aws_cmd kinesis create-stream --stream-name "$STREAM_NAME" --shard-count 1 >/dev/null
+
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH \
+        --billing-mode PAY_PER_REQUEST \
+        --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    STREAM_ARN=$(aws_cmd kinesis describe-stream-summary --stream-name "$STREAM_NAME" | jq -r '.StreamDescriptionSummary.StreamARN')
+
+    aws_cmd dynamodb enable-kinesis-streaming-destination \
+        --table-name "$TABLE_NAME" \
+        --stream-arn "$STREAM_ARN" >/dev/null
+
+    run aws_cmd dynamodb describe-kinesis-streaming-destination \
+        --table-name "$TABLE_NAME"
+    assert_success
+    count=$(echo "$output" | jq '.KinesisDataStreamDestinations | length')
+    [ "$count" = "1" ]
+    dest_status=$(echo "$output" | jq -r '.KinesisDataStreamDestinations[0].DestinationStatus')
+    [ "$dest_status" = "ACTIVE" ]
+
+    aws_cmd kinesis delete-stream --stream-name "$STREAM_NAME" >/dev/null 2>&1 || true
+}
+
+@test "DynamoDB: disable kinesis streaming destination" {
+    STREAM_NAME="bats-kinesis-$(unique_name)"
+
+    aws_cmd kinesis create-stream --stream-name "$STREAM_NAME" --shard-count 1 >/dev/null
+
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH \
+        --billing-mode PAY_PER_REQUEST \
+        --stream-specification StreamEnabled=true,StreamViewType=NEW_AND_OLD_IMAGES >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    STREAM_ARN=$(aws_cmd kinesis describe-stream-summary --stream-name "$STREAM_NAME" | jq -r '.StreamDescriptionSummary.StreamARN')
+
+    aws_cmd dynamodb enable-kinesis-streaming-destination \
+        --table-name "$TABLE_NAME" \
+        --stream-arn "$STREAM_ARN" >/dev/null
+
+    run aws_cmd dynamodb disable-kinesis-streaming-destination \
+        --table-name "$TABLE_NAME" \
+        --stream-arn "$STREAM_ARN"
+    assert_success
+    status=$(json_get "$output" '.DestinationStatus')
+    [ "$status" = "DISABLED" ]
+
+    aws_cmd kinesis delete-stream --stream-name "$STREAM_NAME" >/dev/null 2>&1 || true
+}
+
 @test "DynamoDB: scan with contains on String Set" {
     aws_cmd dynamodb create-table \
         --table-name "$TABLE_NAME" \
