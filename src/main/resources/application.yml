@@ -14,7 +14,9 @@ quarkus:
       --initialize-at-run-time=org.bouncycastle.jce.provider.BouncyCastleProvider,
       --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService,
       --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator,
-      --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
+      --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper,
+      --initialize-at-run-time=org.duckdb.DuckDBDriver,
+      --initialize-at-run-time=org.duckdb.DuckDBNative
 
 floci:
   max-request-size: 512
@@ -117,6 +119,8 @@ floci:
       default-recovery-window-days: 30
     kinesis:
       enabled: true
+    firehose:
+      enabled: true
     kms:
       enabled: true
     cognito:
@@ -128,6 +132,10 @@ floci:
     acm:
       enabled: true
       validation-wait-seconds: 0
+    athena:
+      enabled: true
+    glue:
+      enabled: true
     ses:
       enabled: true
     opensearch:

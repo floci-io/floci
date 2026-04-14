@@ -14,6 +14,8 @@ RUN mvn clean package -DskipTests -q
 FROM eclipse-temurin:25-jre-alpine
 WORKDIR /app
 
+RUN apk add --no-cache libstdc++ gcompat
+
 COPY --from=build /build/target/quarkus-app/ quarkus-app/
 
 RUN mkdir -p /app/data

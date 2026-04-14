@@ -12,6 +12,7 @@ RUN mkdir -p /app/data \
     && chown 1001:root /app \
     && chmod "g+rwX" /app \
     && chown 1001:root /app/data \
+    && apk add --no-cache libstdc++ gcompat \
     && if [ "$INSTALL_AWS_CLI" = "true" ]; then \
              apk add --no-cache aws-cli; \
        fi

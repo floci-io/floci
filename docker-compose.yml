@@ -2,7 +2,7 @@ services:
   floci:
     build:
       context: .
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.native
     ports:
       - "4566:4566"
       - "5100-5199:5100-5199"

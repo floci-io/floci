@@ -13,12 +13,18 @@ COPY src ./src
 
 RUN mvn clean package -Dnative -DskipTests -B
 
+# Extract DuckDB native libraries
+RUN mkdir -p /app/native-libs && \
+    find /root/.m2/repository/org/duckdb/duckdb_jdbc -name "*.jar" -exec jar -xf {} libduckdb_java.so_linux_arm64 libduckdb_java.so_linux_amd64 \; && \
+    mv libduckdb_java.so_linux_* /app/native-libs/
+
 # Stage 2: Minimal runtime
 FROM quay.io/quarkus/quarkus-micro-image:2.0
 
 USER root
 WORKDIR /app
-RUN mkdir -p /app/data \
+# Create the directory DuckDB expects as a workaround
+RUN mkdir -p /app/data /app/lib /app/build/debug \
     && chown -R 1001:root /app \
     && chmod -R g+rwX /app
 VOLUME /app/data
@@ -31,8 +37,16 @@ HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
 ARG VERSION=latest
 ENV FLOCI_VERSION=${VERSION}
 ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+# Set library path for DuckDB
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/app/lib
 
 COPY --from=build /app/target/*-runner /app/application
+COPY --from=build /app/native-libs/* /app/lib/
+
+# Symlink to the expected path
+RUN ln -s /app/lib/libduckdb_java.so_linux_arm64 /app/build/debug/libduckdb_java.so_linux_arm64 && \
+    ln -s /app/lib/libduckdb_java.so_linux_amd64 /app/build/debug/libduckdb_java.so_linux_amd64
+
 RUN chmod +x /app/application
 
 USER 1001
