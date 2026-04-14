@@ -73,7 +73,7 @@ public class SqsEventSourcePoller {
     void init() {
         List<EventSourceMapping> esms = esmStore.list();
         for (EventSourceMapping esm : esms) {
-            if (esm.isEnabled()) {
+            if (esm.isEnabled() && esm.getEventSourceArn().contains(":sqs:")) {
                 startPolling(esm);
             }
         }
