@@ -27,6 +27,7 @@ public class JsonErrorResponseUtils {
         String queryErrorFault = (httpStatusCode < 500) ? "Sender" : "Receiver";
         return Response.status(httpStatusCode)
                 .header("x-amzn-query-error", queryError + ";" + queryErrorFault)
+                .header("X-Amzn-Errortype", errorType)
                 .entity(new AwsErrorResponse(errorType, errorMessage))
                 .build();
     }

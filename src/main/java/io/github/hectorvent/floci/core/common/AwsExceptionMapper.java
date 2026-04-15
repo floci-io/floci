@@ -19,6 +19,7 @@ public class AwsExceptionMapper implements ExceptionMapper<AwsException> {
         LOG.debugv("Mapping exception: {0} - {1}", exception.getErrorCode(), exception.getMessage());
         return Response.status(exception.getHttpStatus())
                 .type(MediaType.APPLICATION_JSON)
+                .header("X-Amzn-Errortype", exception.jsonType())
                 .entity(new AwsErrorResponse(exception.jsonType(), exception.getMessage()))
                 .build();
     }
