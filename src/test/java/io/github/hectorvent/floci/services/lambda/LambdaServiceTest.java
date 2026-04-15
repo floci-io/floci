@@ -102,6 +102,69 @@ class LambdaServiceTest {
     }
 
     @Test
+    void getFunctionAcceptsPartialArn() {
+        service.createFunction(REGION, baseRequest("arn-fn"));
+        LambdaFunction fn = service.getFunction(REGION, "000000000000:function:arn-fn");
+        assertEquals("arn-fn", fn.getFunctionName());
+    }
+
+    @Test
+    void getFunctionAcceptsFullArn() {
+        service.createFunction(REGION, baseRequest("arn-fn"));
+        LambdaFunction fn = service.getFunction(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:arn-fn");
+        assertEquals("arn-fn", fn.getFunctionName());
+    }
+
+    @Test
+    void getFunctionAcceptsArnWithQualifier() {
+        service.createFunction(REGION, baseRequest("arn-fn"));
+        LambdaFunction fn = service.getFunction(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:arn-fn:prod");
+        assertEquals("arn-fn", fn.getFunctionName());
+    }
+
+    @Test
+    void getFunctionRejectsRegionMismatch() {
+        service.createFunction(REGION, baseRequest("region-fn"));
+        AwsException ex = assertThrows(AwsException.class, () -> service.getFunction(REGION,
+                "arn:aws:lambda:eu-west-1:000000000000:function:region-fn"));
+        assertEquals("InvalidParameterValueException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void getFunctionRejectsMalformedArn() {
+        AwsException ex = assertThrows(AwsException.class, () -> service.getFunction(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:layer:my-layer"));
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void createFunctionDeduplicatesAcrossNameAndArn() {
+        service.createFunction(REGION, baseRequest("dedup-fn"));
+        Map<String, Object> req = baseRequest("arn:aws:lambda:us-east-1:000000000000:function:dedup-fn");
+        AwsException ex = assertThrows(AwsException.class, () -> service.createFunction(REGION, req));
+        assertEquals("ResourceConflictException", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteFunctionAcceptsFullArn() {
+        service.createFunction(REGION, baseRequest("delete-arn-fn"));
+        service.deleteFunction(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:delete-arn-fn");
+        assertThrows(AwsException.class, () -> service.getFunction(REGION, "delete-arn-fn"));
+    }
+
+    @Test
+    void putFunctionConcurrencyAcceptsFullArn() {
+        service.createFunction(REGION, baseRequest("concurrency-arn-fn"));
+        service.putFunctionConcurrency(REGION,
+                "arn:aws:lambda:us-east-1:000000000000:function:concurrency-arn-fn", 5);
+        assertEquals(5, service.getFunctionConcurrency(REGION, "concurrency-arn-fn"));
+    }
+
+    @Test
     void listFunctionsReturnsAllInRegion() {
         service.createFunction(REGION, baseRequest("fn-1"));
         service.createFunction(REGION, baseRequest("fn-2"));

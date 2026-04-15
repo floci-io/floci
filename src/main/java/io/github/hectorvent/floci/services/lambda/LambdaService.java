@@ -182,6 +182,10 @@ public class LambdaService {
         if (functionName == null || functionName.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "FunctionName is required", 400);
         }
+        // Accept bare name, partial ARN, or full ARN. Normalize to the short
+        // name so duplicate detection works regardless of which form the
+        // caller supplies across successive calls.
+        functionName = canonicalFunctionName(region, functionName);
         if (role == null || role.isBlank()) {
             throw new AwsException("InvalidParameterValueException", "Role is required", 400);
         }
@@ -250,9 +254,39 @@ public class LambdaService {
     }
 
     public LambdaFunction getFunction(String region, String functionName) {
-        return functionStore.get(region, functionName)
+        String canonical = canonicalFunctionName(region, functionName);
+        return functionStore.get(region, canonical)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Function not found: " + functionName, 404));
+    }
+
+    /**
+     * Resolves a {@code FunctionName} path parameter (bare name, partial ARN,
+     * or full ARN, with optional {@code :qualifier}) to its canonical short
+     * name, enforcing a region match when the input is a full ARN.
+     */
+    String canonicalFunctionName(String region, String functionName) {
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionName);
+        enforceRegion(region, ref);
+        return ref.name();
+    }
+
+    /**
+     * Resolves a {@code FunctionName} path parameter and reconciles any
+     * embedded qualifier with an explicit {@code ?Qualifier=} query-string
+     * value, enforcing region match when the input is a full ARN.
+     */
+    LambdaArnUtils.ResolvedFunctionRef resolveWithRegion(String region, String functionName, String queryQualifier) {
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolveWithQualifier(functionName, queryQualifier);
+        enforceRegion(region, ref);
+        return ref;
+    }
+
+    private void enforceRegion(String region, LambdaArnUtils.ResolvedFunctionRef ref) {
+        if (ref.region() != null && !ref.region().equals(region)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Region '" + ref.region() + "' in ARN does not match request region '" + region + "'", 400);
+        }
     }
 
     public List<LambdaFunction> listFunctions(String region) {
@@ -261,6 +295,7 @@ public class LambdaService {
 
     public LambdaFunction updateFunctionCode(String region, String functionName, Map<String, Object> request) {
         LambdaFunction fn = getFunction(region, functionName);
+        functionName = fn.getFunctionName();
 
         String zipFileBase64 = (String) request.get("ZipFile");
         String imageUri = (String) request.get("ImageUri");
@@ -290,6 +325,7 @@ public class LambdaService {
 
     public void deleteFunction(String region, String functionName) {
         LambdaFunction fn = getFunction(region, functionName); // throws 404 if not found
+        functionName = fn.getFunctionName();
         String arn = fn.getFunctionArn();
         warmPool.drainFunction(functionName);
         // Take the same per-function lock used by Put/DeleteFunctionConcurrency
@@ -332,9 +368,9 @@ public class LambdaService {
                     "Only SQS, Kinesis, and DynamoDB Streams event sources are supported.", 400);
         }
 
-        // Resolve function — supports both short name and ARN
-        String resolvedName = functionName.contains(":") ?
-                functionName.substring(functionName.lastIndexOf(':') + 1) : functionName;
+        // Resolve function — supports bare name, partial ARN, or full ARN
+        LambdaArnUtils.ResolvedFunctionRef fnRef = LambdaArnUtils.resolve(functionName);
+        String resolvedName = fnRef.name();
 
         // Extract region from the event source ARN (parts[3] for all supported ARN formats)
         String resolvedRegion;
@@ -344,6 +380,14 @@ public class LambdaService {
             // arn:aws:kinesis:region:... or arn:aws:dynamodb:region:...
             String[] parts = eventSourceArn.split(":");
             resolvedRegion = parts.length > 3 ? parts[3] : region;
+        }
+
+        // If the caller supplied a full function ARN, its region must agree
+        // with the region derived from the event source ARN. Otherwise we'd
+        // silently bind a different-region function of the same name.
+        if (fnRef.region() != null && !fnRef.region().equals(resolvedRegion)) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Function ARN region '" + fnRef.region() + "' does not match event source region '" + resolvedRegion + "'", 400);
         }
 
         LambdaFunction fn = getFunction(resolvedRegion, resolvedName);
@@ -407,7 +451,10 @@ public class LambdaService {
 
     public List<EventSourceMapping> listEventSourceMappings(String functionArn) {
         if (functionArn != null && !functionArn.isBlank()) {
-            return esmStore.listByFunction(functionArn);
+            // Accept bare name, partial ARN, or full ARN. The store matches
+            // entries by their canonical short name, so normalize first.
+            String shortName = LambdaArnUtils.resolve(functionArn).name();
+            return esmStore.listByFunction(shortName);
         }
         return esmStore.list();
     }
@@ -451,6 +498,7 @@ public class LambdaService {
 
     public LambdaFunction publishVersion(String region, String functionName, String description) {
         LambdaFunction fn = getFunction(region, functionName);
+        functionName = fn.getFunctionName();
         int version = versionCounters.merge(region + "::" + functionName, 1, Integer::sum);
         LambdaFunction snapshot = new LambdaFunction();
         snapshot.setFunctionName(fn.getFunctionName());
@@ -475,8 +523,8 @@ public class LambdaService {
     }
 
     public List<LambdaFunction> listVersionsByFunction(String region, String functionName) {
-        getFunction(region, functionName); // verify function exists
-        return functionStore.listVersions(region, functionName);
+        LambdaFunction fn = getFunction(region, functionName); // verify function exists
+        return functionStore.listVersions(region, fn.getFunctionName());
     }
 
     // ──────────────────────────── Aliases ────────────────────────────
@@ -484,6 +532,7 @@ public class LambdaService {
     public LambdaAlias createAlias(String region, String functionName, String aliasName,
                                    String functionVersion, String description) {
         LambdaFunction fn = getFunction(region, functionName);
+        functionName = fn.getFunctionName();
         if (aliasStore != null && aliasStore.get(region, functionName, aliasName).isPresent()) {
             throw new AwsException("ResourceConflictException", "Alias already exists: " + aliasName, 409);
         }
@@ -506,15 +555,16 @@ public class LambdaService {
         if (aliasStore == null) {
             throw new AwsException("ResourceNotFoundException", "Alias not found: " + aliasName, 404);
         }
-        return aliasStore.get(region, functionName, aliasName)
+        String canonical = canonicalFunctionName(region, functionName);
+        return aliasStore.get(region, canonical, aliasName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Alias not found: " + aliasName, 404));
     }
 
     public List<LambdaAlias> listAliases(String region, String functionName) {
-        getFunction(region, functionName); // verify function exists
+        LambdaFunction fn = getFunction(region, functionName); // verify function exists
         if (aliasStore == null) return List.of();
-        return aliasStore.list(region, functionName);
+        return aliasStore.list(region, fn.getFunctionName());
     }
 
     public LambdaAlias updateAlias(String region, String functionName, String aliasName,
@@ -529,14 +579,18 @@ public class LambdaService {
     }
 
     public void deleteAlias(String region, String functionName, String aliasName) {
-        getAlias(region, functionName, aliasName); // verify it exists
-        if (aliasStore != null) aliasStore.delete(region, functionName, aliasName);
-        LOG.infov("Deleted alias {0} for function {1}", aliasName, functionName);
+        String canonical = canonicalFunctionName(region, functionName);
+        getAlias(region, canonical, aliasName); // verify it exists
+        if (aliasStore != null) aliasStore.delete(region, canonical, aliasName);
+        LOG.infov("Deleted alias {0} for function {1}", aliasName, canonical);
     }
 
     // ──────────────────────────── Function URL Config ────────────────────────────
 
     public LambdaUrlConfig createFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        functionName = ref.name();
+        qualifier = ref.qualifier();
         LambdaUrlConfig urlConfig = new LambdaUrlConfig();
         urlConfig.setAuthType((String) request.getOrDefault("AuthType", "NONE"));
         if (request.containsKey("InvokeMode")) {
@@ -589,6 +643,9 @@ public class LambdaService {
     }
 
     public LambdaUrlConfig getFunctionUrlConfig(String region, String functionName, String qualifier) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        functionName = ref.name();
+        qualifier = ref.qualifier();
         LambdaUrlConfig urlConfig;
         if (qualifier != null && !qualifier.equals("$LATEST")) {
             urlConfig = getAlias(region, functionName, qualifier).getUrlConfig();
@@ -603,6 +660,9 @@ public class LambdaService {
     }
 
     public LambdaUrlConfig updateFunctionUrlConfig(String region, String functionName, String qualifier, Map<String, Object> request) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        functionName = ref.name();
+        qualifier = ref.qualifier();
         LambdaUrlConfig urlConfig = getFunctionUrlConfig(region, functionName, qualifier);
         
         if (request.containsKey("AuthType")) {
@@ -646,6 +706,9 @@ public class LambdaService {
     }
 
     public void deleteFunctionUrlConfig(String region, String functionName, String qualifier) {
+        LambdaArnUtils.ResolvedFunctionRef ref = resolveWithRegion(region, functionName, qualifier);
+        functionName = ref.name();
+        qualifier = ref.qualifier();
         if (qualifier != null && !qualifier.equals("$LATEST")) {
             LambdaAlias alias = getAlias(region, functionName, qualifier);
             if (alias.getUrlConfig() == null) {
@@ -872,26 +935,49 @@ public class LambdaService {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTags(String functionArn) {
-        String[] parts = functionArn.split(":");
-        LambdaFunction fn = getFunction(parts[3], parts[6]);
+        TagTarget target = resolveTagTarget(functionArn);
+        LambdaFunction fn = getFunction(target.region, target.name);
         return fn.getTags() != null ? fn.getTags() : Map.of();
     }
 
     public void tagResource(String functionArn, Map<String, String> tags) {
-        String[] parts = functionArn.split(":");
-        LambdaFunction fn = getFunction(parts[3], parts[6]);
+        TagTarget target = resolveTagTarget(functionArn);
+        LambdaFunction fn = getFunction(target.region, target.name);
         if (fn.getTags() == null) fn.setTags(new java.util.HashMap<>());
         fn.getTags().putAll(tags);
-        functionStore.save(parts[3], fn);
+        functionStore.save(target.region, fn);
     }
 
     public void untagResource(String functionArn, List<String> tagKeys) {
-        String[] parts = functionArn.split(":");
-        LambdaFunction fn = getFunction(parts[3], parts[6]);
+        TagTarget target = resolveTagTarget(functionArn);
+        LambdaFunction fn = getFunction(target.region, target.name);
         if (fn.getTags() != null) {
             tagKeys.forEach(fn.getTags()::remove);
         }
-        functionStore.save(parts[3], fn);
+        functionStore.save(target.region, fn);
+    }
+
+    private record TagTarget(String region, String name) {}
+
+    /**
+     * Resolves a tag-endpoint ARN to a (region, shortName) pair. The Lambda
+     * tag APIs only accept an unqualified full function ARN; reject partial
+     * ARNs, bare names, and qualified ARNs.
+     */
+    private TagTarget resolveTagTarget(String functionArn) {
+        if (functionArn == null || functionArn.isBlank()) {
+            throw new AwsException("InvalidParameterValueException", "Resource ARN is required", 400);
+        }
+        if (!functionArn.startsWith("arn:")) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Resource ARN must be a full Lambda function ARN: " + functionArn, 400);
+        }
+        LambdaArnUtils.ResolvedFunctionRef ref = LambdaArnUtils.resolve(functionArn);
+        if (ref.qualifier() != null) {
+            throw new AwsException("InvalidParameterValueException",
+                    "Tag operations require an unqualified function ARN: " + functionArn, 400);
+        }
+        return new TagTarget(ref.region(), ref.name());
     }
 
     private int toInt(Object value, int defaultValue) {
