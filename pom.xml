@@ -189,9 +189,6 @@
                 <configuration>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
-                        <java.util.logging.config.file>
-                            src/test/resources/logging.properties
-                        </java.util.logging.config.file>
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
