@@ -1,7 +1,7 @@
-package io.github.hectorvent.floci.services.kinesis;
+package com.floci.test;
 
-import io.quarkus.test.common.http.TestHTTPResource;
-import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
@@ -13,32 +13,37 @@ import software.amazon.awssdk.http.SdkHttpRequest;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
 import software.amazon.awssdk.services.kinesis.model.CreateStreamRequest;
+import software.amazon.awssdk.services.kinesis.model.DeleteStreamRequest;
 import software.amazon.awssdk.services.kinesis.model.DescribeStreamSummaryRequest;
 
-import java.net.URI;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
 
-@QuarkusTest
-class KinesisSdkV2IntegrationTest {
+@DisplayName("Kinesis")
+class KinesisTest {
 
-    private static final StaticCredentialsProvider CREDS = StaticCredentialsProvider.create(
-            AwsBasicCredentials.create("test", "test"));
+    private static final StaticCredentialsProvider CREDENTIALS =
+            StaticCredentialsProvider.create(AwsBasicCredentials.create("test", "test"));
 
-    @TestHTTPResource
-    URI endpoint;
+    private static KinesisClient kinesis;
+
+    @AfterAll
+    static void cleanup() {
+        if (kinesis != null) {
+            kinesis.close();
+        }
+    }
 
     @Test
-    void createStreamWithAwsSdkV2() {
+    void awsSdkV2UsesRootCborRoute() {
         AtomicReference<SdkHttpRequest> requestRef = new AtomicReference<>();
 
-        try (KinesisClient client = KinesisClient.builder()
-                .endpointOverride(endpoint)
+        kinesis = KinesisClient.builder()
+                .endpointOverride(TestFixtures.endpoint())
                 .region(Region.US_EAST_1)
-                .credentialsProvider(CREDS)
+                .credentialsProvider(CREDENTIALS)
                 .overrideConfiguration(ClientOverrideConfiguration.builder()
                         .addExecutionInterceptor(new ExecutionInterceptor() {
                             @Override
@@ -49,27 +54,33 @@ class KinesisSdkV2IntegrationTest {
                             }
                         })
                         .build())
-                .build()) {
+                .build();
 
-            String streamName = "sdk-v2-kinesis-stream";
+        String streamName = TestFixtures.uniqueName("sdk-v2-kinesis-stream");
 
-            assertDoesNotThrow(() -> client.createStream(CreateStreamRequest.builder()
+        try {
+            assertDoesNotThrow(() -> kinesis.createStream(CreateStreamRequest.builder()
                     .streamName(streamName)
                     .shardCount(1)
                     .build()));
 
-            var response = assertDoesNotThrow(() -> client.describeStreamSummary(
+            var response = assertDoesNotThrow(() -> kinesis.describeStreamSummary(
                     DescribeStreamSummaryRequest.builder()
                             .streamName(streamName)
                             .build()));
 
             SdkHttpRequest request = requestRef.get();
-            assertNotNull(request);
-            assertEquals("/", request.encodedPath());
-            assertEquals("application/x-amz-cbor-1.1", request.firstMatchingHeader("Content-Type").orElse(null));
-            assertEquals("Kinesis_20131202.DescribeStreamSummary",
-                    request.firstMatchingHeader("X-Amz-Target").orElse(null));
-            assertEquals(streamName, response.streamDescriptionSummary().streamName());
+            assertThat(request).isNotNull();
+            assertThat(request.encodedPath()).isEqualTo("/");
+            assertThat(request.firstMatchingHeader("Content-Type").orElse(null))
+                    .isEqualTo("application/x-amz-cbor-1.1");
+            assertThat(request.firstMatchingHeader("X-Amz-Target").orElse(null))
+                    .isEqualTo("Kinesis_20131202.DescribeStreamSummary");
+            assertThat(response.streamDescriptionSummary().streamName()).isEqualTo(streamName);
+        } finally {
+            assertDoesNotThrow(() -> kinesis.deleteStream(DeleteStreamRequest.builder()
+                    .streamName(streamName)
+                    .build()));
         }
     }
 }
