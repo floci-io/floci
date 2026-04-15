@@ -344,6 +344,7 @@ class SqsIntegrationTest {
         .then()
             .statusCode(400)
             .header("x-amzn-query-error", "AWS.SimpleQueueService.NonExistentQueue;Sender")
+            .header("X-Amzn-Errortype", "QueueDoesNotExist")
             .body(containsString("QueueDoesNotExist"))
             .body(not(containsString("AWS.SimpleQueueService.NonExistentQueue")));
     }
