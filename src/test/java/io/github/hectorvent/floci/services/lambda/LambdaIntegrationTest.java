@@ -152,8 +152,21 @@ class LambdaIntegrationTest {
             .statusCode(400);
     }
 
+    // ── Issue #439: LastUpdateStatus in responses ─────────────────────
+
     @Test
     @Order(9)
+    void getFunctionIncludesLastUpdateStatus() {
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/hello-world")
+        .then()
+            .statusCode(200)
+            .body("Configuration.LastUpdateStatus", equalTo("Successful"));
+    }
+
+    @Test
+    @Order(10)
     void deleteFunction() {
         given()
         .when()
@@ -163,7 +176,7 @@ class LambdaIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void deletedFunctionNotFound() {
         given()
         .when()
@@ -173,7 +186,7 @@ class LambdaIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void createFunctionWithLargeInlineZip() throws Exception {
         // Build a valid zip with a handler file + 16 MB padding so the base64
         // encoding exceeds Jackson's former 20 MB maxStringLength default.

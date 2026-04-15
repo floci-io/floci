@@ -479,6 +479,7 @@ public class LambdaController {
         node.put("LastModified", String.valueOf(fn.getLastModified()));
         node.put("RevisionId", fn.getRevisionId());
         node.put("Version", fn.getVersion());
+        node.put("LastUpdateStatus", "Successful");
 
         if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {
             ObjectNode envNode = node.putObject("Environment");
