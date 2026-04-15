@@ -37,7 +37,7 @@ public class CloudWatchMetricsQueryHandler {
             case "PutMetricData" -> handlePutMetricData(params, region);
             case "ListMetrics" -> handleListMetrics(params, region);
             case "GetMetricStatistics" -> handleGetMetricStatistics(params, region);
-            case "GetMetricData" -> handleGetMetricDataStub(params);
+            case "GetMetricData" -> handleGetMetricData(params, region);
             case "PutMetricAlarm" -> handlePutMetricAlarm(params, region);
             case "DescribeAlarms" -> handleDescribeAlarms(params, region);
             case "DeleteAlarms" -> handleDeleteAlarms(params, region);
@@ -133,9 +133,79 @@ public class CloudWatchMetricsQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("GetMetricStatistics", null, xml.build())).build();
     }
 
-    private Response handleGetMetricDataStub(MultivaluedMap<String, String> params) {
-        String result = new XmlBuilder().start("MetricDataResults").end("MetricDataResults").build();
-        return Response.ok(AwsQueryResponse.envelope("GetMetricData", null, result)).build();
+    private Response handleGetMetricData(MultivaluedMap<String, String> params, String region) {
+        Instant startTime = parseInstant(params.getFirst("StartTime"));
+        Instant endTime = parseInstant(params.getFirst("EndTime"));
+
+        List<CloudWatchMetricsService.MetricDataQuery> queries = parseMetricDataQueries(params);
+
+        List<CloudWatchMetricsService.MetricDataResult> results =
+                metricsService.getMetricData(queries, startTime, endTime, region);
+
+        DateTimeFormatter fmt = DateTimeFormatter.ISO_INSTANT;
+        var xml = new XmlBuilder().start("MetricDataResults");
+        for (var r : results) {
+            xml.start("member")
+                    .elem("Id", r.id())
+                    .elem("Label", r.label())
+                    .elem("StatusCode", r.statusCode());
+
+            xml.start("Timestamps");
+            for (Instant ts : r.timestamps()) {
+                xml.elem("member", fmt.format(ts));
+            }
+            xml.end("Timestamps");
+
+            xml.start("Values");
+            for (Double v : r.values()) {
+                xml.elem("member", String.valueOf(v));
+            }
+            xml.end("Values");
+
+            xml.end("member");
+        }
+        xml.end("MetricDataResults");
+        return Response.ok(AwsQueryResponse.envelope("GetMetricData", null, xml.build())).build();
+    }
+
+    private List<CloudWatchMetricsService.MetricDataQuery> parseMetricDataQueries(
+            MultivaluedMap<String, String> params) {
+        List<CloudWatchMetricsService.MetricDataQuery> queries = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String prefix = "MetricDataQueries.member." + i;
+            String id = params.getFirst(prefix + ".Id");
+            if (id == null) break;
+
+            String expression = params.getFirst(prefix + ".Expression");
+            String label = params.getFirst(prefix + ".Label");
+            boolean returnData = !"false".equals(params.getFirst(prefix + ".ReturnData"));
+
+            CloudWatchMetricsService.MetricStat metricStat = null;
+            String msNamespace = params.getFirst(prefix + ".MetricStat.Metric.Namespace");
+            if (msNamespace != null) {
+                String msMetricName = params.getFirst(prefix + ".MetricStat.Metric.MetricName");
+                int msPeriod = parseIntParam(params, prefix + ".MetricStat.Period", 60);
+                String msStat = params.getFirst(prefix + ".MetricStat.Stat");
+                String msUnit = params.getFirst(prefix + ".MetricStat.Unit");
+
+                List<Dimension> dims = new ArrayList<>();
+                for (int j = 1; ; j++) {
+                    String dimName = params.getFirst(
+                            prefix + ".MetricStat.Metric.Dimensions.member." + j + ".Name");
+                    if (dimName == null) break;
+                    String dimValue = params.getFirst(
+                            prefix + ".MetricStat.Metric.Dimensions.member." + j + ".Value");
+                    dims.add(new Dimension(dimName, dimValue));
+                }
+
+                metricStat = new CloudWatchMetricsService.MetricStat(
+                        msNamespace, msMetricName, dims, msPeriod, msStat, msUnit);
+            }
+
+            queries.add(new CloudWatchMetricsService.MetricDataQuery(
+                    id, metricStat, expression, label, returnData));
+        }
+        return queries;
     }
 
     private Response handlePutMetricAlarm(MultivaluedMap<String, String> params, String region) {

@@ -100,6 +100,31 @@ public class CloudWatchMetricsService {
     public record Datapoint(Instant timestamp, double sampleCount, double sum,
                              double average, double minimum, double maximum, String unit) {}
 
+    public record MetricStat(
+            String namespace,
+            String metricName,
+            List<Dimension> dimensions,
+            int period,
+            String stat,
+            String unit
+    ) {}
+
+    public record MetricDataQuery(
+            String id,
+            MetricStat metricStat,
+            String expression,
+            String label,
+            boolean returnData
+    ) {}
+
+    public record MetricDataResult(
+            String id,
+            String label,
+            List<Instant> timestamps,
+            List<Double> values,
+            String statusCode
+    ) {}
+
     public List<Datapoint> getMetricStatistics(String namespace, String metricName,
                                                 List<Dimension> dimensions,
                                                 Instant startTime, Instant endTime,
@@ -157,6 +182,56 @@ public class CloudWatchMetricsService {
         }
         result.sort(Comparator.comparing(Datapoint::timestamp));
         return result;
+    }
+
+    public List<MetricDataResult> getMetricData(
+            List<MetricDataQuery> queries,
+            Instant startTime,
+            Instant endTime,
+            String region) {
+
+        List<MetricDataResult> results = new ArrayList<>();
+
+        for (MetricDataQuery query : queries) {
+            if (!query.returnData()) {
+                continue;
+            }
+            if (query.metricStat() != null) {
+                MetricStat stat = query.metricStat();
+                int period = stat.period() > 0 ? stat.period() : 60;
+
+                List<Datapoint> datapoints = getMetricStatistics(
+                        stat.namespace(), stat.metricName(), stat.dimensions(),
+                        startTime, endTime, period,
+                        List.of(stat.stat()), stat.unit(), region);
+
+                List<Instant> timestamps = new ArrayList<>();
+                List<Double> values = new ArrayList<>();
+                for (Datapoint dp : datapoints) {
+                    timestamps.add(dp.timestamp());
+                    values.add(resolveStatValue(dp, stat.stat()));
+                }
+
+                String label = query.label() != null ? query.label() : stat.metricName();
+                results.add(new MetricDataResult(query.id(), label, timestamps, values, "Complete"));
+            }
+            // Expression-based queries are out of scope for this implementation
+        }
+        return results;
+    }
+
+    private double resolveStatValue(Datapoint dp, String stat) {
+        return switch (stat) {
+            case "Average" -> dp.average();
+            case "Sum" -> dp.sum();
+            case "Minimum" -> dp.minimum();
+            case "Maximum" -> dp.maximum();
+            case "SampleCount" -> dp.sampleCount();
+            default -> {
+                if (stat.startsWith("p")) yield dp.maximum();
+                else yield dp.average();
+            }
+        };
     }
 
     public void putMetricAlarm(MetricAlarm alarm, String region) {

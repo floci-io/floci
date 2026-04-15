@@ -47,7 +47,7 @@ public class CloudWatchMetricsJsonHandler {
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
-            case "GetMetricData" -> Response.ok(objectMapper.createObjectNode().putArray("MetricDataResults")).build();
+            case "GetMetricData" -> handleGetMetricData(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported by CloudWatch JSON."))
                     .build();
@@ -241,6 +241,63 @@ public class CloudWatchMetricsJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleGetMetricData(JsonNode request, String region) {
+        Instant startTime = parseInstantNode(request.path("StartTime"));
+        Instant endTime = parseInstantNode(request.path("EndTime"));
+
+        List<CloudWatchMetricsService.MetricDataQuery> queries = new ArrayList<>();
+        JsonNode queriesNode = request.path("MetricDataQueries");
+        if (queriesNode.isArray()) {
+            for (JsonNode qNode : queriesNode) {
+                String id = qNode.path("Id").asText();
+                String expression = qNode.has("Expression") ? qNode.path("Expression").asText() : null;
+                String label = qNode.has("Label") ? qNode.path("Label").asText() : null;
+                boolean returnData = qNode.path("ReturnData").asBoolean(true);
+
+                CloudWatchMetricsService.MetricStat metricStat = null;
+                JsonNode msNode = qNode.path("MetricStat");
+                if (!msNode.isMissingNode()) {
+                    JsonNode metricNode = msNode.path("Metric");
+                    String namespace = metricNode.path("Namespace").asText();
+                    String metricName = metricNode.path("MetricName").asText();
+                    int period = msNode.path("Period").asInt(60);
+                    String stat = msNode.path("Stat").asText();
+                    String unit = msNode.has("Unit") ? msNode.path("Unit").asText() : null;
+                    List<Dimension> dims = parseDimensionsJson(metricNode.path("Dimensions"));
+
+                    metricStat = new CloudWatchMetricsService.MetricStat(
+                            namespace, metricName, dims, period, stat, unit);
+                }
+
+                queries.add(new CloudWatchMetricsService.MetricDataQuery(
+                        id, metricStat, expression, label, returnData));
+            }
+        }
+
+        List<CloudWatchMetricsService.MetricDataResult> results =
+                metricsService.getMetricData(queries, startTime, endTime, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode resultsArray = response.putArray("MetricDataResults");
+        for (var r : results) {
+            ObjectNode rNode = resultsArray.addObject();
+            rNode.put("Id", r.id());
+            rNode.put("Label", r.label());
+            rNode.put("StatusCode", r.statusCode());
+
+            ArrayNode tsArray = rNode.putArray("Timestamps");
+            for (Instant ts : r.timestamps()) {
+                tsArray.add(ts.getEpochSecond());
+            }
+
+            ArrayNode valArray = rNode.putArray("Values");
+            for (Double v : r.values()) {
+                valArray.add(v);
+            }
+        }
+        return Response.ok(response).build();
+    }
+
     private List<MetricDatum> parseMetricDataJson(JsonNode node) {
         List<MetricDatum> datums = new ArrayList<>();
         if (!node.isArray()) return datums;
@@ -276,6 +333,15 @@ public class CloudWatchMetricsJsonHandler {
             dims.add(new Dimension(d.path("Name").asText(), d.path("Value").asText()));
         }
         return dims;
+    }
+
+    /** Parse a JsonNode that may be a numeric epoch (long/double) or an ISO-8601 string. */
+    private Instant parseInstantNode(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) return null;
+        if (node.isNumber()) {
+            return Instant.ofEpochSecond(node.asLong());
+        }
+        return parseInstant(node.asText(null));
     }
 
     private Instant parseInstant(String value) {
