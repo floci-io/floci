@@ -111,7 +111,7 @@ public class ResolvedServiceCatalog {
                         Set.of("AmazonApiGatewayV2."), Set.of("apigatewayv2"), Set.of(), Set.of()),
                 descriptor("kinesis", "kinesis", config.services().kinesis().enabled(), true,
                         "kinesis", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
-                        protocols(ServiceProtocol.JSON),
+                        protocols(ServiceProtocol.JSON, ServiceProtocol.CBOR),
                         Set.of("Kinesis_20131202."), Set.of("kinesis"), Set.of(), Set.of()),
                 descriptor("kms", "kms", config.services().kms().enabled(), true,
                         "kms", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
@@ -177,7 +177,11 @@ public class ResolvedServiceCatalog {
                 descriptor("ecr", "ecr", config.services().ecr().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("AmazonEC2ContainerRegistry_V20150921."), Set.of("ecr"), Set.of(), Set.of())
+                        Set.of("AmazonEC2ContainerRegistry_V20150921."), Set.of("ecr"), Set.of(), Set.of()),
+                descriptor("tagging", "tagging", config.services().tagging().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("ResourceGroupsTaggingAPI_20170126."), Set.of("tagging"), Set.of(), Set.of())
         ));
     }
 

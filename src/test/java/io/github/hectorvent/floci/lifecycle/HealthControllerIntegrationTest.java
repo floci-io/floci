@@ -47,7 +47,8 @@ class HealthControllerIntegrationTest {
                 "ecs": "running",
                 "appconfig": "running",
                 "appconfigdata": "running",
-                "ecr": "running"
+                "ecr": "running",
+                "tagging": "running"
               },
               "edition": "floci-always-free",
               "version": "dev"

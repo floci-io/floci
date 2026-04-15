@@ -7,6 +7,7 @@ import com.fasterxml.jackson.dataformat.cbor.CBORGenerator;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamsJsonHandler;
+import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
@@ -34,6 +35,8 @@ public class AwsJsonCborController {
 
     private static final Logger LOG = Logger.getLogger(AwsJsonCborController.class);
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
+    private static final String GENERIC_CBOR_MEDIA_TYPE = "application/cbor";
+    private static final String AWS_CBOR_1_1_MEDIA_TYPE = "application/x-amz-cbor-1.1";
 
     private final ObjectMapper objectMapper;
     private final ResolvedServiceCatalog catalog;
@@ -42,6 +45,7 @@ public class AwsJsonCborController {
     private final DynamoDbStreamsJsonHandler dynamoDbStreamsJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
     private final SnsJsonHandler snsJsonHandler;
+    private final KinesisJsonHandler kinesisJsonHandler;
     private final StepFunctionsJsonHandler sfnJsonHandler;
     private final CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler;
 
@@ -51,6 +55,7 @@ public class AwsJsonCborController {
                                  DynamoDbJsonHandler dynamoDbJsonHandler,
                                  DynamoDbStreamsJsonHandler dynamoDbStreamsJsonHandler,
                                  SqsJsonHandler sqsJsonHandler, SnsJsonHandler snsJsonHandler,
+                                 KinesisJsonHandler kinesisJsonHandler,
                                  StepFunctionsJsonHandler sfnJsonHandler,
                                  CloudWatchMetricsJsonHandler cloudWatchMetricsJsonHandler) {
         this.objectMapper = objectMapper;
@@ -60,6 +65,7 @@ public class AwsJsonCborController {
         this.dynamoDbStreamsJsonHandler = dynamoDbStreamsJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
         this.snsJsonHandler = snsJsonHandler;
+        this.kinesisJsonHandler = kinesisJsonHandler;
         this.sfnJsonHandler = sfnJsonHandler;
         this.cloudWatchMetricsJsonHandler = cloudWatchMetricsJsonHandler;
     }
@@ -116,13 +122,13 @@ public class AwsJsonCborController {
     /**
      * Handles AWS smithy-rpc-v2-cbor protocol requests.
      * AWS SDK v2 sends to POST /service/{sdkId}/operation/{op}
-     * with Content-Type: application/cbor and no X-Amz-Target header.
+     * with a CBOR content type and no X-Amz-Target header.
      * Supported services: DynamoDB, SQS, SNS, StepFunctions, CloudWatch.
      */
     @POST
     @Path("service/{serviceId}/operation/{operation}")
-    @Consumes("application/cbor")
-    @Produces("application/cbor")
+    @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
+    @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
     public Response handleSmithyRpcV2Cbor(
             @PathParam("serviceId") String serviceId,
             @PathParam("operation") String operation,
@@ -146,13 +152,14 @@ public class AwsJsonCborController {
                     ? (JsonNode) delegated.getEntity()
                     : objectMapper.valueToTree(delegated.getEntity());
             byte[] cborBytes = nodeToSmithyCbor(responseNode);
+            String responseContentType = responseContentType(httpHeaders);
             return Response.status(delegated.getStatus())
                     .header("Smithy-Protocol", "rpc-v2-cbor")
-                    .type("application/cbor")
+                    .type(responseContentType)
                     .entity(cborBytes)
                     .build();
         } catch (AwsException e) {
-            return cborErrorResponse(e, "Smithy-Protocol");
+            return cborErrorResponse(e, "Smithy-Protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing Smithy CBOR request: " + serviceId + "." + operation, e);
             return Response.status(500).build();
@@ -164,8 +171,8 @@ public class AwsJsonCborController {
      * Fallback handler for X-Amz-Target based routing with CBOR body.
      */
     @POST
-    @Consumes("application/cbor")
-    @Produces("application/cbor")
+    @Consumes({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
+    @Produces({GENERIC_CBOR_MEDIA_TYPE, AWS_CBOR_1_1_MEDIA_TYPE})
     public Response handleCborRequest(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,
@@ -203,6 +210,7 @@ public class AwsJsonCborController {
                 }
                 case "sqs" -> sqsJsonHandler.handle(action, request, region);
                 case "sns" -> snsJsonHandler.handle(action, request, region);
+                case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
                 case "states" -> sfnJsonHandler.handle(action, request, region);
                 case "monitoring" -> cloudWatchMetricsJsonHandler.handle(action, request, region);
                 default -> null;
@@ -215,13 +223,14 @@ public class AwsJsonCborController {
                     ? (JsonNode) delegated.getEntity()
                     : objectMapper.valueToTree(delegated.getEntity());
             byte[] cborBytes = nodeToSmithyCbor(responseNode);
+            String responseContentType = responseContentType(httpHeaders);
             return Response.status(delegated.getStatus())
                     .header("smithy-protocol", "rpc-v2-cbor")
-                    .type("application/cbor")
+                    .type(responseContentType)
                     .entity(cborBytes)
                     .build();
         } catch (AwsException e) {
-            return cborErrorResponse(e, "smithy-protocol");
+            return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing CBOR request: " + serviceKey + "." + action, e);
             return Response.status(500).build();
@@ -251,7 +260,7 @@ public class AwsJsonCborController {
         };
     }
 
-    private Response cborErrorResponse(AwsException e, String protocolHeader) {
+    private Response cborErrorResponse(AwsException e, String protocolHeader, String mediaType) {
         try {
             byte[] errBytes = CBOR_MAPPER.writeValueAsBytes(
                     new AwsErrorResponse(e.jsonType(), e.getMessage()));
@@ -260,11 +269,22 @@ public class AwsJsonCborController {
                     .header(protocolHeader, "rpc-v2-cbor")
                     .header(AwsHeader.HEADER_X_AMAZON_QUERY_ERROR, e.getErrorCode() + ";" + queryErrorFault)
                     .header(AwsHeader.HEADER_X_AMAZON_ERRORTYPE, e.jsonType())
-                    .type("application/cbor")
+                    .type(mediaType)
                     .entity(errBytes)
                     .build();
         } catch (Exception ex) {
             return Response.status(e.getHttpStatus()).build();
         }
+    }
+
+    private String responseContentType(HttpHeaders httpHeaders) {
+        String requestContentType = httpHeaders.getHeaderString(AwsCborContentTypeFilter.ORIGINAL_CONTENT_TYPE_HEADER);
+        if (requestContentType == null) {
+            requestContentType = httpHeaders.getHeaderString("Content-Type");
+        }
+        if (requestContentType != null && requestContentType.contains("x-amz-cbor")) {
+            return AWS_CBOR_1_1_MEDIA_TYPE;
+        }
+        return GENERIC_CBOR_MEDIA_TYPE;
     }
 }

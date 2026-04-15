@@ -231,6 +231,7 @@ public interface EmulatorConfig {
         AppConfigServiceConfig appconfig();
         AppConfigDataServiceConfig appconfigdata();
         EcrServiceConfig ecr();
+        ResourceGroupsTaggingServiceConfig tagging();
     }
 
     interface SsmServiceConfig {
@@ -458,6 +459,11 @@ public interface EmulatorConfig {
 
         @WithDefault("256")
         int defaultCpuUnits();
+    }
+
+    interface ResourceGroupsTaggingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface EcrServiceConfig {
