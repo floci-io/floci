@@ -30,6 +30,7 @@ public class Ec2Service {
     private final Map<String, KeyPair> keyPairs = new ConcurrentHashMap<>();
     private final Map<String, Address> addresses = new ConcurrentHashMap<>();
     private final Map<String, Instance> instances = new ConcurrentHashMap<>();
+    private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
     // resourceId → List<Tag>
     private final Map<String, List<Tag>> tags = new ConcurrentHashMap<>();
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -1196,6 +1197,16 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        if (resource instanceof Volume vol) {
+            return switch (filterName) {
+                case "volume-id" -> values.contains(vol.getVolumeId());
+                case "status" -> values.contains(vol.getState());
+                case "volume-type" -> values.contains(vol.getVolumeType());
+                case "availability-zone" -> values.contains(vol.getAvailabilityZone());
+                case "encrypted" -> values.contains(String.valueOf(vol.isEncrypted()));
+                default -> true;
+            };
+        }
         return true;
     }
 
@@ -1209,6 +1220,54 @@ public class Ec2Service {
         if (resource instanceof RouteTable rt) return rt.getTags();
         if (resource instanceof KeyPair kp) return kp.getTags();
         if (resource instanceof Address addr) return addr.getTags();
+        if (resource instanceof Volume vol) return vol.getTags();
         return Collections.emptyList();
+    }
+
+    // ─── Volumes ───────────────────────────────────────────────────────────────
+
+    public Volume createVolume(String region, String availabilityZone, String volumeType,
+                               int size, boolean encrypted, int iops, String snapshotId,
+                               List<Tag> volumeTags) {
+        ensureDefaultResources(region);
+        String volumeId = "vol-" + randomHex(17);
+        Volume vol = new Volume();
+        vol.setVolumeId(volumeId);
+        vol.setAvailabilityZone(availabilityZone != null ? availabilityZone : region + "a");
+        vol.setVolumeType(volumeType != null ? volumeType : "gp2");
+        vol.setSize(size > 0 ? size : 8);
+        vol.setEncrypted(encrypted);
+        vol.setIops(iops > 0 ? iops : (volumeType != null && volumeType.startsWith("io") ? iops : 0));
+        vol.setSnapshotId(snapshotId);
+        vol.setCreateTime(Instant.now());
+        vol.setState("available");
+        vol.setRegion(region);
+        if (volumeTags != null) vol.setTags(new ArrayList<>(volumeTags));
+        volumes.put(key(region, volumeId), vol);
+        return vol;
+    }
+
+    public List<Volume> describeVolumes(String region, List<String> volumeIds,
+                                        Map<String, List<String>> filters) {
+        if (volumeIds != null && !volumeIds.isEmpty()) {
+            for (String id : volumeIds) {
+                if (volumes.get(key(region, id)) == null) {
+                    throw new AwsException("InvalidVolume.NotFound",
+                            "The volume '" + id + "' does not exist.", 400);
+                }
+            }
+        }
+        return volumes.values().stream()
+                .filter(v -> v.getRegion().equals(region))
+                .filter(v -> volumeIds == null || volumeIds.isEmpty() || volumeIds.contains(v.getVolumeId()))
+                .filter(v -> matchesFilters(v, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public void deleteVolume(String region, String volumeId) {
+        if (volumes.remove(key(region, volumeId)) == null) {
+            throw new AwsException("InvalidVolume.NotFound",
+                    "The volume '" + volumeId + "' does not exist.", 400);
+        }
     }
 }

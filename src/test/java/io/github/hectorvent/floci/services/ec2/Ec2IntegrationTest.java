@@ -29,6 +29,7 @@ class Ec2IntegrationTest {
     private static String rtbAssocId;
     private static String allocationId;
     private static String associationId;
+    private static String volumeId;
 
     // =========================================================================
     // Default resources
@@ -716,6 +717,110 @@ class Ec2IntegrationTest {
     }
 
     // =========================================================================
+    // Volumes
+    // =========================================================================
+
+    @Test
+    @Order(93)
+    void createVolume() {
+        volumeId = given()
+            .formParam("Action", "CreateVolume")
+            .formParam("AvailabilityZone", "us-east-1a")
+            .formParam("VolumeType", "gp2")
+            .formParam("Size", "20")
+            .formParam("TagSpecification.1.ResourceType", "volume")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "test-volume")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateVolumeResponse.volumeId", startsWith("vol-"))
+            .body("CreateVolumeResponse.volumeType", equalTo("gp2"))
+            .body("CreateVolumeResponse.size", equalTo("20"))
+            .body("CreateVolumeResponse.status", equalTo("available"))
+            .body("CreateVolumeResponse.availabilityZone", equalTo("us-east-1a"))
+            .body("CreateVolumeResponse.encrypted", equalTo("false"))
+        .extract().path("CreateVolumeResponse.volumeId");
+    }
+
+    @Test
+    @Order(94)
+    void describeVolumes() {
+        given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("VolumeId.1", volumeId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVolumesResponse.volumeSet.item.volumeId", equalTo(volumeId))
+            .body("DescribeVolumesResponse.volumeSet.item.volumeType", equalTo("gp2"))
+            .body("DescribeVolumesResponse.volumeSet.item.size", equalTo("20"))
+            .body("DescribeVolumesResponse.volumeSet.item.status", equalTo("available"));
+    }
+
+    @Test
+    @Order(95)
+    void describeVolumesByStatusFilter() {
+        given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("Filter.1.Name", "status")
+            .formParam("Filter.1.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVolumesResponse.volumeSet.item.status", equalTo("available"));
+    }
+
+    @Test
+    @Order(96)
+    void describeVolumesByVolumeTypeFilter() {
+        given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("Filter.1.Name", "volume-type")
+            .formParam("Filter.1.Value.1", "gp2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVolumesResponse.volumeSet.item.volumeType", equalTo("gp2"));
+    }
+
+    @Test
+    @Order(97)
+    void deleteVolume() {
+        given()
+            .formParam("Action", "DeleteVolume")
+            .formParam("VolumeId", volumeId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeleteVolumeResponse.return", equalTo("true"));
+    }
+
+    @Test
+    @Order(98)
+    void describeDeletedVolumeReturnsNotFound() {
+        given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("VolumeId.1", volumeId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVolume.NotFound"));
+    }
+
+    // =========================================================================
     // Teardown / cleanup
     // =========================================================================
 
@@ -895,6 +1000,20 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(202)
+    void describeNonExistentVolume() {
+        given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("VolumeId.1", "vol-0000000000000dead")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVolume.NotFound"));
+    }
+
+    @Test
+    @Order(203)
     void unsupportedAction() {
         given()
             .formParam("Action", "SomeUnknownAction")

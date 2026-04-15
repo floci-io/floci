@@ -107,6 +107,10 @@ public class Ec2QueryHandler {
                 case "DescribeAccountAttributes" -> handleDescribeAccountAttributes(params, region);
                 // Instance Types
                 case "DescribeInstanceTypes" -> handleDescribeInstanceTypes(params, region);
+                // Volumes
+                case "CreateVolume" -> handleCreateVolume(params, region);
+                case "DescribeVolumes" -> handleDescribeVolumes(params, region);
+                case "DeleteVolume" -> handleDeleteVolume(params, region);
                 default -> ec2Error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", 400);
             };
@@ -1265,6 +1269,100 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("tagSet");
+        return xml.build();
+    }
+
+    // ─── Volume handlers ──────────────────────────────────────────────────────
+
+    private Response handleCreateVolume(MultivaluedMap<String, String> p, String region) {
+        String availabilityZone = p.getFirst("AvailabilityZone");
+        String volumeType = p.getFirst("VolumeType");
+        String sizeStr = p.getFirst("Size");
+        int size = sizeStr != null ? Integer.parseInt(sizeStr) : 8;
+        String encryptedStr = p.getFirst("Encrypted");
+        boolean encrypted = "true".equalsIgnoreCase(encryptedStr);
+        String iopsStr = p.getFirst("Iops");
+        int iops = iopsStr != null ? Integer.parseInt(iopsStr) : 0;
+        String snapshotId = p.getFirst("SnapshotId");
+
+        List<Tag> volumeTags = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
+            if (resType == null) break;
+            if ("volume".equals(resType)) {
+                for (int j = 1; ; j++) {
+                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
+                    if (k == null) break;
+                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
+                    volumeTags.add(new Tag(k, v));
+                }
+            }
+        }
+
+        Volume vol = service.createVolume(region, availabilityZone, volumeType, size,
+                encrypted, iops, snapshotId, volumeTags);
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateVolumeResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .raw(volumeXml(vol))
+                .end("CreateVolumeResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVolumes(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "VolumeId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<Volume> volList = service.describeVolumes(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVolumesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("volumeSet");
+        for (Volume vol : volList) {
+            xml.start("item").raw(volumeXml(vol)).end("item");
+        }
+        xml.end("volumeSet")
+                .elem("nextToken", "")
+                .end("DescribeVolumesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteVolume(MultivaluedMap<String, String> p, String region) {
+        service.deleteVolume(region, p.getFirst("VolumeId"));
+        return booleanResponse("DeleteVolume");
+    }
+
+    private String volumeXml(Volume vol) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("volumeId", vol.getVolumeId())
+                .elem("size", String.valueOf(vol.getSize()))
+                .elem("volumeType", vol.getVolumeType())
+                .elem("status", vol.getState())
+                .elem("availabilityZone", vol.getAvailabilityZone())
+                .elem("encrypted", String.valueOf(vol.isEncrypted()));
+        if (vol.getIops() > 0) {
+            xml.elem("iops", String.valueOf(vol.getIops()));
+        }
+        if (vol.getSnapshotId() != null) {
+            xml.elem("snapshotId", vol.getSnapshotId());
+        }
+        if (vol.getCreateTime() != null) {
+            xml.elem("createTime", ISO_FMT.format(vol.getCreateTime()));
+        }
+        xml.start("attachmentSet");
+        for (VolumeAttachment att : vol.getAttachments()) {
+            xml.start("item")
+                    .elem("volumeId", att.getVolumeId())
+                    .elem("instanceId", att.getInstanceId())
+                    .elem("device", att.getDevice())
+                    .elem("status", att.getState())
+                    .elem("deleteOnTermination", String.valueOf(att.isDeleteOnTermination()));
+            if (att.getAttachTime() != null) {
+                xml.elem("attachTime", ISO_FMT.format(att.getAttachTime()));
+            }
+            xml.end("item");
+        }
+        xml.end("attachmentSet")
+                .raw(tagSetXml(vol.getTags()));
         return xml.build();
     }
 
