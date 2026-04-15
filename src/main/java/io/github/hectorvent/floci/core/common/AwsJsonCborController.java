@@ -258,7 +258,8 @@ public class AwsJsonCborController {
             String queryErrorFault = (e.getHttpStatus() < 500) ? "Sender" : "Receiver";
             return Response.status(e.getHttpStatus())
                     .header(protocolHeader, "rpc-v2-cbor")
-                    .header("x-amzn-query-error", e.getErrorCode() + ";" + queryErrorFault)
+                    .header(AwsHeader.HEADER_X_AMAZON_QUERY_ERROR, e.getErrorCode() + ";" + queryErrorFault)
+                    .header(AwsHeader.HEADER_X_AMAZON_ERRORTYPE, e.jsonType())
                     .type("application/cbor")
                     .entity(errBytes)
                     .build();

@@ -102,7 +102,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
                         new AwsErrorResponse("ServiceNotAvailableException", message));
                 return Response.status(400)
                         .header("smithy-protocol", "rpc-v2-cbor")
-                        .header("x-amzn-query-error", "ServiceNotAvailableException;Sender")
+                        .header(AwsHeader.HEADER_X_AMAZON_QUERY_ERROR, "ServiceNotAvailableException;Sender")
                         .type("application/cbor")
                         .entity(errBytes)
                         .build();
