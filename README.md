@@ -195,62 +195,202 @@ Point your existing AWS SDK at `http://localhost:4566` — no other changes need
 
 ```java
 // Java (AWS SDK v2)
-DynamoDbClient client = DynamoDbClient.builder()
+var client = DynamoDbClient.builder()
     .endpointOverride(URI.create("http://localhost:4566"))
     .region(Region.US_EAST_1)
     .credentialsProvider(StaticCredentialsProvider.create(
         AwsBasicCredentials.create("test", "test")))
     .build();
+
+client.createTable(b -> b
+    .tableName("demo-table")
+    .billingMode(BillingMode.PAY_PER_REQUEST)
+    .attributeDefinitions(
+        AttributeDefinition.builder().attributeName("pk").attributeType(ScalarAttributeType.S).build())
+    .keySchema(
+        KeySchemaElement.builder().attributeName("pk").keyType(KeyType.HASH).build()));
+
+client.putItem(b -> b
+    .tableName("demo-table")
+    .item(Map.of("pk", AttributeValue.fromS("item-1"))));
+
+System.out.println(client.listTables().tableNames());
 ```
 
 ```python
 # Python (boto3)
 import boto3
-client = boto3.client("s3",
+client = boto3.client("ssm",
     endpoint_url="http://localhost:4566",
     region_name="us-east-1",
     aws_access_key_id="test",
     aws_secret_access_key="test")
+
+client.put_parameter(
+    Name="/demo/app/message",
+    Value="hello from floci",
+    Type="String",
+    Overwrite=True,
+)
+
+response = client.get_parameter(Name="/demo/app/message")
+print(response["Parameter"]["Value"])
 ```
 
 ```javascript
+// consumer.mjs
 // Node.js (AWS SDK v3)
-import { S3Client } from "@aws-sdk/client-s3";
+import {DeleteMessageCommand, ReceiveMessageCommand, SQSClient,} from "@aws-sdk/client-sqs";
 
-const client = new S3Client({
+const client = new SQSClient({
     endpoint: "http://localhost:4566",
     region: "us-east-1",
-    credentials: { accessKeyId: "test", secretAccessKey: "test" },
-    forcePathStyle: true,
+    credentials: {accessKeyId: "test", secretAccessKey: "test"},
 });
+
+const QUEUE_URL = "http://localhost:4566/000000000000/demo-queue";
+
+const response = await client.send(
+    new ReceiveMessageCommand({
+        QueueUrl: QUEUE_URL,
+        MaxNumberOfMessages: 1,
+        WaitTimeSeconds: 5,
+    }),
+);
+
+if (response.Messages) {
+    for (const msg of response.Messages) {
+        console.log("Message received:", msg.Body);
+
+        await client.send(
+            new DeleteMessageCommand({
+                QueueUrl: QUEUE_URL,
+                ReceiptHandle: msg.ReceiptHandle,
+            }),
+        );
+    }
+}
+
+```
+```javascript
+// producer.mjs
+// Node.js (AWS SDK v3)
+import {SendMessageCommand, SQSClient} from "@aws-sdk/client-sqs";
+
+const client = new SQSClient({
+    endpoint: "http://localhost:4566",
+    region: "us-east-1",
+    credentials: {accessKeyId: "test", secretAccessKey: "test"},
+});
+
+const QUEUE_URL = "http://localhost:4566/000000000000/demo-queue";
+
+await client.send(
+    new SendMessageCommand({
+        QueueUrl: QUEUE_URL,
+        MessageBody: "hello from producer",
+    }),
+);
+
+console.log("Message sent");
+
 ```
 
 ```go
 // Go (AWS SDK v2)
-cfg, err := config.LoadDefaultConfig(context.TODO(),
-    config.WithRegion("us-east-1"),
-    config.WithCredentialsProvider(credentials.NewStaticCredentialsProvider("test", "test", "")),
-    config.WithBaseEndpoint("http://localhost:4566"),
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strings"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
 )
-if err != nil {
-    log.Fatal(err)
+
+func main() {
+	cfg, err := config.LoadDefaultConfig(context.TODO(),
+		config.WithRegion("us-east-1"),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider("test", "test", ""),
+		),
+		config.WithBaseEndpoint("http://localhost:4566"),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	client := s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.UsePathStyle = true
+	})
+
+	_, err = client.CreateBucket(context.TODO(), &s3.CreateBucketInput{
+		Bucket: aws.String("demo-bucket"),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	_, err = client.PutObject(context.TODO(), &s3.PutObjectInput{
+		Bucket: aws.String("demo-bucket"),
+		Key:    aws.String("demo.txt"),
+		Body:   strings.NewReader("hello from floci"),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	out, err := client.ListObjectsV2(context.TODO(), &s3.ListObjectsV2Input{
+		Bucket: aws.String("demo-bucket"),
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if len(out.Contents) > 0 {
+		fmt.Println(*out.Contents[0].Key)
+	}
 }
 
-client := s3.NewFromConfig(cfg, func(o *s3.Options) {
-    o.UsePathStyle = true
-})
 ```
 
-```rush
+```rust
 // Rust (AWS SDK)
-let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-    .region(aws_sdk_s3::config::Region::new("us-east-1"))
-    .credentials_provider(aws_sdk_s3::config::Credentials::new("test", "test", None, None, "floci"))
-    .endpoint_url("http://localhost:4566")
-    .load()
-    .await;
+use aws_sdk_secretsmanager::config::{Credentials, Region};
+use aws_sdk_secretsmanager::Client;
 
-let client = aws_sdk_s3::Client::new(&config);
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(Region::new("us-east-1"))
+        .credentials_provider(Credentials::new("test", "test", None, None, "floci"))
+        .endpoint_url("http://localhost:4566")
+        .load()
+        .await;
+
+    let client = Client::new(&config);
+
+    client
+        .create_secret()
+        .name("demo/secret")
+        .secret_string("hello from floci")
+        .send()
+        .await?;
+
+    let secret = client
+        .get_secret_value()
+        .secret_id("demo/secret")
+        .send()
+        .await?;
+
+    println!("{}", secret.secret_string().unwrap());
+
+    Ok(())
+}
 ```
 
 ```bash
