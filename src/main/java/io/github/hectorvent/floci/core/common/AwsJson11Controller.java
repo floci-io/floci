@@ -144,7 +144,7 @@ public class AwsJson11Controller {
         } catch (AwsException e) {
             return JsonErrorResponseUtils.createErrorResponse(e);
         } catch (Exception e) {
-            LOG.errorf("Error processing %s request", serviceKey, e);
+            LOG.errorf(e, "Error processing %s request", serviceKey);
             return JsonErrorResponseUtils.createErrorResponse(e);
         }
     }
