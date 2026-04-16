@@ -995,13 +995,20 @@ public class DynamoDbService {
                 String rightExpr = valuePart.substring(arithmeticIdx + 1).trim();
                 JsonNode leftVal = evaluateSetExpr(item, leftExpr, exprAttrNames, exprAttrValues);
                 JsonNode rightVal = evaluateSetExpr(item, rightExpr, exprAttrNames, exprAttrValues);
-                if (leftVal != null && rightVal != null && leftVal.has("N") && rightVal.has("N")) {
+                if (leftVal == null || rightVal == null || !leftVal.has("N") || !rightVal.has("N")) {
+                    throw new AwsException("ValidationException",
+                            "Invalid UpdateExpression: Incorrect operand type for operator or function", 400);
+                }
+                try {
                     java.math.BigDecimal left = new java.math.BigDecimal(leftVal.get("N").asText());
                     java.math.BigDecimal right = new java.math.BigDecimal(rightVal.get("N").asText());
                     java.math.BigDecimal result = (operator == '+') ? left.add(right) : left.subtract(right);
                     ObjectNode numNode = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
                     numNode.put("N", result.toPlainString());
                     setValueAtPath(item, attrPath, numNode, exprAttrNames);
+                } catch (NumberFormatException e) {
+                    throw new AwsException("ValidationException",
+                            "The parameter cannot be converted to a numeric value", 400);
                 }
             } else if (valuePart.startsWith("if_not_exists(")) {
                 // if_not_exists(attrRef, fallbackExpr) evaluates to:
@@ -1080,19 +1087,19 @@ public class DynamoDbService {
             if (args.length == 2) {
                 String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
                 String fallbackExpr = args[1].trim();
-                if (item.has(checkAttr)) {
-                    return item.get(checkAttr);
+                if (hasValueAtPath(item, checkAttr, exprAttrNames)) {
+                    return getValueAtPath(item, checkAttr, exprAttrNames);
                 } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
                     return exprAttrValues.get(fallbackExpr);
                 } else {
-                    return item.get(resolveAttributeName(fallbackExpr, exprAttrNames));
+                    return getValueAtPath(item, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
                 }
             }
             return null;
         } else if (expr.startsWith(":") && exprAttrValues != null) {
             return exprAttrValues.get(expr);
         } else {
-            return item.get(resolveAttributeName(expr, exprAttrNames));
+            return getValueAtPath(item, resolveAttributeName(expr, exprAttrNames), exprAttrNames);
         }
     }
 
