@@ -5,7 +5,6 @@ services:
       dockerfile: Dockerfile
     ports:
       - "4566:4566"
-      - "5100-5199:5100-5199"
       - "6379-6399:6379-6399"
       - "7001-7099:7001-7099"
     volumes:
@@ -17,6 +16,8 @@ services:
       FLOCI_SERVICES_DOCKER_NETWORK: floci_default
       FLOCI_SERVICES_RDS_PROXY_BASE_PORT: "7001"
       FLOCI_STORAGE_HOST_PERSISTENT_PATH: ${PWD}/data
+      FLOCI_HOSTNAME: floci
+      FLOCI_BASE_URL: http://floci:4566
     networks:
       floci_default:
         aliases:

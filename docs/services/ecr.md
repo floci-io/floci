@@ -67,6 +67,25 @@ floci:
 | `uri-style` | `hostname` | `hostname` returns `*.dkr.ecr.<region>.localhost`; `path` returns `localhost:<port>/<account>/<region>/<repo>` |
 | `tls-enabled` | `false` | Reserved for the future ACM-backed TLS phase |
 
+### Docker Compose port mapping
+
+The ECR registry sidecar container binds its host port directly — do **not** add `5100-5199` to the floci service's `ports` in `docker-compose.yml`. Adding that range pre-allocates those ports on the floci container and prevents the sidecar from binding them:
+
+```yaml
+# Correct — no ECR port range on the floci service
+services:
+  floci:
+    image: hectorvent/floci:latest
+    ports:
+      - "4566:4566"
+      - "6379-6399:6379-6399"   # ElastiCache
+      - "7001-7099:7001-7099"   # RDS
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+```
+
+`docker login localhost:5100` works automatically once Floci starts the registry sidecar — no additional port mapping is needed.
+
 ## Examples
 
 ```bash

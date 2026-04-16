@@ -179,19 +179,17 @@ public class EcrRegistryManager {
             // persistentPath so the replace is a no-op and we bind the absolute
             // container data path. In a container with an absolute host path set,
             // replace rewrites the container-internal path to the host-side path.
+            // normalize() eliminates any "./" segments so the replace() matches reliably.
             String dataPath = Paths.get(config.services().ecr().dataPath(), "registry")
-                    .toAbsolutePath().toString();
-            String hostDataPath = dataPath.replace(config.storage().persistentPath(), hostPersistentPath);
+                    .toAbsolutePath().normalize().toString();
+            String persistentPath = Paths.get(config.storage().persistentPath())
+                    .toAbsolutePath().normalize().toString();
+            String hostDataPath = dataPath.replace(persistentPath, hostPersistentPath);
             if (!inContainer) {
                 ensureDataDir();
             }
             hostConfig.withBinds(new Bind(hostDataPath, new Volume("/var/lib/registry")));
         }
-
-        config.services().ecr().dockerNetwork()
-                .or(() -> config.services().dockerNetwork())
-                .filter(n -> !n.isBlank())
-                .ifPresent(hostConfig::withNetworkMode);
 
         try {
             CreateContainerResponse created = dockerClient.createContainerCmd(image)
@@ -208,6 +206,24 @@ public class EcrRegistryManager {
         } catch (Exception e) {
             throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
         }
+
+        // Connect to the configured Docker network after starting so that host port
+        // bindings are established first (withNetworkMode during create suppresses
+        // port publishing on some Docker runtimes, e.g. Docker Desktop on macOS).
+        config.services().ecr().dockerNetwork()
+                .or(() -> config.services().dockerNetwork())
+                .filter(n -> !n.isBlank())
+                .ifPresent(network -> {
+                    try {
+                        dockerClient.connectToNetworkCmd()
+                                .withContainerId(containerId)
+                                .withNetworkId(network)
+                                .exec();
+                        LOG.infov("Connected ECR registry {0} to network {1}", name, network);
+                    } catch (Exception e) {
+                        LOG.warnv("Could not connect ECR registry to network {0}: {1}", network, e.getMessage());
+                    }
+                });
         runReconcileOnce();
     }
 

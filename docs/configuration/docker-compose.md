@@ -40,6 +40,9 @@ services:
 !!! warning "Docker socket"
     Lambda, ElastiCache, and RDS require access to the Docker socket (`/var/run/docker.sock`) to spawn and manage containers. If you don't use these services, you can omit that volume.
 
+!!! note "ECR ports are not listed here intentionally"
+    ECR is backed by a separate `registry:2` sidecar container (`floci-ecr-registry`) that Floci starts and manages. That container binds its own host port (default `5100`) directly — adding `5100-5199` to the floci service's `ports` would conflict with the sidecar and break `docker push`/`docker pull`. See [Ports Reference → ECR](./ports.md#ports-51005199--ecr-registry) for details.
+
 ## Multi-container networking
 
 By default, Floci embeds `localhost` in response URLs — for example, SQS queue

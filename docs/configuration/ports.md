@@ -5,7 +5,7 @@
 | Port / Range | Protocol | Purpose |
 |---|---|---|
 | `4566` | HTTP | All AWS API calls (every service) |
-| `5100–5199` | HTTP | ECR Registry port, for `docker push` / `docker pull` |
+| `5100–5199` | HTTP | ECR Registry sidecar (`floci-ecr-registry`) — bound directly by that container, not the floci container |
 | `6379–6399` | TCP | ElastiCache Redis proxy, one port per replication group |
 | `7001–7099` | TCP | RDS proxy, one port per DB instance |
 | `9200–9299` | HTTP | Lambda Runtime API (internal: consumed by spawned Lambda containers, not host-mapped) |
@@ -75,19 +75,35 @@ This range is reserved for OpenSearch `mode: real`, which will spin up an OpenSe
 !!! note
  When real mode lands, configure the range with `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` and `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT`.
 
+## Ports 5100–5199 — ECR Registry
+
+ECR is backed by a separate `registry:2` sidecar container (`floci-ecr-registry`) that Floci starts lazily on the first ECR API call. That container binds its own host port directly — **do not** add `5100-5199` to the floci service's `ports` in Docker Compose. Doing so pre-allocates those ports on the floci container and prevents the sidecar from binding them, causing the ECR registry to fail to start.
+
+```
+host:5100  ←──  floci-ecr-registry (registry:2 container, started by Floci)
+                       ↑
+                 EcrRegistryManager manages this container's lifecycle
+```
+
+`docker login localhost:5100` works because the sidecar has a direct host port binding. No docker-compose port mapping is needed.
+
+!!! warning "Do not expose ECR port range on the floci service"
+    Adding `- "5100-5199:5100-5199"` to the floci service ports will conflict with the ECR sidecar container and break `docker push` / `docker pull`.
+
 ## Exposing Ports in Docker Compose
 
-When running Floci inside Docker, you must expose these ranges to the host so your application (or Redis/psql CLI) can connect:
+When running Floci inside Docker, expose these ranges to the host so your application (or Redis/psql CLI) can connect. **ECR ports are excluded** — they are handled by the registry sidecar:
 
 ```yaml
 services:
   floci:
     image: hectorvent/floci:latest
     ports:
-      - "4566:4566"
-      - "5100-5199:5100-5199"
-      - "6379-6399:6379-6399"
-      - "7001-7099:7001-7099"
+      - "4566:4566"           # All AWS API calls
+      - "6379-6399:6379-6399" # ElastiCache / Redis proxy ports
+      - "7001-7099:7001-7099" # RDS / PostgreSQL + MySQL proxy ports
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 ```
 
 If your application runs inside the same Docker Compose network, it can reach Floci directly on container port `4566` — the host port mapping is only needed for tools running on the host (CLI, IDE plugins, etc.).
