@@ -5,16 +5,21 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.security.Security;
 import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -23,6 +28,13 @@ class KmsServiceTest {
     private static final String REGION = "us-east-1";
 
     private KmsService kmsService;
+
+    @BeforeAll
+    static void registerBouncyCastle() {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+    }
 
     @BeforeEach
     void setUp() {
@@ -184,9 +196,10 @@ class KmsServiceTest {
                 kmsService.decrypt("not-valid-ciphertext".getBytes(StandardCharsets.UTF_8), REGION));
     }
 
-    @Test
-    void signAndVerify() {
-        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", "ECC_NIST_P256", null, Map.of(), REGION);
+    @ParameterizedTest
+    @ValueSource(strings = {"ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521", "ECC_SECG_P256K1"})
+    void signAndVerify(String keySpec) {
+        KmsKey key = kmsService.createKey("ecdsa key", "SIGN_VERIFY", keySpec, null, Map.of(), REGION);
         byte[] message = "sign me".getBytes(StandardCharsets.UTF_8);
 
         byte[] sig = kmsService.sign(key.getKeyId(), message, "ECDSA_SHA_256", REGION);

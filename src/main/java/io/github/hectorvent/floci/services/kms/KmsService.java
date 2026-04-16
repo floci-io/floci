@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
@@ -91,8 +92,8 @@ public class KmsService {
                 generator = KeyPairGenerator.getInstance("RSA");
                 int size = Integer.parseInt(spec.substring(4));
                 generator.initialize(size);
-            } else if (spec.startsWith("ECC_")) {
-                generator = KeyPairGenerator.getInstance("EC");
+            } else if (isEcKeySpec(spec)) {
+                generator = KeyPairGenerator.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
                 String curveName = switch (spec) {
                     case "ECC_NIST_P256" -> "secp256r1";
                     case "ECC_NIST_P384" -> "secp384r1";
@@ -267,8 +268,10 @@ public class KmsService {
                 // If message is already a digest, we need a "NONEwith..." algorithm
                 jcaAlgo = "NONEwith" + (kmsKey.getCustomerMasterKeySpec().startsWith("RSA") ? "RSA" : "ECDSA");
             }
-            
-            Signature sig = Signature.getInstance(jcaAlgo);
+
+            Signature sig = isEcKeySpec(kmsKey.getCustomerMasterKeySpec())
+                ? Signature.getInstance(jcaAlgo, BouncyCastleProvider.PROVIDER_NAME)
+                : Signature.getInstance(jcaAlgo);
             sig.initSign(privateKey);
             sig.update(message);
             return sig.sign();
@@ -295,7 +298,9 @@ public class KmsService {
                 jcaAlgo = "NONEwith" + (kmsKey.getCustomerMasterKeySpec().startsWith("RSA") ? "RSA" : "ECDSA");
             }
 
-            Signature sig = Signature.getInstance(jcaAlgo);
+            Signature sig = isEcKeySpec(kmsKey.getCustomerMasterKeySpec())
+                ? Signature.getInstance(jcaAlgo, BouncyCastleProvider.PROVIDER_NAME)
+                : Signature.getInstance(jcaAlgo);
             sig.initVerify(publicKey);
             sig.update(message);
             return sig.verify(signature);
@@ -307,13 +312,13 @@ public class KmsService {
 
     private PrivateKey loadPrivateKey(String encoded, String spec) throws Exception {
         byte[] decoded = Base64.getDecoder().decode(encoded);
-        KeyFactory factory = KeyFactory.getInstance(spec.startsWith("RSA") ? "RSA" : "EC");
+        KeyFactory factory = buildKeyFactory(spec);
         return factory.generatePrivate(new PKCS8EncodedKeySpec(decoded));
     }
 
     private PublicKey loadPublicKey(String encoded, String spec) throws Exception {
         byte[] decoded = Base64.getDecoder().decode(encoded);
-        KeyFactory factory = KeyFactory.getInstance(spec.startsWith("RSA") ? "RSA" : "EC");
+        KeyFactory factory = buildKeyFactory(spec);
         return factory.generatePublic(new X509EncodedKeySpec(decoded));
     }
 
@@ -363,6 +368,16 @@ public class KmsService {
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
+
+    private static boolean isEcKeySpec(String spec) {
+        return spec.startsWith("ECC_");
+    }
+
+    private static KeyFactory buildKeyFactory(String spec) throws Exception {
+      return spec.startsWith("RSA")
+          ? KeyFactory.getInstance("RSA")
+          : KeyFactory.getInstance("EC", BouncyCastleProvider.PROVIDER_NAME);
+    }
 
     private KmsKey resolveKey(String keyIdOrArn, String region) {
         String id = keyIdOrArn;
