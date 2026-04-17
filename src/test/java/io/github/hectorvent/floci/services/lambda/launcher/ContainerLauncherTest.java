@@ -77,38 +77,13 @@ class ContainerLauncherTest {
     }
 
     @Test
-    void launchHotReloadFunctionAppliesBindMount() {
-        LambdaFunction fn = new LambdaFunction();
-        fn.setFunctionName("hot-fn");
-        fn.setRuntime("nodejs20.x");
-        fn.setHandler("index.handler");
-        fn.setHotReload(true);
-        fn.setCodeLocalPath("/host/path/to/code");
-
-        launcher.launch(fn);
-
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).createAndStart(specCaptor.capture());
-
-        ContainerSpec spec = specCaptor.getValue();
-        // Check that bind mounts are applied
-        assertTrue(spec.binds().stream().anyMatch(b -> 
-            b.getPath().equals("/host/path/to/code") && b.getVolume().getPath().equals("/var/task")
-        ), "Should have bind mount for /var/task");
-        
-        // Ensure NO tar-copy was attempted
-        verify(dockerClient, never()).copyArchiveToContainerCmd(any());
-    }
-
-    @Test
-    void launchStandardFunctionDoesNotApplyBindMount() throws Exception {
+    void launchFunctionCopiesCode() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("code"));
         
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("standard-fn");
         fn.setRuntime("nodejs20.x");
         fn.setHandler("index.handler");
-        fn.setHotReload(false);
         fn.setCodeLocalPath(codePath.toString());
 
         launcher.launch(fn);
@@ -117,9 +92,9 @@ class ContainerLauncherTest {
         verify(lifecycleManager).createAndStart(specCaptor.capture());
 
         ContainerSpec spec = specCaptor.getValue();
-        assertTrue(spec.binds().isEmpty(), "Standard function should NOT have bind mounts");
+        assertTrue(spec.binds().isEmpty(), "Function should NOT have bind mounts");
         
-        // Standard function should attempt to copy code
+        // Function should attempt to copy code
         verify(lifecycleManager, atLeastOnce()).getDockerClient();
     }
 }

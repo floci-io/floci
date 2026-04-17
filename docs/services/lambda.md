@@ -43,6 +43,41 @@ Lambda runs your function code inside real Docker containers — the same way re
 | `GetFunctionConcurrency` | Get reserved concurrent executions |
 | `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
 
+## Hot-Reloading via Reactive S3 Sync
+
+Floci supports an automatic hot-reloading mechanism when functions are deployed via S3. This follows the standard AWS behavior where S3 and Lambda interact, but is optimized for a seamless local development experience.
+
+When a Lambda function is created using an S3 bucket and key, Floci maintains a link between the function and its source object. Any subsequent update to that S3 object (e.g., via `s3:PutObject`) automatically triggers a reactive synchronization:
+
+1.  **Detection**: Floci detects the S3 update via an internal event system.
+2.  **Synchronization**: The new code is automatically re-extracted to the local code storage.
+3.  **Invalidation**: Any active "warm" containers for that function are proactively drained.
+4.  **Reload**: The very next invocation starts a fresh container with the updated code.
+
+This allows you to update your Lambda code by simply re-uploading your ZIP to S3, without having to manually call `UpdateFunctionCode` or restart any containers.
+
+### Example
+
+```bash
+# 1. Create a function linked to S3
+aws lambda create-function \
+  --function-name my-function \
+  --code S3Bucket=my-bucket,S3Key=function.zip \
+  ...
+
+# 2. Invoke (starts a warm container)
+aws lambda invoke --function-name my-function out.json
+
+# 3. Update the code in S3 (Triggers Reactive Sync)
+aws s3 cp updated-function.zip s3://my-bucket/function.zip
+
+# 4. Invoke again (automatically picks up the new code)
+aws lambda invoke --function-name my-function out.json
+```
+
+!!! note "Standard Behavior"
+    This mechanism requires no custom configuration or non-standard magic strings. It works with standard AWS SDKs and CLI tools, providing a "live" development feel while staying within the AWS API contract.
+
 !!! note "Concurrency enforcement"
     Reserved concurrency is enforced: invocations beyond the reserved value
     return `TooManyRequestsException` (HTTP 429). Functions without a reserved

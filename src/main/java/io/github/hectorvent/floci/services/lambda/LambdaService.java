@@ -921,7 +921,6 @@ public class LambdaService {
     }
 
     private void extractZipCode(LambdaFunction fn, String zipFileBase64) {
-        fn.setHotReload(false);
         byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
         Path codePath = codeStore.getCodePath(fn.getFunctionName());
         try {
@@ -959,7 +958,6 @@ public class LambdaService {
             throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
         }
 
-        fn.setHotReload(false);
         fn.setS3Bucket(s3Bucket);
         fn.setS3Key(s3Key);
         S3Object obj;

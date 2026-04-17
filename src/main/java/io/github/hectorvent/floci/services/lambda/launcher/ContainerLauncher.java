@@ -106,7 +106,7 @@ public class ContainerLauncher {
         LOG.infov("Launching container for function: {0}", fn.getFunctionName());
 
         // For Zip functions, verify code exists before allocating any resources.
-        if (fn.getCodeLocalPath() != null && !fn.isHotReload()) {
+        if (fn.getCodeLocalPath() != null) {
             Path codePath = Path.of(fn.getCodeLocalPath());
             if (!Files.exists(codePath)) {
                 throw new RuntimeException("Code directory not found for function '"
@@ -158,13 +158,6 @@ public class ContainerLauncher {
                 .withHostDockerInternalOnLinux()
                 .withLogRotation();
 
-        if (fn.isHotReload() && fn.getCodeLocalPath() != null) {
-            specBuilder.withBind(fn.getCodeLocalPath(), TASK_DIR);
-            if (isProvidedRuntime(fn.getRuntime())) {
-                specBuilder.withBind(fn.getCodeLocalPath() + "/bootstrap", RUNTIME_DIR + "/bootstrap");
-            }
-        }
-
         // For Image package type without an explicit handler, omit CMD so the image's own CMD is used
         if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
             specBuilder.withCmd(fn.getHandler());
@@ -179,7 +172,7 @@ public class ContainerLauncher {
 
         // Copy code into container via Docker API tar stream (works inside Docker too)
         DockerClient dockerClient = lifecycleManager.getDockerClient();
-        if (fn.getCodeLocalPath() != null && !fn.isHotReload()) {
+        if (fn.getCodeLocalPath() != null) {
             Path codePath = Path.of(fn.getCodeLocalPath());
 
             // 1. Always copy all code to /var/task (TASK_DIR)
