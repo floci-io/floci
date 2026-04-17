@@ -5,5 +5,5 @@ import com.fasterxml.jackson.databind.JsonNode;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 @RegisterForReflection
-public record AwsErrorResponse(@JsonProperty("__type") String type, @JsonProperty("message") String message) {
+public record AwsErrorResponseWithItem(@JsonProperty("__type") String type, @JsonProperty("message") String message, @JsonProperty("Item") JsonNode item) {
 }

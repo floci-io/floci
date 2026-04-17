@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -221,17 +222,21 @@ public class DynamoDbService {
     }
 
     public void putItem(String tableName, JsonNode item) {
-        putItem(tableName, item, null, null, null, regionResolver.getDefaultRegion());
+        putItem(tableName, item, null, null, null, regionResolver.getDefaultRegion(), "NONE");
     }
 
     public void putItem(String tableName, JsonNode item, String region) {
-        putItem(tableName, item, null, null, null, region);
+        putItem(tableName, item, null, null, null, region, "NONE");
+    }
+
+    public void putItem(String tableName, JsonNode item, String region, String returnValuesOnConditionCheckFailure) {
+        putItem(tableName, item, null, null, null, region, returnValuesOnConditionCheckFailure);
     }
 
     public void putItem(String tableName, JsonNode item,
                          String conditionExpression,
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
-                         String region) {
+                         String region, String returnValuesOnConditionCheckFailure) {
         String storageKey = regionKey(region, tableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(tableName));
@@ -242,7 +247,7 @@ public class DynamoDbService {
         JsonNode existing = tableItems.get(itemKey);
 
         if (conditionExpression != null) {
-            evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues);
+            evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
         }
 
         tableItems.put(itemKey, item);
@@ -276,17 +281,21 @@ public class DynamoDbService {
     }
 
     public JsonNode deleteItem(String tableName, JsonNode key) {
-        return deleteItem(tableName, key, null, null, null, regionResolver.getDefaultRegion());
+        return deleteItem(tableName, key, null, null, null, regionResolver.getDefaultRegion(), "NONE");
     }
 
     public JsonNode deleteItem(String tableName, JsonNode key, String region) {
-        return deleteItem(tableName, key, null, null, null, region);
+        return deleteItem(tableName, key, null, null, null, region, "NONE");
+    }
+
+    public JsonNode deleteItem(String tableName, JsonNode key, String region, String returnValuesOnConditionCheckFailure) {
+        return deleteItem(tableName, key, null, null, null, region, "ALL_OLD");
     }
 
     public JsonNode deleteItem(String tableName, JsonNode key,
                                 String conditionExpression,
                                 JsonNode exprAttrNames, JsonNode exprAttrValues,
-                                String region) {
+                                String region, String returnValuesOnConditionCheckFailure) {
         String storageKey = regionKey(region, tableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(tableName));
@@ -297,7 +306,7 @@ public class DynamoDbService {
 
         if (conditionExpression != null) {
             JsonNode existing = items.get(itemKey);
-            evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues);
+            evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
         }
 
         JsonNode removed = items.remove(itemKey);
@@ -321,7 +330,8 @@ public class DynamoDbService {
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                                     String returnValues) {
         return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
-                          expressionAttrValues, returnValues, null, regionResolver.getDefaultRegion());
+                          expressionAttrValues, returnValues, null, regionResolver.getDefaultRegion(),
+                          "NONE");
     }
 
     public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -329,13 +339,23 @@ public class DynamoDbService {
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                                     String returnValues, String region) {
         return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
-                          expressionAttrValues, returnValues, null, region);
+                          expressionAttrValues, returnValues, null, region, "NONE");
     }
 
     public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
                                     String updateExpression,
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
-                                    String returnValues, String conditionExpression, String region) {
+                                    String returnValues, String region, 
+                                    String returnValuesOnConditionCheckFailure) {
+        return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
+                          expressionAttrValues, returnValues, null, region, returnValuesOnConditionCheckFailure);
+    }
+
+    public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
+                                    String updateExpression,
+                                    JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                                    String returnValues, String conditionExpression, String region, 
+                                    String returnValuesOnConditionCheckFailure) {
         String storageKey = regionKey(region, tableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(tableName));
@@ -347,7 +367,7 @@ public class DynamoDbService {
         JsonNode existing = items.get(itemKey);
 
         if (conditionExpression != null) {
-            evaluateCondition(existing, conditionExpression, expressionAttrNames, expressionAttrValues);
+            evaluateCondition(existing, conditionExpression, expressionAttrNames, expressionAttrValues, returnValuesOnConditionCheckFailure);
         }
 
         ObjectNode item;
@@ -710,6 +730,8 @@ public class DynamoDbService {
         if (conditionExpression == null) {
             return null;
         }
+        String returnValuesOnConditionCheckFailure = target.has("ReturnValuesOnConditionCheckFailure")
+                ? target.get("ReturnValuesOnConditionCheckFailure").asText() : null;
 
         String tableName = target.path("TableName").asText();
         JsonNode key = transactItem.has("Put") ? target.get("Item") : target.get("Key");
@@ -725,7 +747,7 @@ public class DynamoDbService {
         JsonNode existing = tableItems != null ? tableItems.get(itemKey) : null;
 
         try {
-            evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues);
+            evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             return null;
         } catch (AwsException e) {
             return e.getMessage();
@@ -908,9 +930,14 @@ public class DynamoDbService {
     // --- Condition expression evaluation ---
 
     private void evaluateCondition(JsonNode existingItem, String conditionExpression,
-                                    JsonNode exprAttrNames, JsonNode exprAttrValues) {
+                                    JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValuesOnConditionCheckFailure) {
         if (!matchesFilterExpression(existingItem, conditionExpression, exprAttrNames, exprAttrValues)) {
-            throw new ConditionalCheckFailedException(existingItem);
+            if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){                
+                throw new ConditionalCheckFailedException(existingItem);
+            }
+            else {
+                throw new ConditionalCheckFailedException(null);
+            }
         }
     }
 

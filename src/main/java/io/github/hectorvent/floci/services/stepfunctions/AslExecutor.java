@@ -464,7 +464,7 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.putItem(tableName, item, conditionExpr, exprAttrNames, exprAttrValues, region);
+                dynamoDbService.putItem(tableName, item, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
                 return objectMapper.createObjectNode();
             }
             case "getItem" -> {
@@ -484,7 +484,7 @@ public class AslExecutor {
                         ? input.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = input.has("ExpressionAttributeValues")
                         ? input.get("ExpressionAttributeValues") : null;
-                dynamoDbService.deleteItem(tableName, key, conditionExpr, exprAttrNames, exprAttrValues, region);
+                dynamoDbService.deleteItem(tableName, key, conditionExpr, exprAttrNames, exprAttrValues, region, "NONE");
                 return objectMapper.createObjectNode();
             }
             case "scan" -> {

@@ -207,6 +207,7 @@ public class DynamoDbJsonHandler {
         String tableName = request.path("TableName").asText();
         JsonNode item = request.path("Item");
         String returnValues = request.path("ReturnValues").asText("NONE");
+        String returnValuesOnConditionCheckFailure = request.path("ReturnValuesOnConditionCheckFailure").asText("NONE");
         String conditionExpression = request.has("ConditionExpression")
                 ? request.get("ConditionExpression").asText() : null;
         JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
@@ -220,7 +221,7 @@ public class DynamoDbJsonHandler {
             oldItem = dynamoDbService.getItem(tableName, item, region);
         }
 
-        dynamoDbService.putItem(tableName, item, conditionExpression, exprAttrNames, exprAttrValues, region);
+        dynamoDbService.putItem(tableName, item, conditionExpression, exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure);
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_OLD" .equals(returnValues) && oldItem != null) {
@@ -247,7 +248,8 @@ public class DynamoDbJsonHandler {
     private Response handleDeleteItem(JsonNode request, String region) {
         String tableName = request.path("TableName").asText();
         JsonNode key = request.path("Key");
-        String returnValues = request.path("ReturnValues").asText("NONE");
+        String returnValues = request.path("ReturnValues").asText("NONE");        
+        String returnValuesOnConditionCheckFailure = request.path("ReturnValuesOnConditionCheckFailure").asText("NONE");
         String conditionExpression = request.has("ConditionExpression")
                 ? request.get("ConditionExpression").asText() : null;
         JsonNode exprAttrNames = request.has("ExpressionAttributeNames")
@@ -256,7 +258,7 @@ public class DynamoDbJsonHandler {
                 ? request.get("ExpressionAttributeValues") : null;
 
         JsonNode oldItem = dynamoDbService.deleteItem(tableName, key, conditionExpression,
-                exprAttrNames, exprAttrValues, region);
+                exprAttrNames, exprAttrValues, region, returnValuesOnConditionCheckFailure);
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_OLD" .equals(returnValues) && oldItem != null) {
@@ -279,12 +281,13 @@ public class DynamoDbJsonHandler {
         String conditionExpression = request.has("ConditionExpression")
                 ? request.get("ConditionExpression").asText() : null;
         String returnValues = request.path("ReturnValues").asText("NONE");
+        String returnValuesOnConditionCheckFailure = request.path("ReturnValuesOnConditionCheckFailure").asText("NONE");
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
 
         DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
                 tableName, key, updateData, updateExpression, exprAttrNames, exprAttrValues,
-                returnValues, conditionExpression, region);
+                returnValues, conditionExpression, region, returnValuesOnConditionCheckFailure);
 
         ObjectNode response = objectMapper.createObjectNode();
         if ("ALL_NEW" .equals(returnValues) && result.newItem() != null) {
