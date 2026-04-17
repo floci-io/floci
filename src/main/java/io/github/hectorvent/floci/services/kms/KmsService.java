@@ -9,8 +9,28 @@ import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.ASN1Primitive;
+import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.asn1.DERSequenceGenerator;
+import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.crypto.params.ECDomainParameters;
+import org.bouncycastle.crypto.params.ECPrivateKeyParameters;
+import org.bouncycastle.crypto.params.ECPublicKeyParameters;
+import org.bouncycastle.crypto.params.ParametersWithRandom;
+import org.bouncycastle.crypto.signers.ECDSASigner;
+import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPrivateKey;
+import org.bouncycastle.jcajce.provider.asymmetric.ec.BCECPublicKey;
+import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyFactorySpi;
+import org.bouncycastle.jcajce.provider.asymmetric.ec.KeyPairGeneratorSpi;
+import org.bouncycastle.jcajce.provider.util.AsymmetricKeyInfoConverter;
+import org.bouncycastle.jce.ECNamedCurveTable;
+import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
+import java.math.BigInteger;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.spec.*;
@@ -92,7 +112,6 @@ public class KmsService {
                 int size = Integer.parseInt(spec.substring(4));
                 generator.initialize(size);
             } else if (spec.startsWith("ECC_")) {
-                generator = KeyPairGenerator.getInstance("EC");
                 String curveName = switch (spec) {
                     case "ECC_NIST_P256" -> "secp256r1";
                     case "ECC_NIST_P384" -> "secp384r1";
@@ -100,6 +119,13 @@ public class KmsService {
                     case "ECC_SECG_P256K1" -> "secp256k1";
                     default -> throw new AwsException("InvalidCustomerMasterKeySpecException", "Unsupported curve: " + spec, 400);
                 };
+                // For secp256k1 (ECC_SECG_P256K1), instantiate BC's SPI directly.
+                // JCA's ClassLoader.loadClass cannot find BC SPI classes in GraalVM native image
+                // unless they are allocated directly in code (GraalVM escape analysis eliminates
+                // unused allocations, keeping them out of the native image type registry).
+                generator = isSecgP256k1(spec)
+                        ? new KeyPairGeneratorSpi.EC()
+                        : KeyPairGenerator.getInstance("EC");
                 generator.initialize(new ECGenParameterSpec(curveName));
             } else {
                 throw new AwsException("InvalidCustomerMasterKeySpecException", "Unsupported key spec: " + spec, 400);
@@ -267,7 +293,10 @@ public class KmsService {
                 // If message is already a digest, we need a "NONEwith..." algorithm
                 jcaAlgo = "NONEwith" + (kmsKey.getCustomerMasterKeySpec().startsWith("RSA") ? "RSA" : "ECDSA");
             }
-            
+
+            if (isSecgP256k1(kmsKey.getCustomerMasterKeySpec())) {
+                return signSecgP256k1(privateKey, message, jcaAlgo);
+            }
             Signature sig = Signature.getInstance(jcaAlgo);
             sig.initSign(privateKey);
             sig.update(message);
@@ -295,6 +324,9 @@ public class KmsService {
                 jcaAlgo = "NONEwith" + (kmsKey.getCustomerMasterKeySpec().startsWith("RSA") ? "RSA" : "ECDSA");
             }
 
+            if (isSecgP256k1(kmsKey.getCustomerMasterKeySpec())) {
+                return verifySecgP256k1(publicKey, message, signature, jcaAlgo);
+            }
             Signature sig = Signature.getInstance(jcaAlgo);
             sig.initVerify(publicKey);
             sig.update(message);
@@ -307,14 +339,23 @@ public class KmsService {
 
     private PrivateKey loadPrivateKey(String encoded, String spec) throws Exception {
         byte[] decoded = Base64.getDecoder().decode(encoded);
-        KeyFactory factory = KeyFactory.getInstance(spec.startsWith("RSA") ? "RSA" : "EC");
-        return factory.generatePrivate(new PKCS8EncodedKeySpec(decoded));
+        if (isSecgP256k1(spec)) {
+            // For secp256k1, use BC's KeyFactorySpi.EC directly as AsymmetricKeyInfoConverter.
+            // This bypasses JCA and ClassLoader.loadClass; the allocation is live (generatePrivate
+            // is called), so GraalVM's escape analysis keeps the class in the native image.
+            AsymmetricKeyInfoConverter converter = new KeyFactorySpi.EC();
+            return converter.generatePrivate(PrivateKeyInfo.getInstance(decoded));
+        }
+        return buildKeyFactory(spec).generatePrivate(new PKCS8EncodedKeySpec(decoded));
     }
 
     private PublicKey loadPublicKey(String encoded, String spec) throws Exception {
         byte[] decoded = Base64.getDecoder().decode(encoded);
-        KeyFactory factory = KeyFactory.getInstance(spec.startsWith("RSA") ? "RSA" : "EC");
-        return factory.generatePublic(new X509EncodedKeySpec(decoded));
+        if (isSecgP256k1(spec)) {
+            AsymmetricKeyInfoConverter converter = new KeyFactorySpi.EC();
+            return converter.generatePublic(SubjectPublicKeyInfo.getInstance(decoded));
+        }
+        return buildKeyFactory(spec).generatePublic(new X509EncodedKeySpec(decoded));
     }
 
     private String mapAlgorithm(String awsAlgo) {
@@ -363,6 +404,69 @@ public class KmsService {
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
+
+    private static boolean isSecgP256k1(String spec) {
+        return "ECC_SECG_P256K1".equals(spec);
+    }
+
+    /**
+     * Signs {@code message} with secp256k1 using BC's lightweight {@link ECDSASigner}.
+     *
+     * <p>BC's {@code SignatureSpi} subclasses extend {@code java.security.SignatureSpi} (not
+     * {@code java.security.Signature}), so they cannot be used as a drop-in {@code Signature}.
+     * Using the lightweight API avoids JCA's {@code ClassLoader.loadClass} entirely — every
+     * class referenced here is directly allocated in reachable code and is always in GraalVM's
+     * native image type registry.</p>
+     */
+    private static byte[] signSecgP256k1(PrivateKey privateKey, byte[] message, String jcaAlgo) throws Exception {
+        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
+        ECPrivateKeyParameters privParams = new ECPrivateKeyParameters(((BCECPrivateKey) privateKey).getD(), domain);
+
+        byte[] hash = "NONEwithECDSA".equals(jcaAlgo) ? message : hashForEcdsa(message, jcaAlgo);
+
+        ECDSASigner signer = new ECDSASigner();
+        signer.init(true, new ParametersWithRandom(privParams, new SecureRandom()));
+        BigInteger[] rs = signer.generateSignature(hash);
+
+        ByteArrayOutputStream bOut = new ByteArrayOutputStream();
+        DERSequenceGenerator seq = new DERSequenceGenerator(bOut);
+        seq.addObject(new ASN1Integer(rs[0]));
+        seq.addObject(new ASN1Integer(rs[1]));
+        seq.close();
+        return bOut.toByteArray();
+    }
+
+    /** Verifies a DER-encoded ECDSA signature over secp256k1. */
+    private static boolean verifySecgP256k1(PublicKey publicKey, byte[] message, byte[] signature, String jcaAlgo) throws Exception {
+        ECNamedCurveParameterSpec spec = ECNamedCurveTable.getParameterSpec("secp256k1");
+        ECDomainParameters domain = new ECDomainParameters(spec.getCurve(), spec.getG(), spec.getN(), spec.getH());
+        ECPublicKeyParameters pubParams = new ECPublicKeyParameters(((BCECPublicKey) publicKey).getQ(), domain);
+
+        byte[] hash = "NONEwithECDSA".equals(jcaAlgo) ? message : hashForEcdsa(message, jcaAlgo);
+
+        ASN1Sequence asn1 = ASN1Sequence.getInstance(ASN1Primitive.fromByteArray(signature));
+        BigInteger r = ASN1Integer.getInstance(asn1.getObjectAt(0)).getValue();
+        BigInteger s = ASN1Integer.getInstance(asn1.getObjectAt(1)).getValue();
+
+        ECDSASigner verifier = new ECDSASigner();
+        verifier.init(false, pubParams);
+        return verifier.verifySignature(hash, r, s);
+    }
+
+    private static byte[] hashForEcdsa(byte[] message, String jcaAlgo) throws Exception {
+        String mdAlgo = switch (jcaAlgo) {
+            case "SHA256withECDSA" -> "SHA-256";
+            case "SHA384withECDSA" -> "SHA-384";
+            case "SHA512withECDSA" -> "SHA-512";
+            default -> throw new AwsException("InvalidSigningAlgorithmException", "Unsupported EC algorithm: " + jcaAlgo, 400);
+        };
+        return MessageDigest.getInstance(mdAlgo).digest(message);
+    }
+
+    private static KeyFactory buildKeyFactory(String spec) throws Exception {
+        return KeyFactory.getInstance(spec.startsWith("RSA") ? "RSA" : "EC");
+    }
 
     private KmsKey resolveKey(String keyIdOrArn, String region) {
         String id = keyIdOrArn;

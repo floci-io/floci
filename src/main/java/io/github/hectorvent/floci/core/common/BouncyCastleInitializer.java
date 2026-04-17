@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import io.quarkus.runtime.Startup;
 import jakarta.enterprise.context.ApplicationScoped;
+import org.bouncycastle.jcajce.provider.asymmetric.EC;
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.jboss.logging.Logger;
 
@@ -27,8 +28,18 @@ public class BouncyCastleInitializer {
     private static final Logger LOG = Logger.getLogger(BouncyCastleInitializer.class);
 
     static {
+        BouncyCastleProvider provider = new BouncyCastleProvider();
+        // BC's ClassUtil.loadClass (used during provider setup) uses ClassLoader.loadClass,
+        // which in GraalVM native image only finds classes that are directly allocated in
+        // reachable code — not classes listed only in reflect-config.json or via class literals.
+        // If EC.Mappings failed to load internally, configure EC algorithms explicitly.
+        // Guard prevents IllegalStateException from double-registration in regular JVM mode.
+        EC.Mappings ecMappings = new EC.Mappings();
+        if (provider.getService("KeyPairGenerator", "EC") == null) {
+            ecMappings.configure(provider);
+        }
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(new BouncyCastleProvider());
+            Security.addProvider(provider);
             LOG.info("Registered BouncyCastle security provider (static initializer)");
         }
     }

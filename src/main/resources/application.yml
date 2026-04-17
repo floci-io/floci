@@ -12,6 +12,7 @@ quarkus:
       --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV,
       --initialize-at-run-time=org.bouncycastle.crypto.prng.SP800SecureRandom,
       --initialize-at-run-time=org.bouncycastle.jce.provider.BouncyCastleProvider,
+      --initialize-at-run-time=io.github.hectorvent.floci.core.common.BouncyCastleInitializer,
       --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService,
       --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator,
       --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
