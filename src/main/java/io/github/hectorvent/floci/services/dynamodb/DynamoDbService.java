@@ -326,12 +326,11 @@ public class DynamoDbService {
     }
 
     public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
-                                    String updateExpression,
-                                    JsonNode expressionAttrNames, JsonNode expressionAttrValues,
-                                    String returnValues) {
+                                String updateExpression,
+                                JsonNode expressionAttrNames, JsonNode expressionAttrValues,
+                                String returnValues) {
         return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
-                          expressionAttrValues, returnValues, null, regionResolver.getDefaultRegion(),
-                          "NONE");
+                          expressionAttrValues, returnValues, null, regionResolver.getDefaultRegion(), "NONE");
     }
 
     public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
