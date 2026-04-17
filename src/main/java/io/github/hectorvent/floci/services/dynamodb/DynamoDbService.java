@@ -229,10 +229,6 @@ public class DynamoDbService {
         putItem(tableName, item, null, null, null, region, "NONE");
     }
 
-    public void putItem(String tableName, JsonNode item, String region, String returnValuesOnConditionCheckFailure) {
-        putItem(tableName, item, null, null, null, region, returnValuesOnConditionCheckFailure);
-    }
-
     public void putItem(String tableName, JsonNode item,
                          String conditionExpression,
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
@@ -288,10 +284,6 @@ public class DynamoDbService {
         return deleteItem(tableName, key, null, null, null, region, "NONE");
     }
 
-    public JsonNode deleteItem(String tableName, JsonNode key, String region, String returnValuesOnConditionCheckFailure) {
-        return deleteItem(tableName, key, null, null, null, region, "ALL_OLD");
-    }
-
     public JsonNode deleteItem(String tableName, JsonNode key,
                                 String conditionExpression,
                                 JsonNode exprAttrNames, JsonNode exprAttrValues,
@@ -339,15 +331,6 @@ public class DynamoDbService {
                                     String returnValues, String region) {
         return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
                           expressionAttrValues, returnValues, null, region, "NONE");
-    }
-
-    public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
-                                    String updateExpression,
-                                    JsonNode expressionAttrNames, JsonNode expressionAttrValues,
-                                    String returnValues, String region, 
-                                    String returnValuesOnConditionCheckFailure) {
-        return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
-                          expressionAttrValues, returnValues, null, region, returnValuesOnConditionCheckFailure);
     }
 
     public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -703,8 +686,9 @@ public class DynamoDbService {
                 String updateExpression = upd.has("UpdateExpression") ? upd.get("UpdateExpression").asText() : null;
                 JsonNode exprAttrNames = upd.has("ExpressionAttributeNames") ? upd.get("ExpressionAttributeNames") : null;
                 JsonNode exprAttrValues = upd.has("ExpressionAttributeValues") ? upd.get("ExpressionAttributeValues") : null;
+                //there is no ConditionExpression, so setting returnValuesOnConditionCheckFailure = "NONE"
                 updateItem(tableName, key, null, updateExpression, exprAttrNames, exprAttrValues,
-                           "NONE", null, region);
+                           "NONE", null, region, "NONE");
             }
             // ConditionCheck-only items are handled in the first pass only
         }

@@ -523,7 +523,7 @@ public class AslExecutor {
                 DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
                         tableName, key, attributeUpdates, updateExpression,
                         exprAttrNames, exprAttrValues, returnValues,
-                        conditionExpression, region);
+                        conditionExpression, region, "NONE");
 
                 ObjectNode response = objectMapper.createObjectNode();
                 if ("ALL_NEW".equals(returnValues) && result.newItem() != null) {

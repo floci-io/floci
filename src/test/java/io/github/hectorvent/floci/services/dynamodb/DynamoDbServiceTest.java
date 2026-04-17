@@ -1446,7 +1446,7 @@ class DynamoDbServiceTest {
         key.set("orderId", attributeValue("S", "o1"));
 
         var result = service.updateItem("Orders", key, null,
-                "SET #details.subkey = :val, #status = :s", exprNames, exprValues, "ALL_NEW", null, "us-east-1");
+                "SET #details.subkey = :val, #status = :s", exprNames, exprValues, "ALL_NEW", null, "us-east-1", "NONE");
 
         JsonNode updated = result.newItem();
         assertNotNull(updated);
@@ -1459,7 +1459,7 @@ class DynamoDbServiceTest {
 
         // Now REMOVE the nested field
         result = service.updateItem("Orders", key, null,
-                "REMOVE #details.subkey", exprNames, null, "ALL_NEW", null, "us-east-1");
+                "REMOVE #details.subkey", exprNames, null, "ALL_NEW", null, "us-east-1", "NONE");
 
         updated = result.newItem();
         // The subkey should be removed from the nested map
@@ -1491,11 +1491,11 @@ class DynamoDbServiceTest {
 
         // First, set all four fields
         service.updateItem("Orders", key, null,
-                "SET #a = :v1, #b = :v1, #c = :v1, #d = :v1", exprNames, exprValues, "NONE", null, "us-east-1");
+                "SET #a = :v1, #b = :v1, #c = :v1, #d = :v1", exprNames, exprValues, "NONE", null, "us-east-1", "NONE");
 
         // SET last two assignments, then REMOVE two fields (comma-separated)
         var result = service.updateItem("Orders", key, null,
-                "SET #a = :v1, #b = :v2 REMOVE #c, #d", exprNames, exprValues, "ALL_NEW", null, "us-east-1");
+                "SET #a = :v1, #b = :v2 REMOVE #c, #d", exprNames, exprValues, "ALL_NEW", null, "us-east-1", "NONE");
 
         JsonNode updated = result.newItem();
         assertNotNull(updated);
