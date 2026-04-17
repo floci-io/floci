@@ -7,6 +7,7 @@ services:
       - "4566:4566"
       - "6379-6399:6379-6399"
       - "7001-7099:7001-7099"
+      - "9200-9299:9200-9299"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./scripts:/etc/floci/init/start.d
@@ -26,5 +27,3 @@ services:
 networks:
   floci_default:
     name: floci_default
-
-

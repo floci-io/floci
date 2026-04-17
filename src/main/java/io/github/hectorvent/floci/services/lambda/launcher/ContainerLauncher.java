@@ -211,8 +211,8 @@ public class ContainerLauncher {
         LOG.infov("Stopping container {0}", handle.getContainerId());
         handle.setState(ContainerState.STOPPED);
 
-        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
         handle.getRuntimeApiServer().stop();
+        lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
     }
 
     private void copyDirToContainer(DockerClient dockerClient, String containerId,

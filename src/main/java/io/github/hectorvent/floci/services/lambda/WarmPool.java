@@ -161,6 +161,17 @@ public class WarmPool {
     }
 
     /**
+     * Stops and removes a single container that is no longer usable (e.g. after a timeout).
+     * The container must have already been acquired (removed from the pool) so only a
+     * stop is needed — no pool bookkeeping required.
+     */
+    public void destroyHandle(ContainerHandle handle) {
+        LOG.debugv("Destroying timed-out container {0} for function {1}",
+                handle.getContainerId(), handle.getFunctionName());
+        stopQuietly(handle);
+    }
+
+    /**
      * Stops and removes all warm containers for the given function.
      * Called on function delete or code update.
      */

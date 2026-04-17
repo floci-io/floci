@@ -107,7 +107,7 @@ public class LambdaExecutorService {
 
         } catch (TimeoutException e) {
             LOG.warnv("Function {0} timed out after {1}s", fn.getFunctionName(), fn.getTimeout());
-            warmPool.release(handle);
+            warmPool.destroyHandle(handle);
             return new InvokeResult(200, "Unhandled",
                     buildErrorPayload("Task timed out after " + fn.getTimeout() + " seconds", "Function.TimedOut"),
                     null, requestId);
