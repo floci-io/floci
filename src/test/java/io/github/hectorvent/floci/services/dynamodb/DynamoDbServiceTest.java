@@ -1588,7 +1588,6 @@ class DynamoDbServiceTest {
 
         assertNull(ex.getItem());
     }
-
     
     @Test
     void putItemExistingConditionFailedReturnValuesNone() {
@@ -1612,7 +1611,7 @@ class DynamoDbServiceTest {
     }
 
     @Test
-    void updateItemExistingConditionFailedReturnValuesAllOld() {
+    void putItemExistingConditionFailedReturnValuesAllOld() {
         createOrdersTable();
 
         ObjectNode order1 = item("customerId", "1", "orderId", "sort1", "testAttr", "testVal");
@@ -1633,5 +1632,46 @@ class DynamoDbServiceTest {
         assertNotNull(returnedItem);
         assertTrue(returnedItem.has("testAttr"), "returned item should have testAttr");
         assertEquals("testVal", returnedItem.get("testAttr").get("S").asText());
+    }
+
+    
+    
+    @Test
+    void deleteItemConditionFailedReturnValuesNone() {
+        createOrdersTable();
+    
+        ObjectNode order = item("customerId", "1", "orderId", "sort1");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        service.putItem("Orders", order);
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+            service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "NONE"));
+
+        JsonNode stored = service.getItem("Orders", key);
+        assertNotNull(stored, "item should exist");
+
+        assertNull(ex.getItem());
+    }
+
+    @Test
+    void deleteItemConditionFailedReturnValuesAllOld() {
+        createOrdersTable();
+
+        ObjectNode order = item("customerId", "1", "orderId", "sort1");
+        ObjectNode key = item("customerId", "1", "orderId", "sort1");
+
+        service.putItem("Orders", order);
+
+        ConditionalCheckFailedException ex = assertThrows(ConditionalCheckFailedException.class, () -> 
+            service.deleteItem("Orders", key, "attribute_exists(someAttr)", null, null, "us-east-1", "ALL_OLD"));
+
+        JsonNode stored = service.getItem("Orders", key);
+        assertNotNull(stored, "item should exist");
+
+        JsonNode returnedItem = ex.getItem();
+        assertNotNull(returnedItem);
+        assertTrue(returnedItem.has("customerId"), "returned item should have customerId");
+        assertEquals("1", returnedItem.get("customerId").get("S").asText());
     }
 }
