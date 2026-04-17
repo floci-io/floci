@@ -17,10 +17,12 @@ import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * S3 Control API endpoints used by Terraform AWS provider v6.x and other tools.
@@ -53,17 +55,21 @@ public class S3ControlController {
             @PathParam("resourceArn") String resourceArn,
             @HeaderParam("x-amz-account-id") String accountId) {
 
-        String bucketName = extractBucketName(resourceArn);
-        Map<String, String> tags = s3Service.getBucketTagging(bucketName);
+        try {
+            String bucketName = extractBucketName(resourceArn);
+            Map<String, String> tags = s3Service.getBucketTagging(bucketName);
 
-        XmlBuilder xml = new XmlBuilder()
-                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
-                .start("ListTagsForResourceResult", AwsNamespaces.S3_CONTROL)
-                .start("Tags");
-        tags.forEach((k, v) ->
-                xml.start("Tag").elem("Key", k).elem("Value", v).end("Tag"));
-        xml.end("Tags").end("ListTagsForResourceResult");
-        return Response.ok(xml.build()).build();
+            XmlBuilder xml = new XmlBuilder()
+                    .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    .start("ListTagsForResourceResult", AwsNamespaces.S3_CONTROL)
+                    .start("Tags");
+            tags.forEach((k, v) ->
+                    xml.start("Tag").elem("Key", k).elem("Value", v).end("Tag"));
+            xml.end("Tags").end("ListTagsForResourceResult");
+            return Response.ok(xml.build()).build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
     }
 
     /**
@@ -81,11 +87,15 @@ public class S3ControlController {
             @HeaderParam("x-amz-account-id") String accountId,
             byte[] body) {
 
-        String bucketName = extractBucketName(resourceArn);
-        String xml = new String(body, StandardCharsets.UTF_8);
-        Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
-        s3Service.putBucketTagging(bucketName, tags);
-        return Response.noContent().build();
+        try {
+            String bucketName = extractBucketName(resourceArn);
+            String xml = new String(body, StandardCharsets.UTF_8);
+            Map<String, String> tags = XmlParser.extractPairs(xml, "Tag", "Key", "Value");
+            s3Service.putBucketTagging(bucketName, tags);
+            return Response.noContent().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
     }
 
     /**
@@ -101,20 +111,60 @@ public class S3ControlController {
             @HeaderParam("x-amz-account-id") String accountId,
             @QueryParam("tagKeys") List<String> tagKeys) {
 
-        String bucketName = extractBucketName(resourceArn);
-        Map<String, String> existing = new HashMap<>(s3Service.getBucketTagging(bucketName));
-        tagKeys.forEach(existing::remove);
-        s3Service.putBucketTagging(bucketName, existing);
-        return Response.noContent().build();
+        try {
+            String bucketName = extractBucketName(resourceArn);
+            Map<String, String> existing = new HashMap<>(s3Service.getBucketTagging(bucketName));
+            tagKeys.forEach(existing::remove);
+            s3Service.putBucketTagging(bucketName, existing);
+            return Response.noContent().build();
+        } catch (AwsException e) {
+            return xmlErrorResponse(e);
+        }
     }
 
+    /**
+     * Parse the bucket name out of an S3 bucket ARN path parameter.
+     *
+     * <p>The AWS Go SDK v2 (used by Terraform) percent-encodes the ARN's
+     * colons and slashes in the request path, while the Java SDK sends them
+     * literally. We decode defensively so both forms work, and so routing
+     * frameworks that leave {@code %2F} encoded in path segments don't break
+     * us.
+     */
     private String extractBucketName(String resourceArn) {
-        int idx = resourceArn.lastIndexOf(":bucket/");
+        String decoded;
+        try {
+            decoded = URLDecoder.decode(resourceArn, StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidRequest",
+                    "Malformed percent-encoding in resource ARN: " + e.getMessage(), 400);
+        }
+        int idx = decoded.lastIndexOf(":bucket/");
         if (idx < 0) {
             throw new AwsException("InvalidRequest",
                     "Unsupported resource type. Only S3 bucket ARNs are supported " +
                     "(arn:aws:s3:<region>:<account>:bucket/<name>).", 400);
         }
-        return resourceArn.substring(idx + ":bucket/".length());
+        return decoded.substring(idx + ":bucket/".length());
+    }
+
+    /**
+     * S3 Control is a REST-XML protocol, so error responses must also be XML.
+     * The global {@code AwsExceptionMapper} emits JSON, which trips up the
+     * Go SDK's XML error deserializer with "unexpected EOF".
+     */
+    private Response xmlErrorResponse(AwsException e) {
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("Error")
+                .elem("Code", e.getErrorCode())
+                .elem("Message", e.getMessage())
+                .elem("RequestId", UUID.randomUUID().toString())
+                .end("Error")
+                .build();
+        return Response.status(e.getHttpStatus())
+                .type(MediaType.APPLICATION_XML)
+                .entity(xml)
+                .build();
     }
 }
