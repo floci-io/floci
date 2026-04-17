@@ -28,6 +28,9 @@ public class LambdaFunction {
     private String packageType = "Zip";
     private String imageUri;
     private String codeLocalPath;
+    private boolean hotReload;
+    private String s3Bucket;
+    private String s3Key;
     private Map<String, String> environment = new HashMap<>();
     private Map<String, String> tags = new HashMap<>();
     private List<Map<String, Object>> policies = new ArrayList<>();
@@ -87,6 +90,15 @@ public class LambdaFunction {
 
     public String getCodeLocalPath() { return codeLocalPath; }
     public void setCodeLocalPath(String codeLocalPath) { this.codeLocalPath = codeLocalPath; }
+
+    public boolean isHotReload() { return hotReload; }
+    public void setHotReload(boolean hotReload) { this.hotReload = hotReload; }
+
+    public String getS3Bucket() { return s3Bucket; }
+    public void setS3Bucket(String s3Bucket) { this.s3Bucket = s3Bucket; }
+
+    public String getS3Key() { return s3Key; }
+    public void setS3Key(String s3Key) { this.s3Key = s3Key; }
 
     public Map<String, String> getEnvironment() { return environment; }
     public void setEnvironment(Map<String, String> environment) { this.environment = environment; }

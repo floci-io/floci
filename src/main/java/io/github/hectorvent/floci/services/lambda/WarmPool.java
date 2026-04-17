@@ -151,6 +151,16 @@ public class WarmPool {
     }
 
     /**
+     * Pushes a code update to all warm containers in the pool for the given function.
+     * In this implementation, we drain the containers to force a fresh start with new code.
+     */
+    public void pushCodeUpdate(LambdaFunction fn) {
+        LOG.infov("Reactive S3 Sync: invalidating warm pool for function {0} to pick up new code",
+                fn.getFunctionName());
+        drainFunction(fn.getFunctionName());
+    }
+
+    /**
      * Stops and removes all warm containers for the given function.
      * Called on function delete or code update.
      */

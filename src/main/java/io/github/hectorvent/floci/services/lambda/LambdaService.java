@@ -15,9 +15,11 @@ import io.github.hectorvent.floci.services.lambda.zip.CodeStore;
 import io.github.hectorvent.floci.services.lambda.zip.ZipExtractor;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
+import io.github.hectorvent.floci.services.s3.model.S3ObjectUpdatedEvent;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.enterprise.event.Observes;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
@@ -240,6 +242,8 @@ public class LambdaService {
             }
             String zipFileBase64 = (String) code.get("ZipFile");
             if (zipFileBase64 != null) {
+                fn.setS3Bucket(null);
+                fn.setS3Key(null);
                 extractZipCode(fn, zipFileBase64);
             }
             String s3Bucket = (String) code.get("S3Bucket");
@@ -304,6 +308,8 @@ public class LambdaService {
         String s3Key = (String) request.get("S3Key");
 
         if (zipFileBase64 != null) {
+            fn.setS3Bucket(null);
+            fn.setS3Key(null);
             extractZipCode(fn, zipFileBase64);
         }
         if (imageUri != null) {
@@ -915,6 +921,7 @@ public class LambdaService {
     }
 
     private void extractZipCode(LambdaFunction fn, String zipFileBase64) {
+        fn.setHotReload(false);
         byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
         Path codePath = codeStore.getCodePath(fn.getFunctionName());
         try {
@@ -951,6 +958,10 @@ public class LambdaService {
         if (s3Service == null) {
             throw new AwsException("ServiceUnavailableException", "S3 service not available", 503);
         }
+
+        fn.setHotReload(false);
+        fn.setS3Bucket(s3Bucket);
+        fn.setS3Key(s3Key);
         S3Object obj;
         try {
             obj = s3Service.getObject(s3Bucket, s3Key);
@@ -1085,6 +1096,36 @@ public class LambdaService {
             return Integer.parseInt(value.toString());
         } catch (NumberFormatException e) {
             return defaultValue;
+        }
+    }
+
+    /**
+     * Observes S3 object updates and triggers reactive sync for any Lambda
+     * functions linked to the updated object.
+     */
+    public void onS3ObjectUpdated(@Observes S3ObjectUpdatedEvent event) {
+        LOG.debugv("Observing S3 update: {0}/{1}", event.bucketName(), event.key());
+        // For simplicity, we scan all functions in the default region
+        // Most local dev setups use a single region
+        String region = regionResolver.getDefaultRegion();
+        List<LambdaFunction> functions = functionStore.list(region);
+        for (LambdaFunction fn : functions) {
+            if (event.bucketName().equals(fn.getS3Bucket()) && event.key().equals(fn.getS3Key())) {
+                LOG.infov("Reactive S3 Sync: updating function {0} from s3://{1}/{2}",
+                        fn.getFunctionName(), event.bucketName(), event.key());
+                try {
+                    S3Object obj = s3Service.getObject(event.bucketName(), event.key());
+                    extractZipCode(fn, Base64.getEncoder().encodeToString(obj.getData()));
+                    fn.setLastModified(Instant.now().toEpochMilli());
+                    fn.setRevisionId(UUID.randomUUID().toString());
+                    functionStore.save(region, fn);
+
+                    // Push to warm workers
+                    warmPool.pushCodeUpdate(fn);
+                } catch (Exception e) {
+                    LOG.warnv("Failed reactive sync for function {0}: {1}", fn.getFunctionName(), e.getMessage());
+                }
+            }
         }
     }
 }
