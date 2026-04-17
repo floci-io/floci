@@ -14,6 +14,7 @@ public class EventBus {
     private String description;
     private Map<String, String> tags = new HashMap<>();
     private Instant createdTime;
+    private String policy;
 
     public EventBus() {}
 
@@ -38,4 +39,7 @@ public class EventBus {
 
     public Instant getCreatedTime() { return createdTime; }
     public void setCreatedTime(Instant createdTime) { this.createdTime = createdTime; }
+
+    public String getPolicy() { return policy; }
+    public void setPolicy(String policy) { this.policy = policy; }
 }

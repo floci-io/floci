@@ -61,6 +61,8 @@ public class EventBridgeHandler {
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 case "TagResource" -> handleTagResource(request, region);
                 case "UntagResource" -> handleUntagResource(request, region);
+                case "PutPermission" -> handlePutPermission(request, region);
+                case "RemovePermission" -> handleRemovePermission(request, region);
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                         .build();
@@ -324,6 +326,28 @@ public class EventBridgeHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handlePutPermission(JsonNode request, String region) {
+        String busName = request.path("EventBusName").asText(null);
+        String action = request.path("Action").asText(null);
+        String principal = request.path("Principal").asText(null);
+        String statementId = request.path("StatementId").asText(null);
+        String policy = request.path("Policy").asText(null);
+        JsonNode conditionNode = request.path("Condition");
+        String conditionJson = conditionNode.isMissingNode() || conditionNode.isNull()
+                ? null : conditionNode.toString();
+        eventBridgeService.putPermission(busName, action, principal, statementId,
+                conditionJson, policy, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleRemovePermission(JsonNode request, String region) {
+        String busName = request.path("EventBusName").asText(null);
+        String statementId = request.path("StatementId").asText(null);
+        boolean removeAll = request.path("RemoveAllPermissions").asBoolean(false);
+        eventBridgeService.removePermission(busName, statementId, removeAll, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private ObjectNode buildBusNode(EventBus bus) {
@@ -335,6 +359,9 @@ public class EventBridgeHandler {
         }
         if (bus.getCreatedTime() != null) {
             node.put("CreationTime", bus.getCreatedTime().getEpochSecond());
+        }
+        if (bus.getPolicy() != null) {
+            node.put("Policy", bus.getPolicy());
         }
         return node;
     }

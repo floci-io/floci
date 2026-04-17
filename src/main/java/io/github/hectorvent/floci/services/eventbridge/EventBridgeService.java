@@ -407,6 +407,115 @@ public class EventBridgeService {
         throw new AwsException("ResourceNotFoundException", "Resource not found: " + resourceArn, 404);
     }
 
+    // ──────────────────────────── Permissions ────────────────────────────
+
+    public void putPermission(String busName, String action, String principal,
+                              String statementId, String conditionJson, String policyJson, String region) {
+        String effectiveBus = resolvedBusName(busName);
+        if ("default".equals(effectiveBus)) {
+            getOrCreateDefaultBus(region);
+        }
+        String key = busKey(region, effectiveBus);
+        EventBus bus = busStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "EventBus not found: " + effectiveBus, 404));
+
+        try {
+            if (policyJson != null && !policyJson.isBlank()) {
+                bus.setPolicy(policyJson);
+            } else {
+                String currentPolicy = bus.getPolicy();
+                ObjectNode policy;
+                if (currentPolicy != null && !currentPolicy.isBlank()) {
+                    policy = (ObjectNode) objectMapper.readTree(currentPolicy);
+                } else {
+                    policy = objectMapper.createObjectNode();
+                    policy.put("Version", "2012-10-17");
+                    policy.putArray("Statement");
+                }
+
+                ArrayNode statements = (ArrayNode) policy.get("Statement");
+                for (int i = 0; i < statements.size(); i++) {
+                    if (statementId.equals(statements.get(i).path("Sid").asText(null))) {
+                        statements.remove(i);
+                        break;
+                    }
+                }
+
+                ObjectNode statement = objectMapper.createObjectNode();
+                statement.put("Sid", statementId);
+                statement.put("Effect", "Allow");
+                statement.put("Principal", principal != null ? principal : "*");
+                statement.put("Action", action != null ? action : "events:PutEvents");
+                statement.put("Resource", bus.getArn());
+                if (conditionJson != null && !conditionJson.isBlank()) {
+                    statement.set("Condition", objectMapper.readTree(conditionJson));
+                }
+                statements.add(statement);
+                bus.setPolicy(objectMapper.writeValueAsString(policy));
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("InternalException", "Failed to process permission policy: " + e.getMessage(), 500);
+        }
+
+        busStore.put(key, bus);
+        LOG.infov("Put permission on bus {0}, statement {1}", effectiveBus, statementId);
+    }
+
+    public void removePermission(String busName, String statementId, boolean removeAll, String region) {
+        String effectiveBus = resolvedBusName(busName);
+        if ("default".equals(effectiveBus)) {
+            getOrCreateDefaultBus(region);
+        }
+        String key = busKey(region, effectiveBus);
+        EventBus bus = busStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "EventBus not found: " + effectiveBus, 404));
+
+        if (removeAll) {
+            bus.setPolicy(null);
+        } else {
+            if (statementId == null || statementId.isBlank()) {
+                throw new AwsException("ValidationException", "StatementId is required.", 400);
+            }
+            try {
+                String currentPolicy = bus.getPolicy();
+                if (currentPolicy == null || currentPolicy.isBlank()) {
+                    throw new AwsException("ResourceNotFoundException",
+                            "Statement not found: " + statementId, 400);
+                }
+                ObjectNode policy = (ObjectNode) objectMapper.readTree(currentPolicy);
+                ArrayNode statements = (ArrayNode) policy.get("Statement");
+                boolean found = false;
+                for (int i = 0; i < statements.size(); i++) {
+                    if (statementId.equals(statements.get(i).path("Sid").asText(null))) {
+                        statements.remove(i);
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found) {
+                    throw new AwsException("ResourceNotFoundException",
+                            "Statement not found: " + statementId, 400);
+                }
+                if (statements.isEmpty()) {
+                    bus.setPolicy(null);
+                } else {
+                    bus.setPolicy(objectMapper.writeValueAsString(policy));
+                }
+            } catch (AwsException e) {
+                throw e;
+            } catch (Exception e) {
+                throw new AwsException("InternalException", "Failed to process permission policy: " + e.getMessage(), 500);
+            }
+        }
+
+        busStore.put(key, bus);
+        LOG.infov("Removed permission from bus {0}, statement {1}, removeAll {2}", effectiveBus, statementId, removeAll);
+    }
+
     // ──────────────────────────── PutEvents ────────────────────────────
 
     public record PutEventsResult(int failedCount, List<Map<String, String>> entries) {}
