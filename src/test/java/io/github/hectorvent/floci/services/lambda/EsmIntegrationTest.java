@@ -349,6 +349,45 @@ class EsmIntegrationTest {
 
     @Test
     @Order(44)
+    void createEventSourceMappingRejectsEmptyScalingConfigOnNonSqsSource() {
+        String kinesisArn = "arn:aws:kinesis:" + REGION + ":" + ACCOUNT_ID + ":stream/irrelevant";
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "ScalingConfig": {}
+                }
+                """.formatted(FUNCTION_NAME, kinesisArn))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("only supported for Amazon SQS"));
+    }
+
+    @Test
+    @Order(45)
+    void createEventSourceMappingRejectsNonIntegerMaximumConcurrency() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "%s",
+                    "EventSourceArn": "%s",
+                    "ScalingConfig": { "MaximumConcurrency": 2.5 }
+                }
+                """.formatted(FUNCTION_NAME, QUEUE_ARN))
+        .when()
+            .post(LAMBDA_BASE + "/event-source-mappings")
+        .then()
+            .statusCode(400)
+            .body("message", containsString("must be an integer"));
+    }
+
+    @Test
+    @Order(46)
     void responseOmitsScalingConfigWhenUnset() {
         // A mapping created without ScalingConfig should not expose the key
         // in subsequent responses — AWS omits the field rather than returning
@@ -374,7 +413,7 @@ class EsmIntegrationTest {
     }
 
     @Test
-    @Order(45)
+    @Order(47)
     void updateEventSourceMappingAddsAndClearsScalingConfig() {
         String uuid = given()
             .contentType("application/json")

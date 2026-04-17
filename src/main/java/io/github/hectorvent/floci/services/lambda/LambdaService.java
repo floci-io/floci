@@ -481,13 +481,25 @@ public class LambdaService {
         if (!(raw instanceof Map<?, ?>)) {
             return null;
         }
+        boolean isSqs = eventSourceArn != null && eventSourceArn.contains(":sqs:");
         Map<?, ?> map = (Map<?, ?>) raw;
         Object mc = map.get("MaximumConcurrency");
         if (mc == null) {
+            // Empty ScalingConfig ({}) on SQS means "clear the cap".
+            // On non-SQS sources ScalingConfig is not valid at all.
+            if (!isSqs) {
+                throw new AwsException("InvalidParameterValueException",
+                        "ScalingConfig is only supported for Amazon SQS event source mappings", 400);
+            }
             return null;
         }
         int value;
         if (mc instanceof Number) {
+            double d = ((Number) mc).doubleValue();
+            if (d != Math.floor(d)) {
+                throw new AwsException("InvalidParameterValueException",
+                        "ScalingConfig.MaximumConcurrency must be an integer", 400);
+            }
             value = ((Number) mc).intValue();
         } else {
             try {
@@ -501,9 +513,9 @@ public class LambdaService {
             throw new AwsException("InvalidParameterValueException",
                     "ScalingConfig.MaximumConcurrency must be between 2 and 1000 (got " + value + ")", 400);
         }
-        if (eventSourceArn == null || !eventSourceArn.contains(":sqs:")) {
+        if (!isSqs) {
             throw new AwsException("InvalidParameterValueException",
-                    "ScalingConfig.MaximumConcurrency is only supported for Amazon SQS event source mappings", 400);
+                    "ScalingConfig is only supported for Amazon SQS event source mappings", 400);
         }
         return new ScalingConfig(value);
     }
