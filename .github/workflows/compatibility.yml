@@ -73,7 +73,7 @@ jobs:
         test:
           - sdk-test-node
           - sdk-test-python
-          - sdk-test-java
+          - sdk-test-java # improving execution time
           - sdk-test-go
           - sdk-test-awscli
           - compat-cdk
