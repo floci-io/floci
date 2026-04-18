@@ -34,7 +34,7 @@ public class SesInspectionController {
 
     @GET
     public Response getEmails(@QueryParam("id") String messageId) {
-        List<SentEmail> emails = sesService.getAllEmails();
+        List<SentEmail> emails = sesService.getEmails();
 
         ArrayNode messages = objectMapper.createArrayNode();
         for (SentEmail email : emails) {
@@ -103,7 +103,7 @@ public class SesInspectionController {
 
     @DELETE
     public Response clearEmails() {
-        sesService.clearAllEmails();
+        sesService.clearEmails();
         return Response.ok().build();
     }
 }
