@@ -223,13 +223,13 @@ public class SesController {
                 String subject = simple.path("Subject").path("Data").asText("");
                 String bodyText = simple.path("Body").path("Text").path("Data").asText(null);
                 String bodyHtml = simple.path("Body").path("Html").path("Data").asText(null);
-                messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, replyToAddresses, subject, bodyText, bodyHtml, region);
+                messageId = sesService.sendEmail(region, fromEmailAddress, toAddresses, ccAddresses,
+                        bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
             } else if (content.has("Template")) {
                 String subject = content.path("Template").path("TemplateName").asText("(template)");
                 String templateData = content.path("Template").path("TemplateData").asText("");
-                messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, replyToAddresses, subject, templateData, null, region);
+                messageId = sesService.sendEmail(region, fromEmailAddress, toAddresses, ccAddresses,
+                        bccAddresses, replyToAddresses, subject, templateData, null);
             } else {
                 throw new AwsException("BadRequestException",
                         "Content must contain Raw, Simple, or Template.", 400);
