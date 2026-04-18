@@ -218,10 +218,7 @@ public class SesService {
     }
 
     public void clearAllEmails() {
-        List<String> keys = new ArrayList<>(emailStore.keys().stream()
-                .filter(k -> k.startsWith("email::"))
-                .toList());
-        keys.forEach(emailStore::delete);
+        emailStore.clear();
         LOG.info("Cleared all SES emails across all regions");
     }
 
