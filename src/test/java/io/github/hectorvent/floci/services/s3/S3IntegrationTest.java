@@ -1084,6 +1084,77 @@ class S3IntegrationTest {
         given().delete("/content-disposition-bucket");
     }
 
+    // --- Server-Side Encryption header preservation ---
+
+    @Test
+    @Order(136)
+    void createSseBucketAndPutObject() {
+        given()
+            .put("/sse-bucket")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("text/plain")
+            .header("x-amz-server-side-encryption", "AES256")
+            .body("encrypted-content")
+        .when()
+            .put("/sse-bucket/encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("ETag", notNullValue())
+            .header("x-amz-server-side-encryption", equalTo("AES256"));
+    }
+
+    @Test
+    @Order(137)
+    void getObjectReturnsServerSideEncryption() {
+        given()
+        .when()
+            .get("/sse-bucket/encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"));
+    }
+
+    @Test
+    @Order(138)
+    void headObjectReturnsServerSideEncryption() {
+        given()
+        .when()
+            .head("/sse-bucket/encrypted.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"));
+    }
+
+    @Test
+    @Order(139)
+    void copyObjectPreservesServerSideEncryption() {
+        given()
+            .header("x-amz-copy-source", "/sse-bucket/encrypted.txt")
+        .when()
+            .put("/sse-bucket/encrypted-copy.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .head("/sse-bucket/encrypted-copy.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption", equalTo("AES256"));
+    }
+
+    @Test
+    @Order(140)
+    void cleanupSseBucket() {
+        given().delete("/sse-bucket/encrypted.txt");
+        given().delete("/sse-bucket/encrypted-copy.txt");
+        given().delete("/sse-bucket");
+    }
+
     // --- S3 Notification Configuration with Filter ---
 
     @Test

@@ -17,6 +17,7 @@ public class MultipartUpload {
     private String contentType;
     private String storageClass;
     private String contentDisposition;
+    private String serverSideEncryption;
     private String acl;
     private Map<String, String> metadata;
     private Instant initiated;
@@ -54,6 +55,9 @@ public class MultipartUpload {
 
     public String getContentDisposition() { return contentDisposition; }
     public void setContentDisposition(String contentDisposition) { this.contentDisposition = contentDisposition; }
+
+    public String getServerSideEncryption() { return serverSideEncryption; }
+    public void setServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; }
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
