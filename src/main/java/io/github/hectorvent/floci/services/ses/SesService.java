@@ -119,6 +119,9 @@ public class SesService {
     }
 
     public String sendRawEmail(String source, List<String> destinations, String rawMessage, String region) {
+        if (source == null || source.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
+        }
         if (rawMessage == null || rawMessage.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
