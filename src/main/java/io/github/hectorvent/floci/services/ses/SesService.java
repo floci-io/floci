@@ -51,37 +51,55 @@ public class SesService {
     }
 
     public Identity verifyEmailIdentity(String emailAddress, String region) {
-        if (emailAddress == null || emailAddress.isBlank()) {
+        String normalizedEmailAddress = normalizeIdentity(emailAddress);
+        if (normalizedEmailAddress == null || normalizedEmailAddress.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Email address is required.", 400);
         }
-        String key = identityKey(region, emailAddress);
+        String key = identityKey(region, normalizedEmailAddress);
         Identity existing = identityStore.get(key).orElse(null);
         if (existing != null) return existing;
 
-        Identity identity = new Identity(emailAddress, "EmailAddress");
+        Identity identity = new Identity(normalizedEmailAddress, "EmailAddress");
         identityStore.put(key, identity);
-        LOG.infov("Verified email identity: {0} in region {1}", emailAddress, region);
+        LOG.infov("Verified email identity: {0} in region {1}", normalizedEmailAddress, region);
         return identity;
     }
 
     public Identity verifyDomainIdentity(String domain, String region) {
-        if (domain == null || domain.isBlank()) {
+        String normalizedDomain = normalizeIdentity(domain);
+        if (normalizedDomain == null || normalizedDomain.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Domain is required.", 400);
         }
-        String key = identityKey(region, domain);
+        String key = identityKey(region, normalizedDomain);
         Identity existing = identityStore.get(key).orElse(null);
         if (existing != null) return existing;
 
-        Identity identity = new Identity(domain, "Domain");
+        Identity identity = new Identity(normalizedDomain, "Domain");
         identityStore.put(key, identity);
-        LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
+        LOG.infov("Verified domain identity: {0} in region {1}", normalizedDomain, region);
         return identity;
     }
 
     public void deleteIdentity(String identityValue, String region) {
-        String key = identityKey(region, identityValue);
+        String normalizedIdentity = normalizeIdentity(identityValue);
+        if (normalizedIdentity == null || normalizedIdentity.isBlank()) {
+            return;
+        }
+        String key = identityKey(region, normalizedIdentity);
         identityStore.delete(key);
-        LOG.infov("Deleted identity: {0}", identityValue);
+
+        String prefix = "identity::" + region + "::";
+        List<String> keys = new ArrayList<>(identityStore.keys().stream()
+                .filter(k -> k.startsWith(prefix))
+                .toList());
+        for (String storedKey : keys) {
+            Identity storedIdentity = identityStore.get(storedKey).orElse(null);
+            if (storedIdentity != null && normalizedIdentity.equals(normalizeIdentity(storedIdentity.getIdentity()))) {
+                identityStore.delete(storedKey);
+            }
+        }
+
+        LOG.infov("Deleted identity: {0}", normalizedIdentity);
     }
 
     public List<Identity> listIdentities(String identityType, String region) {
@@ -220,6 +238,11 @@ public class SesService {
     }
 
     private static String identityKey(String region, String identity) {
-        return "identity::" + region + "::" + identity;
+        String normalizedIdentity = normalizeIdentity(identity);
+        return "identity::" + region + "::" + normalizedIdentity;
+    }
+
+    private static String normalizeIdentity(String identity) {
+        return identity == null ? null : identity.trim();
     }
 }

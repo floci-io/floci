@@ -357,6 +357,31 @@ class SesIntegrationTest {
 
     @Test
     @Order(20)
+    void deleteDomainIdentity() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", authorization("email"))
+            .formParam("Action", "DeleteIdentity")
+            .formParam("Identity", "example.com")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("DeleteIdentityResult"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", authorization("email"))
+            .formParam("Action", "ListIdentities")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString("example.com")));
+    }
+
+    @Test
+    @Order(21)
     void unsupportedAction_returns400() {
         given()
             .contentType("application/x-www-form-urlencoded")
