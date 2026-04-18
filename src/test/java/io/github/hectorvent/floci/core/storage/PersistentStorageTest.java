@@ -61,6 +61,15 @@ class PersistentStorageTest {
     }
 
     @Test
+    void scanReturnsMutableList() {
+        storage.put("a", "1");
+        storage.put("b", "2");
+        List<String> result = storage.scan(key -> true);
+        assertDoesNotThrow(() -> result.sort(String::compareTo));
+        assertDoesNotThrow(() -> result.add("3"));
+    }
+
+    @Test
     void clear() {
         storage.put("key1", "value1");
         storage.clear();

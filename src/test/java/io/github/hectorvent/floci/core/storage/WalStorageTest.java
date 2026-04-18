@@ -66,6 +66,15 @@ class WalStorageTest {
     }
 
     @Test
+    void scanReturnsMutableList() {
+        storage.put("a", "1");
+        storage.put("b", "2");
+        var result = storage.scan(key -> true);
+        assertDoesNotThrow(() -> result.sort(String::compareTo));
+        assertDoesNotThrow(() -> result.add("3"));
+    }
+
+    @Test
     void clearRemovesAllEntries() {
         storage.put("key1", "value1");
         storage.put("key2", "value2");

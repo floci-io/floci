@@ -11,6 +11,7 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -19,6 +20,7 @@ import java.util.Set;
 import java.util.concurrent.*;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 /**
  * Write-Ahead Log storage: in-memory reads with append-only binary WAL for durability.
@@ -105,7 +107,7 @@ public class WalStorage<K, V> implements StorageBackend<K, V> {
         return store.entrySet().stream()
                 .filter(e -> keyFilter.test(e.getKey()))
                 .map(Map.Entry::getValue)
-                .toList();
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     @Override

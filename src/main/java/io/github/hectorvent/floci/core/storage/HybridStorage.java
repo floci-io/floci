@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +22,7 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Predicate;
+import java.util.stream.Collectors;
 
 /**
  * Hybrid storage: in-memory reads with async flush to disk.
@@ -75,7 +77,7 @@ public class HybridStorage<K, V> implements StorageBackend<K, V> {
         return store.entrySet().stream()
                 .filter(e -> keyFilter.test(e.getKey()))
                 .map(Map.Entry::getValue)
-                .toList();
+                .collect(Collectors.toCollection(ArrayList::new));
     }
 
     @Override
