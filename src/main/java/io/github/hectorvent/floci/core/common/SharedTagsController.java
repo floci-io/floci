@@ -8,6 +8,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
 import jakarta.ws.rs.GET;
+import jakarta.ws.rs.POST;
 import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
@@ -70,6 +71,15 @@ public class SharedTagsController {
         ObjectNode tagsNode = root.putObject("tags");
         tags.forEach(tagsNode::put);
         return Response.ok(root).build();
+    }
+
+    @POST
+    @Path("/{arn: .*}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response tagResourcePost(@Context HttpHeaders headers,
+                                    @PathParam("arn") String arn,
+                                    String body) {
+        return tagResource(headers, arn, body);
     }
 
     @PUT

@@ -63,28 +63,4 @@ public class EksController {
         return Response.ok(Map.of("cluster", cluster)).build();
     }
 
-    @POST
-    @Path("/tags/{resourceArn:.+}")
-    @SuppressWarnings("unchecked")
-    public Response tagResource(@PathParam("resourceArn") String resourceArn,
-                                Map<String, Object> body) {
-        Map<String, String> tags = body != null ? (Map<String, String>) body.get("tags") : null;
-        eksService.tagResource(resourceArn, tags != null ? tags : Map.of());
-        return Response.ok().build();
-    }
-
-    @DELETE
-    @Path("/tags/{resourceArn:.+}")
-    public Response untagResource(@PathParam("resourceArn") String resourceArn,
-                                  @QueryParam("tagKeys") List<String> tagKeys) {
-        eksService.untagResource(resourceArn, tagKeys);
-        return Response.ok().build();
-    }
-
-    @GET
-    @Path("/tags/{resourceArn:.+}")
-    public Response listTagsForResource(@PathParam("resourceArn") String resourceArn) {
-        Map<String, String> tags = eksService.listTagsForResource(resourceArn);
-        return Response.ok(Map.of("tags", tags)).build();
-    }
 }

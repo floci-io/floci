@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.eks.model;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
@@ -19,6 +20,7 @@ public class Cluster {
     private String arn;
 
     @JsonProperty("createdAt")
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant createdAt;
 
     @JsonProperty("version")

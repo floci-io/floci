@@ -85,14 +85,17 @@ public class EksClusterManager {
         // Build container spec
         String hostDataPath;
         String hostPersistentPath = config.storage().hostPersistentPath();
-        boolean isVolume = !hostPersistentPath.startsWith("/") && !hostPersistentPath.startsWith(".");
+        boolean isAbsoluteHostPath = hostPersistentPath.startsWith("/");
 
-        if (isVolume) {
-            hostDataPath = hostPersistentPath;
-        } else {
+        if (isAbsoluteHostPath) {
             String dataPathStr = dataPath.toAbsolutePath().normalize().toString();
             String persistentPathStr = Path.of(config.storage().persistentPath()).toAbsolutePath().normalize().toString();
             hostDataPath = dataPathStr.replace(persistentPathStr, hostPersistentPath);
+        } else {
+            // Relative or named-volume path: when running inside Docker (DinD), a relative path
+            // refers to a path inside this container that the host daemon cannot bind-mount.
+            // Use a named Docker volume per cluster instead — the host daemon manages it directly.
+            hostDataPath = "floci-eks-" + cluster.getName();
         }
 
         ContainerSpec spec = containerBuilder.newContainer(image)

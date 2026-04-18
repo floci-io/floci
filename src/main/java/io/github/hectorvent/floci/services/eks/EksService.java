@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.TagHandler;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
@@ -27,7 +28,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class EksService {
+public class EksService implements TagHandler {
 
     private static final Logger LOG = Logger.getLogger(EksService.class);
 
@@ -124,7 +125,13 @@ public class EksService {
         return cluster;
     }
 
-    public void tagResource(String resourceArn, Map<String, String> tags) {
+    @Override
+    public String serviceKey() {
+        return "eks";
+    }
+
+    @Override
+    public void tagResource(String region, String resourceArn, Map<String, String> tags) {
         String clusterName = extractClusterName(resourceArn);
         Cluster cluster = storage.get(clusterName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -137,7 +144,8 @@ public class EksService {
         storage.put(clusterName, cluster);
     }
 
-    public void untagResource(String resourceArn, List<String> tagKeys) {
+    @Override
+    public void untagResource(String region, String resourceArn, List<String> tagKeys) {
         String clusterName = extractClusterName(resourceArn);
         Cluster cluster = storage.get(clusterName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -149,13 +157,26 @@ public class EksService {
         storage.put(clusterName, cluster);
     }
 
-    public Map<String, String> listTagsForResource(String resourceArn) {
+    @Override
+    public Map<String, String> listTags(String region, String resourceArn) {
         String clusterName = extractClusterName(resourceArn);
         Cluster cluster = storage.get(clusterName)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Resource not found: " + resourceArn, 404));
 
         return cluster.getTags() != null ? cluster.getTags() : Map.of();
+    }
+
+    public void tagResource(String resourceArn, Map<String, String> tags) {
+        tagResource(null, resourceArn, tags);
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys) {
+        untagResource(null, resourceArn, tagKeys);
+    }
+
+    public Map<String, String> listTagsForResource(String resourceArn) {
+        return listTags(null, resourceArn);
     }
 
     private String extractClusterName(String resourceArn) {
