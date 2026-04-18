@@ -201,6 +201,7 @@ public class SesController {
             List<String> toAddresses = jsonArrayToList(destination.path("ToAddresses"));
             List<String> ccAddresses = jsonArrayToList(destination.path("CcAddresses"));
             List<String> bccAddresses = jsonArrayToList(destination.path("BccAddresses"));
+            List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
 
             JsonNode content = request.path("Content");
             String messageId;
@@ -223,12 +224,12 @@ public class SesController {
                 String bodyText = simple.path("Body").path("Text").path("Data").asText(null);
                 String bodyHtml = simple.path("Body").path("Html").path("Data").asText(null);
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, subject, bodyText, bodyHtml, region);
+                        bccAddresses, replyToAddresses, subject, bodyText, bodyHtml, region);
             } else if (content.has("Template")) {
                 String subject = content.path("Template").path("TemplateName").asText("(template)");
                 String templateData = content.path("Template").path("TemplateData").asText("");
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, subject, templateData, null, region);
+                        bccAddresses, replyToAddresses, subject, templateData, null, region);
             } else {
                 throw new AwsException("BadRequestException",
                         "Content must contain Raw, Simple, or Template.", 400);

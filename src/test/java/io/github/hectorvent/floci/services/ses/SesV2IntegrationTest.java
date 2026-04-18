@@ -753,6 +753,77 @@ class SesV2IntegrationTest {
 
     @Test
     @Order(73)
+    void inspectionEndpoint_replyToAddressesAreStored() {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "FromEmailAddress": "inspect-sender@example.com",
+                    "Destination": {
+                        "ToAddresses": ["inspect-to@example.com"]
+                    },
+                    "ReplyToAddresses": ["reply1@example.com", "reply2@example.com"],
+                    "Content": {
+                        "Simple": {
+                            "Subject": {"Data": "ReplyTo Test"},
+                            "Body": {"Text": {"Data": "hello"}}
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/_aws/ses")
+        .then()
+            .statusCode(200)
+            .body("messages[0].ReplyToAddresses", hasItems("reply1@example.com", "reply2@example.com"));
+    }
+
+    @Test
+    @Order(74)
+    void inspectionEndpoint_noReplyToOmitsField() {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "FromEmailAddress": "inspect-sender@example.com",
+                    "Destination": {
+                        "ToAddresses": ["inspect-to@example.com"]
+                    },
+                    "Content": {
+                        "Simple": {
+                            "Subject": {"Data": "No ReplyTo"},
+                            "Body": {"Text": {"Data": "hello"}}
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/_aws/ses")
+        .then()
+            .statusCode(200)
+            .body("messages[0]", not(hasKey("ReplyToAddresses")));
+    }
+
+    @Test
+    @Order(75)
     void inspectionEndpoint_rawEmailReturnsRawData() {
         given().delete("/_aws/ses").then().statusCode(200);
 

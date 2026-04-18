@@ -29,6 +29,9 @@ public class SentEmail {
     @JsonProperty("Subject")
     private String subject;
 
+    @JsonProperty("ReplyToAddresses")
+    private List<String> replyToAddresses;
+
     @JsonProperty("BodyText")
     private String bodyText;
 
@@ -84,6 +87,9 @@ public class SentEmail {
 
     public String getSubject() { return subject; }
     public void setSubject(String subject) { this.subject = subject; }
+
+    public List<String> getReplyToAddresses() { return replyToAddresses; }
+    public void setReplyToAddresses(List<String> replyToAddresses) { this.replyToAddresses = replyToAddresses; }
 
     public String getBodyText() { return bodyText; }
     public void setBodyText(String bodyText) { this.bodyText = bodyText; }

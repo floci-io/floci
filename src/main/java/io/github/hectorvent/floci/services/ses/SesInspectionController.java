@@ -70,6 +70,11 @@ public class SesInspectionController {
                     email.getBccAddresses().forEach(bccArr::add);
                 }
 
+                if (email.getReplyToAddresses() != null && !email.getReplyToAddresses().isEmpty()) {
+                    ArrayNode replyTo = node.putArray("ReplyToAddresses");
+                    email.getReplyToAddresses().forEach(replyTo::add);
+                }
+
                 node.put("Subject", email.getSubject());
 
                 ObjectNode body = node.putObject("Body");

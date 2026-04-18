@@ -125,12 +125,13 @@ public class SesQueryHandler {
         List<String> toAddresses = extractMembers(params, "Destination.ToAddresses");
         List<String> ccAddresses = extractMembers(params, "Destination.CcAddresses");
         List<String> bccAddresses = extractMembers(params, "Destination.BccAddresses");
+        List<String> replyToAddresses = extractMembers(params, "ReplyToAddresses");
         String subject = getParam(params, "Message.Subject.Data");
         String bodyText = getParam(params, "Message.Body.Text.Data");
         String bodyHtml = getParam(params, "Message.Body.Html.Data");
 
         String messageId = sesService.sendEmail(source, toAddresses, ccAddresses, bccAddresses,
-                subject, bodyText, bodyHtml, region);
+                replyToAddresses, subject, bodyText, bodyHtml, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendEmail", AwsNamespaces.SES, result)).build();

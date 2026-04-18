@@ -101,8 +101,8 @@ public class SesService {
     }
 
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
-                            List<String> bccAddresses, String subject, String bodyText,
-                            String bodyHtml, String region) {
+                            List<String> bccAddresses, List<String> replyToAddresses,
+                            String subject, String bodyText, String bodyHtml, String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -116,6 +116,7 @@ public class SesService {
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, source, toAddresses, ccAddresses, bccAddresses,
                 subject, bodyText, bodyHtml);
+        email.setReplyToAddresses(replyToAddresses);
         emailStore.put("email::" + region + "::" + messageId, email);
 
         LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
