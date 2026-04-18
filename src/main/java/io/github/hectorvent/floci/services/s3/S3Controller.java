@@ -254,6 +254,7 @@ public class S3Controller {
                                 @QueryParam("encoding-type") String encodingType,
                                 @QueryParam("key-marker") String keyMarker,
                                 @Context UriInfo uriInfo) {
+        validateRawUri();
         try {
             if (hasQueryParam(uriInfo, "uploads")) {
                 return handleListMultipartUploads(bucket);
@@ -1681,6 +1682,7 @@ public class S3Controller {
             throw new AwsException("InvalidArgument",
                     "Bucket POST must contain a field named 'key'.", 400);
         }
+        validateKeyNoTraversal(key);
 
         if (fileData == null) {
             throw new AwsException("InvalidArgument",
@@ -1955,6 +1957,34 @@ public class S3Controller {
             return uriInfo.getPathParameters().getFirst("key");
         }
         String rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
-        return URLDecoder.decode(rawKey, StandardCharsets.UTF_8);
+        String key = URLDecoder.decode(rawKey, StandardCharsets.UTF_8);
+        validateKeyNoTraversal(key);
+        return key;
+    }
+
+    private void validateKeyNoTraversal(String key) {
+        if (key == null) return;
+        try {
+            // Use a dummy root to mirror the service pattern, allowing leading slashes but keeping them in sandbox
+            java.nio.file.Path dummyRoot = java.nio.file.Path.of("/s3-sandbox");
+            String safeKey = key;
+            while (safeKey.startsWith("/")) {
+                safeKey = safeKey.substring(1);
+            }
+            java.nio.file.Path resolved = dummyRoot.resolve(safeKey).normalize();
+            if (!resolved.startsWith(dummyRoot)) {
+                throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
+            }
+        } catch (java.nio.file.InvalidPathException e) {
+            throw new AwsException("InvalidKey", "The specified key contains invalid characters.", 400);
+        }
+    }
+
+    private void validateRawUri() {
+        String rawUri = currentVertxRequest.getCurrent().request().uri();
+        String lower = rawUri.toLowerCase();
+        if (lower.contains("/..") || lower.contains("../") || lower.contains("%2e%2e") || lower.contains("%2e.") || lower.contains(".%2e")) {
+            throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
+        }
     }
 }

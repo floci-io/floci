@@ -478,4 +478,32 @@ class S3ServiceTest {
         assertFalse(page2.isTruncated());
         assertEquals("c.txt", page2.objects().get(0).getKey());
     }
+
+    @Test
+    void resolvePathWithTraversalThrows() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        
+        // Blocked: going above the bucket root
+        AwsException ex = assertThrows(AwsException.class, () -> 
+                s3Service.putObject("test-bucket", "../outside.txt", "data".getBytes(), null, null));
+        assertEquals("InvalidKey", ex.getErrorCode());
+        
+        // Blocked: deeper traversal
+        assertThrows(AwsException.class, () -> 
+                s3Service.getObject("test-bucket", "dir/../../../etc/passwd"));
+    }
+
+    @Test
+    void putObjectWithInternalTraversalStaysWithinBucket() {
+        s3Service.createBucket("test-bucket", "us-east-1");
+        byte[] data = "safe-content".getBytes();
+
+        // Allowed: traversal that normalizes to a path still inside the bucket
+        assertDoesNotThrow(() ->
+                s3Service.putObject("test-bucket", "docs/../file.txt", data, null, null));
+
+        // Retrieve using the same literal key (S3 keys are opaque strings)
+        S3Object got = s3Service.getObject("test-bucket", "docs/../file.txt");
+        assertArrayEquals(data, got.getData());
+    }
 }

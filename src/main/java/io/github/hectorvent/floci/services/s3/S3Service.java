@@ -1775,11 +1775,33 @@ public class S3Service {
     private static final String DATA_SUFFIX = ".s3data";
 
     private Path resolveObjectPath(String bucketName, String key) {
-        return dataRoot.resolve(bucketName).resolve(key + DATA_SUFFIX);
+        Path bucketDir = dataRoot.resolve(bucketName).normalize();
+        
+        String safeKey = key;
+        while (safeKey.startsWith("/")) {
+            safeKey = safeKey.substring(1);
+        }
+        
+        Path resolved = bucketDir.resolve(safeKey + DATA_SUFFIX).normalize();
+        if (!resolved.startsWith(bucketDir)) {
+            throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
+        }
+        return resolved;
     }
 
     private Path resolveVersionedPath(String bucketName, String key, String versionId) {
-        return dataRoot.resolve(".versions").resolve(bucketName).resolve(key).resolve(versionId + DATA_SUFFIX);
+        Path baseDir = dataRoot.resolve(".versions").resolve(bucketName).normalize();
+        
+        String safeKey = key;
+        while (safeKey.startsWith("/")) {
+            safeKey = safeKey.substring(1);
+        }
+        
+        Path resolved = baseDir.resolve(safeKey).resolve(versionId + DATA_SUFFIX).normalize();
+        if (!resolved.startsWith(baseDir)) {
+            throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
+        }
+        return resolved;
     }
 
     private void writeVersionedFile(String bucketName, String key, String versionId, byte[] data) {

@@ -147,6 +147,26 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(10)
+    void pathTraversalInUrlIsNormalizedByFramework() {
+        // Vertx normalizes raw `..` in URL paths before the application layer,
+        // so /test-bucket/../../secret.txt becomes /secret.txt at the framework level
+        // and routes to a bucket-level handler (not S3Service.putObject for test-bucket).
+        //
+        // The actual service-layer traversal guard (resolveObjectPath) is tested
+        // in S3ServiceTest.resolvePathWithTraversalThrows.
+        //
+        // Verify that the normalized path does NOT result in a 500 error.
+        given()
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/../../secret.txt")
+        .then()
+            .statusCode(not(equalTo(500)));
+    }
+
+    @Test
     @Order(11)
     void listObjectsWithPrefix() {
         given()
@@ -1417,5 +1437,40 @@ class S3IntegrationTest {
             .body(containsString("eu-central-1"));
 
         given().when().delete("/" + bucket);
+    }
+    @Test
+    void pathTraversalAttemptsReturn400() {
+        // 1. URL-encoded dots survival through Vertx but decoded by our extractObjectKey
+        given()
+                .urlEncodingEnabled(false)
+                .pathParam("bucket", "test-bucket")
+        .when()
+                .get("/{bucket}/%2e%2e/%2e%2e/secret.txt")
+        .then()
+                .statusCode(400)
+                .body(containsString("InvalidKey"));
+
+        // 2. Null byte (survives URL-decoding but fails java.nio.file.Path validation)
+        given()
+                .urlEncodingEnabled(false)
+                .pathParam("bucket", "test-bucket")
+        .when()
+                .get("/{bucket}/%00.txt")
+        .then()
+                .statusCode(400)
+                .body(containsString("InvalidKey"));
+
+        // 3. Mixed-case percent-encoded traversal (%2E instead of %2e)
+        //    Absolute paths like //etc/passwd are normalized by the HTTP server
+        //    before reaching the controller, so they can't be tested via HTTP.
+        //    They are caught at the service layer by the startsWith(bucketDir) guard.
+        given()
+                .urlEncodingEnabled(false)
+                .pathParam("bucket", "test-bucket")
+        .when()
+                .get("/{bucket}/%2E%2E/%2E%2E/secret.txt")
+        .then()
+                .statusCode(400)
+                .body(containsString("InvalidKey"));
     }
 }
