@@ -85,12 +85,31 @@
         <dependency>
             <groupId>com.github.docker-java</groupId>
             <artifactId>docker-java-core</artifactId>
-            <version>3.4.0</version>
+            <version>3.7.1</version>
         </dependency>
         <dependency>
             <groupId>com.github.docker-java</groupId>
             <artifactId>docker-java-transport-httpclient5</artifactId>
-            <version>3.4.0</version>
+            <version>3.7.1</version>
+        </dependency>
+        <!-- Explicit overrides for Quarkus BOM which pins these at 3.7.0;
+             docker-java-core:3.7.1 requires 3.7.1 for ImageHistoryCmd and ExportContainerCmd -->
+        <dependency>
+            <groupId>com.github.docker-java</groupId>
+            <artifactId>docker-java-api</artifactId>
+            <version>3.7.1</version>
+        </dependency>
+        <dependency>
+            <groupId>com.github.docker-java</groupId>
+            <artifactId>docker-java-transport</artifactId>
+            <version>3.7.1</version>
+        </dependency>
+        <!-- httpclient5 5.5.1 (pulled by docker-java-transport-httpclient5:3.7.1) optionally
+             depends on Brotli; GraalVM native image requires the class to be on the classpath -->
+        <dependency>
+            <groupId>org.brotli</groupId>
+            <artifactId>dec</artifactId>
+            <version>0.1.2</version>
         </dependency>
 
         <!-- BouncyCastle for X.509 certificate generation and PEM handling (ACM service) -->
@@ -123,7 +142,7 @@
         <dependency>
             <groupId>com.networknt</groupId>
             <artifactId>json-schema-validator</artifactId>
-            <version>1.5.8</version>
+            <version>1.5.9</version>
         </dependency>
 
         <!-- OpenAPI/Swagger parser (API Gateway ImportRestApi) -->
