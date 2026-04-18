@@ -356,6 +356,16 @@ public class CloudFormationResourceProvisioner {
             req.put("Description", description);
         }
 
+        if (props != null && props.has("Environment")) {
+            JsonNode envNode = engine.resolveNode(props.get("Environment"));
+            if (envNode != null && envNode.has("Variables")) {
+                JsonNode varsNode = envNode.get("Variables");
+                Map<String, String> vars = new HashMap<>();
+                varsNode.fields().forEachRemaining(e -> vars.put(e.getKey(), e.getValue().asText()));
+                req.put("Environment", Map.of("Variables", vars));
+            }
+        }
+
         io.github.hectorvent.floci.services.lambda.model.LambdaFunction func;
         try {
             func = lambdaService.createFunction(region, req);

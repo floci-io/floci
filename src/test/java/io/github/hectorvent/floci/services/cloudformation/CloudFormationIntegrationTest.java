@@ -245,6 +245,61 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_lambdaWithEnvironmentVariables() {
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "cfn-env-func",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                    "Environment": {
+                      "Variables": {
+                        "MY_VAR": "hello",
+                        "STAGE": "local"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-env-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-env-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/cfn-env-func")
+        .then()
+            .statusCode(200)
+            .body("Configuration.FunctionName", equalTo("cfn-env-func"))
+            .body("Configuration.Environment.Variables.MY_VAR", equalTo("hello"))
+            .body("Configuration.Environment.Variables.STAGE", equalTo("local"));
+    }
+
+    @Test
     void createStack_lambdaWithImageUri() {
         String template = """
             {
