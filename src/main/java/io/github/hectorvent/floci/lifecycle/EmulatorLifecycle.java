@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyMan
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.Quarkus;
+import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
 import io.quarkus.vertx.http.HttpServerStart;
@@ -83,23 +84,29 @@ public class EmulatorLifecycle {
         }
     }
 
-    void onStop(@Observes ShutdownEvent ignored) throws IOException, InterruptedException {
+    void onPreShutdown(@Observes ShutdownDelayInitiatedEvent ignored) {
         LOG.info("=== AWS Local Emulator Shutting Down ===");
 
+        // Log-and-continue for every failure mode. Resource cleanup in onStop() must still run,
+        // and cleanup routines (proxy/container/storage shutdown) must not see an interrupted
+        // thread, so we intentionally do NOT restore the interrupt flag here.
         try {
             initializationHooksRunner.run(InitializationHook.STOP);
-        } catch (IOException | InterruptedException e) {
+        } catch (InterruptedException e) {
+            LOG.error("Shutdown hook execution interrupted", e);
+        } catch (IOException e) {
             LOG.error("Shutdown hook execution failed", e);
-            throw e;
         } catch (RuntimeException e) {
             LOG.error("Shutdown hook script failed", e);
-        } finally {
-            elastiCacheProxyManager.stopAll();
-            rdsProxyManager.stopAll();
-            elastiCacheContainerManager.stopAll();
-            rdsContainerManager.stopAll();
-            storageFactory.shutdownAll();
         }
+    }
+
+    void onStop(@Observes ShutdownEvent ignored) {
+        elastiCacheProxyManager.stopAll();
+        rdsProxyManager.stopAll();
+        elastiCacheContainerManager.stopAll();
+        rdsContainerManager.stopAll();
+        storageFactory.shutdownAll();
 
         LOG.info("=== AWS Local Emulator Stopped ===");
     }

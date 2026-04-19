@@ -6,7 +6,7 @@ environment (creating buckets, populating data, configuring resources, etc.) or 
 Hook scripts ending with `.sh` are discovered in the following directories:
 
 - **Startup hooks** (`/etc/floci/init/start.d`) run after the HTTP server is ready and accepting connections on port 4566. This means hooks can safely make HTTP calls back to Floci (e.g. using the AWS CLI).
-- **Shutdown hooks** (`/etc/floci/init/stop.d`) run when Floci is shutting down, after `destroy()` is triggered.
+- **Shutdown hooks** (`/etc/floci/init/stop.d`) run during the pre-shutdown phase, while the HTTP server is still accepting connections, so hooks can make HTTP calls back to Floci (e.g. using the AWS CLI). The server only stops once all shutdown hooks have completed.
 
 If a hook directory does not exist or contains no `.sh` scripts, Floci skips it and continues normally.
 If the hook path exists but is not a directory, it is ignored.
@@ -110,6 +110,12 @@ aws --endpoint-url http://localhost:4566 \
 
 This example assumes the script is stored at `/etc/floci/init/stop.d/01-cleanup-parameter.sh`.
 It removes the parameter during shutdown to leave the environment clean.
+
+!!! note "Shutdown timing"
+    Shutdown hooks run before the HTTP server stops, so Floci's total shutdown time
+    grows by the cumulative runtime of all stop hooks. Make sure external orchestrator
+    grace periods accommodate this (e.g. Kubernetes `terminationGracePeriodSeconds`,
+    Docker Compose `stop_grace_period`).
 
 ## Configuration
 

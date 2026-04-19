@@ -4,6 +4,10 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.max-request-size}M
+  shutdown:
+    # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
+    # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
+    delay-enabled: true
   native:
     additional-build-args: >-
       --initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,
