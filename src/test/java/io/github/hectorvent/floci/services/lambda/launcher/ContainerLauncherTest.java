@@ -138,9 +138,10 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        // Verify ordering: create → Docker copy (to /var/task) → startCreated
+        // Verify ordering: create → getDockerClient → Docker copy (to /var/task) → startCreated
         InOrder inOrder = inOrder(lifecycleManager, dockerClient);
         inOrder.verify(lifecycleManager).create(any());
+        inOrder.verify(lifecycleManager).getDockerClient();
         inOrder.verify(dockerClient).copyArchiveToContainerCmd("container-123");
         inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
 
@@ -165,6 +166,7 @@ class ContainerLauncherTest {
         // and start must happen after. This is the exact regression from #466.
         InOrder inOrder = inOrder(lifecycleManager, dockerClient);
         inOrder.verify(lifecycleManager).create(any());
+        inOrder.verify(lifecycleManager).getDockerClient();
         // Two copies: code to /var/task + bootstrap to /var/runtime
         inOrder.verify(dockerClient, times(2)).copyArchiveToContainerCmd("container-123");
         inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
