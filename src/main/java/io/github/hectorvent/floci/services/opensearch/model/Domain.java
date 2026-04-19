@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.opensearch.model;
 
+import com.fasterxml.jackson.annotation.JsonFormat;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
@@ -42,7 +43,11 @@ public class Domain {
     @JsonProperty("Tags")
     private Map<String, String> tags = new HashMap<>();
 
+    @JsonProperty("ContainerId")
+    private String containerId;
+
     @JsonProperty("CreatedAt")
+    @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant createdAt;
 
     public Domain() {}
@@ -125,6 +130,14 @@ public class Domain {
 
     public void setTags(Map<String, String> tags) {
         this.tags = tags != null ? new HashMap<>(tags) : new HashMap<>();
+    }
+
+    public String getContainerId() {
+        return containerId;
+    }
+
+    public void setContainerId(String containerId) {
+        this.containerId = containerId;
     }
 
     public Instant getCreatedAt() {

@@ -149,10 +149,11 @@ floci:
       enabled: true
     opensearch:
       enabled: true
-      mode: mock
+      mock: false
       default-image: "opensearchproject/opensearch:2"
       proxy-base-port: 9400
       proxy-max-port: 9499
+      keep-running-on-shutdown: false
     ec2:
       enabled: true
     ecs:

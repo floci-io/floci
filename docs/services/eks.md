@@ -38,10 +38,12 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
     ports:
       - "4566:4566"
-      - "6500-6599:6500-6599"   # k3s API server ports (real mode only)
     environment:
       FLOCI_SERVICES_EKS_DOCKER_NETWORK: my_project_default
 ```
+
+!!! note "No port mapping needed for k3s ports"
+    k3s containers bind their API server port (6500–6599) directly on the host via Docker — no `ports:` entry is required in `docker-compose.yml`. See [Ports Reference](../configuration/ports.md#ports-65006599-eks-real-mode) for the full explanation.
 
 ## Configuration
 

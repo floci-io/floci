@@ -1,17 +1,35 @@
 # OpenSearch Service
 
-**Protocol:** REST JSON
-**Endpoint:** `http://localhost:4566/2021-01-01/...`
+**Protocol:** REST JSON  
+**Endpoint:** `http://localhost:4566/2021-01-01/...`  
 **Credential scope:** `es`
 
-## Implementation Mode
+## Implementation Modes
 
-OpenSearch supports two implementation modes controlled by `FLOCI_SERVICES_OPENSEARCH_MODE`:
+OpenSearch supports two modes controlled by `FLOCI_SERVICES_OPENSEARCH_MOCK`.
 
-| Mode | Behaviour |
-|---|---|
-| `mock` *(default)* | Management API only. Domains are stored in the configured StorageBackend and appear `ACTIVE` immediately. No real search capability. |
-| `real` | *(v2, coming soon)* Spins up a real OpenSearch Docker container per domain and proxies data-plane requests to it. |
+### Mock mode (`mock: true`)
+
+Domain metadata is stored in-process. No Docker containers are started. Domains appear `Created: true` and `Processing: false` immediately. Use this in CI or whenever you only need the management API shape, not a real search cluster.
+
+### Real mode (`mock: false`, default)
+
+Floci starts an **OpenSearch** (`opensearchproject/opensearch:2`) Docker container per domain. The container is exposed on a host port from the configured range (`9400–9499`). Once `/_cluster/health` returns `green` or `yellow`, the domain transitions to `Created: true` and the `Endpoint` field is populated with the container's address.
+
+!!! note "Docker socket required"
+    Real mode starts Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other.
+
+```yaml
+services:
+  floci:
+    image: hectorvent/floci:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "4566:4566"
+    environment:
+      FLOCI_SERVICES_DOCKER_NETWORK: my_project_default
+```
 
 ## Supported Operations
 
@@ -54,7 +72,7 @@ OpenSearch supports two implementation modes controlled by `FLOCI_SERVICES_OPENS
 | `DescribeDomainHealth` | Returns `ClusterHealth: Green` |
 | `GetUpgradeHistory` | Returns empty list |
 | `GetUpgradeStatus` | Returns `StepStatus: SUCCEEDED` |
-| `UpgradeDomain` | Stores new engine version, returns immediately |
+| `UpgradeDomain` | Stores new engine version, returns immediately with a generated `UpgradeId` |
 | `CancelDomainConfigChange` | Returns empty `CancelledChangeIds` |
 | `StartServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
 | `CancelServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
@@ -66,10 +84,13 @@ floci:
   services:
     opensearch:
       enabled: true
-      mode: mock                                    # mock | real (real is v2, not yet available)
-      default-image: "opensearchproject/opensearch:2"  # used only when mode=real
+      mock: false                                   # true = metadata only, no Docker
+      default-image: "opensearchproject/opensearch:2"
       proxy-base-port: 9400                         # port range for real-mode containers
       proxy-max-port: 9499
+      keep-running-on-shutdown: false               # leave containers running after Floci stops
+      # data-path is derived from floci.storage.persistent-path/opensearch
+      # docker network is shared with all other services via floci.services.docker-network
 
   storage:
     services:
@@ -82,21 +103,38 @@ floci:
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_OPENSEARCH_ENABLED` | `true` | Enable/disable the service |
-| `FLOCI_SERVICES_OPENSEARCH_MODE` | `mock` | `mock` or `real` |
-| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` | Docker image for `real` mode |
-| `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | Port range start for `real` mode |
-| `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Port range end for `real` mode |
-| `FLOCI_STORAGE_SERVICES_OPENSEARCH_MODE` | *(global default)* | Storage mode override |
+| `FLOCI_SERVICES_OPENSEARCH_MOCK` | `false` | `true` = metadata only (no Docker) |
+| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` | Docker image for real mode |
+| `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | Port range start for real mode |
+| `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Port range end for real mode |
+| `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave containers running after Floci stops |
+| `FLOCI_SERVICES_DOCKER_NETWORK` | *(unset)* | Shared Docker network for all container-based services including OpenSearch |
 | `FLOCI_STORAGE_SERVICES_OPENSEARCH_FLUSH_INTERVAL_MS` | `5000` | Flush interval (ms) |
+
+### Mock mode (CI / tests)
+
+Use `FLOCI_SERVICES_OPENSEARCH_MOCK=true` when you only need the API shape:
+
+```yaml
+# docker-compose.yml — CI / test environment
+services:
+  floci:
+    image: hectorvent/floci:latest
+    environment:
+      FLOCI_SERVICES_OPENSEARCH_MOCK: "true"
+```
 
 ## Emulation Behaviour
 
 - **Domain name validation:** 3–28 characters, must start with a lowercase letter, only lowercase letters, digits, and hyphens.
 - **ARN format:** `arn:aws:es:{region}:{accountId}:domain/{domainName}`
 - **Domain ID format:** `{accountId}/{domainName}`
-- **Processing:** Always `false` in `mock` mode — domains are `ACTIVE` immediately.
+- **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
+- **`Processing` flag:** `false` immediately in mock mode; `true` until the container is ready in real mode.
 - **Engine version default:** `OpenSearch_2.11`
+- **Supported engine versions:** `OpenSearch_2.13`, `OpenSearch_2.11`, `OpenSearch_2.9`, `OpenSearch_2.7`, `OpenSearch_2.5`, `OpenSearch_2.3`, `OpenSearch_1.3`, `OpenSearch_1.2`, `Elasticsearch_7.10`, `Elasticsearch_7.9`, `Elasticsearch_7.8`
 - **Cluster defaults:** `m5.large.search`, 1 instance, EBS enabled with 10 GiB `gp2` volume.
+- **Data path:** `{floci.storage.persistent-path}/opensearch/{domainName}` — follows the shared storage root.
 
 ## Examples
 
@@ -161,11 +199,15 @@ CreateDomainResponse created = os.createDomain(req -> req
 
 System.out.println("ARN: " + created.domainStatus().arn());
 
+// Wait for domain to be ready (real mode)
+// created.domainStatus().created() == true when ready
+
 // Describe the domain
 DescribeDomainResponse desc = os.describeDomain(req -> req
     .domainName("my-search"));
 
 System.out.println("Version: " + desc.domainStatus().engineVersion());
+System.out.println("Endpoint: " + desc.domainStatus().endpoint());
 
 // List domains
 os.listDomainNames(req -> req.build())
@@ -207,9 +249,9 @@ for d in domains["DomainNames"]:
 os_client.delete_domain(DomainName="my-search")
 ```
 
-## Limitations (v1)
+## Limitations
 
-- No real search capability in `mock` mode — data-plane endpoints (`/_search`, `/_index`, etc.) are not proxied.
-- No Elasticsearch-compatible endpoints (`/2015-01-01/es/domain/...`).
+- In mock mode, no data-plane endpoints (`/_search`, `/_index`, etc.) are served — only the management API is emulated.
+- No Elasticsearch-compatible management endpoints (`/2015-01-01/es/domain/...`).
 - VPC options, fine-grained access control, encryption-at-rest, and cross-cluster connections are accepted in the request but silently ignored.
-- All 41 "not applicable" operations (VPC endpoints, reserved instances, packages, applications, data sources) return `UnsupportedOperationException`.
+- All unsupported operations (VPC endpoints, reserved instances, packages, applications, data sources) return `UnsupportedOperationException`.

@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.services.opensearch.model.ClusterConfig;
 import io.github.hectorvent.floci.services.opensearch.model.Domain;
 import io.github.hectorvent.floci.services.opensearch.model.EbsOptions;
 import com.fasterxml.jackson.core.type.TypeReference;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -15,6 +17,9 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class OpenSearchService {
@@ -25,17 +30,40 @@ public class OpenSearchService {
 
     private final StorageBackend<String, Domain> domainStore;
     private final EmulatorConfig config;
+    private final OpenSearchDomainManager domainManager;
+    private final ScheduledExecutorService poller = Executors.newSingleThreadScheduledExecutor();
 
     @Inject
-    public OpenSearchService(StorageFactory storageFactory, EmulatorConfig config) {
+    public OpenSearchService(StorageFactory storageFactory, EmulatorConfig config,
+                             OpenSearchDomainManager domainManager) {
         this.domainStore = storageFactory.create("opensearch", "opensearch-domains.json",
                 new TypeReference<Map<String, Domain>>() {});
         this.config = config;
+        this.domainManager = domainManager;
     }
 
-    OpenSearchService(StorageBackend<String, Domain> domainStore, EmulatorConfig config) {
+    OpenSearchService(StorageBackend<String, Domain> domainStore, EmulatorConfig config,
+                      OpenSearchDomainManager domainManager) {
         this.domainStore = domainStore;
         this.config = config;
+        this.domainManager = domainManager;
+    }
+
+    @PostConstruct
+    public void init() {
+        if (!config.services().opensearch().mock()) {
+            startReadinessPoller();
+        }
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        poller.shutdownNow();
+        if (!config.services().opensearch().mock()) {
+            for (Domain domain : domainStore.scan(k -> true)) {
+                domainManager.stopDomain(domain);
+            }
+        }
     }
 
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
@@ -66,6 +94,13 @@ public class OpenSearchService {
         }
         if (tags != null) {
             domain.setTags(tags);
+        }
+
+        if (config.services().opensearch().mock()) {
+            domain.setProcessing(false);
+        } else {
+            domain.setProcessing(true);
+            domainManager.startDomain(domain);
         }
 
         domainStore.put(domainName, domain);
@@ -132,6 +167,9 @@ public class OpenSearchService {
     public Domain deleteDomain(String domainName) {
         Domain domain = describeDomain(domainName);
         domain.setDeleted(true);
+        if (!config.services().opensearch().mock()) {
+            domainManager.stopDomain(domain);
+        }
         domainStore.delete(domainName);
         LOG.infov("Deleted OpenSearch domain: {0}", domainName);
         return domain;
@@ -186,5 +224,18 @@ public class OpenSearchService {
             return engineVersion != null && engineVersion.startsWith("Elasticsearch");
         }
         return engineVersion == null || engineVersion.startsWith("OpenSearch");
+    }
+
+    private void startReadinessPoller() {
+        poller.scheduleWithFixedDelay(() -> {
+            for (Domain domain : domainStore.scan(k -> true)) {
+                if (domain.isProcessing() && domainManager.isReady(domain)) {
+                    domain.setProcessing(false);
+                    domainStore.put(domain.getDomainName(), domain);
+                    LOG.infov("OpenSearch domain {0} is ready at {1}",
+                            domain.getDomainName(), domain.getEndpoint());
+                }
+            }
+        }, 3, 3, TimeUnit.SECONDS);
     }
 }

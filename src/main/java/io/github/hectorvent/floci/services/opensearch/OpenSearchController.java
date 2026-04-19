@@ -22,6 +22,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 @Path("/2021-01-01")
 @Produces(MediaType.APPLICATION_JSON)
@@ -400,6 +401,7 @@ public class OpenSearchController {
             Domain domain = service.upgradeDomain(domainName, targetVersion);
 
             ObjectNode response = objectMapper.createObjectNode();
+            response.put("UpgradeId", UUID.randomUUID().toString());
             response.put("DomainName", domain.getDomainName());
             response.put("TargetVersion", domain.getEngineVersion());
             response.put("PerformCheckOnly", false);
@@ -456,6 +458,7 @@ public class OpenSearchController {
         node.put("DomainId", domain.getDomainId());
         node.put("DomainName", domain.getDomainName());
         node.put("EngineVersion", domain.getEngineVersion());
+        node.put("Created", !domain.isProcessing());
         node.put("Processing", domain.isProcessing());
         node.put("Deleted", domain.isDeleted());
         node.put("Endpoint", domain.getEndpoint() != null ? domain.getEndpoint() : "");

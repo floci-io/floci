@@ -433,8 +433,9 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("mock")
-        String mode();
+        /** When true, domains are simulated in-memory without real Docker containers. */
+        @WithDefault("false")
+        boolean mock();
 
         @WithDefault("opensearchproject/opensearch:2")
         String defaultImage();
@@ -445,7 +446,11 @@ public interface EmulatorConfig {
         @WithDefault("9499")
         int proxyMaxPort();
 
-        Optional<String> dockerNetwork();
+        @WithDefault("${floci.storage.persistent-path}/opensearch")
+        String dataPath();
+
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
     }
 
     interface EcsServiceConfig {
