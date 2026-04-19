@@ -124,7 +124,9 @@ public class SecretsManagerService {
         return version;
     }
 
-    public SecretVersion putSecretValue(String secretId, String secretString, String secretBinary, String region) {
+    public SecretVersion putSecretValue(String secretId, String secretString,
+                                        String secretBinary, String region,
+                                        List<String> versionStages) {
         Secret secret = resolveSecret(secretId, region);
 
         if (secret.getDeletedDate() != null) {
@@ -135,25 +137,47 @@ public class SecretsManagerService {
         Instant now = Instant.now();
         String newVersionId = UUID.randomUUID().toString();
 
-        SecretVersion oldCurrent = findVersionByStage(secret, AWSCURRENT);
-        if (oldCurrent != null) {
-            List<String> stages = new ArrayList<>(oldCurrent.getVersionStages());
-            stages.remove(AWSCURRENT);
-            if (!stages.contains(AWSPREVIOUS)) {
-                stages.add(AWSPREVIOUS);
+        List<String> stages;
+        if (versionStages != null) {
+            if (versionStages.isEmpty() || versionStages.size() > 20) {
+                throw new AwsException("ValidationException", "Invalid length for parameter VersionStages", 400);
             }
-            oldCurrent.setVersionStages(stages);
+            if (versionStages.stream()
+                    .anyMatch(stage -> stage == null
+                            || stage.isEmpty()
+                            || stage.length() > 256)) {
+                throw new AwsException("ValidationException", "Member must have length less than or equal to 256, Member must have length greater than or equal to 1", 400);
+            }
+            stages = versionStages;
+        } else {
+            stages = List.of(AWSCURRENT);
+        }
+
+        for (String stage : stages) {
+            SecretVersion version = findVersionByStage(secret, stage);
+            if (version == null) {
+                continue;
+            }
+            List<String> newStages = new ArrayList<>(version.getVersionStages());
+            if (stage.equals(AWSCURRENT)) {
+                newStages.add(AWSPREVIOUS);
+            }
+            newStages.remove(stage);
+
+            version.setVersionStages(newStages);
         }
 
         SecretVersion newVersion = new SecretVersion();
         newVersion.setVersionId(newVersionId);
         newVersion.setSecretString(secretString);
         newVersion.setSecretBinary(secretBinary);
-        newVersion.setVersionStages(new ArrayList<>(List.of(AWSCURRENT)));
+        newVersion.setVersionStages(stages);
         newVersion.setCreatedDate(now);
 
         secret.getVersions().put(newVersionId, newVersion);
-        secret.setCurrentVersionId(newVersionId);
+        if (stages.contains(AWSCURRENT)) {
+            secret.setCurrentVersionId(newVersionId);
+        }
         secret.setLastChangedDate(now);
 
         store.put(regionKey(region, secret.getName()), secret);

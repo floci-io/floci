@@ -11,11 +11,11 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
-import java.security.SecureRandom;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.StreamSupport;
 
 @ApplicationScoped
 public class SecretsManagerJsonHandler {
@@ -146,8 +146,12 @@ public class SecretsManagerJsonHandler {
         String secretString = request.has("SecretString") ? request.path("SecretString").asText() : null;
         String secretBinary = request.has("SecretBinary") ? request.path("SecretBinary").asText() : null;
 
+        List<String> versionStages = request.has("VersionStages") && request.path("VersionStages").isArray()
+                ? StreamSupport.stream(request.path("VersionStages").spliterator(), false).map(JsonNode::asText).toList()
+                : null;
+
         Secret secret = service.describeSecret(secretId, region);
-        SecretVersion version = service.putSecretValue(secretId, secretString, secretBinary, region);
+        SecretVersion version = service.putSecretValue(secretId, secretString, secretBinary, region, versionStages);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ARN", secret.getArn());
@@ -172,7 +176,7 @@ public class SecretsManagerJsonHandler {
 
         String versionId = null;
         if (secretString != null || secretBinary != null) {
-            SecretVersion version = service.putSecretValue(secretId, secretString, secretBinary, region);
+            SecretVersion version = service.putSecretValue(secretId, secretString, secretBinary, region, null);
             versionId = version.getVersionId();
         }
 

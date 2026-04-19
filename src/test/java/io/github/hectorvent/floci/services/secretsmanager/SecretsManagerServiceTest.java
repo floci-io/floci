@@ -4,11 +4,14 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import org.apache.commons.lang3.RandomStringUtils;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -60,7 +63,7 @@ class SecretsManagerServiceTest {
     @Test
     void putSecretValueRotatesVersion() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, null);
 
         SecretVersion current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
         assertEquals("v2", current.getSecretString());
@@ -74,7 +77,70 @@ class SecretsManagerServiceTest {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
         service.deleteSecret("my-secret", null, true, REGION);
         assertThrows(AwsException.class, () ->
-                service.putSecretValue("my-secret", "v2", null, REGION));
+                service.putSecretValue("my-secret", "v2", null, REGION, null));
+    }
+
+    @Test
+    void putSecretValuePendingStage() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT"));
+        service.putSecretValue("my-secret", "v3", null, REGION, List.of("AWSPENDING"));
+
+        SecretVersion previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
+        assertEquals("v1", previous.getSecretString());
+
+        SecretVersion current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
+        assertEquals("v2", current.getSecretString());
+
+        SecretVersion pending = service.getSecretValue("my-secret", null, "AWSPENDING", REGION);
+        assertEquals("v3", pending.getSecretString());
+    }
+
+    @Test
+    void putSecretValueMultiStage() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT"));
+        service.putSecretValue("my-secret", "v3", null, REGION, List.of("AWSCURRENT", "AWSPENDING"));
+
+        SecretVersion previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
+        assertEquals("v2", previous.getSecretString());
+
+        SecretVersion current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
+        assertEquals("v3", current.getSecretString());
+
+        SecretVersion pending = service.getSecretValue("my-secret", null, "AWSPENDING", REGION);
+        assertEquals("v3", pending.getSecretString());
+    }
+
+    @Test
+    void putSecretValueInvalidNumberOfStages() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+
+        // no stages
+        Assertions.assertThrows(AwsException.class, () ->
+            service.putSecretValue("my-secret", "v2", null, REGION, List.of())
+        );
+        // more than 20
+        List<String> stages =
+                IntStream.range(0, 21).mapToObj(i -> "stage" + i).toList();
+        Assertions.assertThrows(AwsException.class, () ->
+                service.putSecretValue("my-secret", "v2", null, REGION, stages)
+        );
+    }
+
+    @Test
+    void putSecretValueInvalidStageName() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        // Stage name is 0-length
+        Assertions.assertThrows(AwsException.class, () ->
+                service.putSecretValue("my-secret", "v2", null, REGION, List.of(""))
+        );
+        // Stage name is larger than 256 characters
+        String stageName = RandomStringUtils.randomAlphanumeric(257);
+        Assertions.assertThrows(AwsException.class, () ->
+                service.putSecretValue("my-secret", "v2", null, REGION, List.of(stageName))
+        );
+
     }
 
     @Test
@@ -179,7 +245,7 @@ class SecretsManagerServiceTest {
     @Test
     void listSecretVersionIds() {
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, null);
 
         Map<String, List<String>> versions = service.listSecretVersionIds("my-secret", REGION);
         assertEquals(2, versions.size());
@@ -195,7 +261,7 @@ class SecretsManagerServiceTest {
         SecretVersion v1 = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
         String v1Id = v1.getVersionId();
 
-        service.putSecretValue("my-secret", "v2", null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, null);
 
         SecretVersion fetched = service.getSecretValue("my-secret", v1Id, null, REGION);
         assertEquals("v1", fetched.getSecretString());
