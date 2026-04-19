@@ -65,10 +65,11 @@ public class ContainerLifecycleManager {
      * start it after any pre-start setup (e.g. copying files into the
      * container filesystem).
      *
+     * @param spec the container specification
      * @return the container ID
      */
     public String create(ContainerSpec spec) {
-        LOG.debugv("Creating container (no start) from spec: image={0}, name={1}", spec.image(), spec.name());
+        LOG.debugv("Creating container from spec: image={0}, name={1}", spec.image(), spec.name());
 
         imageCacheService.ensureImageExists(spec.image());
 

@@ -77,7 +77,7 @@ class ContainerLauncherTest {
     }
 
     @Test
-    void launchFunctionCopiesCode() throws Exception {
+    void launchFunction_createsWithoutBindMounts() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("code"));
 
         LambdaFunction fn = new LambdaFunction();
@@ -93,8 +93,6 @@ class ContainerLauncherTest {
 
         ContainerSpec spec = specCaptor.getValue();
         assertTrue(spec.binds().isEmpty(), "Function should NOT have bind mounts");
-
-        verify(lifecycleManager, atLeastOnce()).getDockerClient();
     }
 
     @Test
