@@ -352,4 +352,56 @@ class KinesisServiceTest {
         assertEquals("NONE", unencrypted.getEncryptionType());
         assertNull(unencrypted.getKeyId());
     }
+
+    @Test
+    void legacyFivePartIteratorStillDecodes() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        kinesisService.putRecord("my-stream", "b".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        // Hand-crafted 5-part iterator in the pre-bump format.
+        String raw = "my-stream|shardId-000000000000|TRIM_HORIZON||0";
+        String legacyIterator = java.util.Base64.getEncoder()
+                .encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+
+        Map<String, Object> result = kinesisService.getRecords(legacyIterator, null, REGION);
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> records = (List<KinesisRecord>) result.get("Records");
+        assertEquals(2, records.size(), "5-part iterator must still decode after encoding bump");
+    }
+
+    @Test
+    void atTimestampIteratorRequiresTimestamp() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+
+        // getShardIterator encodes even with null timestamp (handler is the enforcement point for the API).
+        // But getRecords must reject an AT_TIMESTAMP iterator that lacks the timestamp slot.
+        String iterator = kinesisService.getShardIterator("my-stream", "shardId-000000000000",
+                "AT_TIMESTAMP", null, null, REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kinesisService.getRecords(iterator, null, REGION));
+        assertEquals("InvalidArgumentException", ex.getErrorCode());
+    }
+
+    @Test
+    void atTimestampBoundaryIsInclusive() {
+        kinesisService.createStream("my-stream", 1, REGION);
+        kinesisService.putRecord("my-stream", "a".getBytes(StandardCharsets.UTF_8), "pk", REGION);
+        // Read back the exact timestamp of record 0 to use as the boundary.
+        String firstIter = kinesisService.getShardIterator("my-stream", "shardId-000000000000",
+                "TRIM_HORIZON", null, null, REGION);
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> first = (List<KinesisRecord>) kinesisService.getRecords(firstIter, null, REGION)
+                .get("Records");
+        Instant arrivedAt = first.get(0).getApproximateArrivalTimestamp();
+
+        String atIter = kinesisService.getShardIterator("my-stream", "shardId-000000000000",
+                "AT_TIMESTAMP", null, arrivedAt.toEpochMilli(), REGION);
+        @SuppressWarnings("unchecked")
+        List<KinesisRecord> got = (List<KinesisRecord>) kinesisService.getRecords(atIter, null, REGION)
+                .get("Records");
+        assertEquals(1, got.size(), "AT_TIMESTAMP boundary is >= (inclusive)");
+    }
 }

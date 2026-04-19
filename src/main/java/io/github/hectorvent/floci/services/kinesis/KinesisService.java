@@ -371,16 +371,27 @@ public class KinesisService {
     }
 
     public String getShardIterator(String streamName, String shardId, String type, String sequenceNumber, String region) {
+        return getShardIterator(streamName, shardId, type, sequenceNumber, null, region);
+    }
+
+    public String getShardIterator(String streamName, String shardId, String type, String sequenceNumber,
+                                   Long timestampMillis, String region) {
         resolveStream(streamName, region); // validate exists
-        // Format: streamName|shardId|type|sequenceNumber|index
-        String raw = String.format("%s|%s|%s|%s|%d", 
-                streamName, shardId, type, sequenceNumber != null ? sequenceNumber : "", 0);
+        // Format: streamName|shardId|type|sequenceNumber|index|timestampMillis
+        // The 6th slot was added for AT_TIMESTAMP; empty for other iterator types.
+        // Old 5-part iterators still decode via split(-1) compatibility in getRecords.
+        String raw = String.format("%s|%s|%s|%s|%d|%s",
+                streamName, shardId, type,
+                sequenceNumber != null ? sequenceNumber : "",
+                0,
+                timestampMillis != null ? timestampMillis.toString() : "");
         return Base64.getEncoder().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
     public Map<String, Object> getRecords(String shardIterator, Integer limit, String region) {
         byte[] decoded = Base64.getDecoder().decode(shardIterator);
-        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), 5);
+        // Use limit=-1 so trailing empty slots round-trip and old 5-part iterators still work.
+        String[] parts = new String(decoded, StandardCharsets.UTF_8).split(java.util.regex.Pattern.quote("|"), -1);
         if (parts.length < 5) throw new AwsException("InvalidArgumentException", "Invalid shard iterator", 400);
 
         String streamName = parts[0];
@@ -388,6 +399,14 @@ public class KinesisService {
         String type = parts[2];
         String startSeq = parts[3];
         int lastIndex = Integer.parseInt(parts[4]);
+        Long timestampMillis = null;
+        if (parts.length >= 6 && !parts[5].isEmpty()) {
+            try {
+                timestampMillis = Long.parseLong(parts[5]);
+            } catch (NumberFormatException e) {
+                throw new AwsException("InvalidArgumentException", "Invalid timestamp in shard iterator", 400);
+            }
+        }
 
         KinesisStream stream = resolveStream(streamName, region);
         KinesisShard shard = stream.getShards().stream()
@@ -417,6 +436,21 @@ public class KinesisService {
                     break;
                 }
             }
+        } else if ("AT_TIMESTAMP".equals(type)) {
+            if (timestampMillis == null) {
+                throw new AwsException("InvalidArgumentException",
+                        "AT_TIMESTAMP iterator requires a Timestamp", 400);
+            }
+            // First record with ApproximateArrivalTimestamp >= requested timestamp.
+            // If none match (all records predate timestamp or shard is empty), start past end (no records returned, caught up).
+            startIndex = allRecords.size();
+            for (int i = 0; i < allRecords.size(); i++) {
+                Instant arr = allRecords.get(i).getApproximateArrivalTimestamp();
+                if (arr != null && arr.toEpochMilli() >= timestampMillis) {
+                    startIndex = i;
+                    break;
+                }
+            }
         }
 
         int max = limit != null ? Math.min(limit, 1000) : 1000;
@@ -427,8 +461,11 @@ public class KinesisService {
             nextIndex = i + 1;
         }
 
+        // Continuation iterator: type=TRIM_HORIZON + resume-at-nextIndex is the existing
+        // "resume by index" convention (the type label is misleading but preserved for compat).
+        // Timestamp slot empty on continuation.
         String nextIterator = Base64.getEncoder().encodeToString(
-                String.format("%s|%s|%s|%s|%d", streamName, shardId, "TRIM_HORIZON", "", nextIndex)
+                String.format("%s|%s|%s|%s|%d|", streamName, shardId, "TRIM_HORIZON", "", nextIndex)
                 .getBytes(StandardCharsets.UTF_8));
 
         Map<String, Object> response = new HashMap<>();

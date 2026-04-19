@@ -722,4 +722,191 @@ class KinesisIntegrationTest {
         .then().statusCode(200)
             .body("Records.size()", equalTo(0));
     }
+
+    // --- AT_TIMESTAMP iterator coverage ---
+
+    private String atTimestampCreateStream(String name) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.CreateStream")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + name + "\", \"ShardCount\": 1}")
+        .when().post("/").then().statusCode(200);
+        return "shardId-000000000000";
+    }
+
+    private String atTimestampPutAndGetSequence(String stream, String data) {
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.PutRecord")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream + "\", \"Data\": \"" + data + "\", \"PartitionKey\": \"pk\"}")
+        .when().post("/").then().statusCode(200);
+        return "ok";
+    }
+
+    private String atTimestampIterator(String stream, String shardId, double timestampSec) {
+        return given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream + "\", \"ShardId\": \"" + shardId
+                + "\", \"ShardIteratorType\": \"AT_TIMESTAMP\", \"Timestamp\": " + timestampSec + "}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+    }
+
+    @Test
+    @Order(50)
+    void atTimestampReturnsRecordsAtAndAfter() throws InterruptedException {
+        String stream = "at-timestamp-basic";
+        String shardId = atTimestampCreateStream(stream);
+
+        long[] tsMillis = new long[5];
+        for (int i = 0; i < 5; i++) {
+            tsMillis[i] = System.currentTimeMillis();
+            atTimestampPutAndGetSequence(stream, "cmVjMA=="); // "rec0" base64
+            Thread.sleep(100);
+        }
+
+        // tsMillis[i] is captured just before rec[i], so rec[i].arrival >= tsMillis[i]
+        // and rec[i-1].arrival < tsMillis[i]. AT_TIMESTAMP at tsMillis[2] returns rec 2,3,4.
+        double targetSec = tsMillis[2] / 1000.0;
+        String iterator = atTimestampIterator(stream, shardId, targetSec);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(51)
+    void atTimestampBeforeFirstRecordReturnsAll() {
+        String stream = "at-timestamp-before";
+        String shardId = atTimestampCreateStream(stream);
+        for (int i = 0; i < 3; i++) {
+            atTimestampPutAndGetSequence(stream, "YWJj");
+        }
+
+        // Timestamp at epoch 1s (way before any record).
+        String iterator = atTimestampIterator(stream, shardId, 1.0);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(52)
+    void atTimestampFutureReturnsZeroAndValidContinuation() {
+        String stream = "at-timestamp-future";
+        String shardId = atTimestampCreateStream(stream);
+        for (int i = 0; i < 3; i++) {
+            atTimestampPutAndGetSequence(stream, "eHl6");
+        }
+
+        double futureSec = (System.currentTimeMillis() + 3_600_000) / 1000.0;
+        String iterator = atTimestampIterator(stream, shardId, futureSec);
+
+        String nextIter = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(0))
+            .body("NextShardIterator", not(isEmptyOrNullString()))
+            .extract().jsonPath().getString("NextShardIterator");
+
+        // NextShardIterator should be a valid (caught-up) iterator — re-use returns 0 records, no error.
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + nextIter + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(0));
+    }
+
+    @Test
+    @Order(53)
+    void atTimestampOnEmptyShardReturnsZero() {
+        String stream = "at-timestamp-empty";
+        String shardId = atTimestampCreateStream(stream);
+
+        String iterator = atTimestampIterator(stream, shardId, System.currentTimeMillis() / 1000.0);
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(0))
+            .body("NextShardIterator", not(isEmptyOrNullString()));
+    }
+
+    @Test
+    @Order(54)
+    void atTimestampWithoutTimestampParamIs400() {
+        String stream = "at-timestamp-missing-param";
+        atTimestampCreateStream(stream);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream
+                + "\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"AT_TIMESTAMP\"}")
+        .when().post("/")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(56)
+    void atTimestampWithNonNumericTimestampIs400() {
+        String stream = "at-timestamp-bad-type";
+        atTimestampCreateStream(stream);
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream
+                + "\", \"ShardId\": \"shardId-000000000000\", \"ShardIteratorType\": \"AT_TIMESTAMP\", \"Timestamp\": \"not-a-number\"}")
+        .when().post("/")
+        .then().statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(55)
+    void trimHorizonIteratorStillWorksAfterEncodingBump() {
+        // Regression: 5-part old iterators should still decode via split(-1) compat,
+        // and the new TRIM_HORIZON/LATEST/AT_SEQUENCE_NUMBER paths must not trip over the new 6th slot.
+        String stream = "post-bump-trim-horizon";
+        String shardId = atTimestampCreateStream(stream);
+        atTimestampPutAndGetSequence(stream, "YQ==");
+        atTimestampPutAndGetSequence(stream, "Yg==");
+
+        String iterator = given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetShardIterator")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"StreamName\": \"" + stream + "\", \"ShardId\": \"" + shardId
+                + "\", \"ShardIteratorType\": \"TRIM_HORIZON\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().jsonPath().getString("ShardIterator");
+
+        given()
+            .header("X-Amz-Target", "Kinesis_20131202.GetRecords")
+            .contentType(KINESIS_CONTENT_TYPE)
+            .body("{\"ShardIterator\": \"" + iterator + "\"}")
+        .when().post("/")
+        .then().statusCode(200)
+            .body("Records.size()", equalTo(2));
+    }
 }

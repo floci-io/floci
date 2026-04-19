@@ -386,8 +386,24 @@ public class KinesisJsonHandler {
         String shardId = request.path("ShardId").asText();
         String type = request.path("ShardIteratorType").asText();
         String seq = request.has("StartingSequenceNumber") ? request.path("StartingSequenceNumber").asText() : null;
+        // AWS sends Timestamp as epoch seconds (double with fractional ms).
+        // Convert to long millis at the boundary; the emulator stores time in ms everywhere.
+        // Use Math.round to avoid 1ms drift from FP multiplication (e.g. X.999...).
+        Long timestampMillis = null;
+        if (request.has("Timestamp") && !request.path("Timestamp").isNull()) {
+            JsonNode tsNode = request.path("Timestamp");
+            if (!tsNode.isNumber()) {
+                throw new io.github.hectorvent.floci.core.common.AwsException("InvalidArgumentException",
+                        "Timestamp must be a number (epoch seconds)", 400);
+            }
+            timestampMillis = Math.round(tsNode.asDouble() * 1000);
+        }
+        if ("AT_TIMESTAMP".equals(type) && timestampMillis == null) {
+            throw new io.github.hectorvent.floci.core.common.AwsException("InvalidArgumentException",
+                    "ShardIteratorType AT_TIMESTAMP requires a Timestamp", 400);
+        }
 
-        String iterator = service.getShardIterator(streamName, shardId, type, seq, region);
+        String iterator = service.getShardIterator(streamName, shardId, type, seq, timestampMillis, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ShardIterator", iterator);
