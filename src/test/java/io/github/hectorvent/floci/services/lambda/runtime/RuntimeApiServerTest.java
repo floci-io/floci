@@ -134,6 +134,69 @@ class RuntimeApiServerTest {
         assertTrue(payload.contains("ContainerStopped"));
     }
 
+    @Test
+    @Timeout(15)
+    void stopWakesBlockedPollerImmediately() throws Exception {
+        // GET /next on a background thread — blocks in pendingQueue.poll(30s).
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET()
+                .build();
+        CompletableFuture<HttpResponse<String>> asyncResponse =
+                httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
+
+        // Give the handler time to enter poll()
+        Thread.sleep(500);
+        assertFalse(asyncResponse.isDone(), "handler should be blocked in poll");
+
+        long start = System.currentTimeMillis();
+        server.stop();
+        HttpResponse<String> response = asyncResponse.get(2, TimeUnit.SECONDS);
+        long elapsed = System.currentTimeMillis() - start;
+
+        // 204 requires the handler to have: woken from poll, observed sentinel, exited loop,
+        // written the response. Proves the worker thread is released (not just the socket closed).
+        assertEquals(204, response.statusCode());
+        assertTrue(elapsed < 1000, "stop() should wake poller in <1s, took " + elapsed + "ms");
+    }
+
+    @Test
+    @Timeout(15)
+    void stopCompletesQueuedInvocationsWithContainerStopped() throws Exception {
+        // Enqueue an invocation, but never call /next — it sits in pendingQueue.
+        PendingInvocation invocation = new PendingInvocation(
+                "req-queued", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        // stop() must drain the queue and complete the future — not discard it silently.
+        server.stop();
+
+        InvokeResult result = invocation.getResultFuture().get(2, TimeUnit.SECONDS);
+        assertNotNull(result);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+    }
+
+    @Test
+    @Timeout(15)
+    void enqueueAfterStopCompletesImmediately() throws Exception {
+        server.stop();
+
+        PendingInvocation invocation = new PendingInvocation(
+                "req-late", "{}".getBytes(), System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        // Future is completed synchronously by enqueue() when stopped, so no /next is needed.
+        assertTrue(invocation.getResultFuture().isDone(), "future should be already done");
+        InvokeResult result = invocation.getResultFuture().get(0, TimeUnit.SECONDS);
+        assertEquals("Unhandled", result.getFunctionError());
+        assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+    }
+
     private static int findFreePort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();

@@ -32,6 +32,14 @@ public class RuntimeApiServer {
     private static final String ERROR_PATH = "/" + RUNTIME_API_VERSION + "/runtime/invocation/:requestId/error";
     private static final String INIT_ERROR_PATH = "/" + RUNTIME_API_VERSION + "/runtime/init/error";
 
+    private static final byte[] CONTAINER_STOPPED_PAYLOAD =
+            "{\"errorMessage\":\"Container stopped\",\"errorType\":\"ContainerStopped\"}".getBytes();
+
+    // Sentinel used to wake a /next handler blocked in pendingQueue.poll() when stop() is called.
+    // Compared by identity (==), not equals.
+    private static final PendingInvocation SHUTDOWN_SENTINEL =
+            new PendingInvocation("<shutdown>", new byte[0], 0L, "", new CompletableFuture<>());
+
     private final Vertx vertx;
     private final int port;
     private final LinkedBlockingQueue<PendingInvocation> pendingQueue = new LinkedBlockingQueue<>();
@@ -61,6 +69,17 @@ public class RuntimeApiServer {
                 PendingInvocation invocation = null;
                 while (invocation == null && !stopped) {
                     invocation = pendingQueue.poll(30, TimeUnit.SECONDS);
+                    if (invocation == SHUTDOWN_SENTINEL) {
+                        invocation = null;
+                        break;
+                    }
+                }
+                // If stop() ran after poll() returned a real invocation (narrow race before
+                // inFlight.put), complete it here so the caller doesn't hang.
+                if (invocation != null && stopped) {
+                    invocation.getResultFuture().complete(
+                            new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
+                    invocation = null;
                 }
                 if (invocation == null) {
                     ctx.response().setStatusCode(204).end();
@@ -132,17 +151,44 @@ public class RuntimeApiServer {
         if (httpServer != null) {
             httpServer.close();
         }
-        // Complete any in-flight invocations with error
-        inFlight.values().forEach(inv -> {
-            byte[] errorPayload = "{\"errorMessage\":\"Container stopped\",\"errorType\":\"ContainerStopped\"}".getBytes();
-            inv.getResultFuture().complete(new InvokeResult(200, "Unhandled", errorPayload, null, inv.getRequestId()));
-        });
+
+        // Drain queued invocations that were never consumed by /next, completing each future
+        // with ContainerStopped so callers (LambdaExecutorService) don't hang waiting for a result.
+        PendingInvocation pending;
+        while ((pending = pendingQueue.poll()) != null) {
+            if (pending == SHUTDOWN_SENTINEL) {
+                continue;
+            }
+            pending.getResultFuture().complete(
+                    new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, pending.getRequestId()));
+        }
+
+        // Offer sentinel AFTER drain so it cannot be discarded. Wakes any /next handler
+        // currently blocked in poll(). N=1 today: a single RuntimeApiServer serves one container,
+        // so one sentinel suffices.
+        pendingQueue.offer(SHUTDOWN_SENTINEL);
+
+        // Complete any in-flight invocations with error.
+        inFlight.values().forEach(inv ->
+                inv.getResultFuture().complete(
+                        new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, inv.getRequestId())));
         inFlight.clear();
-        pendingQueue.clear();
     }
 
     public CompletableFuture<InvokeResult> enqueue(PendingInvocation invocation) {
+        if (stopped) {
+            // stop() already ran; don't queue. Complete immediately so caller doesn't hang.
+            invocation.getResultFuture().complete(
+                    new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
+            return invocation.getResultFuture();
+        }
         pendingQueue.offer(invocation);
+        // Close the check-then-offer race: if stop() ran between the guard and offer(),
+        // the drain is done and our invocation would sit forever. Remove and complete.
+        if (stopped && pendingQueue.remove(invocation)) {
+            invocation.getResultFuture().complete(
+                    new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
+        }
         return invocation.getResultFuture();
     }
 }
