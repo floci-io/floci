@@ -138,6 +138,8 @@ class DynamoDbJsonHandlerTest {
 
         assertTrue(attr.has("counter"), "Attributes should have counter");
         assertEquals("60000001", attr.get("counter").get("N").asText());
+
+        assertFalse(attr.has("userId"), "UPDATED_NEW should not include key attributes");
     }
 
     @Test
