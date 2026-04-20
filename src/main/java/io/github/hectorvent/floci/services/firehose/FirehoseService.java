@@ -44,6 +44,13 @@ public class FirehoseService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Stream not found: " + name, 400));
     }
 
+    public void deleteDeliveryStream(String name) {
+        describeDeliveryStream(name); // Checks if it exists and throws if not
+        streamStore.remove(name);
+        buffers.remove(name);
+        LOG.infov("Deleted Firehose Delivery Stream: {0}", name);
+    }
+
     public List<String> listDeliveryStreams() {
         return streamStore.scan(k -> true).stream().map(DeliveryStreamDescription::getDeliveryStreamName).toList();
     }

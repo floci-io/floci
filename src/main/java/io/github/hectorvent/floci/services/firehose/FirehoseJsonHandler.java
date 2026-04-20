@@ -41,8 +41,9 @@ public class FirehoseJsonHandler {
                 yield Response.ok(Map.of("DeliveryStreamNames", firehoseService.listDeliveryStreams(), "HasMoreDeliveryStreams", false)).build();
             }
             case "DeleteDeliveryStream" -> {
-                // TODO: delete implementation
-                yield Response.ok().build();
+                String name = request.get("DeliveryStreamName").asText();
+                firehoseService.deleteDeliveryStream(name);
+                yield Response.ok(Map.of()).build();
             }
             case "PutRecord" -> {
                 String name = request.get("DeliveryStreamName").asText();
