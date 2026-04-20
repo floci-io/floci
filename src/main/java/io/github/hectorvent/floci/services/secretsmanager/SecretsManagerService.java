@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -335,6 +336,82 @@ public class SecretsManagerService {
             }
         }
         return result;
+    }
+
+    public Secret updateSecretVersionStage(String secretId, String moveToVersionId, String removeFromVersionId, String versionStage, String region) {
+
+        if (secretId == null || secretId.isEmpty() || secretId.length() > 2048) {
+            throw new AwsException("InvalidParameterException", "Parameter validation failed. Invalid SecretId.", 400);
+        } else if (versionStage == null || versionStage.isEmpty() || versionStage.length() > 256) {
+            throw new AwsException("InvalidParameterException", "Parameter validation failed. Invalid VersionStage.", 400);
+        } else if (moveToVersionId != null && (moveToVersionId.length() < 32 || moveToVersionId.length() > 64)) {
+            throw new AwsException("InvalidParameterException", "Parameter validation failed. Invalid MoveToVersionId.", 400);
+        } else if (removeFromVersionId != null && (removeFromVersionId.length() < 32 || removeFromVersionId.length() > 64)) {
+            throw new AwsException("InvalidParameterException", "Parameter validation failed. Invalid RemoveFromVersionId.", 400);
+        }
+
+        Secret secret = resolveSecret(secretId, region);
+        if (secret.getDeletedDate() != null) {
+            throw new AwsException("ResourceNotFoundException", "Secrets Manager can't find the specified secret.", 400);
+        }
+
+        SecretVersion versionByStage = findVersionByStage(secret, versionStage);
+        String currentVersionId = versionByStage != null
+                ? versionByStage.getVersionId() : null;
+
+        if (currentVersionId != null) {
+
+            // If the label is attached and you either do not specify
+            // this parameter, or the version ID does not match, then the
+            // operation fails.
+            if (removeFromVersionId == null) {
+                throw new AwsException("InvalidParameterException",
+                        ("The parameter RemoveFromVersionId can't be empty. Staging label %s is currently attached to "
+                            + "version %s, so you must explicitly reference that version in RemoveFromVersionId.")
+                        .formatted(versionByStage, currentVersionId), 400);
+            } else if (!Objects.equals(currentVersionId, removeFromVersionId)) {
+                throw new AwsException("InvalidParameterException",
+                        ("When you move staging label %s, if you specify RemoveFromVersionId, it must be set to the "
+                            + "version that currently has the staging label %s.")
+                        .formatted(versionByStage, currentVersionId), 400);
+            }
+
+            List<String> mutableStages = new ArrayList<>(secret.getVersions()
+                    .get(removeFromVersionId).getVersionStages());
+            mutableStages.remove(versionStage);
+
+            if (AWSCURRENT.equals(versionStage)) {
+                mutableStages.add(AWSPREVIOUS);
+
+                // remove AWSPREVIOUS tag from the previous SecretVersion
+                SecretVersion previous = findVersionByStage(secret, AWSPREVIOUS);
+                if (previous != null) {
+                    List<String> mutablePrevStages =
+                            new ArrayList<>(previous.getVersionStages());
+                    mutablePrevStages.remove(AWSPREVIOUS);
+                    previous.setVersionStages(mutablePrevStages);
+                }
+            }
+            secret.getVersions().get(removeFromVersionId).setVersionStages(mutableStages);
+        }
+
+        if (moveToVersionId != null) {
+            // check whether it exists
+            if (!secret.getVersions().containsKey(moveToVersionId)) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Secrets Manager can't find the specified secret value for VersionId: %s.".formatted(moveToVersionId),
+                        400);
+            }
+
+            // we are adding versionStage to this ID
+            List<String> mutableStages = new ArrayList<>(secret.getVersions().get(moveToVersionId).getVersionStages());
+            mutableStages.add(versionStage);
+            secret.getVersions().get(moveToVersionId).setVersionStages(mutableStages);
+        }
+
+        store.put(regionKey(region, secret.getName()), secret);
+
+        return secret;
     }
 
     public record BatchSecretValue(

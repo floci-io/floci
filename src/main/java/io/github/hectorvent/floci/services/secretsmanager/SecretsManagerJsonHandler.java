@@ -47,6 +47,7 @@ public class SecretsManagerJsonHandler {
             case "BatchGetSecretValue" -> handleBatchGetSecretValue(request, region);
             case "DeleteResourcePolicy" -> Response.ok(objectMapper.createObjectNode()).build();
             case "PutResourcePolicy" -> Response.ok(objectMapper.createObjectNode()).build();
+            case "UpdateSecretVersionStage" -> handleUpdateSecretVersionStage(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -400,6 +401,21 @@ public class SecretsManagerJsonHandler {
                     .entity(new AwsErrorResponse("InvalidParameterException", e.getMessage()))
                     .build();
         }
+    }
+
+    private Response handleUpdateSecretVersionStage(JsonNode request, String region) {
+        String secretId = request.path("SecretId").asText();
+        String moveToVersionId = request.path("MoveToVersionId").asText(null);
+        String removeFromVersionId = request.path("RemoveFromVersionId").asText(null);
+        String versionStage = request.path("VersionStage").asText();
+
+        Secret secret = service.updateSecretVersionStage(secretId,
+                moveToVersionId, removeFromVersionId, versionStage, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ARN", secret.getArn());
+        response.put("Name", secret.getName());
+        return Response.ok(response).build();
     }
 
     private List<Secret.Tag> parseTags(JsonNode request) {

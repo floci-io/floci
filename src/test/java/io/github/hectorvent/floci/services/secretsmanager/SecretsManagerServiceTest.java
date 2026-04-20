@@ -351,4 +351,199 @@ class SecretsManagerServiceTest {
         Secret updated = service.describeSecret("kms-secret", REGION);
         assertEquals("arn:aws:kms:us-east-1:000000000000:key/other-key", updated.getKmsKeyId());
     }
+
+    @Test
+    void updateSecretVersionStageInvalidSecretIdThrows() {
+        String validStage = "AWSCURRENT";
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage(null, null, null, validStage, REGION));
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("", null, null, validStage, REGION));
+        String longId = RandomStringUtils.randomAlphanumeric(2049);
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage(longId, null, null, validStage, REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageInvalidVersionStageThrows() {
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", null, null, null, REGION));
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", null, null, "", REGION));
+        String longStage = RandomStringUtils.randomAlphanumeric(257);
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", null, null, longStage, REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageInvalidMoveToVersionIdThrows() {
+        String shortId = RandomStringUtils.randomAlphanumeric(31);
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", shortId, null, "AWSCURRENT", REGION));
+        String longId = RandomStringUtils.randomAlphanumeric(65);
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", longId, null, "AWSCURRENT", REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageInvalidRemoveFromVersionIdThrows() {
+        String shortId = RandomStringUtils.randomAlphanumeric(31);
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", null, shortId, "AWSCURRENT", REGION));
+        String longId = RandomStringUtils.randomAlphanumeric(65);
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", null, longId, "AWSCURRENT", REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageSecretNotFoundThrows() {
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("non-existent", null, null, "AWSCURRENT", REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageDeletedSecretThrows() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.deleteSecret("my-secret", 7, false, REGION);
+
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", null, null, "AWSCURRENT", REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageRemoveFromRequiredWhenStageAttached() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        String v1Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", v1Id, null, "AWSCURRENT", REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageRemoveFromMustMatchCurrentVersion() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, null);
+
+        String v1Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
+        String v2Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", v1Id, v1Id, "AWSCURRENT", REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageMoveToNonExistentVersionThrows() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        String fakeVersionId = RandomStringUtils.randomAlphanumeric(36);
+
+        assertThrows(AwsException.class, () ->
+                service.updateSecretVersionStage("my-secret", fakeVersionId, null, "NEWLABEL", REGION));
+    }
+
+    @Test
+    void updateSecretVersionStageMovesCustomLabel() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT", "MYSTAGE"));
+
+        String v1Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
+        String v2Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+
+        service.updateSecretVersionStage("my-secret", v1Id, v2Id, "MYSTAGE", REGION);
+
+        SecretVersion v1After = service.getSecretValue("my-secret", v1Id, null, REGION);
+        SecretVersion v2After = service.getSecretValue("my-secret", v2Id, null, REGION);
+
+        assertTrue(v1After.getVersionStages().contains("MYSTAGE"));
+        assertFalse(v2After.getVersionStages().contains("MYSTAGE"));
+    }
+
+    @Test
+    void updateSecretVersionStageMoveAwsCurrentAddsAwsPrevious() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, null);
+
+        String v1Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
+        String v2Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+
+        service.updateSecretVersionStage("my-secret", v1Id, v2Id, "AWSCURRENT", REGION);
+
+        SecretVersion v1After = service.getSecretValue("my-secret", v1Id, null, REGION);
+        SecretVersion v2After = service.getSecretValue("my-secret", v2Id, null, REGION);
+
+        assertTrue(v1After.getVersionStages().contains("AWSCURRENT"));
+        assertFalse(v1After.getVersionStages().contains("AWSPREVIOUS"));
+        assertFalse(v2After.getVersionStages().contains("AWSCURRENT"));
+        assertTrue(v2After.getVersionStages().contains("AWSPREVIOUS"));
+    }
+
+    @Test
+    void updateSecretVersionStageAddsLabelWhenNotAttached() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        String v1Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+
+        service.updateSecretVersionStage("my-secret", v1Id, null, "NEWLABEL", REGION);
+
+        SecretVersion v1After = service.getSecretValue("my-secret", v1Id, null, REGION);
+        assertTrue(v1After.getVersionStages().contains("NEWLABEL"));
+        assertTrue(v1After.getVersionStages().contains("AWSCURRENT"));
+    }
+
+    @Test
+    void updateSecretVersionStageMoveAwsCurrentCleansUpPreviousFromMultiStageVersion() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, null);
+        service.putSecretValue("my-secret", "v3", null, REGION, null);
+
+        String v1Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+        String v3Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+        String v2Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
+
+        service.updateSecretVersionStage("my-secret", v2Id, null, "CUSTOMLABEL", REGION);
+
+        Secret described = service.describeSecret("my-secret", REGION);
+        String v1Id2 = described.getVersions().keySet().stream()
+                .filter(id -> !id.equals(v2Id) && !id.equals(v3Id))
+                .findFirst().orElseThrow();
+
+        service.updateSecretVersionStage("my-secret", v1Id2, v3Id, "AWSCURRENT", REGION);
+
+        SecretVersion v2After = service.getSecretValue("my-secret", v2Id, null, REGION);
+        assertFalse(v2After.getVersionStages().contains("AWSPREVIOUS"));
+        assertTrue(v2After.getVersionStages().contains("CUSTOMLABEL"));
+    }
+
+    @Test
+    void updateSecretVersionStageMoveAwsCurrentRemovesPreviousOnlyVersion() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        service.putSecretValue("my-secret", "v2", null, REGION, null);
+        service.putSecretValue("my-secret", "v3", null, REGION, null);
+
+        String v3Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+        String v2Id = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION).getVersionId();
+
+        service.updateSecretVersionStage("my-secret", v2Id, v3Id, "AWSCURRENT", REGION);
+
+        SecretVersion v2After = service.getSecretValue("my-secret", v2Id, null, REGION);
+        assertTrue(v2After.getVersionStages().contains("AWSCURRENT"));
+        assertFalse(v2After.getVersionStages().contains("AWSPREVIOUS"));
+
+        SecretVersion v3After = service.getSecretValue("my-secret", v3Id, null, REGION);
+        assertTrue(v3After.getVersionStages().contains("AWSPREVIOUS"));
+    }
+
+    @Test
+    void updateSecretVersionStageRemovesLabelOnly() {
+        service.createSecret("my-secret", "v1", null, null, null, null, REGION);
+        String v1Id = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION).getVersionId();
+
+        service.updateSecretVersionStage("my-secret", v1Id, null, "CUSTOMLABEL", REGION);
+        assertTrue(service.getSecretValue("my-secret", v1Id, null, REGION)
+                .getVersionStages().contains("CUSTOMLABEL"));
+
+        service.updateSecretVersionStage("my-secret", null, v1Id, "CUSTOMLABEL", REGION);
+
+        SecretVersion v1After = service.getSecretValue("my-secret", v1Id, null, REGION);
+        assertFalse(v1After.getVersionStages().contains("CUSTOMLABEL"));
+        assertTrue(v1After.getVersionStages().contains("AWSCURRENT"));
+    }
 }
