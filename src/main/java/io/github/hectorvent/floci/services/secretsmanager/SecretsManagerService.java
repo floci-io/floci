@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -7,7 +8,6 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
-import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -17,6 +17,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -161,6 +162,18 @@ public class SecretsManagerService {
                 continue;
             }
             List<String> newStages = new ArrayList<>(version.getVersionStages());
+            // if stage is AWSCURRENT, the previous AWSCURRENT will become
+            // AWSPREVIOUS, and the previous AWSPREVIOUS will drop that stage
+            // name
+            if (stage.equals(AWSCURRENT)) {
+                SecretVersion previous = findVersionByStage(secret, AWSPREVIOUS);
+                if (previous != null) {
+                    List<String> oldPrevious = new ArrayList<>(previous.getVersionStages());
+                    oldPrevious.remove(AWSPREVIOUS);
+                    previous.setVersionStages(oldPrevious);
+                }
+                newStages.add(AWSPREVIOUS);
+            }
             newStages.remove(stage);
 
             version.setVersionStages(newStages);

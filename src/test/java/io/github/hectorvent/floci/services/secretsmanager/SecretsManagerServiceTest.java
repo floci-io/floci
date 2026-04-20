@@ -98,16 +98,25 @@ class SecretsManagerServiceTest {
 
     @Test
     void putSecretValueMultiStage() {
+        // create secret, single secret version exists
         service.createSecret("my-secret", "v1", null, null, null, null, REGION);
-        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT"));
-        service.putSecretValue("my-secret", "v3", null, REGION, List.of("AWSCURRENT", "AWSPENDING"));
-
-        SecretVersion previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
-        assertEquals("v2", previous.getSecretString());
-
         SecretVersion current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
-        assertEquals("v3", current.getSecretString());
+        assertEquals("v1", current.getSecretString());
 
+        // adding new secret version, previous will be v1, current will be v2
+        service.putSecretValue("my-secret", "v2", null, REGION, List.of("AWSCURRENT"));
+        SecretVersion previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
+        assertEquals("v1", previous.getSecretString());
+        current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
+        assertEquals("v2", current.getSecretString());
+
+        // adding new secret version v3, current and pending will be v3,
+        // previous will be v2
+        service.putSecretValue("my-secret", "v3", null, REGION, List.of("AWSCURRENT", "AWSPENDING"));
+        previous = service.getSecretValue("my-secret", null, "AWSPREVIOUS", REGION);
+        assertEquals("v2", previous.getSecretString());
+        current = service.getSecretValue("my-secret", null, "AWSCURRENT", REGION);
+        assertEquals("v3", current.getSecretString());
         SecretVersion pending = service.getSecretValue("my-secret", null, "AWSPENDING", REGION);
         assertEquals("v3", pending.getSecretString());
     }
