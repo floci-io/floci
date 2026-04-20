@@ -148,6 +148,11 @@ floci:
       enabled: true
     ses:
       enabled: true
+      # smtp-host: mailpit          # SMTP server for email relay (empty = store only)
+      # smtp-port: 1025
+      # smtp-user: ""
+      # smtp-pass: ""
+      # smtp-starttls: DISABLED     # DISABLED, OPTIONAL, or REQUIRED
     opensearch:
       enabled: true
       mock: false

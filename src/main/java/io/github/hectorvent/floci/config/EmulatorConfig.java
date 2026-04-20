@@ -430,6 +430,23 @@ public interface EmulatorConfig {
     interface SesServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** SMTP server host for email relay. Empty = relay disabled (emails stored only). */
+        Optional<String> smtpHost();
+
+        /** SMTP server port. */
+        @WithDefault("25")
+        int smtpPort();
+
+        /** SMTP authentication username. Empty = no authentication. */
+        Optional<String> smtpUser();
+
+        /** SMTP authentication password. */
+        Optional<String> smtpPass();
+
+        /** STARTTLS mode: DISABLED, OPTIONAL, or REQUIRED. */
+        @WithDefault("DISABLED")
+        String smtpStarttls();
     }
 
     interface OpenSearchServiceConfig {
