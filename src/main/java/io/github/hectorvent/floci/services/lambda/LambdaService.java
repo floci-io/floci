@@ -232,6 +232,48 @@ public class LambdaService {
         Map<String, String> tags = (Map<String, String>) request.get("Tags");
         if (tags != null) fn.setTags(tags);
 
+        // Architectures
+        @SuppressWarnings("unchecked")
+        List<String> architectures = request.get("Architectures") instanceof List
+                ? (List<String>) request.get("Architectures") : null;
+        if (architectures != null && !architectures.isEmpty()) {
+            fn.setArchitectures(new ArrayList<>(architectures));
+        }
+
+        // EphemeralStorage
+        if (request.get("EphemeralStorage") instanceof Map<?, ?> es) {
+            fn.setEphemeralStorageSize(toInt(es.get("Size"), 512));
+        }
+
+        // TracingConfig
+        if (request.get("TracingConfig") instanceof Map<?, ?> tc) {
+            Object mode = tc.get("Mode");
+            fn.setTracingMode(mode != null ? mode.toString() : "PassThrough");
+        }
+
+        // DeadLetterConfig
+        if (request.get("DeadLetterConfig") instanceof Map<?, ?> dlq) {
+            fn.setDeadLetterTargetArn((String) dlq.get("TargetArn"));
+        }
+
+        // Layers
+        @SuppressWarnings("unchecked")
+        List<String> layers = request.get("Layers") instanceof List
+                ? (List<String>) request.get("Layers") : null;
+        if (layers != null) {
+            fn.setLayers(new ArrayList<>(layers));
+        }
+
+        if (request.containsKey("KMSKeyArn")) {
+            fn.setKmsKeyArn((String) request.get("KMSKeyArn"));
+        }
+
+        if (request.get("VpcConfig") instanceof Map<?, ?>) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
+            fn.setVpcConfig(vpc);
+        }
+
         // Handle code deployment
         @SuppressWarnings("unchecked")
         Map<String, Object> code = (Map<String, Object>) request.get("Code");
@@ -358,6 +400,64 @@ public class LambdaService {
                 @SuppressWarnings("unchecked")
                 Map<String, String> vars = (Map<String, String>) envBlock.get("Variables");
                 fn.setEnvironment(vars != null ? vars : new java.util.HashMap<>());
+            }
+        }
+
+        // RevisionId optimistic locking
+        if (request.containsKey("RevisionId")) {
+            String incomingRevision = (String) request.get("RevisionId");
+            if (incomingRevision != null && !incomingRevision.equals(fn.getRevisionId())) {
+                throw new AwsException("PreconditionFailedException",
+                        "The Revision Id provided does not match the latest Revision Id. "
+                        + "Call the GetFunction or the GetFunctionConfiguration API to retrieve "
+                        + "the latest Revision Id for your resource.", 412);
+            }
+        }
+
+        if (request.containsKey("Architectures")) {
+            @SuppressWarnings("unchecked")
+            List<String> archs = request.get("Architectures") instanceof List
+                    ? (List<String>) request.get("Architectures") : null;
+            if (archs != null && !archs.isEmpty()) {
+                fn.setArchitectures(new ArrayList<>(archs));
+            }
+        }
+
+        if (request.containsKey("EphemeralStorage")) {
+            if (request.get("EphemeralStorage") instanceof Map<?, ?> es) {
+                fn.setEphemeralStorageSize(toInt(es.get("Size"), 512));
+            }
+        }
+
+        if (request.containsKey("TracingConfig")) {
+            if (request.get("TracingConfig") instanceof Map<?, ?> tc) {
+                Object mode = tc.get("Mode");
+                fn.setTracingMode(mode != null ? mode.toString() : "PassThrough");
+            }
+        }
+
+        if (request.containsKey("DeadLetterConfig")) {
+            if (request.get("DeadLetterConfig") instanceof Map<?, ?> dlq) {
+                fn.setDeadLetterTargetArn((String) dlq.get("TargetArn"));
+            }
+        }
+
+        if (request.containsKey("Layers")) {
+            @SuppressWarnings("unchecked")
+            List<String> layerList = request.get("Layers") instanceof List
+                    ? (List<String>) request.get("Layers") : null;
+            fn.setLayers(layerList != null ? new ArrayList<>(layerList) : new ArrayList<>());
+        }
+
+        if (request.containsKey("KMSKeyArn")) {
+            fn.setKmsKeyArn((String) request.get("KMSKeyArn"));
+        }
+
+        if (request.containsKey("VpcConfig")) {
+            if (request.get("VpcConfig") instanceof Map<?, ?>) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
+                fn.setVpcConfig(vpc);
             }
         }
 
@@ -927,6 +1027,10 @@ public class LambdaService {
             zipExtractor.extractTo(zipBytes, codePath);
             fn.setCodeLocalPath(codePath.toAbsolutePath().normalize().toString());
             fn.setCodeSizeBytes(zipBytes.length);
+            try {
+                byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(zipBytes);
+                fn.setCodeSha256(Base64.getEncoder().encodeToString(digest));
+            } catch (java.security.NoSuchAlgorithmException ignored) {}
 
             // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
             if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {

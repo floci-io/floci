@@ -26,6 +26,9 @@ import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Map;
 
@@ -502,15 +505,46 @@ public class LambdaController {
         if (fn.getStateReason() != null) node.put("StateReason", fn.getStateReason());
         if (fn.getStateReasonCode() != null) node.put("StateReasonCode", fn.getStateReasonCode());
         node.put("CodeSize", fn.getCodeSizeBytes());
+        node.put("CodeSha256", fn.getCodeSha256() != null ? fn.getCodeSha256() : "");
         node.put("PackageType", fn.getPackageType());
         if (fn.getImageUri() != null) node.put("ImageUri", fn.getImageUri());
-        node.put("LastModified", String.valueOf(fn.getLastModified()));
+        node.put("LastModified", DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
+                .format(Instant.ofEpochMilli(fn.getLastModified()).atOffset(ZoneOffset.UTC)));
         node.put("RevisionId", fn.getRevisionId());
         node.put("Version", fn.getVersion());
         node.put("LastUpdateStatus", "Successful");
 
+        // Architectures — always present; default x86_64
+        ArrayNode archNode = node.putArray("Architectures");
+        List<String> archs = fn.getArchitectures();
+        (archs != null && !archs.isEmpty() ? archs : List.of("x86_64")).forEach(archNode::add);
+
+        // EphemeralStorage — always present; AWS default 512 MB
+        node.putObject("EphemeralStorage").put("Size", fn.getEphemeralStorageSize());
+
+        // TracingConfig — always present
+        node.putObject("TracingConfig")
+                .put("Mode", fn.getTracingMode() != null ? fn.getTracingMode() : "PassThrough");
+
+        // DeadLetterConfig — only when set
+        if (fn.getDeadLetterTargetArn() != null) {
+            node.putObject("DeadLetterConfig").put("TargetArn", fn.getDeadLetterTargetArn());
+        }
+
+        // Layers — only when non-empty
+        if (fn.getLayers() != null && !fn.getLayers().isEmpty()) {
+            ArrayNode layersNode = node.putArray("Layers");
+            fn.getLayers().forEach(arn -> layersNode.addObject().put("Arn", arn));
+        }
+
+        // KMSKeyArn — only when set
+        if (fn.getKmsKeyArn() != null) {
+            node.put("KMSKeyArn", fn.getKmsKeyArn());
+        }
+
+        // Environment — always present (SDK expects it even when empty)
+        ObjectNode envNode = node.putObject("Environment");
         if (fn.getEnvironment() != null && !fn.getEnvironment().isEmpty()) {
-            ObjectNode envNode = node.putObject("Environment");
             ObjectNode vars = envNode.putObject("Variables");
             fn.getEnvironment().forEach(vars::put);
         }

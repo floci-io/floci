@@ -38,6 +38,14 @@ public class LambdaFunction {
     private String version = "$LATEST";
     private LambdaUrlConfig urlConfig;
     private Integer reservedConcurrentExecutions;
+    private List<String> architectures;
+    private int ephemeralStorageSize = 512;
+    private String tracingMode = "PassThrough";
+    private String deadLetterTargetArn;
+    private List<String> layers = new ArrayList<>();
+    private String kmsKeyArn;
+    private Map<String, Object> vpcConfig;
+    private String codeSha256;
 
     @JsonIgnore
     private volatile ContainerState containerState = ContainerState.COLD;
@@ -119,6 +127,30 @@ public class LambdaFunction {
 
     public Integer getReservedConcurrentExecutions() { return reservedConcurrentExecutions; }
     public void setReservedConcurrentExecutions(Integer reservedConcurrentExecutions) { this.reservedConcurrentExecutions = reservedConcurrentExecutions; }
+
+    public List<String> getArchitectures() { return architectures; }
+    public void setArchitectures(List<String> architectures) { this.architectures = architectures; }
+
+    public int getEphemeralStorageSize() { return ephemeralStorageSize; }
+    public void setEphemeralStorageSize(int ephemeralStorageSize) { this.ephemeralStorageSize = ephemeralStorageSize; }
+
+    public String getTracingMode() { return tracingMode; }
+    public void setTracingMode(String tracingMode) { this.tracingMode = tracingMode; }
+
+    public String getDeadLetterTargetArn() { return deadLetterTargetArn; }
+    public void setDeadLetterTargetArn(String deadLetterTargetArn) { this.deadLetterTargetArn = deadLetterTargetArn; }
+
+    public List<String> getLayers() { return layers; }
+    public void setLayers(List<String> layers) { this.layers = layers; }
+
+    public String getKmsKeyArn() { return kmsKeyArn; }
+    public void setKmsKeyArn(String kmsKeyArn) { this.kmsKeyArn = kmsKeyArn; }
+
+    public Map<String, Object> getVpcConfig() { return vpcConfig; }
+    public void setVpcConfig(Map<String, Object> vpcConfig) { this.vpcConfig = vpcConfig; }
+
+    public String getCodeSha256() { return codeSha256; }
+    public void setCodeSha256(String codeSha256) { this.codeSha256 = codeSha256; }
 
     @JsonIgnore
     public ContainerState getContainerState() { return containerState; }
