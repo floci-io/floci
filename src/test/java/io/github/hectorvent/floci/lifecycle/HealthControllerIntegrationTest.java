@@ -50,7 +50,8 @@ class HealthControllerIntegrationTest {
                 "ecr": "running",
                 "tagging": "running",
                 "bedrock-runtime": "running",
-                "eks": "running"
+                "eks": "running",
+                "pipes": "running"
               },
               "edition": "floci-always-free",
               "version": "dev"

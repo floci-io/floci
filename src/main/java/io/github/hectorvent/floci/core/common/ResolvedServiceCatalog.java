@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeControll
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
+import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
 import io.github.hectorvent.floci.services.ses.SesController;
@@ -198,7 +199,11 @@ public class ResolvedServiceCatalog {
                 descriptor("eks", "eks", config.services().eks().enabled(), true,
                         "eks", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("eks"), Set.of(), Set.of(EksController.class))
+                        Set.of(), Set.of("eks"), Set.of(), Set.of(EksController.class)),
+                descriptor("pipes", "pipes", config.services().pipes().enabled(), true,
+                        "pipes", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("pipes"), Set.of(), Set.of(PipesController.class))
         ));
     }
 

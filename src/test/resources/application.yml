@@ -142,3 +142,5 @@ floci:
     eks:
       enabled: true
       mock: true
+    pipes:
+      enabled: true

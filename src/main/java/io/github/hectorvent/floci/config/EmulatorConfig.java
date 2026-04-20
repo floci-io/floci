@@ -236,6 +236,7 @@ public interface EmulatorConfig {
         ResourceGroupsTaggingServiceConfig tagging();
         BedrockRuntimeServiceConfig bedrockRuntime();
         EksServiceConfig eks();
+        PipesServiceConfig pipes();
     }
 
     interface SsmServiceConfig {
@@ -576,6 +577,11 @@ public interface EmulatorConfig {
     }
 
     interface AppConfigDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface PipesServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
