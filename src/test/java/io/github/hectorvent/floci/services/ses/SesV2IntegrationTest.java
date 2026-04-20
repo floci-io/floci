@@ -296,6 +296,23 @@ class SesV2IntegrationTest {
             .body("MessageId", notNullValue());
     }
 
+    @Test
+    @Order(14)
+    void createEmailIdentity_rejectsLeadingTrailingWhitespace() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailIdentity": " padded@example.com "}
+                """)
+        .when()
+            .post("/v2/email/identities")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("leading or trailing whitespace"));
+    }
+
     // ──────────────── DKIM Attributes ────────────────
 
     @Test

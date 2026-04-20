@@ -51,41 +51,40 @@ public class SesService {
     }
 
     public Identity verifyEmailIdentity(String emailAddress, String region) {
-        String normalizedEmailAddress = normalizeIdentity(emailAddress);
-        if (normalizedEmailAddress == null || normalizedEmailAddress.isBlank()) {
+        validateIdentityWhitespace(emailAddress, "Email address");
+        if (emailAddress == null || emailAddress.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Email address is required.", 400);
         }
-        String key = identityKey(region, normalizedEmailAddress);
+        String key = identityKey(region, emailAddress);
         Identity existing = identityStore.get(key).orElse(null);
         if (existing != null) return existing;
 
-        Identity identity = new Identity(normalizedEmailAddress, "EmailAddress");
+        Identity identity = new Identity(emailAddress, "EmailAddress");
         identityStore.put(key, identity);
-        LOG.infov("Verified email identity: {0} in region {1}", normalizedEmailAddress, region);
+        LOG.infov("Verified email identity: {0} in region {1}", emailAddress, region);
         return identity;
     }
 
     public Identity verifyDomainIdentity(String domain, String region) {
-        String normalizedDomain = normalizeIdentity(domain);
-        if (normalizedDomain == null || normalizedDomain.isBlank()) {
+        validateIdentityWhitespace(domain, "Domain");
+        if (domain == null || domain.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Domain is required.", 400);
         }
-        String key = identityKey(region, normalizedDomain);
+        String key = identityKey(region, domain);
         Identity existing = identityStore.get(key).orElse(null);
         if (existing != null) return existing;
 
-        Identity identity = new Identity(normalizedDomain, "Domain");
+        Identity identity = new Identity(domain, "Domain");
         identityStore.put(key, identity);
-        LOG.infov("Verified domain identity: {0} in region {1}", normalizedDomain, region);
+        LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
         return identity;
     }
 
     public void deleteIdentity(String identityValue, String region) {
-        String normalizedIdentity = normalizeIdentity(identityValue);
-        if (normalizedIdentity == null || normalizedIdentity.isBlank()) {
+        if (identityValue == null || identityValue.isBlank()) {
             return;
         }
-        String key = identityKey(region, normalizedIdentity);
+        String key = identityKey(region, identityValue);
         identityStore.delete(key);
 
         String prefix = "identity::" + region + "::";
@@ -94,12 +93,12 @@ public class SesService {
                 .toList());
         for (String storedKey : keys) {
             Identity storedIdentity = identityStore.get(storedKey).orElse(null);
-            if (storedIdentity != null && normalizedIdentity.equals(normalizeIdentity(storedIdentity.getIdentity()))) {
+            if (storedIdentity != null && identityValue.equals(storedIdentity.getIdentity())) {
                 identityStore.delete(storedKey);
             }
         }
 
-        LOG.infov("Deleted identity: {0}", normalizedIdentity);
+        LOG.infov("Deleted identity: {0}", identityValue);
     }
 
     public List<Identity> listIdentities(String identityType, String region) {
@@ -238,11 +237,16 @@ public class SesService {
     }
 
     private static String identityKey(String region, String identity) {
-        String normalizedIdentity = normalizeIdentity(identity);
-        return "identity::" + region + "::" + normalizedIdentity;
+        validateIdentityWhitespace(identity, "Identity");
+        return "identity::" + region + "::" + identity;
     }
 
-    private static String normalizeIdentity(String identity) {
-        return identity == null ? null : identity.trim();
+    private static void validateIdentityWhitespace(String identity, String fieldName) {
+        if (identity == null || identity.isBlank()) {
+            return;
+        }
+        if (Character.isWhitespace(identity.charAt(0)) || Character.isWhitespace(identity.charAt(identity.length() - 1))) {
+            throw new AwsException("InvalidParameterValue", fieldName + " must not contain leading or trailing whitespace.", 400);
+        }
     }
 }

@@ -382,6 +382,38 @@ class SesIntegrationTest {
 
     @Test
     @Order(21)
+    void verifyEmailIdentity_rejectsLeadingTrailingWhitespace() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", authorization("email"))
+            .formParam("Action", "VerifyEmailIdentity")
+            .formParam("EmailAddress", " sender@example.com ")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"))
+            .body(containsString("leading or trailing whitespace"));
+    }
+
+    @Test
+    @Order(22)
+    void verifyDomainIdentity_rejectsLeadingTrailingWhitespace() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", authorization("email"))
+            .formParam("Action", "VerifyDomainIdentity")
+            .formParam("Domain", " example.com ")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"))
+            .body(containsString("leading or trailing whitespace"));
+    }
+
+    @Test
+    @Order(23)
     void unsupportedAction_returns400() {
         given()
             .contentType("application/x-www-form-urlencoded")
