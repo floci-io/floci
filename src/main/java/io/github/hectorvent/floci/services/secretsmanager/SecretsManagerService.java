@@ -153,18 +153,33 @@ public class SecretsManagerService {
             stages = List.of(AWSCURRENT);
         }
 
+        SecretVersion previousCurrent = stages.contains(AWSCURRENT) ? findVersionByStage(secret, AWSCURRENT) : null;
+
         for (String stage : stages) {
             SecretVersion version = findVersionByStage(secret, stage);
             if (version == null) {
                 continue;
             }
             List<String> newStages = new ArrayList<>(version.getVersionStages());
-            if (stage.equals(AWSCURRENT)) {
-                newStages.add(AWSPREVIOUS);
-            }
             newStages.remove(stage);
 
             version.setVersionStages(newStages);
+        }
+
+        if (previousCurrent != null) {
+            for (SecretVersion version : secret.getVersions().values()) {
+                List<String> assignedStages = version.getVersionStages();
+                if (assignedStages == null || !assignedStages.contains(AWSPREVIOUS)) {
+                    continue;
+                }
+                List<String> newStages = new ArrayList<>(assignedStages);
+                newStages.removeIf(AWSPREVIOUS::equals);
+                version.setVersionStages(newStages);
+            }
+
+            List<String> newStages = new ArrayList<>(previousCurrent.getVersionStages());
+            newStages.add(AWSPREVIOUS);
+            previousCurrent.setVersionStages(newStages);
         }
 
         SecretVersion newVersion = new SecretVersion();
