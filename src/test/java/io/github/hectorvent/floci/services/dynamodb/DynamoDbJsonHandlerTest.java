@@ -109,6 +109,38 @@ class DynamoDbJsonHandlerTest {
     }
     
     @Test
+    void updateItemReturnValuesUpdatedNewOnNewItem() throws Exception {
+        createUsersTable();
+
+        // Item does not exist - UpdateItem creates it
+        ObjectNode key = item("userId", "u-new");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        ObjectNode startVal = mapper.createObjectNode();
+        startVal.put("N", "60000000");
+        ObjectNode incVal = mapper.createObjectNode();
+        incVal.put("N", "1");
+        exprValues.set(":start", startVal);
+        exprValues.set(":inc", incVal);
+
+        JsonNode request = createRequest("Users", key,
+                "SET counter = if_not_exists(counter, :start) + :inc",
+                null, exprValues, "UPDATED_NEW");
+
+        Response response = handler.handle("UpdateItem", request, "us-east-1");
+        assertNotNull(response);
+
+        JsonNode responseData = mapper.convertValue(response.getEntity(), JsonNode.class);
+
+        assertNotNull(responseData);
+        assertTrue(responseData.has("Attributes"), "Attributes must be present when item is newly created");
+        JsonNode attr = responseData.get("Attributes");
+
+        assertTrue(attr.has("counter"), "Attributes should have counter");
+        assertEquals("60000001", attr.get("counter").get("N").asText());
+    }
+
+    @Test
     void updateItemReturnValuesUpdatedOld()  throws Exception {
         createUsersTable();
 

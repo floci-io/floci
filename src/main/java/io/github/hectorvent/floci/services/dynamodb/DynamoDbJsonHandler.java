@@ -294,10 +294,18 @@ public class DynamoDbJsonHandler {
             response.set("Attributes", result.newItem());
         } else if ("ALL_OLD" .equals(returnValues) && result.oldItem() != null) {
             response.set("Attributes", result.oldItem());
-        } else if ("UPDATED_NEW".equals(returnValues) && result.oldItem() != null && result.newItem() != null) {
-            response.set("Attributes", getChangedAttributes(result.newItem(), result.oldItem()));
-        } else if ("UPDATED_OLD".equals(returnValues) && result.oldItem() != null && result.newItem() != null) {
-            response.set("Attributes", getChangedAttributes(result.oldItem(), result.newItem()));
+        } else if ("UPDATED_NEW".equals(returnValues) && result.newItem() != null) {
+            if (result.oldItem() != null) {
+                response.set("Attributes", getChangedAttributes(result.newItem(), result.oldItem()));
+            } else {
+                response.set("Attributes", result.newItem());
+            }
+        } else if ("UPDATED_OLD".equals(returnValues) && result.oldItem() != null) {
+            if (result.newItem() != null) {
+                response.set("Attributes", getChangedAttributes(result.oldItem(), result.newItem()));
+            } else {
+                response.set("Attributes", result.oldItem());
+            }
         }
         addConsumedCapacity(response, request, tableName, 1, true);
         return Response.ok(response).build();
