@@ -1,4 +1,9 @@
 {
+  "resources": {
+    "includes": [
+      {"pattern": "META-INF/services/java.security.Provider"}
+    ]
+  },
   "bundles": [
     {"name": "com.sun.org.apache.xerces.internal.impl.msg.XMLMessages"},
     {"name": "com.sun.org.apache.xerces.internal.impl.msg.XMLSerializerMessages"},

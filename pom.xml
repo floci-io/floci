@@ -125,6 +125,10 @@
 
         <!-- BouncyCastle for X.509 certificate generation and PEM handling (ACM service) -->
         <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-security</artifactId>
+        </dependency>
+        <dependency>
             <groupId>org.bouncycastle</groupId>
             <artifactId>bcprov-jdk18on</artifactId>
             <version>1.83</version>
