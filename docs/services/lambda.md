@@ -14,6 +14,7 @@ Lambda runs your function code inside real Docker containers — the same way re
 | `GetFunctionConfiguration` | Get runtime configuration |
 | `ListFunctions` | List all functions |
 | `UpdateFunctionCode` | Upload new code |
+| `UpdateFunctionConfiguration` | Update runtime, handler, memory, timeout, environment, architectures, tracing, layers, and more |
 | `DeleteFunction` | Remove a function |
 | `Invoke` | Invoke a function synchronously or asynchronously |
 | `CreateEventSourceMapping` | Connect SQS / Kinesis / DynamoDB Streams to a function |
@@ -107,7 +108,6 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
 - Layers (`PublishLayerVersion`, `DeleteLayerVersion`, `GetLayerVersion`, `GetLayerVersionByArn`, `AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
-- `UpdateFunctionConfiguration` (use `UpdateFunctionCode` for code-only updates; configuration-only updates are not separately supported)
 - Dead-letter, async invoke config, and event invoke config operations
 - `InvokeWithResponseStream`
 - Code signing management (only `GetFunctionCodeSigningConfig` is wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`)
@@ -123,7 +123,6 @@ floci:
       ephemeral: false                     # Remove container after each invocation
       default-memory-mb: 128
       default-timeout-seconds: 3
-      docker-host: unix:///var/run/docker.sock
       runtime-api-base-port: 9200
       runtime-api-max-port: 9299
       code-path: ./data/lambda-code        # ZIP storage location
@@ -143,6 +142,10 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
 ```
+
+### Private registry authentication
+
+Container image functions (`"PackageType": "Image"`) that pull from private registries need Docker credentials. See [Docker Configuration → Private Registry Authentication](../configuration/docker.md#private-registry-authentication) for the full guide.
 
 ## Examples
 

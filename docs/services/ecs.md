@@ -170,7 +170,7 @@ services:
 
 ### Docker socket requirement
 
-When `mock: false` (the default), ECS launches real Docker containers and requires the Docker socket. Mount it and set the network so containers can reach each other:
+When `mock: false` (the default), ECS launches real Docker containers and requires the Docker socket. Mount it and set the network so containers can reach each other. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
 
 ```yaml
 services:

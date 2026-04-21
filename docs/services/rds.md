@@ -41,7 +41,7 @@ floci:
 
 ### Docker Compose
 
-RDS requires the Docker socket and port range exposure:
+RDS requires the Docker socket and port range exposure. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
 
 ```yaml
 services:

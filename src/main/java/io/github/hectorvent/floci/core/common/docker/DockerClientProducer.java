@@ -30,12 +30,16 @@ public class DockerClientProducer {
     @Produces
     @ApplicationScoped
     public DockerClient dockerClient() {
-        String dockerHost = config.services().lambda().dockerHost();
+        String dockerHost = config.docker().dockerHost();
         LOG.infov("Creating DockerClient for host: {0}", dockerHost);
 
-        DefaultDockerClientConfig clientConfig = DefaultDockerClientConfig.createDefaultConfigBuilder()
-                .withDockerHost(dockerHost)
-                .build();
+        DefaultDockerClientConfig.Builder builder = DefaultDockerClientConfig.createDefaultConfigBuilder()
+                .withDockerHost(dockerHost);
+        config.docker().dockerConfigPath().ifPresent(path -> {
+            LOG.infov("Using Docker config path: {0}", path);
+            builder.withDockerConfig(path);
+        });
+        DefaultDockerClientConfig clientConfig = builder.build();
 
         ApacheDockerHttpClient httpClient = new ApacheDockerHttpClient.Builder()
                 .dockerHost(clientConfig.getDockerHost())

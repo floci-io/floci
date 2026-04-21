@@ -143,6 +143,10 @@ volumes:
 
 Named volumes are managed entirely by Docker and won't create files in your repository. This works with both the JVM and native images.
 
+## Docker Configuration
+
+For Docker daemon socket, private registry authentication, log rotation, and network settings see [Docker Configuration](./docker.md).
+
 ## Environment Variables Reference
 
 All `application.yml` options can be overridden via environment variables using the `FLOCI_` prefix with underscores replacing dots and dashes:
@@ -154,7 +158,11 @@ All `application.yml` options can be overridden via environment variables using 
 | `FLOCI_DEFAULT_ACCOUNT_ID` | `000000000000` | AWS account ID used in ARNs |
 | `FLOCI_STORAGE_MODE` | `memory` | Global storage mode (`memory`, `persistent`, `hybrid`, `wal`) |
 | `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Directory for persistent storage |
-| `FLOCI_SERVICES_LAMBDA_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker host for Lambda containers |
+| `FLOCI_DOCKER_DOCKER_HOST` | `unix:///var/run/docker.sock` | Docker daemon socket (shared by Lambda, RDS, ElastiCache) |
+| `FLOCI_DOCKER_DOCKER_CONFIG_PATH` | `` | Path to dir with Docker's config.json (e.g. `/root/.docker`) |
+| `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__SERVER` | `` | Registry hostname for explicit credential entry 0 |
+| `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__USERNAME` | `` | Username for explicit credential entry 0 |
+| `FLOCI_DOCKER_REGISTRY_CREDENTIALS_0__PASSWORD` | `` | Password for explicit credential entry 0 |
 | `FLOCI_SERVICES_LAMBDA_EPHEMERAL` | `false` | Remove Lambda containers after each invocation |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_MEMORY_MB` | `128` | Default Lambda memory allocation |
 | `FLOCI_SERVICES_LAMBDA_DEFAULT_TIMEOUT_SECONDS` | `3` | Default Lambda timeout |

@@ -68,6 +68,13 @@ floci:
     validate-signatures: false               # Set to true to enforce AWS SigV4 validation
     presign-secret: local-emulator-secret    # HMAC secret for S3 pre-signed URL verification
 
+  docker:
+    log-max-size: "10m"                      # Max size per container log file before rotation
+    log-max-file: "3"                        # Number of rotated log files to retain
+    docker-host: unix:///var/run/docker.sock # Docker daemon socket (shared by Lambda, RDS, ElastiCache)
+    docker-config-path: ""                   # Path to dir containing Docker's config.json (e.g. /root/.docker)
+    registry-credentials: []                 # Per-registry explicit credentials for private registries
+
   services:
     ssm:
       enabled: true
@@ -93,7 +100,6 @@ floci:
       ephemeral: false                        # true = remove container after each invocation
       default-memory-mb: 128
       default-timeout-seconds: 3
-      docker-host: unix:///var/run/docker.sock
       runtime-api-base-port: 9200             # Port range for Lambda Runtime API
       runtime-api-max-port: 9299
       code-path: ./data/lambda-code           # Where ZIP archives are stored

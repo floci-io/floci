@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.config;
 
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
+import java.util.List;
 import java.util.Optional;
 
 @ConfigMapping(prefix = "floci")
@@ -543,9 +544,6 @@ public interface EmulatorConfig {
         @WithDefault("3")
         int defaultTimeoutSeconds();
 
-        @WithDefault("unix:///var/run/docker.sock")
-        String dockerHost();
-
         Optional<String> dockerHostOverride();
 
         @WithDefault("9200")
@@ -665,5 +663,31 @@ public interface EmulatorConfig {
          */
         @WithDefault("3")
         String logMaxFile();
+
+        /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
+        @WithDefault("unix:///var/run/docker.sock")
+        String dockerHost();
+
+        /**
+         * Path to a directory containing Docker's config.json (e.g. /root/.docker).
+         * When set, overrides the system default. Useful when Floci runs inside Docker
+         * and the host ~/.docker directory is mounted in.
+         */
+        Optional<String> dockerConfigPath();
+
+        /**
+         * Explicit credentials for private Docker registries.
+         * Each entry maps a registry hostname to a username/password pair.
+         * Use when mounting the host Docker config is impractical.
+         */
+        @WithDefault("")
+        List<RegistryCredential> registryCredentials();
+
+        interface RegistryCredential {
+            /** Registry hostname (e.g. myregistry.example.com). */
+            String server();
+            String username();
+            String password();
+        }
     }
 }

@@ -2,10 +2,13 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.PullImageResultCallback;
+import com.github.dockerjava.api.model.AuthConfig;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -20,12 +23,14 @@ public class ImageCacheService {
     private static final Logger LOG = Logger.getLogger(ImageCacheService.class);
 
     private final DockerClient dockerClient;
+    private final List<EmulatorConfig.DockerConfig.RegistryCredential> registryCredentials;
     private final Set<String> pulledImages = ConcurrentHashMap.newKeySet();
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
 
     @Inject
-    public ImageCacheService(DockerClient dockerClient) {
+    public ImageCacheService(DockerClient dockerClient, EmulatorConfig config) {
         this.dockerClient = dockerClient;
+        this.registryCredentials = config.docker().registryCredentials();
     }
 
     public void ensureImageExists(String imageUri) {
@@ -40,6 +45,7 @@ public class ImageCacheService {
             LOG.infov("Pulling image: {0}", imageUri);
             try {
                 dockerClient.pullImageCmd(imageUri)
+                        .withAuthConfig(resolveAuth(imageUri))
                         .exec(new PullImageResultCallback())
                         .awaitCompletion(5, TimeUnit.MINUTES);
                 pulledImages.add(imageUri);
@@ -49,5 +55,24 @@ public class ImageCacheService {
                 throw new RuntimeException("Interrupted while pulling image: " + imageUri, e);
             }
         }
+    }
+
+    private AuthConfig resolveAuth(String imageUri) {
+        String host = extractRegistryHost(imageUri);
+        for (EmulatorConfig.DockerConfig.RegistryCredential cred : registryCredentials) {
+            if (cred.server().equals(host)) {
+                LOG.debugv("Using configured credentials for registry: {0}", host);
+                return new AuthConfig()
+                        .withUsername(cred.username())
+                        .withPassword(cred.password())
+                        .withRegistryAddress(cred.server());
+            }
+        }
+        return new AuthConfig();
+    }
+
+    static String extractRegistryHost(String imageUri) {
+        String firstSegment = imageUri.split("/")[0];
+        return (firstSegment.contains(".") || firstSegment.contains(":")) ? firstSegment : "";
     }
 }

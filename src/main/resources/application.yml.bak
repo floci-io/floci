@@ -4,28 +4,22 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.max-request-size}M
-  security:
-     security-providers: BC
   shutdown:
     # Enables the pre-shutdown phase so stop hooks run before the HTTP server stops.
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
   native:
-    additional-build-args:
-      - --report-unsupported-elements-at-runtime
-      - --allow-incomplete-classpath
-      - --enable-url-protocols=http,https
-      - --initialize-at-run-time=io.vertx.ext.mail.impl.sasl.NTLMEngineImpl
-      - --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$Default
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV
-      - --initialize-at-run-time=org.bouncycastle.crypto.prng.SP800SecureRandom
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.rsa.KeyPairGeneratorSpi
-      - --initialize-at-run-time=org.bouncycastle.jcajce.provider.asymmetric.x509.CertificateFactory
-      - --initialize-at-run-time=io.github.hectorvent.floci.core.common.BouncyCastleInitializer
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
-      - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
+    additional-build-args: >-
+      --initialize-at-run-time=org.apache.hc.client5.http.impl.auth.NTLMEngineImpl,
+      --initialize-at-run-time=com.github.dockerjava.transport.NamedPipeSocket$Kernel32,
+      --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$Default,
+      --initialize-at-run-time=org.bouncycastle.jcajce.provider.drbg.DRBG$NonceAndIV,
+      --initialize-at-run-time=org.bouncycastle.crypto.prng.SP800SecureRandom,
+      --initialize-at-run-time=org.bouncycastle.jce.provider.BouncyCastleProvider,
+      --initialize-at-run-time=io.github.hectorvent.floci.core.common.BouncyCastleInitializer,
+      --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService,
+      --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator,
+      --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
 
 floci:
   port: 4566
@@ -71,6 +65,7 @@ floci:
     log-max-file: "3"
     docker-host: unix:///var/run/docker.sock
     docker-config-path: ""
+    registry-credentials: []
 
   services:
     ssm:
@@ -155,11 +150,6 @@ floci:
       enabled: true
     ses:
       enabled: true
-      # smtp-host: mailpit          # SMTP server for email relay (empty = store only)
-      # smtp-port: 1025
-      # smtp-user: ""
-      # smtp-pass: ""
-      # smtp-starttls: DISABLED     # DISABLED, OPTIONAL, or REQUIRED
     opensearch:
       enabled: true
       mock: false

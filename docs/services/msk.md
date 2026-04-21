@@ -31,7 +31,7 @@ floci:
 
 ## How it works
 
-When `mock` is set to `false` (default), Floci uses the Docker API to start a Redpanda container for each created cluster.
+When `mock` is set to `false` (default), Floci uses the Docker API to start a Redpanda container for each created cluster. For Docker socket setup, private registry authentication, and other Docker settings see [Docker Configuration](../configuration/docker.md).
 
 - **Port Mapping**: The Kafka API (9092) is mapped to a dynamic host port.
 - **Persistence**: Data is stored in the Floci persistent path under `msk/<cluster-name>`.

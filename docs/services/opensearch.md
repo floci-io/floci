@@ -17,7 +17,7 @@ Domain metadata is stored in-process. No Docker containers are started. Domains 
 Floci starts an **OpenSearch** (`opensearchproject/opensearch:2`) Docker container per domain. The container is exposed on a host port from the configured range (`9400–9499`). Once `/_cluster/health` returns `green` or `yellow`, the domain transitions to `Created: true` and the `Endpoint` field is populated with the container's address.
 
 !!! note "Docker socket required"
-    Real mode starts Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other.
+    Real mode starts Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
 
 ```yaml
 services:
