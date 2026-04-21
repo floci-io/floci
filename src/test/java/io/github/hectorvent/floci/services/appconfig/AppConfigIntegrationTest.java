@@ -300,7 +300,7 @@ class AppConfigIntegrationTest {
                 .body("tags", anEmptyMap());
     }
 
-    @Test @Order(22)
+    @Test @Order(21)
     void emptyConfigurationReturnsEmptyPayload() {
         emptyAppId = given()
                 .contentType(ContentType.JSON)

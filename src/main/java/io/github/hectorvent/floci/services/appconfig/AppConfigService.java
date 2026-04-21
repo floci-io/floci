@@ -164,22 +164,25 @@ public class AppConfigService {
             case "AppConfig.AllAtOnce" -> {
                 DeploymentStrategy s = new DeploymentStrategy();
                 s.setId(id); s.setName(id);
+                s.setDescription("Quick");
                 s.setDeploymentDurationInMinutes(0); s.setGrowthFactor(100f);
-                s.setFinalBakeTimeInMinutes(0); s.setGrowthType("LINEAR");
+                s.setFinalBakeTimeInMinutes(10); s.setGrowthType("LINEAR");
                 s.setReplicateTo("NONE");
                 yield s;
             }
             case "AppConfig.Linear50PercentEvery30Seconds" -> {
                 DeploymentStrategy s = new DeploymentStrategy();
                 s.setId(id); s.setName(id);
+                s.setDescription("Test/Demo");
                 s.setDeploymentDurationInMinutes(1); s.setGrowthFactor(50f);
-                s.setFinalBakeTimeInMinutes(0); s.setGrowthType("LINEAR");
+                s.setFinalBakeTimeInMinutes(1); s.setGrowthType("LINEAR");
                 s.setReplicateTo("NONE");
                 yield s;
             }
             case "AppConfig.Canary10Percent20Minutes" -> {
                 DeploymentStrategy s = new DeploymentStrategy();
                 s.setId(id); s.setName(id);
+                s.setDescription("AWS Recommended");
                 s.setDeploymentDurationInMinutes(20); s.setGrowthFactor(10f);
                 s.setFinalBakeTimeInMinutes(10); s.setGrowthType("EXPONENTIAL");
                 s.setReplicateTo("NONE");
