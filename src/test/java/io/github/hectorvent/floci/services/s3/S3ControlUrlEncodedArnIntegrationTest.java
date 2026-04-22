@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.core.common.XmlParser;
+import io.restassured.response.Response;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.MethodOrderer;
@@ -7,9 +9,14 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Integration tests for S3 Control API handling of URL-encoded ARN path
@@ -32,6 +39,25 @@ class S3ControlUrlEncodedArnIntegrationTest {
     // What the Go SDK actually puts on the wire: colons AND slashes URL-encoded.
     private static final String ENCODED_ARN =
             "arn%3Aaws%3As3%3A" + REGION + "%3A" + ACCOUNT + "%3Abucket%2F" + BUCKET;
+
+    private void assertS3ControlErrorResponse(Response response) {
+        String body = response.getBody().asString();
+        List<String> requestIds = XmlParser.extractAll(body, "RequestId");
+
+        assertEquals(400, response.statusCode());
+        assertThat(response.getContentType(), containsString("xml"));
+        assertThat(body, containsString("<ErrorResponse xmlns=\"http://awss3control.amazonaws.com/doc/2018-08-20/\">"));
+        assertThat(body, containsString("<Error>"));
+        assertThat(body, containsString("<Code>InvalidRequest</Code>"));
+        assertTrue(body.contains("</Error><RequestId>"),
+                "expected top-level RequestId sibling after the Error block");
+        assertEquals(2, requestIds.size(), "expected inner and top-level RequestId elements");
+        assertEquals(requestIds.get(0), requestIds.get(1),
+                "expected inner and top-level RequestId values to match");
+        assertEquals(requestIds.get(0), response.getHeader("x-amz-request-id"));
+        assertEquals(requestIds.get(0), response.getHeader("x-amzn-RequestId"));
+        assertEquals(requestIds.get(0), response.getHeader("x-amz-id-2"));
+    }
 
     @Test
     @Order(1)
@@ -134,17 +160,12 @@ class S3ControlUrlEncodedArnIntegrationTest {
     @DisplayName("Malformed ARN returns S3 Control ErrorResponse wrapper (#435, #557)")
     void malformedArnReturnsXmlError() {
         // Path param must not contain a literal ':bucket/' segment after decoding.
-        given()
+        Response response = given()
             .header("x-amz-account-id", ACCOUNT)
         .when()
-            .get("/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Abogus%2F" + BUCKET)
-        .then()
-            .statusCode(400)
-            .contentType(containsString("xml"))
-            .body(containsString("<ErrorResponse xmlns=\"http://awss3control.amazonaws.com/doc/2018-08-20/\">"))
-            .body(containsString("<Error>"))
-            .body(containsString("<Code>InvalidRequest</Code>"))
-            .body(containsString("<RequestId>"));
+            .get("/v20180820/tags/arn%3Aaws%3As3%3A%3A%3Abogus%2F" + BUCKET);
+
+        assertS3ControlErrorResponse(response);
     }
 
     @Test
@@ -152,16 +173,11 @@ class S3ControlUrlEncodedArnIntegrationTest {
     @DisplayName("Malformed percent-encoding returns S3 Control ErrorResponse wrapper (#435, #557)")
     void malformedPercentEncodingReturnsXmlError() {
         // %ZZ is not a valid percent-encoding sequence; URLDecoder throws IAE.
-        given()
+        Response response = given()
             .header("x-amz-account-id", ACCOUNT)
         .when()
-            .get("/v20180820/tags/arn%3Aaws%ZZbucket%2F" + BUCKET)
-        .then()
-            .statusCode(400)
-            .contentType(containsString("xml"))
-            .body(containsString("<ErrorResponse xmlns=\"http://awss3control.amazonaws.com/doc/2018-08-20/\">"))
-            .body(containsString("<Error>"))
-            .body(containsString("<Code>InvalidRequest</Code>"))
-            .body(containsString("<RequestId>"));
+            .get("/v20180820/tags/arn%3Aaws%ZZbucket%2F" + BUCKET);
+
+        assertS3ControlErrorResponse(response);
     }
 }
