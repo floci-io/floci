@@ -12,6 +12,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/acm"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
+	"github.com/aws/aws-sdk-go-v2/service/pipes"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
@@ -118,6 +119,11 @@ func ACMClient() *acm.Client {
 // ECRClient returns a new ECR client.
 func ECRClient() *ecr.Client {
 	return ecr.NewFromConfig(Config())
+}
+
+// PipesClient returns a new EventBridge Pipes client.
+func PipesClient() *pipes.Client {
+	return pipes.NewFromConfig(Config())
 }
 
 // MinimalZip returns a minimal Lambda deployment zip with a Node.js handler.

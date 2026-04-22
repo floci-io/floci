@@ -15,6 +15,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.when;
 
 class PipesServiceTest {
@@ -30,7 +31,8 @@ class PipesServiceTest {
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("000000000000");
 
-        pipesService = new PipesService(storageFactory, config);
+        PipesPoller poller = Mockito.mock(PipesPoller.class);
+        pipesService = new PipesService(storageFactory, config, poller);
     }
 
     @Test

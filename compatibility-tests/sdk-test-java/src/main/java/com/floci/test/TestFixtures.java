@@ -36,6 +36,7 @@ import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecr.EcrClient;
+import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.eks.EksClient;
 import software.amazon.awssdk.services.scheduler.SchedulerClient;
@@ -489,6 +490,14 @@ public final class TestFixtures {
 
     public static AppConfigDataClient appConfigDataClient() {
         return AppConfigDataClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static PipesClient pipesClient() {
+        return PipesClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

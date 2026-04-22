@@ -145,6 +145,12 @@ def ecr_client(aws_config, client_config):
     return boto3.client("ecr", config=client_config, **aws_config)
 
 
+@pytest.fixture
+def pipes_client(aws_config, client_config):
+    """Create EventBridge Pipes client."""
+    return boto3.client("pipes", config=client_config, **aws_config)
+
+
 # ============================================
 # Utility Fixtures
 # ============================================

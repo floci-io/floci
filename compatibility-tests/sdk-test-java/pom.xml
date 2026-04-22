@@ -189,6 +189,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>ecr</artifactId>
         </dependency>
+        <!-- EventBridge Pipes client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>pipes</artifactId>
+        </dependency>
         <!-- EKS client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

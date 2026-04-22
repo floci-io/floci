@@ -99,6 +99,11 @@ pub async fn cloudformation_client() -> aws_sdk_cloudformation::Client {
     aws_sdk_cloudformation::Client::new(&base_config().await)
 }
 
+/// Returns an EventBridge Pipes client.
+pub async fn pipes_client() -> aws_sdk_pipes::Client {
+    aws_sdk_pipes::Client::new(&base_config().await)
+}
+
 /// Returns a minimal Lambda deployment zip with a Node.js handler.
 pub fn minimal_zip() -> Vec<u8> {
     use std::io::Write;

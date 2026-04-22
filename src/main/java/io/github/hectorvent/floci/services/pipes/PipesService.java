@@ -27,12 +27,26 @@ public class PipesService implements TagHandler {
 
     private final StorageBackend<String, Pipe> storage;
     private final EmulatorConfig config;
+    private final PipesPoller poller;
 
     @Inject
-    public PipesService(StorageFactory storageFactory, EmulatorConfig config) {
+    public PipesService(StorageFactory storageFactory, EmulatorConfig config, PipesPoller poller) {
         this.storage = storageFactory.create("pipes", "pipes.json",
                 new TypeReference<Map<String, Pipe>>() {});
         this.config = config;
+        this.poller = poller;
+    }
+
+    public void startPersistedPollers() {
+        List<Pipe> runningPipes = storage.scan(key -> true).stream()
+                .filter(pipe -> pipe.getCurrentState() == PipeState.RUNNING)
+                .toList();
+        for (Pipe pipe : runningPipes) {
+            poller.startPolling(pipe);
+        }
+        if (!runningPipes.isEmpty()) {
+            LOG.infov("Resumed polling for {0} pipe(s)", runningPipes.size());
+        }
     }
 
     public Pipe createPipe(String name, String source, String target, String roleArn,
@@ -83,6 +97,10 @@ public class PipesService implements TagHandler {
 
         storage.put(key, pipe);
         LOG.infov("Created pipe: {0}", name);
+
+        if (pipe.getCurrentState() == PipeState.RUNNING) {
+            poller.startPolling(pipe);
+        }
         return pipe;
     }
 
@@ -108,6 +126,11 @@ public class PipesService implements TagHandler {
         if (desiredState != null) {
             pipe.setDesiredState(desiredState);
             pipe.setCurrentState(desiredState == DesiredState.RUNNING ? PipeState.RUNNING : PipeState.STOPPED);
+            if (desiredState == DesiredState.RUNNING) {
+                poller.startPolling(pipe);
+            } else {
+                poller.stopPolling(pipe);
+            }
         }
         if (enrichment != null) pipe.setEnrichment(enrichment);
         if (sourceParameters != null) pipe.setSourceParameters(sourceParameters);
@@ -122,10 +145,10 @@ public class PipesService implements TagHandler {
 
     public void deletePipe(String name, String region) {
         String key = region + "::" + name;
-        if (storage.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException",
-                    "Pipe " + name + " does not exist.", 404);
-        }
+        Pipe pipe = storage.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Pipe " + name + " does not exist.", 404));
+        poller.stopPolling(pipe);
         storage.delete(key);
         LOG.infov("Deleted pipe: {0}", name);
     }
@@ -152,6 +175,7 @@ public class PipesService implements TagHandler {
         pipe.setCurrentState(PipeState.RUNNING);
         pipe.setLastModifiedTime(Instant.now());
         storage.put(key, pipe);
+        poller.startPolling(pipe);
         LOG.infov("Started pipe: {0}", name);
         return pipe;
     }
@@ -162,6 +186,7 @@ public class PipesService implements TagHandler {
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
 
+        poller.stopPolling(pipe);
         pipe.setDesiredState(DesiredState.STOPPED);
         pipe.setCurrentState(PipeState.STOPPED);
         pipe.setLastModifiedTime(Instant.now());

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyMan
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
+import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.Quarkus;
@@ -42,6 +43,7 @@ public class EmulatorLifecycle {
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
+    private final PipesService pipesService;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -53,7 +55,8 @@ public class EmulatorLifecycle {
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
-                             DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller) {
+                             DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
+                             PipesService pipesService) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -65,6 +68,7 @@ public class EmulatorLifecycle {
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
+        this.pipesService = pipesService;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -78,6 +82,7 @@ public class EmulatorLifecycle {
         sqsPoller.startPersistedPollers();
         kinesisPoller.startPersistedPollers();
         dynamodbStreamsPoller.startPersistedPollers();
+        pipesService.startPersistedPollers();
 
         if (!initializationHooksRunner.hasHooks(InitializationHook.START)) {
             LOG.info("=== AWS Local Emulator Ready ===");

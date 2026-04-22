@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyMan
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
+import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
@@ -45,6 +46,7 @@ class EmulatorLifecycleTest {
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
     @Mock private DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
+    @Mock private PipesService pipesService;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -54,7 +56,7 @@ class EmulatorLifecycleTest {
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheProxyManager,
                 rdsContainerManager, rdsProxyManager, initializationHooksRunner,
-                sqsPoller, kinesisPoller, dynamodbStreamsPoller);
+                sqsPoller, kinesisPoller, dynamodbStreamsPoller, pipesService);
     }
 
     private void stubStorageConfig() {
