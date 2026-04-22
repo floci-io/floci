@@ -260,6 +260,9 @@ public interface EmulatorConfig {
 
         @WithDefault("262144")
         int maxMessageSize();
+
+        @WithDefault("false")
+        boolean clearFifoDeduplicationCacheOnPurge();
     }
 
     interface S3ServiceConfig {

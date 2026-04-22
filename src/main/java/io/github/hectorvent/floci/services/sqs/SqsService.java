@@ -40,6 +40,7 @@ public class SqsService {
     private final int maxMessageSize;
     private final String baseUrl;
     private final RegionResolver regionResolver;
+    private final boolean clearFifoDeduplicationCacheOnPurge;
 
     @Inject
     public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -56,7 +57,8 @@ public class SqsService {
                 config.services().sqs().defaultVisibilityTimeout(),
                 config.services().sqs().maxMessageSize(),
                 config.effectiveBaseUrl(),
-                regionResolver
+                regionResolver,
+                config.services().sqs().clearFifoDeduplicationCacheOnPurge()
         );
     }
 
@@ -66,13 +68,21 @@ public class SqsService {
     SqsService(StorageBackend<String, Queue> queueStore,
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl) {
         this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
-                new RegionResolver("us-east-1", "000000000000"));
+                new RegionResolver("us-east-1", "000000000000"), false);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
                StorageBackend<String, Map<String, Long>> dedupStore,
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver) {
+        this(queueStore, messageStore, dedupStore, defaultVisibilityTimeout, maxMessageSize, baseUrl,
+                regionResolver, false);
+    }
+
+    SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
+               StorageBackend<String, Map<String, Long>> dedupStore,
+               int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -80,6 +90,7 @@ public class SqsService {
         this.maxMessageSize = maxMessageSize;
         this.baseUrl = baseUrl;
         this.regionResolver = regionResolver;
+        this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
         loadPersistedMessages();
         loadPersistedDedup();
     }
@@ -602,7 +613,14 @@ public class SqsService {
         String storageKey = regionKey(region, queueUrl);
         ensureQueueExists(storageKey);
         getOrCreateQueue(storageKey).purge();
-        LOG.infov("Purged queue: {0}", queueUrl);
+        if (clearFifoDeduplicationCacheOnPurge) {
+            deduplicationCache.remove(storageKey);
+            if (dedupStore != null) {
+                dedupStore.delete(storageKey);
+            }
+        }
+        LOG.infov("Purged queue{0}: {1}",
+                clearFifoDeduplicationCacheOnPurge ? " (dedup cache cleared)" : "", queueUrl);
     }
 
     public void setQueueAttributes(String queueUrl, Map<String, String> attributes, String region) {

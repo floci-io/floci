@@ -37,6 +37,7 @@ floci:
       enabled: true
       default-visibility-timeout: 30  # Seconds
       max-message-size: 262144        # 256 KB
+      clear-fifo-deduplication-cache-on-purge: false  # When true, PurgeQueue also clears the FIFO 5-minute deduplication cache
 ```
 
 ## Examples

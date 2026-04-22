@@ -80,6 +80,7 @@ floci:
       enabled: true
       default-visibility-timeout: 30
       max-message-size: 262144
+      clear-fifo-deduplication-cache-on-purge: false
     s3:
       enabled: true
       default-presign-expiry-seconds: 3600

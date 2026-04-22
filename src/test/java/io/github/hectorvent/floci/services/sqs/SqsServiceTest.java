@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.sqs;
 
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
@@ -344,5 +345,80 @@ class SqsServiceTest {
         List<Message> immediate = sqsService.receiveMessage(queue.getQueueUrl(), 1, 0, 0);
         assertEquals(1, immediate.size(),
                 "FIFO queues must ignore per-message DelaySeconds");
+    }
+
+    // --- clearFifoDeduplicationCacheOnPurge tests ---
+
+    @Test
+    void purgeQueueClearsFifoDeduplicationCacheWhenEnabled() {
+        final var service = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true);
+
+        final var queue = service.createQueue("dedup-clear.fifo", Map.of("ContentBasedDeduplication", "true"));
+
+        // First send — message M1 added, dedup cache populated with "dedup-1"
+        final var m1 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1");
+        assertNotNull(m1.getMessageId());
+
+        // Purge clears both messages and the dedup cache
+        service.purgeQueue(queue.getQueueUrl());
+        assertTrue(service.receiveMessage(queue.getQueueUrl(), 10, 0, 0).isEmpty(),
+                "Queue must be empty after purge");
+
+        // Re-send with the same dedup ID — cache was cleared so this is treated as a fresh send
+        final var m2 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1");
+        assertNotNull(m2.getMessageId());
+
+        final var received = service.receiveMessage(queue.getQueueUrl(), 10, 30, 0);
+        assertEquals(1, received.size(), "One message must be in the queue after re-send");
+
+        // Third send with same dedup ID — fresh cache entry from m2 deduplicates correctly
+        final var m3 = service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1");
+        assertEquals(m2.getMessageId(), m3.getMessageId(),
+                "Dedup must work with the fresh cache entry after purge");
+    }
+
+    @Test
+    void purgeQueuePreservesFifoDeduplicationCacheByDefault() {
+        // Default service has clearFifoDeduplicationCacheOnPurge=false
+        final var queue = sqsService.createQueue("dedup-preserve.fifo",
+                Map.of("ContentBasedDeduplication", "true"));
+
+        // Send and then purge — messages are gone but dedup cache is intact
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1");
+        sqsService.purgeQueue(queue.getQueueUrl());
+
+        assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 10, 0, 0).isEmpty(),
+                "Queue must be empty after purge");
+
+        // Re-send with same dedup ID — dedup cache fires but finds no message (purged),
+        // so it falls through and creates a new message
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1");
+
+        final var received = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0);
+        assertEquals(1, received.size(),
+                "Re-send after purge must produce exactly one message in the queue");
+    }
+
+    @Test
+    void purgeQueueClearsDedupStoreWhenEnabled() {
+        final var dedupStore = new InMemoryStorage<String, Map<String, Long>>();
+        final var service = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), dedupStore,
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true);
+
+        final var queue = service.createQueue("dedup-store-clear.fifo",
+                Map.of("ContentBasedDeduplication", "true"));
+
+        // Send a message — dedup entry must be persisted to the store
+        service.sendMessage(queue.getQueueUrl(), "msg", 0, "group1", "dedup-1");
+        assertFalse(dedupStore.keys().isEmpty(),
+                "Dedup store must have an entry after sending a FIFO message");
+
+        // Purge with flag enabled — dedupStore entry for the queue must be removed
+        service.purgeQueue(queue.getQueueUrl());
+        assertTrue(dedupStore.keys().isEmpty(),
+                "Dedup store must be empty after purge with clearFifoDeduplicationCacheOnPurge=true");
     }
 }
