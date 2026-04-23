@@ -20,6 +20,7 @@ import org.jboss.logging.Logger;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -40,8 +41,8 @@ public class DynamoDbService {
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
-    // Per-item locks: storageKey -> itemKey -> ReentrantLock. See PLAN-dynamodb-concurrency.md.
-    // Locks are created lazily on first access and never removed; transactWriteItems
+    // Per-item locks: storageKey -> itemKey -> ReentrantLock. Locks are created lazily
+    // on first access and cleared with the table (see deleteTable); transactWriteItems
     // relies on ReentrantLock's re-entrancy so the inner put/update/delete calls do
     // not deadlock after the outer transaction already took each participant's lock.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
@@ -217,6 +218,7 @@ public class DynamoDbService {
         }
         tableStore.delete(storageKey);
         itemsByTable.remove(storageKey);
+        itemLocks.remove(storageKey);
         if (itemStore != null) {
             itemStore.delete(storageKey);
         }
@@ -685,12 +687,15 @@ public class DynamoDbService {
         // order before evaluating conditions or applying writes. Total-ordered acquisition
         // prevents deadlock across concurrent transactions; ReentrantLock lets the inner
         // putItem/updateItem/deleteItem calls re-enter the same lock for free.
-        TreeMap<String, ReentrantLock> toAcquire = new TreeMap<>();
+        //
+        // Ordering uses a tuple comparator — not a delimited string — so user-supplied
+        // bytes in an item's PK/SK value cannot collide two distinct participants
+        // into the same ordering key.
+        TreeMap<TransactParticipant, ReentrantLock> toAcquire = new TreeMap<>(PARTICIPANT_ORDER);
         for (JsonNode transactItem : transactItems) {
             TransactParticipant p = resolveParticipant(transactItem, region);
             if (p == null) continue;
-            String orderingKey = p.storageKey + "\0" + p.itemKey;
-            toAcquire.putIfAbsent(orderingKey, lockFor(p.storageKey, p.itemKey));
+            toAcquire.putIfAbsent(p, lockFor(p.storageKey, p.itemKey));
         }
 
         List<ReentrantLock> acquired = new ArrayList<>(toAcquire.size());
@@ -752,6 +757,10 @@ public class DynamoDbService {
 
     private record TransactParticipant(String storageKey, String itemKey) {}
 
+    private static final Comparator<TransactParticipant> PARTICIPANT_ORDER =
+            Comparator.comparing(TransactParticipant::storageKey)
+                    .thenComparing(TransactParticipant::itemKey);
+
     private TransactParticipant resolveParticipant(JsonNode transactItem, String region) {
         JsonNode target;
         boolean isPut = false;
@@ -768,7 +777,7 @@ public class DynamoDbService {
             return null;
         }
 
-        String tableName = target.path("TableName").asText();
+        String tableName = canonicalTableName(region, target.path("TableName").asText());
         JsonNode keyOrItem = isPut ? target.get("Item") : target.get("Key");
         if (keyOrItem == null) {
             return null;

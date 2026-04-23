@@ -38,7 +38,7 @@ import static org.junit.jupiter.api.Assertions.*;
  * regression that surfaces intermittently has a real chance of being observed in a
  * single CI run.
  *
- * <p>See issue #571 and PLAN-dynamodb-concurrency.md.
+ * <p>See issue #571.
  */
 class DynamoDbConcurrencyIntegrationTest {
 

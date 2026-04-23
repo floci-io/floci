@@ -43,8 +43,7 @@ import static org.assertj.core.api.Assertions.assertThat;
  * End-to-end concurrency tests against a running Floci instance.
  *
  * <p>Covers the four scenarios that must match real DynamoDB's per-item
- * linearisability and transaction atomicity — see issue #571 and
- * PLAN-dynamodb-concurrency.md.
+ * linearisability and transaction atomicity — see issue #571.
  *
  * <p>Each scenario uses a shared {@link CountDownLatch} starting gate so
  * client threads dispatch simultaneously, maximising contention at the server.
