@@ -278,6 +278,19 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createFunctionWithNestedPythonPackageHandler() throws Exception {
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "nested-python-package-handler-fn",
+                "Runtime", "python3.11",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Handler", "apps.foo.src.lambda_handler.lambda_handler",
+                "Code", Map.of("ZipFile", createZipBase64("apps/foo/src/lambda_handler/__init__.py"))
+        ));
+        LambdaFunction fn = service.createFunction(REGION, req);
+        assertEquals("apps.foo.src.lambda_handler.lambda_handler", fn.getHandler());
+    }
+
+    @Test
     void createFunctionWithMissingHandler() throws Exception {
         Map<String, Object> req = new java.util.HashMap<>(Map.of(
                 "FunctionName", "missing-handler-fn",

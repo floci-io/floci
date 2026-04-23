@@ -1035,15 +1035,21 @@ public class LambdaService {
             // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
             if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {
                 String handlerFile = resolveHandlerFilePath(fn);
-                boolean found = Files.walk(codePath)
-                        .filter(Files::isRegularFile)
-                        .anyMatch(p -> {
-                            String relative = codePath.relativize(p).toString();
-                            String withoutExt = relative.contains(".")
-                                    ? relative.substring(0, relative.lastIndexOf('.'))
-                                    : relative;
-                            return withoutExt.replace('\\', '/').equals(handlerFile);
-                        });
+                boolean pythonRuntime = fn.getRuntime().startsWith("python");
+                boolean found;
+                try (var walk = Files.walk(codePath)) {
+                    found = walk
+                            .filter(Files::isRegularFile)
+                            .anyMatch(p -> {
+                                String relative = codePath.relativize(p).toString();
+                                String withoutExt = relative.contains(".")
+                                        ? relative.substring(0, relative.lastIndexOf('.'))
+                                        : relative;
+                                String normalized = withoutExt.replace('\\', '/');
+                                return normalized.equals(handlerFile)
+                                        || (pythonRuntime && normalized.equals(handlerFile + "/__init__"));
+                            });
+                }
                 if (!found) {
                     throw new AwsException("InvalidParameterValueException",
                             "Handler file '" + handlerFile + "' not found in deployment package", 400);
