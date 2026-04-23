@@ -71,7 +71,7 @@ public class DynamoDbJsonHandler {
     }
 
     private Response handleCreateTable(JsonNode request, String region) {
-        String tableName = request.path("TableName").asText();
+        String tableName = DynamoDbTableNames.requireShortName(request.path("TableName").asText());
 
         List<KeySchemaElement> keySchema = new ArrayList<>();
         request.path("KeySchema").forEach(ks ->
@@ -523,12 +523,12 @@ public class DynamoDbJsonHandler {
             if (streamEnabled) {
                 String viewType = streamSpec.path("StreamViewType").asText("NEW_AND_OLD_IMAGES");
                 StreamDescription sd = dynamoDbStreamService.enableStream(
-                        tableName, table.getTableArn(), viewType, region);
+                        table.getTableName(), table.getTableArn(), viewType, region);
                 table.setStreamEnabled(true);
                 table.setStreamArn(sd.getStreamArn());
                 table.setStreamViewType(viewType);
             } else {
-                dynamoDbStreamService.disableStream(tableName, region);
+                dynamoDbStreamService.disableStream(table.getTableName(), region);
                 table.setStreamEnabled(false);
             }
         }
@@ -693,6 +693,7 @@ public class DynamoDbJsonHandler {
         String streamArn = request.path("StreamArn").asText();
 
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        String resolvedTableName = table.getTableName();
 
         String streamName = streamArn.substring(streamArn.lastIndexOf('/') + 1);
         try {
@@ -717,16 +718,16 @@ public class DynamoDbJsonHandler {
 
         if (!table.isStreamEnabled()) {
             StreamDescription sd = dynamoDbStreamService.enableStream(
-                    tableName, table.getTableArn(), "NEW_AND_OLD_IMAGES", region);
+                    resolvedTableName, table.getTableArn(), "NEW_AND_OLD_IMAGES", region);
             table.setStreamEnabled(true);
             table.setStreamArn(sd.getStreamArn());
             table.setStreamViewType("NEW_AND_OLD_IMAGES");
         }
 
-        dynamoDbService.persistTable(tableName, table, region);
+        dynamoDbService.persistTable(resolvedTableName, table, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("TableName", tableName);
+        response.put("TableName", resolvedTableName);
         response.put("StreamArn", streamArn);
         response.put("DestinationStatus", "ACTIVE");
         response.put("DestinationStatusDescription", "Kinesis streaming is enabled for this table");
@@ -738,6 +739,7 @@ public class DynamoDbJsonHandler {
         String streamArn = request.path("StreamArn").asText();
 
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
+        String resolvedTableName = table.getTableName();
 
         Optional<KinesisStreamingDestination> existing = table.findKinesisStreamingDestination(streamArn);
         if (existing.isEmpty()) {
@@ -752,10 +754,10 @@ public class DynamoDbJsonHandler {
 
         existing.get().setDestinationStatus("DISABLED");
         existing.get().setDestinationStatusDescription("Kinesis streaming is disabled for this table");
-        dynamoDbService.persistTable(tableName, table, region);
+        dynamoDbService.persistTable(resolvedTableName, table, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("TableName", tableName);
+        response.put("TableName", resolvedTableName);
         response.put("StreamArn", streamArn);
         response.put("DestinationStatus", "DISABLED");
         response.put("DestinationStatusDescription", "Kinesis streaming is disabled for this table");
@@ -767,7 +769,7 @@ public class DynamoDbJsonHandler {
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("TableName", tableName);
+        response.put("TableName", table.getTableName());
 
         ArrayNode destinations = objectMapper.createArrayNode();
         for (KinesisStreamingDestination dest : table.getKinesisStreamingDestinations()) {
@@ -795,7 +797,7 @@ public class DynamoDbJsonHandler {
         double cu = isWrite ? Math.max(1.0, itemCount) : Math.max(0.5, itemCount * 0.5);
 
         ObjectNode cc = objectMapper.createObjectNode();
-        cc.put("TableName", tableName);
+        cc.put("TableName", DynamoDbTableNames.resolve(tableName));
         cc.put("CapacityUnits", cu);
 
         if ("INDEXES".equals(returnCC)) {
@@ -829,7 +831,7 @@ public class DynamoDbJsonHandler {
         ArrayNode ccArray = objectMapper.createArrayNode();
         for (String tableName : tableItems.keySet()) {
             ObjectNode cc = objectMapper.createObjectNode();
-            cc.put("TableName", tableName);
+            cc.put("TableName", DynamoDbTableNames.resolve(tableName));
             cc.put("CapacityUnits", isWrite ? 1.0 : 0.5);
             if ("INDEXES".equals(returnCC)) {
                 ObjectNode tableCap = objectMapper.createObjectNode();

@@ -35,6 +35,10 @@ class DynamoDbServiceTest {
                 5L, 5L);
     }
 
+    private static String tableArn(String region, String tableName) {
+        return "arn:aws:dynamodb:" + region + ":000000000000:table/" + tableName;
+    }
+
     private TableDefinition createOrdersTable() {
         return service.createTable("Orders",
                 List.of(
@@ -84,9 +88,27 @@ class DynamoDbServiceTest {
     }
 
     @Test
+    void createTableRejectsArnInput() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createTable("arn:aws:dynamodb:us-east-1:000000000000:table/Users",
+                        List.of(new KeySchemaElement("userId", "HASH")),
+                        List.of(new AttributeDefinition("userId", "S")),
+                        5L, 5L));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
     void describeTable() {
         createUsersTable();
         TableDefinition table = service.describeTable("Users");
+        assertEquals("Users", table.getTableName());
+    }
+
+    @Test
+    void describeTableAcceptsArn() {
+        createUsersTable();
+        TableDefinition table = service.describeTable(tableArn("us-east-1", "Users"));
         assertEquals("Users", table.getTableName());
     }
 
@@ -122,6 +144,67 @@ class DynamoDbServiceTest {
         JsonNode retrieved = service.getItem("Users", key);
         assertNotNull(retrieved);
         assertEquals("Alice", retrieved.get("name").get("S").asText());
+    }
+
+    @Test
+    void putAndGetItemAcceptArnTableName() {
+        createUsersTable();
+        ObjectNode userItem = item("userId", "user-1", "name", "Alice");
+        String usersArn = tableArn("us-east-1", "Users");
+
+        service.putItem(usersArn, userItem);
+
+        JsonNode retrieved = service.getItem(usersArn, item("userId", "user-1"));
+        assertNotNull(retrieved);
+        assertEquals("Alice", retrieved.get("name").get("S").asText());
+    }
+
+    @Test
+    void batchGetPreservesRequestKeyButResolvesArn() {
+        createUsersTable();
+        service.putItem("Users", item("userId", "user-1", "name", "Alice"));
+
+        ObjectNode request = mapper.createObjectNode();
+        request.set("Keys", mapper.createArrayNode().add(item("userId", "user-1")));
+        String usersArn = tableArn("us-east-1", "Users");
+
+        DynamoDbService.BatchGetResult result = service.batchGetItem(java.util.Map.of(usersArn, request), "us-east-1");
+
+        assertTrue(result.responses().containsKey(usersArn));
+        assertEquals("Alice", result.responses().get(usersArn).getFirst().get("name").get("S").asText());
+    }
+
+    @Test
+    void transactWriteConditionChecksAcceptArnTableName() {
+        createUsersTable();
+        service.putItem("Users", item("userId", "user-1", "name", "Alice"));
+        String usersArn = tableArn("us-east-1", "Users");
+
+        ObjectNode exprValues = mapper.createObjectNode();
+        exprValues.set(":name", attributeValue("S", "Alice"));
+
+        ObjectNode update = mapper.createObjectNode();
+        update.put("TableName", usersArn);
+        update.set("Key", item("userId", "user-1"));
+        update.put("ConditionExpression", "name = :name");
+        update.put("UpdateExpression", "SET email = :name");
+        update.set("ExpressionAttributeValues", exprValues);
+
+        ObjectNode transactItem = mapper.createObjectNode();
+        transactItem.set("Update", update);
+
+        assertDoesNotThrow(() -> service.transactWriteItems(List.of(transactItem), "us-east-1"));
+        assertEquals("Alice", service.getItem("Users", item("userId", "user-1")).get("email").get("S").asText());
+    }
+
+    @Test
+    void describeTableRejectsRegionMismatchArn() {
+        createUsersTable();
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.describeTable(tableArn("eu-west-1", "Users")));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test

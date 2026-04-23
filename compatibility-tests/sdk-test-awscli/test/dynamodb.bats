@@ -36,6 +36,23 @@ teardown() {
     [ "$name" = "$TABLE_NAME" ]
 }
 
+@test "DynamoDB: describe table by ARN" {
+    aws_cmd dynamodb create-table \
+        --table-name "$TABLE_NAME" \
+        --attribute-definitions AttributeName=pk,AttributeType=S \
+        --key-schema AttributeName=pk,KeyType=HASH \
+        --billing-mode PAY_PER_REQUEST >/dev/null
+
+    ddb_wait_table "$TABLE_NAME"
+
+    table_arn="arn:aws:dynamodb:${AWS_REGION:-us-east-1}:000000000000:table/$TABLE_NAME"
+
+    run aws_cmd dynamodb describe-table --table-name "$table_arn"
+    assert_success
+    name=$(json_get "$output" '.Table.TableName')
+    [ "$name" = "$TABLE_NAME" ]
+}
+
 @test "DynamoDB: list tables" {
     aws_cmd dynamodb create-table \
         --table-name "$TABLE_NAME" \

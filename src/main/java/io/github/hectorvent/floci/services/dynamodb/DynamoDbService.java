@@ -130,6 +130,11 @@ public class DynamoDbService {
                                         List<GlobalSecondaryIndex> gsis,
                                         List<LocalSecondaryIndex> lsis,
                                         String region) {
+        // Enforce at the service boundary: CreateTable persists its input as the
+        // canonical table name and derives TableArn from it. An ARN-form input
+        // would produce ARN-on-ARN TableArn values. Handler-layer rejection alone
+        // would leave non-HTTP callers able to bypass the guard.
+        DynamoDbTableNames.requireShortName(tableName);
         String storageKey = regionKey(region, tableName);
         if (tableStore.get(storageKey).isPresent()) {
             throw new AwsException("ResourceInUseException",
@@ -174,9 +179,10 @@ public class DynamoDbService {
     }
 
     public TableDefinition describeTable(String tableName, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         // Update dynamic counts
         var items = itemsByTable.get(storageKey);
@@ -187,7 +193,8 @@ public class DynamoDbService {
     }
 
     public void persistTable(String tableName, TableDefinition table, String region) {
-        tableStore.put(regionKey(region, tableName), table);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        tableStore.put(regionKey(region, canonicalTableName), table);
     }
 
     public void deleteTable(String tableName) {
@@ -195,9 +202,10 @@ public class DynamoDbService {
     }
 
     public void deleteTable(String tableName, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         if (tableStore.get(storageKey).isEmpty()) {
-            throw resourceNotFoundException(tableName);
+            throw resourceNotFoundException(canonicalTableName);
         }
         tableStore.delete(storageKey);
         itemsByTable.remove(storageKey);
@@ -205,9 +213,9 @@ public class DynamoDbService {
             itemStore.delete(storageKey);
         }
         if (streamService != null) {
-            streamService.deleteStream(tableName, region);
+            streamService.deleteStream(canonicalTableName, region);
         }
-        LOG.infov("Deleted table: {0}", tableName);
+        LOG.infov("Deleted table: {0}", canonicalTableName);
     }
 
     public List<String> listTables() {
@@ -233,9 +241,10 @@ public class DynamoDbService {
                          String conditionExpression,
                          JsonNode exprAttrNames, JsonNode exprAttrValues,
                          String region, String returnValuesOnConditionCheckFailure) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, item);
         var tableItems = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
@@ -248,11 +257,11 @@ public class DynamoDbService {
 
         tableItems.put(itemKey, item);
         persistItems(storageKey);
-        LOG.debugv("Put item in {0}: key={1}", tableName, itemKey);
+        LOG.debugv("Put item in {0}: key={1}", canonicalTableName, itemKey);
 
         String eventName = existing == null ? "INSERT" : "MODIFY";
         if (streamService != null) {
-            streamService.captureEvent(tableName, eventName, existing, item, table, region);
+            streamService.captureEvent(canonicalTableName, eventName, existing, item, table, region);
         }
         if (kinesisForwarder != null) {
             kinesisForwarder.forward(eventName, existing, item, table, region);
@@ -264,9 +273,10 @@ public class DynamoDbService {
     }
 
     public JsonNode getItem(String tableName, JsonNode key, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key);
         var items = itemsByTable.get(storageKey);
@@ -288,9 +298,10 @@ public class DynamoDbService {
                                 String conditionExpression,
                                 JsonNode exprAttrNames, JsonNode exprAttrValues,
                                 String region, String returnValuesOnConditionCheckFailure) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key);
         var items = itemsByTable.get(storageKey);
@@ -303,11 +314,11 @@ public class DynamoDbService {
 
         JsonNode removed = items.remove(itemKey);
         persistItems(storageKey);
-        LOG.debugv("Deleted item from {0}: key={1}", tableName, itemKey);
+        LOG.debugv("Deleted item from {0}: key={1}", canonicalTableName, itemKey);
 
         if (removed != null) {
             if (streamService != null) {
-                streamService.captureEvent(tableName, "REMOVE", removed, null, table, region);
+                streamService.captureEvent(canonicalTableName, "REMOVE", removed, null, table, region);
             }
             if (kinesisForwarder != null) {
                 kinesisForwarder.forward("REMOVE", removed, null, table, region);
@@ -338,9 +349,10 @@ public class DynamoDbService {
                                     JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                                     String returnValues, String conditionExpression, String region, 
                                     String returnValuesOnConditionCheckFailure) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key);
         var items = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
@@ -388,7 +400,7 @@ public class DynamoDbService {
         persistItems(storageKey);
 
         if (streamService != null) {
-            streamService.captureEvent(tableName, "MODIFY", existing, item, table, region);
+            streamService.captureEvent(canonicalTableName, "MODIFY", existing, item, table, region);
         }
         if (kinesisForwarder != null) {
             kinesisForwarder.forward("MODIFY", existing, item, table, region);
@@ -415,9 +427,10 @@ public class DynamoDbService {
                               JsonNode expressionAttrValues, String keyConditionExpression,
                               String filterExpression, Integer limit, Boolean scanIndexForward, String indexName,
                               JsonNode exclusiveStartKey, JsonNode exprAttrNames, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         var items = itemsByTable.get(storageKey);
         if (items == null) return new QueryResult(List.of(), 0, null);
@@ -547,9 +560,10 @@ public class DynamoDbService {
     public ScanResult scan(String tableName, String filterExpression,
                             JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                             JsonNode scanFilter, Integer limit, JsonNode exclusiveStartKey, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         var items = itemsByTable.get(storageKey);
         if (items == null) return new ScanResult(List.of(), 0, null);
@@ -610,7 +624,7 @@ public class DynamoDbService {
 
     public BatchWriteResult batchWriteItem(Map<String, List<JsonNode>> requestItems, String region) {
         for (Map.Entry<String, List<JsonNode>> entry : requestItems.entrySet()) {
-            String tableName = entry.getKey();
+            String tableName = canonicalTableName(region, entry.getKey());
             for (JsonNode writeRequest : entry.getValue()) {
                 if (writeRequest.has("PutRequest")) {
                     JsonNode item = writeRequest.get("PutRequest").get("Item");
@@ -629,7 +643,8 @@ public class DynamoDbService {
     public BatchGetResult batchGetItem(Map<String, JsonNode> requestItems, String region) {
         Map<String, List<JsonNode>> responses = new HashMap<>();
         for (Map.Entry<String, JsonNode> entry : requestItems.entrySet()) {
-            String tableName = entry.getKey();
+            String tableNameOrArn = entry.getKey();
+            String tableName = canonicalTableName(region, tableNameOrArn);
             JsonNode tableRequest = entry.getValue();
             JsonNode keys = tableRequest.get("Keys");
             List<JsonNode> tableItems = new ArrayList<>();
@@ -641,7 +656,7 @@ public class DynamoDbService {
                     }
                 }
             }
-            responses.put(tableName, tableItems);
+            responses.put(tableNameOrArn, tableItems);
         }
         return new BatchGetResult(responses, Map.of());
     }
@@ -717,13 +732,14 @@ public class DynamoDbService {
                 ? target.get("ReturnValuesOnConditionCheckFailure").asText() : null;
 
         String tableName = target.path("TableName").asText();
+        String canonicalTableName = canonicalTableName(region, tableName);
         JsonNode key = transactItem.has("Put") ? target.get("Item") : target.get("Key");
         JsonNode exprAttrNames = target.has("ExpressionAttributeNames") ? target.get("ExpressionAttributeNames") : null;
         JsonNode exprAttrValues = target.has("ExpressionAttributeValues") ? target.get("ExpressionAttributeValues") : null;
 
-        String storageKey = regionKey(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         String itemKey = buildItemKey(table, key);
         var tableItems = itemsByTable.get(storageKey);
@@ -761,9 +777,10 @@ public class DynamoDbService {
     public TableDefinition updateTable(String tableName, Long readCapacity, Long writeCapacity,
                                         List<GlobalSecondaryIndex> gsiCreates, List<String> gsiDeletes,
                                         List<AttributeDefinition> newAttrDefs, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
         if (readCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
@@ -793,33 +810,35 @@ public class DynamoDbService {
         }
 
         tableStore.put(storageKey, table);
-        LOG.infov("Updated table: {0} in region {1}", tableName, region);
+        LOG.infov("Updated table: {0} in region {1}", canonicalTableName, region);
         return table;
     }
 
     // --- TTL ---
 
     public void updateTimeToLive(String tableName, String ttlAttributeName, boolean enabled, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
         table.setTtlAttributeName(ttlAttributeName);
         table.setTtlEnabled(enabled);
         tableStore.put(storageKey, table);
-        LOG.infov("Updated TTL for table {0}: enabled={1}, attr={2}", tableName, enabled, ttlAttributeName);
+        LOG.infov("Updated TTL for table {0}: enabled={1}, attr={2}", canonicalTableName, enabled, ttlAttributeName);
     }
 
     public TableDefinition updateContinuousBackups(String tableName, boolean enabled,
                                                    Integer recoveryPeriodInDays, String region) {
-        String storageKey = regionKey(region, tableName);
+        String canonicalTableName = canonicalTableName(region, tableName);
+        String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> resourceNotFoundException(tableName));
+                .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
         table.setPointInTimeRecoveryEnabled(enabled);
         table.setPointInTimeRecoveryRecoveryPeriodInDays(
                 recoveryPeriodInDays != null ? recoveryPeriodInDays : table.getPointInTimeRecoveryRecoveryPeriodInDays());
         tableStore.put(storageKey, table);
         LOG.infov("Updated PITR for table {0}: enabled={1}, recoveryPeriodInDays={2}",
-                tableName, enabled, table.getPointInTimeRecoveryRecoveryPeriodInDays());
+                canonicalTableName, enabled, table.getPointInTimeRecoveryRecoveryPeriodInDays());
         return table;
     }
 
@@ -908,6 +927,10 @@ public class DynamoDbService {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Requested resource not found: " + arn, 400));
+    }
+
+    private String canonicalTableName(String region, String tableName) {
+        return DynamoDbTableNames.resolveWithRegion(tableName, region).name();
     }
 
     // --- Condition expression evaluation ---
