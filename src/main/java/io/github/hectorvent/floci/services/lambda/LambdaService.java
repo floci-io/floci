@@ -1034,7 +1034,7 @@ public class LambdaService {
 
             // For file-based runtimes, verify handler file exists (skip Java and .NET which use different handler formats)
             if (fn.getRuntime() != null && !fn.getRuntime().startsWith("java") && !fn.getRuntime().startsWith("dotnet")) {
-                String handlerFile = fn.getHandler().split("\\.")[0];
+                String handlerFile = resolveHandlerFilePath(fn);
                 boolean found = Files.walk(codePath)
                         .filter(Files::isRegularFile)
                         .anyMatch(p -> {
@@ -1042,7 +1042,7 @@ public class LambdaService {
                             String withoutExt = relative.contains(".")
                                     ? relative.substring(0, relative.lastIndexOf('.'))
                                     : relative;
-                            return withoutExt.equals(handlerFile);
+                            return withoutExt.replace('\\', '/').equals(handlerFile);
                         });
                 if (!found) {
                     throw new AwsException("InvalidParameterValueException",
@@ -1072,6 +1072,16 @@ public class LambdaService {
                     "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
         }
         extractZipCode(fn, Base64.getEncoder().encodeToString(obj.getData()));
+    }
+
+    private String resolveHandlerFilePath(LambdaFunction fn) {
+        String handler = fn.getHandler();
+        int lastDot = handler.lastIndexOf('.');
+        String modulePath = lastDot >= 0 ? handler.substring(0, lastDot) : handler;
+        if (fn.getRuntime().startsWith("python")) {
+            return modulePath.replace('.', '/');
+        }
+        return modulePath;
     }
 
     // ──────────────────────────── Permissions (Policy) ────────────────────────────
