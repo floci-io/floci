@@ -223,6 +223,111 @@ class TestPipesPolling:
             sqs_client.delete_queue(QueueUrl=src_url)
             sqs_client.delete_queue(QueueUrl=tgt_url)
 
+    def test_filter_criteria_filters_messages(self, pipes_client, sqs_client, unique_name):
+        """Test that FilterCriteria only forwards matching messages."""
+        src_name = f"pipe-src-{unique_name}"
+        tgt_name = f"pipe-tgt-{unique_name}"
+        pipe_name = f"pipe-{unique_name}"
+
+        src_resp = sqs_client.create_queue(QueueName=src_name)
+        src_url = src_resp["QueueUrl"]
+        tgt_resp = sqs_client.create_queue(QueueName=tgt_name)
+        tgt_url = tgt_resp["QueueUrl"]
+        try:
+            pipes_client.create_pipe(
+                Name=pipe_name,
+                Source=sqs_arn(src_name),
+                Target=sqs_arn(tgt_name),
+                RoleArn=ROLE_ARN,
+                DesiredState="RUNNING",
+                SourceParameters={
+                    "FilterCriteria": {
+                        "Filters": [
+                            {"Pattern": '{"body": {"status": ["active"]}}'},
+                        ],
+                    },
+                },
+            )
+
+            sqs_client.send_message(
+                QueueUrl=src_url,
+                MessageBody='{"status": "active", "id": "match-1"}',
+            )
+            sqs_client.send_message(
+                QueueUrl=src_url,
+                MessageBody='{"status": "inactive", "id": "no-match"}',
+            )
+
+            found = False
+            for _ in range(15):
+                time.sleep(1)
+                resp = sqs_client.receive_message(
+                    QueueUrl=tgt_url, MaxNumberOfMessages=10, WaitTimeSeconds=1
+                )
+                msgs = resp.get("Messages", [])
+                if any("match-1" in m["Body"] for m in msgs):
+                    assert not any("no-match" in m["Body"] for m in msgs), \
+                        "Non-matching message should not be forwarded"
+                    found = True
+                    break
+
+            assert found, "Target queue should receive matching message"
+
+            attrs = sqs_client.get_queue_attributes(
+                QueueUrl=src_url, AttributeNames=["ApproximateNumberOfMessages"]
+            )
+            assert attrs["Attributes"]["ApproximateNumberOfMessages"] == "0"
+        finally:
+            pipes_client.delete_pipe(Name=pipe_name)
+            sqs_client.delete_queue(QueueUrl=src_url)
+            sqs_client.delete_queue(QueueUrl=tgt_url)
+
+    def test_batch_size_in_source_parameters(self, pipes_client, sqs_client, unique_name):
+        """Test that BatchSize in SourceParameters is respected."""
+        src_name = f"pipe-src-{unique_name}"
+        tgt_name = f"pipe-tgt-{unique_name}"
+        pipe_name = f"pipe-{unique_name}"
+
+        src_resp = sqs_client.create_queue(QueueName=src_name)
+        src_url = src_resp["QueueUrl"]
+        tgt_resp = sqs_client.create_queue(QueueName=tgt_name)
+        tgt_url = tgt_resp["QueueUrl"]
+        try:
+            pipes_client.create_pipe(
+                Name=pipe_name,
+                Source=sqs_arn(src_name),
+                Target=sqs_arn(tgt_name),
+                RoleArn=ROLE_ARN,
+                DesiredState="RUNNING",
+                SourceParameters={
+                    "SqsQueueParameters": {
+                        "BatchSize": 1,
+                    },
+                },
+            )
+
+            for i in range(1, 4):
+                sqs_client.send_message(QueueUrl=src_url, MessageBody=f"batch-msg-{i}")
+
+            found_messages = set()
+            for _ in range(20):
+                if len(found_messages) >= 3:
+                    break
+                time.sleep(1)
+                resp = sqs_client.receive_message(
+                    QueueUrl=tgt_url, MaxNumberOfMessages=10, WaitTimeSeconds=1
+                )
+                for msg in resp.get("Messages", []):
+                    for j in range(1, 4):
+                        if f"batch-msg-{j}" in msg["Body"]:
+                            found_messages.add(f"batch-msg-{j}")
+
+            assert len(found_messages) == 3, "All 3 messages should arrive at target"
+        finally:
+            pipes_client.delete_pipe(Name=pipe_name)
+            sqs_client.delete_queue(QueueUrl=src_url)
+            sqs_client.delete_queue(QueueUrl=tgt_url)
+
     def test_stopped_pipe_does_not_forward(self, pipes_client, sqs_client, unique_name):
         """Test that a STOPPED pipe does not forward messages."""
         src_name = f"pipe-src-{unique_name}"

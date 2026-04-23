@@ -315,6 +315,139 @@ describe('Pipes Polling', () => {
     }
   });
 
+  it('should filter messages with FilterCriteria', async () => {
+    const pipeName = `node-pipe-filter-${uniqueName()}`;
+    const srcQueue = `node-pipe-src-filter-${uniqueName()}`;
+    const tgtQueue = `node-pipe-tgt-filter-${uniqueName()}`;
+
+    const srcResp = await sqs.send(new CreateQueueCommand({ QueueName: srcQueue }));
+    const srcUrl = srcResp.QueueUrl!;
+    const tgtResp = await sqs.send(new CreateQueueCommand({ QueueName: tgtQueue }));
+    const tgtUrl = tgtResp.QueueUrl!;
+
+    try {
+      await pipes.send(
+        new CreatePipeCommand({
+          Name: pipeName,
+          Source: sqsArn(srcQueue),
+          Target: sqsArn(tgtQueue),
+          RoleArn: ROLE_ARN,
+          DesiredState: RequestedPipeState.RUNNING,
+          SourceParameters: {
+            FilterCriteria: {
+              Filters: [
+                { Pattern: '{"body": {"status": ["active"]}}' },
+              ],
+            },
+          },
+        })
+      );
+
+      await sqs.send(
+        new SendMessageCommand({
+          QueueUrl: srcUrl,
+          MessageBody: JSON.stringify({ status: 'active', id: 'match-1' }),
+        })
+      );
+      await sqs.send(
+        new SendMessageCommand({
+          QueueUrl: srcUrl,
+          MessageBody: JSON.stringify({ status: 'inactive', id: 'no-match' }),
+        })
+      );
+
+      let found = false;
+      for (let i = 0; i < 15; i++) {
+        await sleep(1000);
+        const r = await sqs.send(
+          new ReceiveMessageCommand({
+            QueueUrl: tgtUrl,
+            MaxNumberOfMessages: 10,
+            WaitTimeSeconds: 1,
+          })
+        );
+        if (r.Messages?.some((m) => m.Body?.includes('match-1'))) {
+          const hasNonMatch = r.Messages.some((m) => m.Body?.includes('no-match'));
+          expect(hasNonMatch).toBe(false);
+          found = true;
+          break;
+        }
+      }
+      expect(found).toBe(true);
+
+      // Source queue should be drained (non-matching messages deleted per AWS behavior)
+      const attrs = await sqs.send(
+        new GetQueueAttributesCommand({
+          QueueUrl: srcUrl,
+          AttributeNames: ['ApproximateNumberOfMessages'],
+        })
+      );
+      expect(attrs.Attributes?.ApproximateNumberOfMessages).toBe('0');
+    } finally {
+      await pipes.send(new DeletePipeCommand({ Name: pipeName })).catch(() => {});
+      await sqs.send(new DeleteQueueCommand({ QueueUrl: srcUrl })).catch(() => {});
+      await sqs.send(new DeleteQueueCommand({ QueueUrl: tgtUrl })).catch(() => {});
+    }
+  });
+
+  it('should respect BatchSize in SourceParameters', async () => {
+    const pipeName = `node-pipe-batch-${uniqueName()}`;
+    const srcQueue = `node-pipe-src-batch-${uniqueName()}`;
+    const tgtQueue = `node-pipe-tgt-batch-${uniqueName()}`;
+
+    const srcResp = await sqs.send(new CreateQueueCommand({ QueueName: srcQueue }));
+    const srcUrl = srcResp.QueueUrl!;
+    const tgtResp = await sqs.send(new CreateQueueCommand({ QueueName: tgtQueue }));
+    const tgtUrl = tgtResp.QueueUrl!;
+
+    try {
+      await pipes.send(
+        new CreatePipeCommand({
+          Name: pipeName,
+          Source: sqsArn(srcQueue),
+          Target: sqsArn(tgtQueue),
+          RoleArn: ROLE_ARN,
+          DesiredState: RequestedPipeState.RUNNING,
+          SourceParameters: {
+            SqsQueueParameters: {
+              BatchSize: 1,
+            },
+          },
+        })
+      );
+
+      for (let i = 1; i <= 3; i++) {
+        await sqs.send(
+          new SendMessageCommand({ QueueUrl: srcUrl, MessageBody: `batch-msg-${i}` })
+        );
+      }
+
+      const foundMessages = new Set<string>();
+      for (let i = 0; i < 20 && foundMessages.size < 3; i++) {
+        await sleep(1000);
+        const r = await sqs.send(
+          new ReceiveMessageCommand({
+            QueueUrl: tgtUrl,
+            MaxNumberOfMessages: 10,
+            WaitTimeSeconds: 1,
+          })
+        );
+        for (const msg of r.Messages ?? []) {
+          for (let j = 1; j <= 3; j++) {
+            if (msg.Body?.includes(`batch-msg-${j}`)) {
+              foundMessages.add(`batch-msg-${j}`);
+            }
+          }
+        }
+      }
+      expect(foundMessages.size).toBe(3);
+    } finally {
+      await pipes.send(new DeletePipeCommand({ Name: pipeName })).catch(() => {});
+      await sqs.send(new DeleteQueueCommand({ QueueUrl: srcUrl })).catch(() => {});
+      await sqs.send(new DeleteQueueCommand({ QueueUrl: tgtUrl })).catch(() => {});
+    }
+  });
+
   it('should not forward messages when pipe is stopped', async () => {
     const pipeName = `node-pipe-nofwd-${uniqueName()}`;
     const srcQueue = `node-pipe-src-nofwd-${uniqueName()}`;

@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/pipes"
 	pipestypes "github.com/aws/aws-sdk-go-v2/service/pipes/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
+	sqstypes "github.com/aws/aws-sdk-go-v2/service/sqs/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -264,6 +266,140 @@ func TestPipes(t *testing.T) {
 			}
 		}
 		assert.True(t, found, "target queue should receive forwarded message")
+	})
+
+	t.Run("FilterCriteriaFiltersMessages", func(t *testing.T) {
+		pipeName := "go-test-filter-pipe"
+		srcQueue := "go-pipe-src-filter"
+		tgtQueue := "go-pipe-tgt-filter"
+
+		srcResp, _ := sqsSvc.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String(srcQueue)})
+		srcURL := aws.ToString(srcResp.QueueUrl)
+		tgtResp, _ := sqsSvc.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String(tgtQueue)})
+		tgtURL := aws.ToString(tgtResp.QueueUrl)
+
+		t.Cleanup(func() {
+			pipesSvc.DeletePipe(ctx, &pipes.DeletePipeInput{Name: aws.String(pipeName)})
+			sqsSvc.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: aws.String(srcURL)})
+			sqsSvc.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: aws.String(tgtURL)})
+		})
+
+		pipesSvc.CreatePipe(ctx, &pipes.CreatePipeInput{
+			Name:         aws.String(pipeName),
+			Source:       aws.String(sqsArn(srcQueue)),
+			Target:       aws.String(sqsArn(tgtQueue)),
+			RoleArn:      aws.String(pipesRoleArn),
+			DesiredState: pipestypes.RequestedPipeStateRunning,
+			SourceParameters: &pipestypes.PipeSourceParameters{
+				FilterCriteria: &pipestypes.FilterCriteria{
+					Filters: []pipestypes.Filter{
+						{Pattern: aws.String(`{"body": {"status": ["active"]}}`)},
+					},
+				},
+			},
+		})
+
+		sqsSvc.SendMessage(ctx, &sqs.SendMessageInput{
+			QueueUrl:    aws.String(srcURL),
+			MessageBody: aws.String(`{"status": "active", "id": "match-1"}`),
+		})
+		sqsSvc.SendMessage(ctx, &sqs.SendMessageInput{
+			QueueUrl:    aws.String(srcURL),
+			MessageBody: aws.String(`{"status": "inactive", "id": "no-match"}`),
+		})
+
+		found := false
+		for i := 0; i < 15; i++ {
+			time.Sleep(1 * time.Second)
+			r, err := sqsSvc.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+				QueueUrl:            aws.String(tgtURL),
+				MaxNumberOfMessages: 10,
+				WaitTimeSeconds:     1,
+			})
+			if err == nil && len(r.Messages) > 0 {
+				hasMatch := false
+				hasNoMatch := false
+				for _, m := range r.Messages {
+					if strings.Contains(aws.ToString(m.Body), "match-1") {
+						hasMatch = true
+					}
+					if strings.Contains(aws.ToString(m.Body), "no-match") {
+						hasNoMatch = true
+					}
+				}
+				if hasMatch {
+					assert.False(t, hasNoMatch, "non-matching message should not be forwarded")
+					found = true
+					break
+				}
+			}
+		}
+		assert.True(t, found, "target queue should receive matching message")
+
+		attrResp, err := sqsSvc.GetQueueAttributes(ctx, &sqs.GetQueueAttributesInput{
+			QueueUrl:       aws.String(srcURL),
+			AttributeNames: []sqstypes.QueueAttributeName{sqstypes.QueueAttributeNameApproximateNumberOfMessages},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "0", attrResp.Attributes[string(sqstypes.QueueAttributeNameApproximateNumberOfMessages)])
+	})
+
+	t.Run("BatchSizeInSourceParameters", func(t *testing.T) {
+		pipeName := "go-test-batch-pipe"
+		srcQueue := "go-pipe-src-batch"
+		tgtQueue := "go-pipe-tgt-batch"
+
+		srcResp, _ := sqsSvc.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String(srcQueue)})
+		srcURL := aws.ToString(srcResp.QueueUrl)
+		tgtResp, _ := sqsSvc.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String(tgtQueue)})
+		tgtURL := aws.ToString(tgtResp.QueueUrl)
+
+		t.Cleanup(func() {
+			pipesSvc.DeletePipe(ctx, &pipes.DeletePipeInput{Name: aws.String(pipeName)})
+			sqsSvc.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: aws.String(srcURL)})
+			sqsSvc.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: aws.String(tgtURL)})
+		})
+
+		pipesSvc.CreatePipe(ctx, &pipes.CreatePipeInput{
+			Name:         aws.String(pipeName),
+			Source:       aws.String(sqsArn(srcQueue)),
+			Target:       aws.String(sqsArn(tgtQueue)),
+			RoleArn:      aws.String(pipesRoleArn),
+			DesiredState: pipestypes.RequestedPipeStateRunning,
+			SourceParameters: &pipestypes.PipeSourceParameters{
+				SqsQueueParameters: &pipestypes.PipeSourceSqsQueueParameters{
+					BatchSize: aws.Int32(1),
+				},
+			},
+		})
+
+		for i := 1; i <= 3; i++ {
+			sqsSvc.SendMessage(ctx, &sqs.SendMessageInput{
+				QueueUrl:    aws.String(srcURL),
+				MessageBody: aws.String(fmt.Sprintf("batch-msg-%d", i)),
+			})
+		}
+
+		foundMessages := make(map[string]bool)
+		for i := 0; i < 20 && len(foundMessages) < 3; i++ {
+			time.Sleep(1 * time.Second)
+			r, err := sqsSvc.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{
+				QueueUrl:            aws.String(tgtURL),
+				MaxNumberOfMessages: 10,
+				WaitTimeSeconds:     1,
+			})
+			if err == nil {
+				for _, msg := range r.Messages {
+					for j := 1; j <= 3; j++ {
+						key := fmt.Sprintf("batch-msg-%d", j)
+						if strings.Contains(aws.ToString(msg.Body), key) {
+							foundMessages[key] = true
+						}
+					}
+				}
+			}
+		}
+		assert.Len(t, foundMessages, 3, "all 3 messages should arrive at target")
 	})
 
 	t.Run("StoppedPipeDoesNotForward", func(t *testing.T) {

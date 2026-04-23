@@ -186,6 +186,127 @@ class PipesTest {
 
     @Test
     @Order(11)
+    void filterCriteriaFiltersMessages() throws InterruptedException {
+        String filterPipeName = TestFixtures.uniqueName("pipe-filter");
+        String filterSrc = TestFixtures.uniqueName("pipe-filter-src");
+        String filterTgt = TestFixtures.uniqueName("pipe-filter-tgt");
+        String filterSrcUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName(filterSrc).build()).queueUrl();
+        String filterTgtUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName(filterTgt).build()).queueUrl();
+
+        try {
+            pipes.createPipe(CreatePipeRequest.builder()
+                    .name(filterPipeName)
+                    .source(sqsArn(filterSrc))
+                    .target(sqsArn(filterTgt))
+                    .roleArn(ROLE_ARN)
+                    .desiredState(RequestedPipeState.RUNNING)
+                    .sourceParameters(PipeSourceParameters.builder()
+                            .filterCriteria(FilterCriteria.builder()
+                                    .filters(Filter.builder()
+                                            .pattern("{\"body\": {\"status\": [\"active\"]}}")
+                                            .build())
+                                    .build())
+                            .build())
+                    .build());
+
+            sqs.sendMessage(SendMessageRequest.builder()
+                    .queueUrl(filterSrcUrl)
+                    .messageBody("{\"status\": \"active\", \"id\": \"match-1\"}")
+                    .build());
+            sqs.sendMessage(SendMessageRequest.builder()
+                    .queueUrl(filterSrcUrl)
+                    .messageBody("{\"status\": \"inactive\", \"id\": \"no-match\"}")
+                    .build());
+
+            boolean found = false;
+            for (int i = 0; i < 15; i++) {
+                Thread.sleep(1000);
+                ReceiveMessageResponse recv = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                        .queueUrl(filterTgtUrl)
+                        .maxNumberOfMessages(10)
+                        .waitTimeSeconds(1)
+                        .build());
+                if (recv.messages().stream().anyMatch(m -> m.body().contains("match-1"))) {
+                    assertThat(recv.messages().stream().noneMatch(m -> m.body().contains("no-match")))
+                            .as("non-matching message should not be forwarded").isTrue();
+                    found = true;
+                    break;
+                }
+            }
+            assertThat(found).as("target queue should receive matching message").isTrue();
+
+            GetQueueAttributesResponse attrs = sqs.getQueueAttributes(GetQueueAttributesRequest.builder()
+                    .queueUrl(filterSrcUrl)
+                    .attributeNames(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)
+                    .build());
+            assertThat(attrs.attributes().get(QueueAttributeName.APPROXIMATE_NUMBER_OF_MESSAGES)).isEqualTo("0");
+        } finally {
+            try { pipes.deletePipe(DeletePipeRequest.builder().name(filterPipeName).build()); } catch (Exception ignored) {}
+            try { sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(filterSrcUrl).build()); } catch (Exception ignored) {}
+            try { sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(filterTgtUrl).build()); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(12)
+    void batchSizeInSourceParameters() throws InterruptedException {
+        String batchPipeName = TestFixtures.uniqueName("pipe-batch");
+        String batchSrc = TestFixtures.uniqueName("pipe-batch-src");
+        String batchTgt = TestFixtures.uniqueName("pipe-batch-tgt");
+        String batchSrcUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName(batchSrc).build()).queueUrl();
+        String batchTgtUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName(batchTgt).build()).queueUrl();
+
+        try {
+            pipes.createPipe(CreatePipeRequest.builder()
+                    .name(batchPipeName)
+                    .source(sqsArn(batchSrc))
+                    .target(sqsArn(batchTgt))
+                    .roleArn(ROLE_ARN)
+                    .desiredState(RequestedPipeState.RUNNING)
+                    .sourceParameters(PipeSourceParameters.builder()
+                            .sqsQueueParameters(PipeSourceSqsQueueParameters.builder()
+                                    .batchSize(1)
+                                    .build())
+                            .build())
+                    .build());
+
+            for (int i = 1; i <= 3; i++) {
+                sqs.sendMessage(SendMessageRequest.builder()
+                        .queueUrl(batchSrcUrl)
+                        .messageBody("batch-msg-" + i)
+                        .build());
+            }
+
+            java.util.Set<String> foundMessages = new java.util.HashSet<>();
+            for (int i = 0; i < 20 && foundMessages.size() < 3; i++) {
+                Thread.sleep(1000);
+                ReceiveMessageResponse recv = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                        .queueUrl(batchTgtUrl)
+                        .maxNumberOfMessages(10)
+                        .waitTimeSeconds(1)
+                        .build());
+                for (Message msg : recv.messages()) {
+                    for (int j = 1; j <= 3; j++) {
+                        if (msg.body().contains("batch-msg-" + j)) {
+                            foundMessages.add("batch-msg-" + j);
+                        }
+                    }
+                }
+            }
+            assertThat(foundMessages).hasSize(3);
+        } finally {
+            try { pipes.deletePipe(DeletePipeRequest.builder().name(batchPipeName).build()); } catch (Exception ignored) {}
+            try { sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(batchSrcUrl).build()); } catch (Exception ignored) {}
+            try { sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(batchTgtUrl).build()); } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(13)
     void stoppedPipeDoesNotForward() throws InterruptedException {
         String nfPipeName = TestFixtures.uniqueName("pipe-nofwd");
         String nfSrc = TestFixtures.uniqueName("pipe-nofwd-src");

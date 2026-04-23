@@ -339,6 +339,191 @@ async fn test_pipes_sqs_to_sqs_forwarding() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn test_pipes_filter_criteria() {
+    let pipes = common::pipes_client().await;
+    let sqs = common::sqs_client().await;
+    let src_queue = "rust-pipe-src-filter";
+    let tgt_queue = "rust-pipe-tgt-filter";
+    let pipe_name = "rust-pipe-filter";
+
+    let src_resp = sqs.create_queue().queue_name(src_queue).send().await.expect("create src queue");
+    let src_url = src_resp.queue_url().unwrap_or("").to_string();
+    let tgt_resp = sqs.create_queue().queue_name(tgt_queue).send().await.expect("create tgt queue");
+    let tgt_url = tgt_resp.queue_url().unwrap_or("").to_string();
+
+    let _guard = common::CleanupGuard::new({
+        let pipes = pipes.clone();
+        let sqs = sqs.clone();
+        let src_url = src_url.clone();
+        let tgt_url = tgt_url.clone();
+        async move {
+            let _ = pipes.delete_pipe().name(pipe_name).send().await;
+            let _ = sqs.delete_queue().queue_url(&src_url).send().await;
+            let _ = sqs.delete_queue().queue_url(&tgt_url).send().await;
+        }
+    });
+
+    pipes
+        .create_pipe()
+        .name(pipe_name)
+        .source(sqs_arn(src_queue))
+        .target(sqs_arn(tgt_queue))
+        .role_arn(ROLE_ARN)
+        .desired_state(aws_sdk_pipes::types::RequestedPipeState::Running)
+        .source_parameters(
+            aws_sdk_pipes::types::PipeSourceParameters::builder()
+                .filter_criteria(
+                    aws_sdk_pipes::types::FilterCriteria::builder()
+                        .filters(
+                            aws_sdk_pipes::types::Filter::builder()
+                                .pattern(r#"{"body": {"status": ["active"]}}"#)
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pipe");
+
+    sqs.send_message()
+        .queue_url(&src_url)
+        .message_body(r#"{"status": "active", "id": "match-1"}"#)
+        .send()
+        .await
+        .expect("send matching message");
+
+    sqs.send_message()
+        .queue_url(&src_url)
+        .message_body(r#"{"status": "inactive", "id": "no-match"}"#)
+        .send()
+        .await
+        .expect("send non-matching message");
+
+    let mut found = false;
+    for _ in 0..15 {
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let recv = sqs
+            .receive_message()
+            .queue_url(&tgt_url)
+            .max_number_of_messages(10)
+            .wait_time_seconds(1)
+            .send()
+            .await;
+        if let Ok(r) = recv {
+            if let Some(msgs) = r.messages() {
+                if msgs.iter().any(|m| m.body().unwrap_or("").contains("match-1")) {
+                    assert!(
+                        !msgs.iter().any(|m| m.body().unwrap_or("").contains("no-match")),
+                        "non-matching message should not be forwarded"
+                    );
+                    found = true;
+                    break;
+                }
+            }
+        }
+    }
+    assert!(found, "target queue should receive matching message");
+
+    let attrs = sqs
+        .get_queue_attributes()
+        .queue_url(&src_url)
+        .attribute_names(aws_sdk_sqs::types::QueueAttributeName::ApproximateNumberOfMessages)
+        .send()
+        .await
+        .expect("get queue attributes");
+    assert_eq!(
+        attrs.attributes().unwrap().get(&aws_sdk_sqs::types::QueueAttributeName::ApproximateNumberOfMessages).map(|s| s.as_str()),
+        Some("0"),
+        "source queue should be drained"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_pipes_batch_size() {
+    let pipes = common::pipes_client().await;
+    let sqs = common::sqs_client().await;
+    let src_queue = "rust-pipe-src-batch";
+    let tgt_queue = "rust-pipe-tgt-batch";
+    let pipe_name = "rust-pipe-batch";
+
+    let src_resp = sqs.create_queue().queue_name(src_queue).send().await.expect("create src queue");
+    let src_url = src_resp.queue_url().unwrap_or("").to_string();
+    let tgt_resp = sqs.create_queue().queue_name(tgt_queue).send().await.expect("create tgt queue");
+    let tgt_url = tgt_resp.queue_url().unwrap_or("").to_string();
+
+    let _guard = common::CleanupGuard::new({
+        let pipes = pipes.clone();
+        let sqs = sqs.clone();
+        let src_url = src_url.clone();
+        let tgt_url = tgt_url.clone();
+        async move {
+            let _ = pipes.delete_pipe().name(pipe_name).send().await;
+            let _ = sqs.delete_queue().queue_url(&src_url).send().await;
+            let _ = sqs.delete_queue().queue_url(&tgt_url).send().await;
+        }
+    });
+
+    pipes
+        .create_pipe()
+        .name(pipe_name)
+        .source(sqs_arn(src_queue))
+        .target(sqs_arn(tgt_queue))
+        .role_arn(ROLE_ARN)
+        .desired_state(aws_sdk_pipes::types::RequestedPipeState::Running)
+        .source_parameters(
+            aws_sdk_pipes::types::PipeSourceParameters::builder()
+                .sqs_queue_parameters(
+                    aws_sdk_pipes::types::PipeSourceSqsQueueParameters::builder()
+                        .batch_size(1)
+                        .build(),
+                )
+                .build(),
+        )
+        .send()
+        .await
+        .expect("create pipe");
+
+    for i in 1..=3 {
+        sqs.send_message()
+            .queue_url(&src_url)
+            .message_body(format!("batch-msg-{}", i))
+            .send()
+            .await
+            .expect("send message");
+    }
+
+    let mut found_messages = std::collections::HashSet::new();
+    for _ in 0..20 {
+        if found_messages.len() >= 3 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let recv = sqs
+            .receive_message()
+            .queue_url(&tgt_url)
+            .max_number_of_messages(10)
+            .wait_time_seconds(1)
+            .send()
+            .await;
+        if let Ok(r) = recv {
+            if let Some(msgs) = r.messages() {
+                for msg in msgs {
+                    for j in 1..=3 {
+                        let key = format!("batch-msg-{}", j);
+                        if msg.body().unwrap_or("").contains(&key) {
+                            found_messages.insert(key);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(found_messages.len(), 3, "all 3 messages should arrive at target");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn test_pipes_stopped_pipe_does_not_forward() {
     let pipes = common::pipes_client().await;
     let sqs = common::sqs_client().await;

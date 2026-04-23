@@ -185,6 +185,96 @@ target_arn() {
     [ "$found" = "true" ]
 }
 
+@test "Pipes: FilterCriteria filters messages" {
+    create_queues
+    aws_cmd pipes create-pipe \
+        --name "$PIPE_NAME" \
+        --source "$(source_arn)" \
+        --target "$(target_arn)" \
+        --role-arn "$ROLE_ARN" \
+        --desired-state RUNNING \
+        --source-parameters '{"FilterCriteria":{"Filters":[{"Pattern":"{\"body\": {\"status\": [\"active\"]}}"}]}}' >/dev/null
+
+    aws_cmd sqs send-message \
+        --queue-url "$SOURCE_QUEUE_URL" \
+        --message-body '{"status": "active", "id": "match-1"}' >/dev/null
+
+    aws_cmd sqs send-message \
+        --queue-url "$SOURCE_QUEUE_URL" \
+        --message-body '{"status": "inactive", "id": "no-match"}' >/dev/null
+
+    # Poll target queue for matching message
+    local found=false
+    for i in $(seq 1 15); do
+        sleep 1
+        out=$(aws_cmd sqs receive-message \
+            --queue-url "$TARGET_QUEUE_URL" \
+            --max-number-of-messages 10 \
+            --wait-time-seconds 1)
+        if echo "$out" | grep -q "match-1"; then
+            # Verify no non-matching message arrived
+            if echo "$out" | grep -q "no-match"; then
+                fail "non-matching message should not be forwarded"
+            fi
+            found=true
+            break
+        fi
+    done
+
+    [ "$found" = "true" ]
+
+    # Source queue should be drained (non-matching messages deleted per AWS behavior)
+    out=$(aws_cmd sqs get-queue-attributes \
+        --queue-url "$SOURCE_QUEUE_URL" \
+        --attribute-names ApproximateNumberOfMessages)
+    count=$(json_get "$out" '.Attributes.ApproximateNumberOfMessages')
+    [ "$count" = "0" ]
+}
+
+@test "Pipes: BatchSize in SourceParameters" {
+    create_queues
+    aws_cmd pipes create-pipe \
+        --name "$PIPE_NAME" \
+        --source "$(source_arn)" \
+        --target "$(target_arn)" \
+        --role-arn "$ROLE_ARN" \
+        --desired-state RUNNING \
+        --source-parameters '{"SqsQueueParameters":{"BatchSize":1}}' >/dev/null
+
+    for i in 1 2 3; do
+        aws_cmd sqs send-message \
+            --queue-url "$SOURCE_QUEUE_URL" \
+            --message-body "batch-msg-$i" >/dev/null
+    done
+
+    # Poll target queue until all 3 messages arrive
+    local found_count=0
+    local found1=false found2=false found3=false
+    for i in $(seq 1 20); do
+        sleep 1
+        out=$(aws_cmd sqs receive-message \
+            --queue-url "$TARGET_QUEUE_URL" \
+            --max-number-of-messages 10 \
+            --wait-time-seconds 1)
+        if [ "$found1" = "false" ] && echo "$out" | grep -q "batch-msg-1"; then
+            found1=true
+        fi
+        if [ "$found2" = "false" ] && echo "$out" | grep -q "batch-msg-2"; then
+            found2=true
+        fi
+        if [ "$found3" = "false" ] && echo "$out" | grep -q "batch-msg-3"; then
+            found3=true
+        fi
+        if [ "$found1" = "true" ] && [ "$found2" = "true" ] && [ "$found3" = "true" ]; then
+            break
+        fi
+    done
+
+    [ "$found1" = "true" ]
+    [ "$found2" = "true" ]
+    [ "$found3" = "true" ]
+}
+
 @test "Pipes: stopped pipe does not forward messages" {
     create_queues
     aws_cmd pipes create-pipe \
