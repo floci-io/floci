@@ -1041,13 +1041,14 @@ public class LambdaService {
                     found = walk
                             .filter(Files::isRegularFile)
                             .anyMatch(p -> {
-                                String relative = codePath.relativize(p).toString();
-                                String withoutExt = relative.contains(".")
-                                        ? relative.substring(0, relative.lastIndexOf('.'))
+                                String relative = codePath.relativize(p).toString().replace('\\', '/');
+                                int lastSlash = relative.lastIndexOf('/');
+                                int lastDot = relative.lastIndexOf('.');
+                                String withoutExt = (lastDot > lastSlash)
+                                        ? relative.substring(0, lastDot)
                                         : relative;
-                                String normalized = withoutExt.replace('\\', '/');
-                                return normalized.equals(handlerFile)
-                                        || (pythonRuntime && normalized.equals(handlerFile + "/__init__"));
+                                return withoutExt.equals(handlerFile)
+                                        || (pythonRuntime && withoutExt.equals(handlerFile + "/__init__"));
                             });
                 }
                 if (!found) {
@@ -1082,8 +1083,9 @@ public class LambdaService {
 
     private String resolveHandlerFilePath(LambdaFunction fn) {
         String handler = fn.getHandler();
+        int lastSlash = handler.lastIndexOf('/');
         int lastDot = handler.lastIndexOf('.');
-        String modulePath = lastDot >= 0 ? handler.substring(0, lastDot) : handler;
+        String modulePath = (lastDot > lastSlash) ? handler.substring(0, lastDot) : handler;
         if (fn.getRuntime().startsWith("python")) {
             return modulePath.replace('.', '/');
         }

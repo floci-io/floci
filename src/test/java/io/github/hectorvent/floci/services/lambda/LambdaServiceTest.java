@@ -252,6 +252,32 @@ class LambdaServiceTest {
     }
 
     @Test
+    void createFunctionWithDirectoryDotInNodeHandler() throws Exception {
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "dir-dot-handler-fn",
+                "Runtime", "nodejs20.x",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Handler", "folder.name/index.handler",
+                "Code", Map.of("ZipFile", createZipBase64("folder.name/index.js"))
+        ));
+        LambdaFunction fn = service.createFunction(REGION, req);
+        assertEquals("folder.name/index.handler", fn.getHandler());
+    }
+
+    @Test
+    void createFunctionWithDirectoryDotInGoHandler() throws Exception {
+        Map<String, Object> req = new java.util.HashMap<>(Map.of(
+                "FunctionName", "go-handler-fn",
+                "Runtime", "provided.al2",
+                "Role", "arn:aws:iam::000000000000:role/test-role",
+                "Handler", "folder.name/bootstrap",
+                "Code", Map.of("ZipFile", createZipBase64("folder.name/bootstrap"))
+        ));
+        LambdaFunction fn = service.createFunction(REGION, req);
+        assertEquals("folder.name/bootstrap", fn.getHandler());
+    }
+
+    @Test
     void createFunctionWithRootHandler() throws Exception {
         Map<String, Object> req = new java.util.HashMap<>(Map.of(
                 "FunctionName", "root-handler-fn",
