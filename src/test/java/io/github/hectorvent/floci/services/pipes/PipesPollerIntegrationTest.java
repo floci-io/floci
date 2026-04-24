@@ -91,11 +91,11 @@ class PipesPollerIntegrationTest {
                 .statusCode(200)
                 .extract().body().asString();
 
-            if (body.contains("hello from pipes") || body.contains("Records")) {
+            if (body.contains("hello from pipes")) {
                 break;
             }
         }
-        assertTrue(body.contains("hello from pipes") || body.contains("Records"),
+        assertTrue(body.contains("hello from pipes"),
                 "Target queue should contain forwarded message but got: " + body);
     }
 
@@ -502,6 +502,8 @@ class PipesPollerIntegrationTest {
         }
         assertTrue(body.contains("transformed"),
                 "Target should contain the InputTemplate-transformed message but got: " + body);
+        assertTrue(body.contains("template-test-payload"),
+                "InputTemplate should resolve $.body to the original message body but got: " + body);
     }
 
     @Test
