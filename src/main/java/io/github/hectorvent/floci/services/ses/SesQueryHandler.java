@@ -350,7 +350,7 @@ public class SesQueryHandler {
         }
         try {
             return objectMapper.readTree(raw);
-        } catch (Exception e) {
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new AwsException("InvalidTemplate",
                     "Invalid TemplateData JSON: " + e.getMessage(), 400);
         }
