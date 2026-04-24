@@ -257,7 +257,9 @@ public class AwsQueryController {
             "SendEmail", "SendRawEmail", "GetSendQuota", "GetSendStatistics",
             "GetAccountSendingEnabled", "ListVerifiedEmailAddresses", "DeleteVerifiedEmailAddress",
             "SetIdentityNotificationTopic", "GetIdentityNotificationAttributes",
-            "GetIdentityDkimAttributes"
+            "GetIdentityDkimAttributes",
+            "CreateTemplate", "UpdateTemplate", "GetTemplate", "DeleteTemplate",
+            "ListTemplates", "SendTemplatedEmail"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(
