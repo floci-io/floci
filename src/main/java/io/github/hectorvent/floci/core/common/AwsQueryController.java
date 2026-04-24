@@ -266,7 +266,8 @@ public class AwsQueryController {
             "InitiateAuth", "AdminInitiateAuth", "RespondToAuthChallenge",
             "SignUp", "ConfirmSignUp", "ChangePassword", "ForgotPassword",
             "ConfirmForgotPassword", "GetUser", "UpdateUserAttributes",
-            "CreateUserPool", "DescribeUserPool", "ListUserPools", "DeleteUserPool",
+            "CreateUserPool", "DescribeUserPool", "ListUserPools", "UpdateUserPool", "DeleteUserPool",
+            "TagResource", "UntagResource", "ListTagsForResource",
             "CreateUserPoolClient", "DescribeUserPoolClient", "ListUserPoolClients", "DeleteUserPoolClient",
             "CreateGroup", "GetGroup", "ListGroups", "DeleteGroup",
             "AdminAddUserToGroup", "AdminRemoveUserFromGroup", "AdminListGroupsForUser"

@@ -481,6 +481,53 @@ class CognitoIntegrationTest {
                 "DescribeUserPoolClient must include GenerateSecret");
     }
 
+    @Test
+    @Order(36)
+    void updateUserPoolClient() throws Exception {
+        // 1. Create a client
+        JsonNode createResp = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "initial-name"
+                }
+                """.formatted(poolId));
+        String cid = createResp.path("UserPoolClient").path("ClientId").asText();
+
+        // 2. Update the client
+        cognitoJson("UpdateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientId": "%s",
+                  "ClientName": "updated-name",
+                  "AllowedOAuthFlowsUserPoolClient": true,
+                  "AllowedOAuthFlows": ["code", "implicit"],
+                  "AllowedOAuthScopes": ["email", "openid"]
+                }
+                """.formatted(poolId, cid));
+
+        // 3. Verify the updates
+        JsonNode describeResp = cognitoJson("DescribeUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientId": "%s"
+                }
+                """.formatted(poolId, cid));
+        JsonNode client = describeResp.path("UserPoolClient");
+
+        assertEquals("updated-name", client.path("ClientName").asText());
+        assertEquals(true, client.path("AllowedOAuthFlowsUserPoolClient").asBoolean());
+        
+        JsonNode flows = client.path("AllowedOAuthFlows");
+        assertEquals(2, flows.size());
+        assertTrue(flows.toString().contains("code"));
+        assertTrue(flows.toString().contains("implicit"));
+
+        JsonNode scopes = client.path("AllowedOAuthScopes");
+        assertEquals(2, scopes.size());
+        assertTrue(scopes.toString().contains("email"));
+        assertTrue(scopes.toString().contains("openid"));
+    }
+
     // ── Issue #229: Password verification ──────────────────────────────
 
     @Test

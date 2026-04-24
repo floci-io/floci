@@ -48,6 +48,7 @@ class CognitoFeaturesTest {
     private static CognitoIdentityProviderClient cognito;
 
     private static String poolId;
+    private static String poolArn;
     private static String clientId;
     private static final String USERNAME = "compat-user-" + UUID.randomUUID() + "@example.com";
     private static final String PASSWORD = "CompatPass1!";
@@ -76,11 +77,37 @@ class CognitoFeaturesTest {
     void createPool() {
         CreateUserPoolResponse resp = cognito.createUserPool(b -> b.poolName("compat-test-pool"));
         poolId = resp.userPool().id();
+        poolArn = resp.userPool().arn();
         assertThat(poolId).isNotBlank();
+        assertThat(poolArn).isNotBlank();
     }
 
     @Test
     @Order(2)
+    void tagListAndUntagResourceRoundTrip() {
+        cognito.tagResource(b -> b.resourceArn(poolArn).tags(Map.of("env", "test", "team", "platform")));
+
+        ListTagsForResourceResponse tagged = cognito.listTagsForResource(b -> b.resourceArn(poolArn));
+        assertThat(tagged.tags()).containsEntry("env", "test").containsEntry("team", "platform");
+
+        cognito.untagResource(b -> b.resourceArn(poolArn).tagKeys("team"));
+
+        ListTagsForResourceResponse untagged = cognito.listTagsForResource(b -> b.resourceArn(poolArn));
+        assertThat(untagged.tags()).containsEntry("env", "test").doesNotContainKey("team");
+    }
+
+    @Test
+    @Order(3)
+    void tagResourceRejectsReservedKey() {
+        assertThatThrownBy(() -> cognito.tagResource(b -> b
+                .resourceArn(poolArn)
+                .tags(Map.of("floci:override-id", "late-id"))))
+                .isInstanceOf(CognitoIdentityProviderException.class)
+                .hasMessageContaining("Reserved tag keys with prefix floci:");
+    }
+
+    @Test
+    @Order(4)
     void createClient() {
         CreateUserPoolClientResponse resp = cognito.createUserPoolClient(b -> b
                 .userPoolId(poolId)
@@ -93,7 +120,7 @@ class CognitoFeaturesTest {
     }
 
     @Test
-    @Order(3)
+    @Order(5)
     void createUserWithPermPassword() {
         cognito.adminCreateUser(b -> b
                 .userPoolId(poolId)

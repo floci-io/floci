@@ -7,11 +7,14 @@ Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth to
 
 `CreateUserPool` accepts a reserved user-pool tag, `floci:override-id`, to pin the resulting `UserPool.Id` at creation time. Floci strips reserved `floci:*` tags from stored and returned `UserPoolTags` on both create and update paths, so the tag namespace acts as an input-only control channel and is never persisted as user-visible metadata.
 
+Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` and `UntagResource` operate on the persisted user-pool tag map.
+
 ## Supported Actions
 
 | Category | Actions |
 |---|---|
-| **User Pools** | CreateUserPool, DescribeUserPool, ListUserPools, DeleteUserPool |
+| **User Pools** | CreateUserPool, DescribeUserPool, ListUserPools, UpdateUserPool, DeleteUserPool |
+| **User Pool Tags** | TagResource, UntagResource, ListTagsForResource |
 | **User Pool Clients** | CreateUserPoolClient, DescribeUserPoolClient, ListUserPoolClients, DeleteUserPoolClient |
 | **Resource Servers** | CreateResourceServer, DescribeResourceServer, ListResourceServers, DeleteResourceServer |
 | **Admin User Management** | AdminCreateUser, AdminGetUser, AdminDeleteUser, AdminSetUserPassword, AdminUpdateUserAttributes |

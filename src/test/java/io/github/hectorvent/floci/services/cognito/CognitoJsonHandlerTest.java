@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -150,5 +151,60 @@ class CognitoJsonHandlerTest {
         JsonNode describedPool = describeBody.get("UserPool");
         assertEquals("test", describedPool.get("UserPoolTags").get("env").asText());
         assertFalse(describedPool.get("UserPoolTags").has(ReservedTags.OVERRIDE_ID_KEY));
+    }
+
+    @Test
+    void tagListAndUntagResourceRoundTrip() {
+        ObjectNode createRequest = mapper.createObjectNode();
+        createRequest.put("PoolName", "tag-pool");
+        JsonNode createBody = (JsonNode) handler.handle("CreateUserPool", createRequest, "us-east-1").getEntity();
+        JsonNode createdPool = createBody.get("UserPool");
+        String resourceArn = createdPool.get("Arn").asText();
+
+        ObjectNode tagRequest = mapper.createObjectNode();
+        tagRequest.put("ResourceArn", resourceArn);
+        ObjectNode tags = tagRequest.putObject("Tags");
+        tags.put("env", "test");
+        tags.put("team", "platform");
+
+        Response tagResponse = handler.handle("TagResource", tagRequest, "us-east-1");
+        assertEquals(200, tagResponse.getStatus());
+
+        ObjectNode listRequest = mapper.createObjectNode();
+        listRequest.put("ResourceArn", resourceArn);
+        Response listResponse = handler.handle("ListTagsForResource", listRequest, "us-east-1");
+        assertEquals(200, listResponse.getStatus());
+        JsonNode listedTags = ((JsonNode) listResponse.getEntity()).get("Tags");
+        assertEquals("test", listedTags.get("env").asText());
+        assertEquals("platform", listedTags.get("team").asText());
+
+        ObjectNode untagRequest = mapper.createObjectNode();
+        untagRequest.put("ResourceArn", resourceArn);
+        untagRequest.putArray("TagKeys").add("team");
+
+        Response untagResponse = handler.handle("UntagResource", untagRequest, "us-east-1");
+        assertEquals(200, untagResponse.getStatus());
+
+        JsonNode afterUntag = ((JsonNode) handler.handle("ListTagsForResource", listRequest, "us-east-1").getEntity()).get("Tags");
+        assertEquals("test", afterUntag.get("env").asText());
+        assertFalse(afterUntag.has("team"));
+    }
+
+    @Test
+    void tagResourceRejectsReservedKey() {
+        ObjectNode createRequest = mapper.createObjectNode();
+        createRequest.put("PoolName", "tag-pool");
+        JsonNode createBody = (JsonNode) handler.handle("CreateUserPool", createRequest, "us-east-1").getEntity();
+        String resourceArn = createBody.get("UserPool").get("Arn").asText();
+
+        ObjectNode tagRequest = mapper.createObjectNode();
+        tagRequest.put("ResourceArn", resourceArn);
+        tagRequest.putObject("Tags").put(ReservedTags.OVERRIDE_ID_KEY, "late-id");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> handler.handle("TagResource", tagRequest, "us-east-1")
+        );
+        assertEquals("ValidationException", exception.getErrorCode());
     }
 }

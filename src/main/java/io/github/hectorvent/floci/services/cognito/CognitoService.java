@@ -150,6 +150,61 @@ public class CognitoService {
         return poolStore.scan(k -> true);
     }
 
+    private UserPool describeUserPoolByArn(String resourceArn) {
+        String poolId = extractUserPoolIdFromArn(resourceArn);
+        return describeUserPool(poolId);
+    }
+
+    public void tagResource(String resourceArn, Map<String, String> tags) {
+        if (tags == null || tags.isEmpty()) {
+            throw new AwsException("InvalidParameterException", "Tags are required", 400);
+        }
+        ReservedTags.rejectReservedTagsOnUpdate(tags);
+        UserPool pool = describeUserPoolByArn(resourceArn);
+        synchronized (pool) {
+            pool.setUserPoolTags(mergeUserPoolTags(pool.getUserPoolTags(), tags));
+            pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            poolStore.put(pool.getId(), pool);
+        }
+    }
+
+    public void untagResource(String resourceArn, List<String> tagKeys) {
+        if (tagKeys == null || tagKeys.isEmpty()) {
+            throw new AwsException("InvalidParameterException", "TagKeys are required", 400);
+        }
+        UserPool pool = describeUserPoolByArn(resourceArn);
+        synchronized (pool) {
+            pool.setUserPoolTags(removeUserPoolTags(pool.getUserPoolTags(), tagKeys));
+            pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+            poolStore.put(pool.getId(), pool);
+        }
+    }
+
+    public Map<String, String> listTagsForResource(String resourceArn) {
+        UserPool pool = describeUserPoolByArn(resourceArn);
+        return new HashMap<>(pool.getUserPoolTags() != null ? pool.getUserPoolTags() : Map.of());
+    }
+
+    private static String extractUserPoolIdFromArn(String resourceArn) {
+        if (resourceArn == null || resourceArn.isBlank()) {
+            throw new AwsException("InvalidParameterException", "ResourceArn is required", 400);
+        }
+        // arn:aws:cognito-idp:<region>:<account>:userpool/<pool-id>
+        String[] parts = resourceArn.split(":", 6);
+        if (parts.length < 6 || !"cognito-idp".equals(parts[2])) {
+            throw new AwsException("InvalidParameterException", "Invalid resource ARN: " + resourceArn, 400);
+        }
+        String resource = parts[5];
+        if (!resource.startsWith("userpool/")) {
+            throw new AwsException("InvalidParameterException", "Invalid resource ARN: " + resourceArn, 400);
+        }
+        String poolId = resource.substring("userpool/".length());
+        if (poolId.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Invalid resource ARN: " + resourceArn, 400);
+        }
+        return poolId;
+    }
+
     public void deleteUserPool(String id) {
         String prefix = id + "::";
         groupStore.scan(k -> k.startsWith(prefix))
@@ -207,6 +262,28 @@ public class CognitoService {
     public void deleteUserPoolClient(String userPoolId, String clientId) {
         describeUserPoolClient(userPoolId, clientId);
         clientStore.delete(clientId);
+    }
+
+    public UserPoolClient updateUserPoolClient(String userPoolId, String clientId, String clientName,
+                                               Boolean allowedOAuthFlowsUserPoolClient,
+                                               List<String> allowedOAuthFlows,
+                                               List<String> allowedOAuthScopes) {
+        UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
+        if (clientName != null) client.setClientName(clientName);
+        if (allowedOAuthFlowsUserPoolClient != null) {
+            client.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
+        }
+        if (allowedOAuthFlows != null) {
+            client.setAllowedOAuthFlows(normalizeStringList(allowedOAuthFlows));
+        }
+        if (allowedOAuthScopes != null) {
+            client.setAllowedOAuthScopes(normalizeStringList(allowedOAuthScopes));
+        }
+
+        client.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        clientStore.put(clientId, client);
+        LOG.infov("Updated User Pool Client: {0} for pool {1}", clientId, userPoolId);
+        return client;
     }
 
     public List<UserPoolClientSecret> listUserPoolClientSecrets(String userPoolId, String clientId) {
@@ -1461,6 +1538,18 @@ public class CognitoService {
     private String generateSecretValue() {
         return UUID.randomUUID().toString().replace("-", "")
                 + UUID.randomUUID().toString().replace("-", "");
+    }
+
+    private Map<String, String> mergeUserPoolTags(Map<String, String> existingTags, Map<String, String> tagsToAdd) {
+        Map<String, String> merged = new HashMap<>(existingTags != null ? existingTags : Map.of());
+        merged.putAll(tagsToAdd);
+        return merged;
+    }
+
+    private Map<String, String> removeUserPoolTags(Map<String, String> existingTags, List<String> tagKeys) {
+        Map<String, String> updated = new HashMap<>(existingTags != null ? existingTags : Map.of());
+        tagKeys.forEach(updated::remove);
+        return updated;
     }
 
     private String trimTrailingSlash(String value) {

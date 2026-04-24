@@ -187,3 +187,45 @@ teardown() {
     assert_failure
     [[ "$output" == *"ResourceConflictException"* ]]
 }
+
+@test "Cognito: tag-resource list-tags-for-resource and untag-resource manage user pool tags" {
+    out=$(aws_cmd cognito-idp create-user-pool --pool-name "bats-test-pool-$(unique_name)")
+    POOL_ID=$(json_get "$out" '.UserPool.Id')
+    RESOURCE_ARN=$(json_get "$out" '.UserPool.Arn')
+
+    run aws_cmd cognito-idp tag-resource \
+        --resource-arn "$RESOURCE_ARN" \
+        --tags env=test,team=platform
+    assert_success
+
+    run aws_cmd cognito-idp list-tags-for-resource --resource-arn "$RESOURCE_ARN"
+    assert_success
+    env_value=$(json_get "$output" '.Tags.env')
+    [ "$env_value" = "test" ]
+    team_value=$(json_get "$output" '.Tags.team')
+    [ "$team_value" = "platform" ]
+
+    run aws_cmd cognito-idp untag-resource \
+        --resource-arn "$RESOURCE_ARN" \
+        --tag-keys team
+    assert_success
+
+    run aws_cmd cognito-idp list-tags-for-resource --resource-arn "$RESOURCE_ARN"
+    assert_success
+    env_value=$(json_get "$output" '.Tags.env')
+    [ "$env_value" = "test" ]
+    has_team=$(echo "$output" | jq '.Tags | has("team")')
+    [ "$has_team" = "false" ]
+}
+
+@test "Cognito: standalone tag-resource rejects reserved floci tags" {
+    out=$(aws_cmd cognito-idp create-user-pool --pool-name "bats-test-pool-$(unique_name)")
+    POOL_ID=$(json_get "$out" '.UserPool.Id')
+    RESOURCE_ARN=$(json_get "$out" '.UserPool.Arn')
+
+    run aws_cmd cognito-idp tag-resource \
+        --resource-arn "$RESOURCE_ARN" \
+        --tags floci:override-id=late-id
+    assert_failure
+    [[ "$output" == *"ValidationException"* ]]
+}

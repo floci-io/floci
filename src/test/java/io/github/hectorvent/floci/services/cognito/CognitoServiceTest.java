@@ -183,6 +183,90 @@ class CognitoServiceTest {
     }
 
     @Test
+    void tagResourceAddsAndOverwritesTags() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TaggedPool", "UserPoolTags", Map.of("env", "dev")),
+                "us-east-1"
+        );
+
+        service.tagResource(pool.getArn(), Map.of("team", "platform", "env", "test"));
+
+        assertEquals(Map.of("env", "test", "team", "platform"), service.listTagsForResource(pool.getArn()));
+    }
+
+    @Test
+    void tagResourceRejectsReservedKey() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TaggedPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.tagResource(pool.getArn(), Map.of(ReservedTags.OVERRIDE_ID_KEY, "late-id"))
+        );
+
+        assertEquals("ValidationException", exception.getErrorCode());
+    }
+
+    @Test
+    void tagResourceRejectsEmptyTags() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TaggedPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.tagResource(pool.getArn(), Map.of())
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void tagResourceWithUnknownArnThrowsNotFound() {
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.tagResource("arn:aws:cognito-idp:us-east-1:000000000000:userpool/us-east-1_missing", Map.of("env", "test"))
+        );
+
+        assertEquals("ResourceNotFoundException", exception.getErrorCode());
+    }
+
+    @Test
+    void untagResourceRemovesRequestedKeysAndAllowsReservedRemoval() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TaggedPool", "UserPoolTags", Map.of("env", "test", "team", "platform")),
+                "us-east-1"
+        );
+
+        service.untagResource(pool.getArn(), List.of("team", ReservedTags.OVERRIDE_ID_KEY));
+
+        assertEquals(Map.of("env", "test"), service.listTagsForResource(pool.getArn()));
+    }
+
+    @Test
+    void listTagsForResourceReturnsCurrentTags() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TaggedPool", "UserPoolTags", Map.of("env", "test")),
+                "us-east-1"
+        );
+
+        assertEquals(Map.of("env", "test"), service.listTagsForResource(pool.getArn()));
+    }
+
+    @Test
+    void updateUserPoolAndTagResourceShareConsistentVisibleTagBehavior() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TaggedPool"), "us-east-1");
+
+        service.updateUserPool(
+                Map.of(
+                        "UserPoolId", pool.getId(),
+                        "UserPoolTags", Map.of(ReservedTags.OVERRIDE_ID_KEY, "late-id", "env", "test")
+                ),
+                "us-east-1"
+        );
+        service.tagResource(pool.getArn(), Map.of("team", "platform"));
+
+        assertEquals(Map.of("env", "test", "team", "platform"), service.listTagsForResource(pool.getArn()));
+    }
+
+    @Test
     void issuerUrlForPinnedPoolResolvesAsBaseUrlSlashPoolId() {
         UserPool pool = service.createUserPool(
                 Map.of("PoolName", "PinnedPool", "UserPoolTags", Map.of(ReservedTags.OVERRIDE_ID_KEY, "custompool")),
