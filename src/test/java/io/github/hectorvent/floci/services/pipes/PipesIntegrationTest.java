@@ -198,6 +198,46 @@ class PipesIntegrationTest {
 
     @Test
     @Order(12)
+    void createPipeReturnsParametersInResponse() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Source": "arn:aws:sqs:us-east-1:000000000000:params-source",
+                    "Target": "arn:aws:sqs:us-east-1:000000000000:params-target",
+                    "RoleArn": "arn:aws:iam::000000000000:role/pipe-role",
+                    "SourceParameters": {
+                        "FilterCriteria": {
+                            "Filters": [{"Pattern": "{\\"body\\":{\\"status\\":[\\"active\\"]}}"}]
+                        }
+                    },
+                    "TargetParameters": {
+                        "InputTemplate": "{\\"id\\": <$.messageId>}"
+                    },
+                    "Tags": {"env": "test", "team": "platform"}
+                }
+                """)
+        .when()
+            .post("/v1/pipes/params-pipe")
+        .then()
+            .statusCode(200)
+            .body("Name", equalTo("params-pipe"))
+            .body("SourceParameters.FilterCriteria.Filters[0].Pattern",
+                    equalTo("{\"body\":{\"status\":[\"active\"]}}"))
+            .body("TargetParameters.InputTemplate", equalTo("{\"id\": <$.messageId>}"))
+            .body("Tags.env", equalTo("test"))
+            .body("Tags.team", equalTo("platform"));
+
+        given()
+            .contentType("application/json")
+        .when()
+            .delete("/v1/pipes/params-pipe")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(13)
     void createPipeMissingSourceReturns400() {
         given()
             .contentType("application/json")

@@ -215,6 +215,18 @@ public class PipesController {
         node.put("CurrentState", pipe.getCurrentState().name());
         if (pipe.getDescription() != null) node.put("Description", pipe.getDescription());
         if (pipe.getEnrichment() != null) node.put("Enrichment", pipe.getEnrichment());
+        if (pipe.getSourceParameters() != null) {
+            node.set("SourceParameters", pipe.getSourceParameters());
+        }
+        if (pipe.getTargetParameters() != null) {
+            node.set("TargetParameters", pipe.getTargetParameters());
+        }
+        if (pipe.getEnrichmentParameters() != null) {
+            node.set("EnrichmentParameters", pipe.getEnrichmentParameters());
+        }
+        if (pipe.getTags() != null && !pipe.getTags().isEmpty()) {
+            node.set("Tags", objectMapper.valueToTree(pipe.getTags()));
+        }
         if (pipe.getCreationTime() != null) node.put("CreationTime", pipe.getCreationTime().getEpochSecond());
         if (pipe.getLastModifiedTime() != null) node.put("LastModifiedTime", pipe.getLastModifiedTime().getEpochSecond());
         if (pipe.getStateReason() != null) node.put("StateReason", pipe.getStateReason());

@@ -219,7 +219,10 @@ public class PipesPoller {
                 return;
             }
             String eventJson = wrapRecords(filtered);
-            invokeWithDlq(pipe, eventJson, region);
+            if (!invokeWithDlq(pipe, eventJson, region)) {
+                LOG.warnv("Pipe {0}: {1} Kinesis record(s) dropped — delivery and DLQ both failed",
+                        pipe.getName(), filtered.size());
+            }
         } catch (AwsException e) {
             if ("ExpiredIteratorException".equals(e.getErrorCode())) {
                 kinesisIterators.remove(pipeKey);
@@ -267,7 +270,10 @@ public class PipesPoller {
                 return;
             }
             String eventJson = wrapRecords(filtered);
-            invokeWithDlq(pipe, eventJson, region);
+            if (!invokeWithDlq(pipe, eventJson, region)) {
+                LOG.warnv("Pipe {0}: {1} DynamoDB Stream record(s) dropped — delivery and DLQ both failed",
+                        pipe.getName(), filtered.size());
+            }
         } catch (AwsException e) {
             if ("ExpiredIteratorException".equals(e.getErrorCode()) ||
                 "TrimmedDataAccessException".equals(e.getErrorCode())) {
