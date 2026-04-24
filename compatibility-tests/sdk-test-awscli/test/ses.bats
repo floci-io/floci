@@ -140,3 +140,97 @@ teardown_file() {
     refute_output --partial "$TEST_EMAIL"
     refute_output --partial "$TEST_DOMAIN"
 }
+
+# ──────────────── Template CRUD ────────────────
+
+@test "SES: create template" {
+    local tpl_json
+    tpl_json=$(cat <<TMPL
+{"TemplateName":"cli-tpl-${BATS_ROOT_PID}","SubjectPart":"Hello {{name}}","TextPart":"Hi {{name}} from {{team}}","HtmlPart":"<p>Hi {{name}}</p>"}
+TMPL
+    )
+    run aws_cmd ses create-template --template "$tpl_json"
+    assert_success
+}
+
+@test "SES: create template - duplicate rejected" {
+    local tpl_json
+    tpl_json=$(cat <<TMPL
+{"TemplateName":"cli-tpl-${BATS_ROOT_PID}","SubjectPart":"Dup","TextPart":"Dup"}
+TMPL
+    )
+    run aws_cmd ses create-template --template "$tpl_json"
+    assert_failure
+    assert_output --partial "AlreadyExists"
+}
+
+@test "SES: get template" {
+    run aws_cmd ses get-template --template-name "cli-tpl-${BATS_ROOT_PID}"
+    assert_success
+    name=$(json_get "$output" '.Template.TemplateName')
+    subject=$(json_get "$output" '.Template.SubjectPart')
+    [ "$name" = "cli-tpl-${BATS_ROOT_PID}" ]
+    [ "$subject" = "Hello {{name}}" ]
+}
+
+@test "SES: get template - not found" {
+    run aws_cmd ses get-template --template-name "nonexistent-tpl"
+    assert_failure
+    assert_output --partial "TemplateDoesNotExist"
+}
+
+@test "SES: update template" {
+    local tpl_json
+    tpl_json=$(cat <<TMPL
+{"TemplateName":"cli-tpl-${BATS_ROOT_PID}","SubjectPart":"Updated {{name}}","TextPart":"Updated {{name}} {{team}}","HtmlPart":"<p>Updated {{name}}</p>"}
+TMPL
+    )
+    run aws_cmd ses update-template --template "$tpl_json"
+    assert_success
+
+    run aws_cmd ses get-template --template-name "cli-tpl-${BATS_ROOT_PID}"
+    assert_success
+    subject=$(json_get "$output" '.Template.SubjectPart')
+    [ "$subject" = "Updated {{name}}" ]
+}
+
+@test "SES: list templates includes created" {
+    run aws_cmd ses list-templates
+    assert_success
+    assert_output --partial "cli-tpl-${BATS_ROOT_PID}"
+}
+
+@test "SES: send templated email" {
+    # Ensure an identity exists for sending
+    aws_cmd ses verify-email-identity --email-address "tpl-sender@example.com" >/dev/null 2>&1 || true
+
+    run aws_cmd ses send-templated-email \
+        --source "tpl-sender@example.com" \
+        --destination "ToAddresses=recipient@example.com" \
+        --template "cli-tpl-${BATS_ROOT_PID}" \
+        --template-data '{"name":"Alice","team":"floci"}'
+    assert_success
+    message_id=$(json_get "$output" '.MessageId')
+    [ -n "$message_id" ]
+}
+
+@test "SES: send templated email - unknown template" {
+    run aws_cmd ses send-templated-email \
+        --source "tpl-sender@example.com" \
+        --destination "ToAddresses=recipient@example.com" \
+        --template "nonexistent-tpl" \
+        --template-data '{}'
+    assert_failure
+    assert_output --partial "TemplateDoesNotExist"
+}
+
+@test "SES: delete template" {
+    run aws_cmd ses delete-template --template-name "cli-tpl-${BATS_ROOT_PID}"
+    assert_success
+}
+
+@test "SES: delete template - not found" {
+    run aws_cmd ses delete-template --template-name "nonexistent-tpl"
+    assert_failure
+    assert_output --partial "TemplateDoesNotExist"
+}
