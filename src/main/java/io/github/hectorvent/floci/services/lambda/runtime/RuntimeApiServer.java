@@ -5,13 +5,13 @@ import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
 import io.vertx.core.Vertx;
 import io.vertx.core.http.HttpServer;
 import io.vertx.ext.web.Router;
+import io.vertx.ext.web.RoutingContext;
 import io.vertx.ext.web.handler.BodyHandler;
 import org.jboss.logging.Logger;
 
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Per-container HTTP server implementing the AWS Lambda Runtime API.
@@ -35,14 +35,15 @@ public class RuntimeApiServer {
     private static final byte[] CONTAINER_STOPPED_PAYLOAD =
             "{\"errorMessage\":\"Container stopped\",\"errorType\":\"ContainerStopped\"}".getBytes();
 
-    // Sentinel used to wake a /next handler blocked in pendingQueue.poll() when stop() is called.
-    // Compared by identity (==), not equals.
-    private static final PendingInvocation SHUTDOWN_SENTINEL =
-            new PendingInvocation("<shutdown>", new byte[0], 0L, "", new CompletableFuture<>());
-
     private final Vertx vertx;
     private final int port;
-    private final LinkedBlockingQueue<PendingInvocation> pendingQueue = new LinkedBlockingQueue<>();
+
+    // Invocations queued before a /next poller arrived.
+    private final ConcurrentLinkedQueue<PendingInvocation> pendingQueue = new ConcurrentLinkedQueue<>();
+
+    // /next callers parked while the pending queue is empty.
+    private final ConcurrentLinkedQueue<RoutingContext> waitingContexts = new ConcurrentLinkedQueue<>();
+
     private final ConcurrentHashMap<String, PendingInvocation> inFlight = new ConcurrentHashMap<>();
 
     private volatile HttpServer httpServer;
@@ -63,46 +64,39 @@ public class RuntimeApiServer {
         Router router = Router.router(vertx);
         router.route().handler(BodyHandler.create());
 
-        // GET /runtime/invocation/next — poll for next invocation, one request per worker thread.
-        // Returns 204 when nothing arrives within 30 s so the runtime re-polls.
-        // This matches the real AWS Runtime API contract and caps each handler to one
-        // Vert.x worker thread for at most 30 seconds, preventing worker-pool exhaustion
-        // when multiple warm containers are polling concurrently.
-        router.get(NEXT_PATH).blockingHandler(ctx -> {
-            try {
+        // GET /runtime/invocation/next — AWS Runtime API contract: blocks until an invocation
+        // arrives, then returns 200 with the invocation payload and required headers.
+        // Uses a reactive pattern (no thread held while waiting) to avoid Vert.x worker pool
+        // exhaustion when many warm containers poll concurrently.
+        router.get(NEXT_PATH).handler(ctx -> {
+            if (stopped) {
+                ctx.response().setStatusCode(204).end();
+                return;
+            }
+            PendingInvocation invocation = pendingQueue.poll();
+            if (invocation != null) {
                 if (stopped) {
-                    ctx.response().setStatusCode(204).end();
-                    return;
-                }
-                PendingInvocation invocation = pendingQueue.poll(30, TimeUnit.SECONDS);
-                if (invocation == SHUTDOWN_SENTINEL) {
-                    invocation = null;
-                }
-                // If stop() ran after poll() returned a real invocation (narrow race before
-                // inFlight.put), complete it here so the caller doesn't hang.
-                if (invocation != null && stopped) {
                     invocation.getResultFuture().complete(
                             new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
-                    invocation = null;
-                }
-                if (invocation == null) {
                     ctx.response().setStatusCode(204).end();
                     return;
                 }
-                inFlight.put(invocation.getRequestId(), invocation);
-                ctx.response()
-                        .setStatusCode(200)
-                        .putHeader("Content-Type", "application/json")
-                        .putHeader("Lambda-Runtime-Aws-Request-Id", invocation.getRequestId())
-                        .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getFunctionArn())
-                        .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()))
-                        .end(invocation.getPayload() != null
-                                ? new String(invocation.getPayload())
-                                : "{}");
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                ctx.response().setStatusCode(204).end();
+                sendInvocation(ctx, invocation);
+                return;
             }
+            // No invocation queued yet — park this context until enqueue() wakes it.
+            waitingContexts.add(ctx);
+            // Re-check stop race: stop() may have drained waitingContexts before our add().
+            if (stopped && waitingContexts.remove(ctx)) {
+                ctx.response().setStatusCode(204).end();
+                return;
+            }
+            // Re-check enqueue race: an invocation may have arrived between our poll() and add().
+            PendingInvocation raced = pendingQueue.poll();
+            if (raced != null && waitingContexts.remove(ctx)) {
+                sendInvocation(ctx, raced);
+            }
+            // else: still parked — enqueue() will dispatch via vertx.runOnContext().
         });
 
         // POST /runtime/invocation/{requestId}/response — success
@@ -156,21 +150,23 @@ public class RuntimeApiServer {
             httpServer.close();
         }
 
-        // Drain queued invocations that were never consumed by /next, completing each future
-        // with ContainerStopped so callers (LambdaExecutorService) don't hang waiting for a result.
+        // Wake any parked /next pollers with 204 (container shutting down — runtime will exit).
+        RoutingContext waiting;
+        while ((waiting = waitingContexts.poll()) != null) {
+            final RoutingContext ctx = waiting;
+            vertx.runOnContext(v -> {
+                if (!ctx.response().ended()) {
+                    ctx.response().setStatusCode(204).end();
+                }
+            });
+        }
+
+        // Drain queued invocations that were never consumed by /next.
         PendingInvocation pending;
         while ((pending = pendingQueue.poll()) != null) {
-            if (pending == SHUTDOWN_SENTINEL) {
-                continue;
-            }
             pending.getResultFuture().complete(
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, pending.getRequestId()));
         }
-
-        // Offer sentinel AFTER drain so it cannot be discarded. Wakes any /next handler
-        // currently blocked in poll(). N=1 today: a single RuntimeApiServer serves one container,
-        // so one sentinel suffices.
-        pendingQueue.offer(SHUTDOWN_SENTINEL);
 
         // Complete any in-flight invocations with error.
         inFlight.values().forEach(inv ->
@@ -181,9 +177,22 @@ public class RuntimeApiServer {
 
     public CompletableFuture<InvokeResult> enqueue(PendingInvocation invocation) {
         if (stopped) {
-            // stop() already ran; don't queue. Complete immediately so caller doesn't hang.
             invocation.getResultFuture().complete(
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
+            return invocation.getResultFuture();
+        }
+        // If a /next poller is already parked, dispatch immediately on the event loop.
+        RoutingContext ctx = waitingContexts.poll();
+        if (ctx != null) {
+            final RoutingContext waitingCtx = ctx;
+            vertx.runOnContext(v -> {
+                if (!waitingCtx.response().ended()) {
+                    sendInvocation(waitingCtx, invocation);
+                } else {
+                    // Connection closed between park and dispatch — re-queue.
+                    pendingQueue.offer(invocation);
+                }
+            });
             return invocation.getResultFuture();
         }
         pendingQueue.offer(invocation);
@@ -194,5 +203,18 @@ public class RuntimeApiServer {
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
         }
         return invocation.getResultFuture();
+    }
+
+    private void sendInvocation(RoutingContext ctx, PendingInvocation invocation) {
+        inFlight.put(invocation.getRequestId(), invocation);
+        ctx.response()
+                .setStatusCode(200)
+                .putHeader("Content-Type", "application/json")
+                .putHeader("Lambda-Runtime-Aws-Request-Id", invocation.getRequestId())
+                .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getFunctionArn())
+                .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()))
+                .end(invocation.getPayload() != null
+                        ? new String(invocation.getPayload())
+                        : "{}");
     }
 }

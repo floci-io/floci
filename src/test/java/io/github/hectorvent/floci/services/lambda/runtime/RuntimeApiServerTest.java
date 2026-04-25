@@ -77,32 +77,30 @@ class RuntimeApiServerTest {
     }
 
     @Test
-    @Timeout(45)
-    void nextEndpoint_returns204OnTimeout_thenReturns200OnRepoll() throws Exception {
-        // AWS Runtime API contract: GET /next returns 204 when no invocation arrives within
-        // the poll window. The runtime re-polls and picks up the next queued invocation.
+    @Timeout(10)
+    void nextEndpoint_parksWithNoResponse_thenReturns200WhenInvocationEnqueued() throws Exception {
+        // AWS Runtime API spec: GET /next must park (no response) until an invocation
+        // arrives — it must never return 204 during normal operation.
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
                 .GET()
                 .build();
+        CompletableFuture<HttpResponse<String>> asyncResponse =
+                httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
 
-        // First poll: nothing queued — should return 204 after ~30 s.
-        HttpResponse<String> emptyResponse = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(204, emptyResponse.statusCode(),
-                "GET /next should return 204 when the queue is empty after the poll timeout");
+        Thread.sleep(300);
+        assertFalse(asyncResponse.isDone(), "GET /next should be parked, not returned");
 
-        // Enqueue an invocation and re-poll — should be returned immediately.
         PendingInvocation invocation = new PendingInvocation(
-                "req-after-timeout", "{\"repoll\":true}".getBytes(),
+                "req-parked", "{\"reactive\":true}".getBytes(),
                 System.currentTimeMillis() + 60_000,
                 "arn:aws:lambda:us-east-1:000000000000:function:test",
                 new CompletableFuture<>());
         server.enqueue(invocation);
 
-        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-        assertEquals(200, response.statusCode());
-        assertEquals("req-after-timeout",
-                response.headers().firstValue("Lambda-Runtime-Aws-Request-Id").orElse(""));
+        HttpResponse<String> response = asyncResponse.get(2, TimeUnit.SECONDS);
+        assertEquals(200, response.statusCode(), "GET /next must return 200 when invocation arrives");
+        assertEquals("req-parked", response.headers().firstValue("Lambda-Runtime-Aws-Request-Id").orElse(""));
     }
 
     @Test
@@ -136,8 +134,8 @@ class RuntimeApiServerTest {
 
     @Test
     @Timeout(15)
-    void stopWakesBlockedPollerImmediately() throws Exception {
-        // GET /next on a background thread — blocks in pendingQueue.poll(30s).
+    void stopWakesParkedPollerImmediately() throws Exception {
+        // GET /next on a background thread — parks in waitingContexts (no thread held).
         HttpRequest request = HttpRequest.newBuilder()
                 .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
                 .GET()
@@ -145,19 +143,18 @@ class RuntimeApiServerTest {
         CompletableFuture<HttpResponse<String>> asyncResponse =
                 httpClient.sendAsync(request, HttpResponse.BodyHandlers.ofString());
 
-        // Give the handler time to enter poll()
+        // Give the handler time to park
         Thread.sleep(500);
-        assertFalse(asyncResponse.isDone(), "handler should be blocked in poll");
+        assertFalse(asyncResponse.isDone(), "handler should be parked");
 
         long start = System.currentTimeMillis();
         server.stop();
         HttpResponse<String> response = asyncResponse.get(2, TimeUnit.SECONDS);
         long elapsed = System.currentTimeMillis() - start;
 
-        // 204 requires the handler to have: woken from poll, observed sentinel, exited loop,
-        // written the response. Proves the worker thread is released (not just the socket closed).
+        // 204 is only valid on shutdown — the container is being terminated.
         assertEquals(204, response.statusCode());
-        assertTrue(elapsed < 1000, "stop() should wake poller in <1s, took " + elapsed + "ms");
+        assertTrue(elapsed < 1000, "stop() should wake parked poller in <1s, took " + elapsed + "ms");
     }
 
     @Test
