@@ -4,6 +4,8 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.athena.model.QueryExecution;
+import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
+import io.github.hectorvent.floci.services.athena.model.ResultConfiguration;
 import io.github.hectorvent.floci.services.athena.model.ResultSet;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -28,11 +30,18 @@ public class AthenaJsonHandler {
             case "StartQueryExecution" -> {
                 String query = request.get("QueryString").asText();
                 String workGroup = request.has("WorkGroup") ? request.get("WorkGroup").asText() : "primary";
-                String database = "default";
-                if (request.has("QueryExecutionContext") && request.get("QueryExecutionContext").has("Database")) {
-                    database = request.get("QueryExecutionContext").get("Database").asText();
+
+                QueryExecutionContext context = null;
+                if (request.has("QueryExecutionContext")) {
+                    context = mapper.treeToValue(request.get("QueryExecutionContext"), QueryExecutionContext.class);
                 }
-                String id = athenaService.startQueryExecution(query, workGroup, database);
+
+                ResultConfiguration resultConfiguration = null;
+                if (request.has("ResultConfiguration")) {
+                    resultConfiguration = mapper.treeToValue(request.get("ResultConfiguration"), ResultConfiguration.class);
+                }
+
+                String id = athenaService.startQueryExecution(query, workGroup, context, resultConfiguration);
                 yield Response.ok(Map.of("QueryExecutionId", id)).build();
             }
             case "GetQueryExecution" -> {
@@ -46,8 +55,9 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("ResultSet", results)).build();
             }
             case "ListQueryExecutions" -> {
-                yield Response.ok(Map.of("QueryExecutionIds", 
-                        athenaService.listQueryExecutions().stream().map(QueryExecution::getQueryExecutionId).toList())).build();
+                yield Response.ok(Map.of("QueryExecutionIds",
+                        athenaService.listQueryExecutions().stream()
+                                .map(QueryExecution::getQueryExecutionId).toList())).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };

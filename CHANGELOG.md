@@ -3,6 +3,10 @@
 
 ### Features
 
+* **athena:** real SQL execution via `floci-duck` DuckDB sidecar — queries run against actual S3 data; Glue tables are auto-registered as DuckDB views at query time
+* **athena:** lazy sidecar lifecycle — `floci/floci-duck:latest` container is started on first query and reused for subsequent executions; `FLOCI_SERVICES_ATHENA_DUCK_URL` bypasses container management
+* **athena:** `mock` mode (`FLOCI_SERVICES_ATHENA_MOCK=true`) keeps the previous behavior for unit tests that only verify the state machine
+* **glue,athena:** SerDe-aware format inference — `inferReadFunction` now checks `SerdeInfo.SerializationLibrary` in addition to `InputFormat`; standard AWS JSON tables (`TextInputFormat` + `JsonSerDe`) correctly map to `read_json_auto`
 * **bedrock-runtime:** add stub for Converse and InvokeModel ([#87](https://github.com/floci-io/floci/issues/87))
 * **s3:** preserve explicit object server-side-encryption headers on PutObject, GetObject, HeadObject, CopyObject, and multipart uploads
 * **cognito,kms:** allow caller-pinned resource IDs via the reserved `floci:override-id` tag channel ([#460](https://github.com/floci-io/floci/issues/460))
@@ -16,6 +20,7 @@
 * honor `floci.storage.services.acm.*` overrides in `StorageFactory`
 * **dynamodb:** serialise concurrent mutations via per-item locks and total-ordered transaction lock acquisition so `UpdateItem` counters, conditional `PutItem`/`DeleteItem`, and `TransactWriteItems` are linearisable under load — callers whose prior races silently succeeded may now see the `ConditionalCheckFailedException` / `TransactionCanceledException` that real DynamoDB would raise ([#571](https://github.com/floci-io/floci/issues/571))
 * **s3:** honor canned object ACLs on PutObject, CopyObject, and multipart uploads
+* **lambda:** skip Docker Hub pull when image already exists locally, preventing local builds from being overwritten
 
 ## [1.5.2](https://github.com/floci-io/floci/compare/1.5.1...1.5.2) (2026-04-10)
 

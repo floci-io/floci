@@ -42,6 +42,11 @@ public class ImageCacheService {
             if (pulledImages.contains(imageUri)) {
                 return;
             }
+            if (isLocalImagePresent(imageUri)) {
+                pulledImages.add(imageUri);
+                LOG.infov("Image already present locally, skipping pull: {0}", imageUri);
+                return;
+            }
             LOG.infov("Pulling image: {0}", imageUri);
             try {
                 dockerClient.pullImageCmd(imageUri)
@@ -54,6 +59,18 @@ public class ImageCacheService {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException("Interrupted while pulling image: " + imageUri, e);
             }
+        }
+    }
+
+    private boolean isLocalImagePresent(String imageUri) {
+        try {
+            dockerClient.inspectImageCmd(imageUri).exec();
+            return true;
+        } catch (com.github.dockerjava.api.exception.NotFoundException e) {
+            return false;
+        } catch (Exception e) {
+            LOG.debugv("Could not check local image presence for {0}: {1}", imageUri, e.getMessage());
+            return false;
         }
     }
 

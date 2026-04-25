@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.firehose;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -14,6 +16,11 @@ import static org.hamcrest.Matchers.*;
 class FirehoseIntegrationTest {
 
     private static final String STREAM_NAME = "test-delivery-stream";
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     @Order(1)

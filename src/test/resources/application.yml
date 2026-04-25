@@ -116,6 +116,7 @@ floci:
       validation-wait-seconds: 0
     athena:
       enabled: true
+      mock: true
     glue:
       enabled: true
     ses:

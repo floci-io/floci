@@ -12,6 +12,8 @@ import software.amazon.awssdk.services.glue.model.*;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -42,14 +44,19 @@ class DataLakeTest {
                 .databaseInput(DatabaseInput.builder().name(DB_NAME).build())
                 .build());
 
-        // 2. Glue Table
+        // 2. Glue Table — standard AWS JSON table config: TextInputFormat + JsonSerDe
         glue.createTable(CreateTableRequest.builder()
                 .databaseName(DB_NAME)
                 .tableInput(TableInput.builder()
                         .name(TABLE_NAME)
                         .storageDescriptor(StorageDescriptor.builder()
                                 .location("s3://floci-firehose-results/" + STREAM_NAME + "/")
-                                .inputFormat("Parquet")
+                                .inputFormat("org.apache.hadoop.mapred.TextInputFormat")
+                                .outputFormat("org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat")
+                                .serdeInfo(SerDeInfo.builder()
+                                        .serializationLibrary("org.openx.data.jsonserde.JsonSerDe")
+                                        .parameters(Map.of("serialization.format", "1"))
+                                        .build())
                                 .columns(
                                         software.amazon.awssdk.services.glue.model.Column.builder().name("id").type("int").build(),
                                         software.amazon.awssdk.services.glue.model.Column.builder().name("amount").type("double").build()
@@ -102,13 +109,22 @@ class DataLakeTest {
 
         assertThat(status.state()).isEqualTo(QueryExecutionState.SUCCEEDED);
 
-        // Get Results — Athena is in mock mode; query execution is accepted and the state
-        // machine runs correctly, but results are empty until the DuckDB sidecar is integrated.
         GetQueryResultsResponse results = athena.getQueryResults(GetQueryResultsRequest.builder()
                 .queryExecutionId(queryId)
                 .build());
 
         assertThat(results.resultSet()).isNotNull();
-        assertThat(results.resultSet().rows()).isEmpty();
+        // Athena GetQueryResults includes a header row + data rows
+        assertThat(results.resultSet().rows()).hasSizeGreaterThanOrEqualTo(2);
+
+        // Header row must contain the column name
+        List<String> header = results.resultSet().rows().get(0).data().stream()
+                .map(d -> d.varCharValue())
+                .collect(Collectors.toList());
+        assertThat(header).containsExactly("total");
+
+        // Data row: sum(amount) = 10+20+30+40+50 = 150
+        String total = results.resultSet().rows().get(1).data().get(0).varCharValue();
+        assertThat(Double.parseDouble(total)).isEqualTo(150.0);
     }
 }

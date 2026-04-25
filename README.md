@@ -57,7 +57,7 @@
 | ElastiCache (Redis + IAM auth) | ✅ | ❌ |
 | RDS (PostgreSQL + MySQL + IAM auth) | ✅ | ❌ |
 | MSK (Kafka + Redpanda) | ✅ | ❌ |
-| Athena (query state machine, mock mode) | ✅ | ❌ |
+| Athena (real SQL via DuckDB sidecar + Glue views) | ✅ | ❌ |
 | Glue Data Catalog | ✅ | ❌ |
 | Data Firehose (NDJSON delivery) | ✅ | ❌ |
 | S3 Object Lock (COMPLIANCE / GOVERNANCE) | ✅ | ⚠️ Partial |
@@ -92,6 +92,7 @@ flowchart LR
 
         subgraph Containers ["Container Services  🐳"]
             C["Lambda\nElastiCache\nRDS\nECS\nMSK\nEKS"]
+            D["Athena ➜ floci-duck\n(DuckDB sidecar)"]
         end
 
         Router --> Stateless
@@ -196,8 +197,8 @@ All default images are configurable via environment variables, useful for pinnin
 | **ElastiCache** | **Real Docker containers** | Redis / Valkey, IAM auth, SigV4 validation |
 | **RDS** | **Real Docker containers** | PostgreSQL & MySQL, IAM auth, JDBC-compatible |
 | **MSK** | **Real Docker containers** | Kafka compatible via Redpanda orchestration |
-| **Athena** | In-process | Query state machine (mock mode — queries accepted, results empty) |
-| **Glue** | In-process | Data Catalog for metadata management |
+| **Athena** | In-process + **DuckDB sidecar** | Real SQL execution; Glue-backed views over S3 data; `read_parquet` / `read_json_auto` / `read_csv_auto` inferred from SerDe |
+| **Glue** | In-process | Data Catalog; tables consumed by Athena as DuckDB views at query time |
 | **Data Firehose** | In-process | Streaming data delivery; records flushed as NDJSON to S3 |
 | **ECS** | **Real Docker containers** | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | **EC2** | In-process | VPCs, subnets, security groups, instances, AMIs, key pairs, internet gateways, route tables, Elastic IPs, tags |

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.firehose;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription.S3Destination;
 import io.github.hectorvent.floci.services.firehose.model.Record;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -29,7 +30,13 @@ public class FirehoseJsonHandler {
         return switch (action) {
             case "CreateDeliveryStream" -> {
                 String name = request.get("DeliveryStreamName").asText();
-                String arn = firehoseService.createDeliveryStream(name);
+                S3Destination s3 = null;
+                if (request.has("S3DestinationConfiguration")) {
+                    s3 = mapper.treeToValue(request.get("S3DestinationConfiguration"), S3Destination.class);
+                } else if (request.has("ExtendedS3DestinationConfiguration")) {
+                    s3 = mapper.treeToValue(request.get("ExtendedS3DestinationConfiguration"), S3Destination.class);
+                }
+                String arn = firehoseService.createDeliveryStream(name, s3);
                 yield Response.ok(Map.of("DeliveryStreamARN", arn)).build();
             }
             case "DescribeDeliveryStream" -> {
@@ -38,7 +45,9 @@ public class FirehoseJsonHandler {
                 yield Response.ok(Map.of("DeliveryStreamDescription", desc)).build();
             }
             case "ListDeliveryStreams" -> {
-                yield Response.ok(Map.of("DeliveryStreamNames", firehoseService.listDeliveryStreams(), "HasMoreDeliveryStreams", false)).build();
+                yield Response.ok(Map.of(
+                        "DeliveryStreamNames", firehoseService.listDeliveryStreams(),
+                        "HasMoreDeliveryStreams", false)).build();
             }
             case "DeleteDeliveryStream" -> {
                 String name = request.get("DeliveryStreamName").asText();
@@ -53,13 +62,15 @@ public class FirehoseJsonHandler {
             }
             case "PutRecordBatch" -> {
                 String name = request.get("DeliveryStreamName").asText();
-                List<Map<String, String>> responseEntries = new ArrayList<>();
+                List<Record> records = new ArrayList<>();
                 for (JsonNode recordNode : request.get("Records")) {
-                    Record record = mapper.treeToValue(recordNode, Record.class);
-                    firehoseService.putRecord(name, record);
-                    responseEntries.add(Map.of("RecordId", UUID.randomUUID().toString()));
+                    records.add(mapper.treeToValue(recordNode, Record.class));
                 }
-                yield Response.ok(Map.of("FailedPutCount", 0, "RequestResponses", responseEntries)).build();
+                firehoseService.putRecordBatch(name, records);
+                List<Map<String, String>> responses = records.stream()
+                        .map(r -> Map.of("RecordId", UUID.randomUUID().toString()))
+                        .toList();
+                yield Response.ok(Map.of("FailedPutCount", 0, "RequestResponses", responses)).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };

@@ -440,6 +440,15 @@ public interface EmulatorConfig {
     interface AthenaServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean mock();
+
+        /** When set, Floci uses this URL and skips floci-duck container management. */
+        Optional<String> duckUrl();
+
+        @WithDefault("floci/floci-duck:latest")
+        String defaultImage();
     }
 
     interface GlueServiceConfig {

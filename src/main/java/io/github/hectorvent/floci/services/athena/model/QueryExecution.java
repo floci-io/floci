@@ -14,12 +14,22 @@ public class QueryExecution {
     @JsonProperty("WorkGroup")
     private String workGroup;
 
+    @JsonProperty("ResultConfiguration")
+    private ResultConfiguration resultConfiguration;
+
+    @JsonProperty("QueryExecutionContext")
+    private QueryExecutionContext queryExecutionContext;
+
     public QueryExecution() {}
-    public QueryExecution(String id, String query, String workGroup) {
+    public QueryExecution(String id, String query, String workGroup,
+                          ResultConfiguration resultConfiguration,
+                          QueryExecutionContext queryExecutionContext) {
         this.queryExecutionId = id;
         this.query = query;
         this.workGroup = workGroup;
         this.status = new QueryExecutionStatus(QueryExecutionState.QUEUED);
+        this.resultConfiguration = resultConfiguration;
+        this.queryExecutionContext = queryExecutionContext;
     }
 
     public String getQueryExecutionId() { return queryExecutionId; }
@@ -30,4 +40,8 @@ public class QueryExecution {
     public void setStatus(QueryExecutionStatus status) { this.status = status; }
     public String getWorkGroup() { return workGroup; }
     public void setWorkGroup(String workGroup) { this.workGroup = workGroup; }
+    public ResultConfiguration getResultConfiguration() { return resultConfiguration; }
+    public void setResultConfiguration(ResultConfiguration resultConfiguration) { this.resultConfiguration = resultConfiguration; }
+    public QueryExecutionContext getQueryExecutionContext() { return queryExecutionContext; }
+    public void setQueryExecutionContext(QueryExecutionContext queryExecutionContext) { this.queryExecutionContext = queryExecutionContext; }
 }
