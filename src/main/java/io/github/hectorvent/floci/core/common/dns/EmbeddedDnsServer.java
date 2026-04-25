@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common.dns;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import io.quarkus.runtime.Startup;
 import io.vertx.core.Vertx;
 import io.vertx.core.buffer.Buffer;
 import io.vertx.core.datagram.DatagramSocket;
@@ -34,12 +35,14 @@ import java.util.Optional;
  * Only starts when Floci detects it is running inside Docker. No-op on the host.
  */
 @ApplicationScoped
+@Startup
 public class EmbeddedDnsServer {
 
     private static final Logger LOG = Logger.getLogger(EmbeddedDnsServer.class);
     private static final int DNS_PORT = 53;
     private static final int TTL = 60;
     private static final String FALLBACK_UPSTREAM = "127.0.0.11";
+    public static final String DEFAULT_SUFFIX = "localhost.floci.io";
 
     private volatile String serverIp;
     private final List<String> suffixes = new ArrayList<>();
@@ -58,7 +61,7 @@ public class EmbeddedDnsServer {
             String myIp = InetAddress.getLocalHost().getHostAddress();
             upstreamDns = readUpstreamDns();
 
-            config.hostname().ifPresent(suffixes::add);
+            suffixes.add(config.hostname().orElse(DEFAULT_SUFFIX));
             config.dns().extraSuffixes().ifPresent(suffixes::addAll);
 
             DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));

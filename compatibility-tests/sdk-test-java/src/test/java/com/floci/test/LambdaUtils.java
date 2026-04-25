@@ -151,6 +151,33 @@ public final class LambdaUtils {
         }
     }
 
+    /**
+     * ZIP containing a Node.js handler that fetches an S3 object via virtual-hosted URL.
+     * Receives {@code {bucket, key, endpoint}} in the event (endpoint = "host:port").
+     * Used to verify embedded DNS injection into Lambda containers.
+     */
+    public static byte[] s3VirtualHostFetchZip() {
+        String code = """
+                const http = require('http');
+                exports.handler = async (event) => {
+                    const { bucket, key, endpoint } = event;
+                    const url = `http://${bucket}.${endpoint}/${key}`;
+                    console.log('[dns-probe] fetching', url);
+                    return new Promise((resolve, reject) => {
+                        http.get(url, (res) => {
+                            let data = '';
+                            res.on('data', chunk => data += chunk);
+                            res.on('end', () => {
+                                console.log('[dns-probe] status', res.statusCode, 'body', data);
+                                resolve({ statusCode: res.statusCode, body: data });
+                            });
+                        }).on('error', e => reject(new Error(e.message)));
+                    });
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
     private static byte[] createZip(String filename, String content) {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

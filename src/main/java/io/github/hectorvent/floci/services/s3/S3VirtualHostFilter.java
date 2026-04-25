@@ -1,32 +1,35 @@
 package io.github.hectorvent.floci.services.s3;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 import jakarta.ws.rs.container.ContainerRequestContext;
 import jakarta.ws.rs.container.ContainerRequestFilter;
 import jakarta.ws.rs.container.PreMatching;
 import jakarta.ws.rs.core.UriBuilder;
 import jakarta.ws.rs.ext.Provider;
-import org.eclipse.microprofile.config.ConfigProvider;
 
 import java.net.URI;
-import java.util.Optional;
 
 @Provider
 @PreMatching
+@ApplicationScoped
 public class S3VirtualHostFilter implements ContainerRequestFilter {
 
     private final String baseHostname;
 
-    public S3VirtualHostFilter() {
-        var config = ConfigProvider.getConfig();
-        String baseUrl = config
-                .getOptionalValue("floci.base-url", String.class)
-                .orElse("http://localhost:4566");
-        Optional<String> hostname = config
-                .getOptionalValue("floci.hostname", String.class);
-        String effectiveUrl = hostname
-                .map(h -> baseUrl.replaceFirst("://[^:/]+(:\\d+)?", "://" + h + "$1"))
-                .orElse(baseUrl);
-        this.baseHostname = extractHostnameFromUrl(effectiveUrl);
+    @Inject
+    public S3VirtualHostFilter(EmulatorConfig config, ContainerDetector containerDetector) {
+        this.baseHostname = config.hostname()
+                .orElseGet(() -> containerDetector.isRunningInContainer()
+                        ? EmbeddedDnsServer.DEFAULT_SUFFIX
+                        : extractHostnameFromUrl(config.baseUrl()));
+    }
+
+    S3VirtualHostFilter() {
+        this.baseHostname = "localhost";
     }
 
     @Override
