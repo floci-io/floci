@@ -76,6 +76,35 @@ class RuntimeApiServerTest {
         assertTrue(response.body().contains("key"));
     }
 
+    /**
+     * Regression: an Invoke with no body (e.g. {@code aws lambda invoke} without
+     * {@code --payload}) reaches the /next handler as a {@code byte[0]}, not
+     * {@code null}. The server must still write a valid JSON body ({@code {}})
+     * so the managed Node.js runtime's {@code JSON.parse(event)} doesn't throw
+     * "Unexpected end of JSON input" before the handler runs.
+     */
+    @Test
+    @Timeout(15)
+    void nextEndpoint_emptyPayload_isDeliveredAsEmptyJsonObject() throws Exception {
+        PendingInvocation invocation = new PendingInvocation(
+                "req-empty", new byte[0], System.currentTimeMillis() + 60_000,
+                "arn:aws:lambda:us-east-1:000000000000:function:test",
+                new CompletableFuture<>());
+        server.enqueue(invocation);
+
+        HttpRequest request = HttpRequest.newBuilder()
+                .uri(URI.create("http://localhost:" + port + "/2018-06-01/runtime/invocation/next"))
+                .GET()
+                .build();
+        HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+
+        assertEquals(200, response.statusCode());
+        assertEquals("req-empty",
+                response.headers().firstValue("Lambda-Runtime-Aws-Request-Id").orElse(""));
+        assertEquals("{}", response.body(),
+                "empty Invoke payload must be normalised to '{}' so JSON.parse() in the runtime succeeds");
+    }
+
     @Test
     @Timeout(45)
     void nextEndpoint_returns204OnTimeout_thenReturns200OnRepoll() throws Exception {

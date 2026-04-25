@@ -90,15 +90,17 @@ public class RuntimeApiServer {
                     return;
                 }
                 inFlight.put(invocation.getRequestId(), invocation);
+                byte[] payload = invocation.getPayload();
+                String body = (payload != null && payload.length > 0)
+                        ? new String(payload)
+                        : "{}";
                 ctx.response()
                         .setStatusCode(200)
                         .putHeader("Content-Type", "application/json")
                         .putHeader("Lambda-Runtime-Aws-Request-Id", invocation.getRequestId())
                         .putHeader("Lambda-Runtime-Invoked-Function-Arn", invocation.getFunctionArn())
                         .putHeader("Lambda-Runtime-Deadline-Ms", String.valueOf(invocation.getDeadlineMs()))
-                        .end(invocation.getPayload() != null
-                                ? new String(invocation.getPayload())
-                                : "{}");
+                        .end(body);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
                 ctx.response().setStatusCode(204).end();
