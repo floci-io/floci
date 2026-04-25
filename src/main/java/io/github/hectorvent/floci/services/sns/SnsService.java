@@ -567,6 +567,54 @@ public class SnsService {
         return false;
     }
 
+    /**
+     * Removes all FIFO deduplication cache entries for SNS topics that have an SQS subscription
+     * whose endpoint resolves to the same queue path as {@code queueUrl} (used when purging SQS
+     * with {@code clearFifoDeduplicationCacheOnPurge}).
+     */
+    public void clearFifoDeduplicationCacheForSqsQueueSubscriptions(String queueUrl, String region) {
+        String queuePath = extractQueuePathFromUrl(queueUrl);
+        if (queuePath.isEmpty()) {
+            return;
+        }
+        String subPrefix = "sub::" + region + "::";
+        subscriptionStore.keys().stream()
+                .filter(key -> key.startsWith(subPrefix))
+                .map(key -> subscriptionStore.get(key).orElse(null))
+                .filter(Objects::nonNull)
+                .filter(sub -> "sqs".equals(sub.getProtocol()))
+                .filter(sub -> sqsSubscriptionEndpointMatchesQueuePath(sub.getEndpoint(), queuePath))
+                .map(Subscription::getTopicArn)
+                .forEach(topicArn ->
+                        fifoDeduplicationCache.keySet().removeIf(cacheKey -> cacheKey.startsWith(topicArn + ":")));
+    }
+
+    private boolean sqsSubscriptionEndpointMatchesQueuePath(String endpoint, String queuePath) {
+        if (endpoint == null) {
+            return false;
+        }
+        String asUrl = sqsArnToUrl(endpoint);
+        return extractQueuePathFromUrl(asUrl).equals(queuePath);
+    }
+
+    /**
+     * Same path extraction as {@code SqsService} queue URL normalization ({@code /accountId/queueName}).
+     */
+    private static String extractQueuePathFromUrl(String url) {
+        if (url == null) {
+            return "";
+        }
+        int schemeEnd = url.indexOf("://");
+        if (schemeEnd < 0) {
+            return url;
+        }
+        int pathStart = url.indexOf('/', schemeEnd + 3);
+        if (pathStart < 0) {
+            return url;
+        }
+        return url.substring(pathStart);
+    }
+
     private List<Subscription> subscriptionsByTopic(String topicArn, String region) {
         List<Subscription> result = new ArrayList<>();
         String prefix = "sub::" + region + "::";

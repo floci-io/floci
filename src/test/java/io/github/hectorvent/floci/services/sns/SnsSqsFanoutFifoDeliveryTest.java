@@ -164,4 +164,34 @@ class SnsSqsFanoutFifoDeliveryTest {
         assertEquals(1, messages.size());
         assertTrue(messages.get(0).getBody().contains("first"));
     }
+
+    @Test
+    void clearFifoDedupForSubscribedQueue_thenRepublishWithSameDedupId_deliversAgain() {
+        RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT);
+        SqsService purgeSqsService = SqsServiceFactory.createInMemoryWithFifoDedupPurgeAndSns(
+                BASE_URL, regionResolver, snsService);
+        sqsService.createQueue("manual-sns-dedup-queue.fifo", Map.of("FifoQueue", "true"), REGION);
+        purgeSqsService.createQueue("manual-sns-dedup-queue.fifo", Map.of("FifoQueue", "true"), REGION);
+        String queueArn = "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":manual-sns-dedup-queue.fifo";
+
+        snsService.createTopic("manual-sns-dedup-topic.fifo", Map.of("FifoTopic", "true"), null, REGION);
+        String topicArn = "arn:aws:sns:" + REGION + ":" + ACCOUNT + ":manual-sns-dedup-topic.fifo";
+        snsService.subscribe(topicArn, "sqs", queueArn, REGION, Map.of());
+
+        String queueUrl = BASE_URL + "/" + ACCOUNT + "/manual-sns-dedup-queue.fifo";
+
+        snsService.publish(topicArn, null, null, "before-clear", null, null, "group-1", "shared-dedup", REGION);
+        List<Message> first = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(1, first.size());
+        for (Message m : first) {
+            sqsService.deleteMessage(queueUrl, m.getReceiptHandle(), REGION);
+        }
+
+        purgeSqsService.purgeQueue(queueUrl, REGION);
+
+        snsService.publish(topicArn, null, null, "after-clear", null, null, "group-1", "shared-dedup", REGION);
+        List<Message> after = sqsService.receiveMessage(queueUrl, 10, 30, 0, REGION);
+        assertEquals(1, after.size());
+        assertTrue(after.getFirst().getBody().contains("after-clear"));
+    }
 }

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -41,9 +42,11 @@ public class SqsService {
     private final String baseUrl;
     private final RegionResolver regionResolver;
     private final boolean clearFifoDeduplicationCacheOnPurge;
+    private final SnsService snsService;
 
     @Inject
-    public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public SqsService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
+                      SnsService snsService) {
         this(
                 storageFactory.create("sqs", "sqs-queues.json",
                         new TypeReference<Map<String, Queue>>() {
@@ -58,7 +61,8 @@ public class SqsService {
                 config.services().sqs().maxMessageSize(),
                 config.effectiveBaseUrl(),
                 regionResolver,
-                config.services().sqs().clearFifoDeduplicationCacheOnPurge()
+                config.services().sqs().clearFifoDeduplicationCacheOnPurge(),
+                snsService
         );
     }
 
@@ -68,7 +72,7 @@ public class SqsService {
     SqsService(StorageBackend<String, Queue> queueStore,
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl) {
         this(queueStore, null, null, defaultVisibilityTimeout, maxMessageSize, baseUrl,
-                new RegionResolver("us-east-1", "000000000000"), false);
+                new RegionResolver("us-east-1", "000000000000"), false, null);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
@@ -76,13 +80,14 @@ public class SqsService {
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
                RegionResolver regionResolver) {
         this(queueStore, messageStore, dedupStore, defaultVisibilityTimeout, maxMessageSize, baseUrl,
-                regionResolver, false);
+                regionResolver, false, null);
     }
 
     SqsService(StorageBackend<String, Queue> queueStore, StorageBackend<String, List<Message>> messageStore,
                StorageBackend<String, Map<String, Long>> dedupStore,
                int defaultVisibilityTimeout, int maxMessageSize, String baseUrl,
-               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge) {
+               RegionResolver regionResolver, boolean clearFifoDeduplicationCacheOnPurge,
+               SnsService snsService) {
         this.queueStore = queueStore;
         this.messageStore = messageStore;
         this.dedupStore = dedupStore;
@@ -91,6 +96,7 @@ public class SqsService {
         this.baseUrl = baseUrl;
         this.regionResolver = regionResolver;
         this.clearFifoDeduplicationCacheOnPurge = clearFifoDeduplicationCacheOnPurge;
+        this.snsService = snsService;
         loadPersistedMessages();
         loadPersistedDedup();
     }
@@ -617,6 +623,9 @@ public class SqsService {
             deduplicationCache.remove(storageKey);
             if (dedupStore != null) {
                 dedupStore.delete(storageKey);
+            }
+            if (snsService != null) {
+                snsService.clearFifoDeduplicationCacheForSqsQueueSubscriptions(queueUrl, region);
             }
         }
         LOG.infov("Purged queue{0}: {1}",

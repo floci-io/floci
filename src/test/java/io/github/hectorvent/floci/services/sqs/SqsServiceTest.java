@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.sqs;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import org.junit.jupiter.api.BeforeEach;
@@ -12,6 +13,8 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 
 class SqsServiceTest {
 
@@ -353,7 +356,7 @@ class SqsServiceTest {
     void purgeQueueClearsFifoDeduplicationCacheWhenEnabled() {
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true);
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
         final var queue = service.createQueue("dedup-clear.fifo", Map.of("ContentBasedDeduplication", "true"));
 
@@ -406,7 +409,7 @@ class SqsServiceTest {
         final var dedupStore = new InMemoryStorage<String, Map<String, Long>>();
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), dedupStore,
-                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true);
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
         final var queue = service.createQueue("dedup-store-clear.fifo",
                 Map.of("ContentBasedDeduplication", "true"));
@@ -420,5 +423,17 @@ class SqsServiceTest {
         service.purgeQueue(queue.getQueueUrl());
         assertTrue(dedupStore.keys().isEmpty(),
                 "Dedup store must be empty after purge with clearFifoDeduplicationCacheOnPurge=true");
+    }
+
+    @Test
+    void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
+        final var sns = mock(SnsService.class);
+        final var service = new SqsService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, sns);
+        final var queue = service.createQueue("sns-dedup-delegate.fifo", Map.of("FifoQueue", "true"));
+        service.purgeQueue(queue.getQueueUrl());
+        verify(sns).clearFifoDeduplicationCacheForSqsQueueSubscriptions(
+                queue.getQueueUrl(), "us-east-1");
     }
 }
