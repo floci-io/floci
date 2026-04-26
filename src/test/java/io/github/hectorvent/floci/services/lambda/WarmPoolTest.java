@@ -15,6 +15,7 @@ import java.lang.reflect.Field;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -103,6 +104,7 @@ class WarmPoolTest {
         ContainerHandle h2 = new ContainerHandle("cid-b", "multi-fn", null, ContainerState.WARM);
 
         when(containerLauncher.launch(any())).thenReturn(h1, h2);
+        when(containerLauncher.isAlive(any())).thenReturn(true);
 
         ContainerHandle acquired1 = pool.acquire(fn);
         pool.release(acquired1);
@@ -136,6 +138,7 @@ class WarmPoolTest {
 
         ContainerHandle handle = new ContainerHandle("cid-reuse", "reuse-fn", null, ContainerState.WARM);
         when(containerLauncher.launch(any())).thenReturn(handle);
+        when(containerLauncher.isAlive(any())).thenReturn(true);
 
         ContainerHandle first = pool.acquire(fn);
         assertEquals(ContainerState.BUSY, first.getState());
@@ -149,6 +152,72 @@ class WarmPoolTest {
 
         // containerLauncher.launch should only have been called once (cold start)
         verify(containerLauncher, times(1)).launch(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void acquire_discardsDeadPooledHandleAndColdStarts() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("dead-fn");
+
+        ContainerHandle dead = new ContainerHandle("cid-dead", "dead-fn", null, ContainerState.WARM);
+        ContainerHandle fresh = new ContainerHandle("cid-fresh", "dead-fn", null, ContainerState.WARM);
+
+        // Seed the pool with the dead handle by acquiring + releasing it once.
+        // The seed acquire is a cold start (empty pool), so isAlive isn't called.
+        when(containerLauncher.launch(any())).thenReturn(dead, fresh);
+        ContainerHandle seeded = pool.acquire(fn);
+        assertSame(dead, seeded);
+        pool.release(seeded);
+
+        // Now the container "dies" out-of-band (docker rm -f, OOM, etc.).
+        when(containerLauncher.isAlive(dead)).thenReturn(false);
+
+        ContainerHandle acquired = pool.acquire(fn);
+        assertSame(fresh, acquired);
+        assertNotSame(dead, acquired);
+        verify(containerLauncher, times(1)).stop(dead);
+        verify(containerLauncher, times(2)).launch(any());
+
+        pool.shutdown();
+    }
+
+    @Test
+    void acquire_skipsDeadHandleAndReusesNextAlive() {
+        WarmPool pool = buildPool();
+        pool.init();
+
+        LambdaFunction fn = mock(LambdaFunction.class);
+        when(fn.getFunctionName()).thenReturn("mixed-fn");
+
+        ContainerHandle dead = new ContainerHandle("cid-dead", "mixed-fn", null, ContainerState.WARM);
+        ContainerHandle alive = new ContainerHandle("cid-alive", "mixed-fn", null, ContainerState.WARM);
+
+        // Seed deque with [dead, alive]: release(alive) first, then release(dead),
+        // so dead ends up at the front (release uses addFirst). Both acquires
+        // here are cold starts (empty pool) so no isAlive stub is needed yet.
+        when(containerLauncher.launch(any())).thenReturn(alive, dead);
+        ContainerHandle a1 = pool.acquire(fn);
+        ContainerHandle a2 = pool.acquire(fn);
+        assertSame(alive, a1);
+        assertSame(dead, a2);
+        pool.release(a1);
+        pool.release(a2);
+
+        // dead dies out-of-band, alive is still up.
+        when(containerLauncher.isAlive(dead)).thenReturn(false);
+        when(containerLauncher.isAlive(alive)).thenReturn(true);
+
+        ContainerHandle acquired = pool.acquire(fn);
+        assertSame(alive, acquired);
+        verify(containerLauncher, times(1)).stop(dead);
+        verify(containerLauncher, never()).stop(alive);
+        // Only the original two cold starts; no extra launch was needed.
+        verify(containerLauncher, times(2)).launch(any());
 
         pool.shutdown();
     }

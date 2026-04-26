@@ -217,6 +217,16 @@ public class ContainerLauncher {
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
     }
 
+    /**
+     * Probes whether the handle's underlying container is still running.
+     *
+     * @param handle the warm-pool handle to probe
+     * @return true if the container is still running
+     */
+    public boolean isAlive(ContainerHandle handle) {
+        return lifecycleManager.isContainerRunning(handle.getContainerId());
+    }
+
     private void copyDirToContainer(DockerClient dockerClient, String containerId,
                                     Path sourceDir, String remotePath, String functionName) {
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();

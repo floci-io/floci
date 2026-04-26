@@ -103,8 +103,23 @@ public class WarmPool {
 
         if (!ephemeral) {
             ArrayDeque<ContainerHandle> queue = pool.computeIfAbsent(fn.getFunctionName(), k -> new ArrayDeque<>());
-            synchronized (queue) {
-                handle = queue.pollFirst();
+            // Skip pooled handles whose container died out-of-band — otherwise the
+            // caller would wait the full Lambda function timeout.
+            while (true) {
+                ContainerHandle candidate;
+                synchronized (queue) {
+                    candidate = queue.pollFirst();
+                }
+                if (candidate == null) {
+                    break;
+                }
+                if (containerLauncher.isAlive(candidate)) {
+                    handle = candidate;
+                    break;
+                }
+                LOG.infov("Discarding dead pooled container {0} for function {1}",
+                        candidate.getContainerId(), fn.getFunctionName());
+                stopQuietly(candidate);
             }
         }
 
