@@ -246,6 +246,26 @@ public class ContainerLifecycleManager {
     }
 
     /**
+     * Returns whether the container is currently running. A missing container
+     * is treated as not-running; any other Docker error is treated as running
+     * so a transient daemon hiccup does not evict a healthy warm pool.
+     *
+     * @param containerId the container ID to inspect
+     * @return true if the container exists and is reported as running
+     */
+    public boolean isContainerRunning(String containerId) {
+        try {
+            InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+            return Boolean.TRUE.equals(inspect.getState().getRunning());
+        } catch (NotFoundException e) {
+            return false;
+        } catch (Exception e) {
+            LOG.warnv("Liveness check failed for container {0}: {1}", containerId, e.getMessage());
+            return true;
+        }
+    }
+
+    /**
      * Resolves the endpoint (host and port) to connect to a specific container port.
      *
      * @param containerId the container ID
