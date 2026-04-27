@@ -189,6 +189,12 @@
             <artifactId>rds</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- AWS SDK S3 client for SDK-level round-trip tests -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3</artifactId>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

@@ -121,6 +121,91 @@ class S3LifecycleIntegrationTest {
             .statusCode(204);
     }
 
+    // ── x-amz-transition-default-minimum-object-size (issue #441) ────────────
+    // The terraform-provider-aws v6.x stability wait reads this header from
+    // the GET response, not the XML body. Without it, the wait times out.
+
+    private static final String DEFAULT_SIZE = "all_storage_classes_128K";
+    private static final String CUSTOM_SIZE = "varies_by_storage_class";
+    private static final String SIZE_HEADER = "x-amz-transition-default-minimum-object-size";
+
+    @Test
+    @Order(81)
+    void putWithoutHeaderEchoesDefault() {
+        given()
+            .contentType("application/xml")
+            .body(FILTER_PREFIX_EMPTY_XML)
+        .when()
+            .put("/" + BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200)
+            .header(SIZE_HEADER, equalTo(DEFAULT_SIZE));
+    }
+
+    @Test
+    @Order(82)
+    void getReturnsDefaultHeaderWhenPutOmittedIt() {
+        given()
+        .when()
+            .get("/" + BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200)
+            .header(SIZE_HEADER, equalTo(DEFAULT_SIZE));
+    }
+
+    @Test
+    @Order(83)
+    void putWithCustomHeaderEchoesIt() {
+        given()
+            .contentType("application/xml")
+            .header(SIZE_HEADER, CUSTOM_SIZE)
+            .body(FILTER_PREFIX_EMPTY_XML)
+        .when()
+            .put("/" + BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200)
+            .header(SIZE_HEADER, equalTo(CUSTOM_SIZE));
+    }
+
+    @Test
+    @Order(84)
+    void getReturnsCustomHeaderRoundTrip() {
+        given()
+        .when()
+            .get("/" + BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200)
+            .header(SIZE_HEADER, equalTo(CUSTOM_SIZE));
+    }
+
+    @Test
+    @Order(85)
+    void deleteThenPutWithoutHeaderClearsToDefault() {
+        // Wipe any stored header value via DELETE.
+        given()
+        .when()
+            .delete("/" + BUCKET + "?lifecycle")
+        .then()
+            .statusCode(204);
+
+        // Subsequent PUT without the header must default, not retain CUSTOM_SIZE.
+        given()
+            .contentType("application/xml")
+            .body(FILTER_PREFIX_EMPTY_XML)
+        .when()
+            .put("/" + BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200)
+            .header(SIZE_HEADER, equalTo(DEFAULT_SIZE));
+
+        given()
+        .when()
+            .get("/" + BUCKET + "?lifecycle")
+        .then()
+            .statusCode(200)
+            .header(SIZE_HEADER, equalTo(DEFAULT_SIZE));
+    }
+
     // ── No config yet: GET returns 404 ────────────────────────────────────────
 
     @Test

@@ -171,8 +171,12 @@ public class S3Controller {
                 return Response.ok().build();
             }
             if (hasQueryParam(uriInfo, "lifecycle")) {
-                s3Service.putBucketLifecycle(bucket, new String(body, StandardCharsets.UTF_8));
-                return Response.ok().build();
+                String requestedSize = httpHeaders.getHeaderString("x-amz-transition-default-minimum-object-size");
+                String storedSize = s3Service.putBucketLifecycle(bucket,
+                        new String(body, StandardCharsets.UTF_8), requestedSize);
+                return Response.ok()
+                        .header("x-amz-transition-default-minimum-object-size", storedSize)
+                        .build();
             }
             if (hasQueryParam(uriInfo, "acl")) {
                 s3Service.putBucketAcl(bucket, new String(body, StandardCharsets.UTF_8));
@@ -310,7 +314,10 @@ public class S3Controller {
                 return Response.ok(s3Service.getBucketCors(bucket)).build();
             }
             if (hasQueryParam(uriInfo, "lifecycle")) {
-                return Response.ok(s3Service.getBucketLifecycle(bucket)).build();
+                S3Service.LifecycleConfigurationResult lc = s3Service.getBucketLifecycle(bucket);
+                return Response.ok(lc.xml())
+                        .header("x-amz-transition-default-minimum-object-size", lc.transitionDefaultMinimumObjectSize())
+                        .build();
             }
             if (hasQueryParam(uriInfo, "acl")) {
                 return Response.ok(s3Service.getBucketAcl(bucket)).build();

@@ -1357,26 +1357,40 @@ public class S3Service {
         bucketStore.put(bucketName, bucket);
     }
 
-    public String getBucketLifecycle(String bucketName) {
+    public static final String DEFAULT_TRANSITION_DEFAULT_MIN_OBJECT_SIZE = "all_storage_classes_128K";
+
+    public record LifecycleConfigurationResult(String xml, String transitionDefaultMinimumObjectSize) {}
+
+    public LifecycleConfigurationResult getBucketLifecycle(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         if (bucket.getLifecycleConfiguration() == null) {
             throw new AwsException("NoSuchLifecycleConfiguration", "The lifecycle configuration does not exist", 404);
         }
-        return bucket.getLifecycleConfiguration();
+        String size = bucket.getTransitionDefaultMinimumObjectSize();
+        if (size == null) {
+            size = DEFAULT_TRANSITION_DEFAULT_MIN_OBJECT_SIZE;
+        }
+        return new LifecycleConfigurationResult(bucket.getLifecycleConfiguration(), size);
     }
 
-    public void putBucketLifecycle(String bucketName, String lifecycle) {
+    public String putBucketLifecycle(String bucketName, String lifecycle, String transitionDefaultMinimumObjectSize) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setLifecycleConfiguration(lifecycle);
+        String size = (transitionDefaultMinimumObjectSize == null || transitionDefaultMinimumObjectSize.isBlank())
+                ? DEFAULT_TRANSITION_DEFAULT_MIN_OBJECT_SIZE
+                : transitionDefaultMinimumObjectSize;
+        bucket.setTransitionDefaultMinimumObjectSize(size);
         bucketStore.put(bucketName, bucket);
+        return size;
     }
 
     public void deleteBucketLifecycle(String bucketName) {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setLifecycleConfiguration(null);
+        bucket.setTransitionDefaultMinimumObjectSize(null);
         bucketStore.put(bucketName, bucket);
     }
 

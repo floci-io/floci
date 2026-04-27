@@ -21,6 +21,7 @@ public class Bucket {
     private String policy;
     private String corsConfiguration;
     private String lifecycleConfiguration;
+    private String transitionDefaultMinimumObjectSize; // x-amz-transition-default-minimum-object-size header value
     private String acl; // XML representation or JSON stub
     private String encryptionConfiguration; // XML string
     private String publicAccessBlockConfiguration; // XML string
@@ -72,6 +73,11 @@ public class Bucket {
 
     public String getLifecycleConfiguration() { return lifecycleConfiguration; }
     public void setLifecycleConfiguration(String lifecycleConfiguration) { this.lifecycleConfiguration = lifecycleConfiguration; }
+
+    public String getTransitionDefaultMinimumObjectSize() { return transitionDefaultMinimumObjectSize; }
+    public void setTransitionDefaultMinimumObjectSize(String transitionDefaultMinimumObjectSize) {
+        this.transitionDefaultMinimumObjectSize = transitionDefaultMinimumObjectSize;
+    }
 
     public String getAcl() { return acl; }
     public void setAcl(String acl) { this.acl = acl; }
