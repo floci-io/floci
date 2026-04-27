@@ -262,7 +262,10 @@ public class KmsService {
 
     public boolean getKeyRotationStatus(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
-        validateRotationSupported(key);
+        if (!"ENCRYPT_DECRYPT".equals(key.getKeyUsage())
+                || !"SYMMETRIC_DEFAULT".equals(key.getCustomerMasterKeySpec())) {
+            return false;
+        }
         return key.isKeyRotationEnabled();
     }
 

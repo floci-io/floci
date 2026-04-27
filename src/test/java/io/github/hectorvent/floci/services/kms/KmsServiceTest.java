@@ -421,13 +421,28 @@ class KmsServiceTest {
     }
 
     @Test
-    void keyRotationOnAsymmetricKeyThrows() {
+    void enableKeyRotationOnAsymmetricKeyThrows() {
         KmsKey key = kmsService.createKey(null, REGION);
         key.setCustomerMasterKeySpec("RSA_2048");
         key.setKeyUsage("SIGN_VERIFY");
-        // Persist the modified key
         assertThrows(AwsException.class, () ->
                 kmsService.enableKeyRotation(key.getKeyId(), REGION));
+    }
+
+    @Test
+    void getKeyRotationStatusOnAsymmetricKeyReturnsFalse() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        key.setCustomerMasterKeySpec("ECC_NIST_P256");
+        key.setKeyUsage("SIGN_VERIFY");
+        assertFalse(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
+    }
+
+    @Test
+    void getKeyRotationStatusOnHmacKeyReturnsFalse() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        key.setCustomerMasterKeySpec("HMAC_256");
+        key.setKeyUsage("GENERATE_VERIFY_MAC");
+        assertFalse(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
     }
 
     // ── Issue #497 — HMAC key specs ─────────────────────────────────────────
