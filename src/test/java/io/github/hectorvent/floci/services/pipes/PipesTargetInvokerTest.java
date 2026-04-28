@@ -197,4 +197,49 @@ class PipesTargetInvokerTest {
         String result = invoker.applyInputTemplate("{\"count\": <$.count>}", "{\"count\": 42}");
         assertEquals("{\"count\": 42}", result);
     }
+
+    // ──────────────────────────── nested JSON string resolution ────────────────────────────
+
+    @Test
+    void extractJsonPath_nestedJsonString_resolvesField() {
+        String json = "{\"body\": \"{\\\"message\\\": \\\"hello\\\", \\\"type\\\": \\\"greeting\\\"}\"}";
+        assertEquals("\"hello\"", invoker.extractJsonPath("$.body.message", json));
+        assertEquals("\"greeting\"", invoker.extractJsonPath("$.body.type", json));
+    }
+
+    @Test
+    void extractJsonPath_nestedJsonString_missingNestedField() {
+        String json = "{\"body\": \"{\\\"message\\\": \\\"hello\\\"}\"}";
+        assertNull(invoker.extractJsonPath("$.body.nonexistent", json));
+    }
+
+    @Test
+    void extractJsonPath_nestedJsonString_nonJsonStringReturnsNull() {
+        String json = "{\"body\": \"plain text\"}";
+        assertNull(invoker.extractJsonPath("$.body.message", json));
+    }
+
+    @Test
+    void extractJsonPath_nestedJsonString_objectValue() {
+        String json = "{\"body\": \"{\\\"data\\\": {\\\"id\\\": 1}}\"}";
+        assertEquals("{\"id\":1}", invoker.extractJsonPath("$.body.data", json));
+    }
+
+    @Test
+    void inputTemplate_nestedJsonString_endToEnd() {
+        ObjectNode tp = MAPPER.createObjectNode();
+        tp.put("InputTemplate",
+                "{\"message\": <$.body.message>, \"messageType\": <$.body.messageType>}");
+
+        Pipe pipe = createPipe("arn:aws:sqs:us-east-1:000000000000:target", tp);
+        String payload = "{\"body\": \"{\\\"message\\\": \\\"user registered\\\", \\\"messageType\\\": \\\"REGISTRATION\\\"}\"}";
+
+        invoker.invoke(pipe, payload, "us-east-1");
+
+        ArgumentCaptor<String> captor = ArgumentCaptor.forClass(String.class);
+        verify(sqsService).sendMessage(anyString(), captor.capture(), eq(0));
+        assertEquals(
+                "{\"message\": \"user registered\", \"messageType\": \"REGISTRATION\"}",
+                captor.getValue());
+    }
 }

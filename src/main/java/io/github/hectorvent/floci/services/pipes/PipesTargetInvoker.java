@@ -15,6 +15,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -26,6 +27,7 @@ public class PipesTargetInvoker {
 
     private static final Logger LOG = Logger.getLogger(PipesTargetInvoker.class);
     private static final Pattern TEMPLATE_PLACEHOLDER = Pattern.compile("<(\\$[^>]+)>");
+    private static final Pattern ARRAY_INDEX = Pattern.compile("^(.+?)\\[(\\d+)]$");
 
     private final LambdaService lambdaService;
     private final SqsService sqsService;
@@ -142,18 +144,46 @@ public class PipesTargetInvoker {
             return null;
         }
         try {
-            String path = jsonPath.startsWith("$") ? jsonPath.substring(1) : jsonPath;
-            // Translate array indices [N] to /N for Jackson JSON Pointer
-            path = path.replaceAll("\\[(\\d+)]", "/$1");
-            String pointer = path.replace('.', '/');
-            JsonNode node = objectMapper.readTree(json).at(pointer);
-            if (node.isMissingNode() || node.isNull()) {
-                return null;
+            String path = jsonPath.startsWith("$.") ? jsonPath.substring(2)
+                    : jsonPath.startsWith("$") ? jsonPath.substring(1)
+                    : jsonPath;
+            // Split into segments on dots, but expand array indices into separate segments
+            // e.g. "Records[0].body" -> ["Records", "0", "body"]
+            String[] rawSegments = path.split("\\.");
+            List<String> segments = new ArrayList<>();
+            for (String seg : rawSegments) {
+                Matcher am = ARRAY_INDEX.matcher(seg);
+                if (am.matches()) {
+                    segments.add(am.group(1));
+                    segments.add(am.group(2));
+                } else if (!seg.isEmpty()) {
+                    segments.add(seg);
+                }
             }
-            if (node.isValueNode()) {
-                return objectMapper.writeValueAsString(node);
+
+            JsonNode current = objectMapper.readTree(json);
+            for (String segment : segments) {
+                // AWS Pipes auto-parses string fields containing valid JSON
+                if (current.isTextual()) {
+                    try {
+                        current = objectMapper.readTree(current.asText());
+                    } catch (Exception ignored) {
+                        return null;
+                    }
+                }
+                if (current.isArray()) {
+                    current = current.path(Integer.parseInt(segment));
+                } else {
+                    current = current.path(segment);
+                }
+                if (current.isMissingNode() || current.isNull()) {
+                    return null;
+                }
             }
-            return node.toString();
+            if (current.isValueNode()) {
+                return objectMapper.writeValueAsString(current);
+            }
+            return current.toString();
         } catch (Exception e) {
             LOG.warnv("Failed to extract JSONPath {0}: {1}", jsonPath, e.getMessage());
             return null;
