@@ -334,6 +334,8 @@ public class S3Service {
             writeFile(bucketName, key, data);
             LOG.debugv("Put object: {0}/{1} ({2} bytes)", bucketName, key, data.length);
         }
+        // Release cached payload reference - data is now persisted to disk (or to memoryDataStore in inMemory mode)
+        object.setData(null);
         return object;
     }
 
@@ -392,9 +394,7 @@ public class S3Service {
     }
 
     public S3Object getObjectMetadata(String bucketName, String key, String versionId) {
-        S3Object copy = copyObject(getStoredObject(bucketName, key, versionId));
-        copy.setData(null);
-        return copy;
+        return copyObject(getStoredObject(bucketName, key, versionId));
     }
 
     public GetObjectAttributesResult getObjectAttributes(String bucketName, String key, String versionId,

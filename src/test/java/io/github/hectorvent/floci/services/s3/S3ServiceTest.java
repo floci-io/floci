@@ -159,6 +159,44 @@ class S3ServiceTest {
     }
 
     @Test
+    void putObjectDoesNotRetainBytesInObjectStore() {
+        InMemoryStorage<String, Bucket> bucketStore = new InMemoryStorage<>();
+        InMemoryStorage<String, S3Object> objectStore = new InMemoryStorage<>();
+        Path dataRoot = tempDir.resolve("leak-test-s3");
+        S3Service service = new S3Service(bucketStore, objectStore, dataRoot, false);
+
+        service.createBucket("leak-bucket", "us-east-1");
+        byte[] payload = new byte[64 * 1024];
+        service.putObject("leak-bucket", "big.bin", payload, "application/octet-stream", null);
+
+        S3Object cached = objectStore.get("leak-bucket/big.bin").orElseThrow();
+        assertNull(cached.getData(),
+                "S3Object cached in objectStore must not retain byte[] payload after disk persistence");
+    }
+
+    @Test
+    void putObjectVersionedDoesNotRetainBytesInObjectStore() {
+        InMemoryStorage<String, Bucket> bucketStore = new InMemoryStorage<>();
+        InMemoryStorage<String, S3Object> objectStore = new InMemoryStorage<>();
+        Path dataRoot = tempDir.resolve("leak-test-versioned-s3");
+        S3Service service = new S3Service(bucketStore, objectStore, dataRoot, false);
+
+        service.createBucket("versioned-leak-bucket", "us-east-1");
+        service.putBucketVersioning("versioned-leak-bucket", "Enabled");
+        byte[] payload = new byte[64 * 1024];
+        S3Object put = service.putObject("versioned-leak-bucket", "big.bin", payload,
+                "application/octet-stream", null);
+
+        S3Object latest = objectStore.get("versioned-leak-bucket/big.bin").orElseThrow();
+        S3Object versioned = objectStore.get("versioned-leak-bucket/big.bin#v#" + put.getVersionId())
+                .orElseThrow();
+        assertNull(latest.getData(),
+                "Latest S3Object cached in objectStore must not retain byte[] after disk persistence");
+        assertNull(versioned.getData(),
+                "Versioned S3Object cached in objectStore must not retain byte[] after disk persistence");
+    }
+
+    @Test
     void deleteObjectRemovesFileFromDisk() {
         s3Service.createBucket("test-bucket", "us-east-1");
         s3Service.putObject("test-bucket", "file.txt", "data".getBytes(), null, null);
