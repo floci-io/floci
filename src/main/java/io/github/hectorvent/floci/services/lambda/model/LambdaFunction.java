@@ -27,6 +27,8 @@ public class LambdaFunction {
     private long codeSizeBytes;
     private String packageType = "Zip";
     private String imageUri;
+    private List<String> imageConfigCommand;
+    private List<String> imageConfigEntryPoint;
     private String codeLocalPath;
     private String s3Bucket;
     private String s3Key;
@@ -97,6 +99,12 @@ public class LambdaFunction {
 
     public String getImageUri() { return imageUri; }
     public void setImageUri(String imageUri) { this.imageUri = imageUri; }
+
+    public List<String> getImageConfigCommand() { return imageConfigCommand; }
+    public void setImageConfigCommand(List<String> imageConfigCommand) { this.imageConfigCommand = imageConfigCommand; }
+
+    public List<String> getImageConfigEntryPoint() { return imageConfigEntryPoint; }
+    public void setImageConfigEntryPoint(List<String> imageConfigEntryPoint) { this.imageConfigEntryPoint = imageConfigEntryPoint; }
 
     public String getCodeLocalPath() { return codeLocalPath; }
     public void setCodeLocalPath(String codeLocalPath) { this.codeLocalPath = codeLocalPath; }

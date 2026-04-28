@@ -278,4 +278,78 @@ class LambdaIntegrationTest {
         // cleanup
         given().delete(BASE_PATH + "/functions/large-zip-fn");
     }
+
+    // ── ImageConfig ───────────────────────────────────────────────────────────
+
+    @Test
+    @Order(20)
+    void createImageFunctionWithImageConfig() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "image-fn",
+                    "PackageType": "Image",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Code": {
+                        "ImageUri": "123456789012.dkr.ecr.us-east-1.amazonaws.com/my-repo:latest"
+                    },
+                    "ImageConfig": {
+                        "Command": ["app.handler"],
+                        "EntryPoint": ["/lambda-entrypoint.sh"]
+                    }
+                }
+                """)
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201)
+            .body("FunctionName", equalTo("image-fn"))
+            .body("PackageType", equalTo("Image"))
+            .body("ImageConfigResponse.ImageConfig.Command", hasItem("app.handler"))
+            .body("ImageConfigResponse.ImageConfig.EntryPoint", hasItem("/lambda-entrypoint.sh"));
+    }
+
+    @Test
+    @Order(21)
+    void getFunctionReturnsImageConfig() {
+        given()
+        .when()
+            .get(BASE_PATH + "/functions/image-fn")
+        .then()
+            .statusCode(200)
+            .body("Configuration.ImageConfigResponse.ImageConfig.Command",
+                    hasItem("app.handler"))
+            .body("Configuration.ImageConfigResponse.ImageConfig.EntryPoint",
+                    hasItem("/lambda-entrypoint.sh"));
+    }
+
+    @Test
+    @Order(22)
+    void updateImageFunctionConfig() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ImageConfig": {
+                        "Command": ["new.handler"]
+                    }
+                }
+                """)
+        .when()
+            .put(BASE_PATH + "/functions/image-fn/configuration")
+        .then()
+            .statusCode(200)
+            .body("ImageConfigResponse.ImageConfig.Command", hasItem("new.handler"));
+    }
+
+    @Test
+    @Order(23)
+    void deleteImageFunction() {
+        given()
+        .when()
+            .delete(BASE_PATH + "/functions/image-fn")
+        .then()
+            .statusCode(204);
+    }
 }

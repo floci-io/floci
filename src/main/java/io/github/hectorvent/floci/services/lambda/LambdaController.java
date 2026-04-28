@@ -508,6 +508,17 @@ public class LambdaController {
         node.put("CodeSha256", fn.getCodeSha256() != null ? fn.getCodeSha256() : "");
         node.put("PackageType", fn.getPackageType());
         if (fn.getImageUri() != null) node.put("ImageUri", fn.getImageUri());
+        if ("Image".equals(fn.getPackageType())) {
+            ObjectNode imageConfig = node.putObject("ImageConfigResponse").putObject("ImageConfig");
+            if (fn.getImageConfigCommand() != null && !fn.getImageConfigCommand().isEmpty()) {
+                ArrayNode cmdNode = imageConfig.putArray("Command");
+                fn.getImageConfigCommand().forEach(cmdNode::add);
+            }
+            if (fn.getImageConfigEntryPoint() != null && !fn.getImageConfigEntryPoint().isEmpty()) {
+                ArrayNode epNode = imageConfig.putArray("EntryPoint");
+                fn.getImageConfigEntryPoint().forEach(epNode::add);
+            }
+        }
         node.put("LastModified", DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSZ")
                 .format(Instant.ofEpochMilli(fn.getLastModified()).atOffset(ZoneOffset.UTC)));
         node.put("RevisionId", fn.getRevisionId());

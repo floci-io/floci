@@ -284,6 +284,18 @@ public class LambdaService {
             fn.setVpcConfig(vpc);
         }
 
+        // ImageConfig (PackageType=Image overrides)
+        if (request.get("ImageConfig") instanceof Map<?, ?> ic) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> imageConfig = (Map<String, Object>) ic;
+            if (imageConfig.get("Command") instanceof List<?> cmd) {
+                fn.setImageConfigCommand(cmd.stream().map(Object::toString).toList());
+            }
+            if (imageConfig.get("EntryPoint") instanceof List<?> ep) {
+                fn.setImageConfigEntryPoint(ep.stream().map(Object::toString).toList());
+            }
+        }
+
         // Handle code deployment
         @SuppressWarnings("unchecked")
         Map<String, Object> code = (Map<String, Object>) request.get("Code");
@@ -476,6 +488,25 @@ public class LambdaService {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> vpc = (Map<String, Object>) request.get("VpcConfig");
                 fn.setVpcConfig(vpc);
+            }
+        }
+
+        if (request.containsKey("ImageConfig")) {
+            if (request.get("ImageConfig") instanceof Map<?, ?> ic) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> imageConfig = (Map<String, Object>) ic;
+                if (imageConfig.containsKey("Command")) {
+                    @SuppressWarnings("unchecked")
+                    List<String> cmd = imageConfig.get("Command") instanceof List<?>
+                            ? ((List<?>) imageConfig.get("Command")).stream().map(Object::toString).toList() : null;
+                    fn.setImageConfigCommand(cmd);
+                }
+                if (imageConfig.containsKey("EntryPoint")) {
+                    @SuppressWarnings("unchecked")
+                    List<String> ep = imageConfig.get("EntryPoint") instanceof List<?>
+                            ? ((List<?>) imageConfig.get("EntryPoint")).stream().map(Object::toString).toList() : null;
+                    fn.setImageConfigEntryPoint(ep);
+                }
             }
         }
 
