@@ -205,7 +205,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ModifyVpcAttribute")
             .formParam("VpcId", vpcId)
-            .formParam("EnableDnsSupport.Value", "true")
+            .formParam("EnableDnsSupport.Value", "false")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -225,7 +225,20 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeVpcAttributeResponse.vpcId", equalTo(vpcId));
+            .body("DescribeVpcAttributeResponse.vpcId", equalTo(vpcId))
+            .body("DescribeVpcAttributeResponse.enableDnsSupport.value", equalTo("false"));
+    }
+
+    @Test
+    @Order(14)
+    void describeVpcEndpointServices() {
+        given()
+            .formParam("Action", "DescribeVpcEndpointServices")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     // =========================================================================

@@ -613,6 +613,37 @@ class Ec2Tests {
 
     @Test
     @Order(47)
+    @DisplayName("ModifyVpcAttribute - set enableDnsSupport=false")
+    void modifyVpcAttributeDnsSupport() {
+        ec2.modifyVpcAttribute(r -> r.vpcId(vpcId)
+                .enableDnsSupport(a -> a.value(false)));
+    }
+
+    @Test
+    @Order(48)
+    @DisplayName("DescribeVpcAttribute - enableDnsSupport round-trip")
+    void describeVpcAttributeDnsSupport() {
+        DescribeVpcAttributeResponse resp = ec2.describeVpcAttribute(r -> r
+                .vpcId(vpcId)
+                .attribute(VpcAttributeName.ENABLE_DNS_SUPPORT));
+
+        assertThat(resp.vpcId()).isEqualTo(vpcId);
+        assertThat(resp.enableDnsSupport().value()).isFalse();
+    }
+
+    @Test
+    @Order(49)
+    @DisplayName("DescribeVpcEndpointServices - returns empty list")
+    void describeVpcEndpointServices() {
+        DescribeVpcEndpointServicesResponse resp = ec2.describeVpcEndpointServices(
+                DescribeVpcEndpointServicesRequest.builder().build());
+
+        assertThat(resp.serviceNames()).isEmpty();
+        assertThat(resp.serviceDetails()).isEmpty();
+    }
+
+    @Test
+    @Order(50)
     @DisplayName("DeleteVpc - delete VPC")
     void deleteVpc() {
         ec2.deleteVpc(DeleteVpcRequest.builder().vpcId(vpcId).build());

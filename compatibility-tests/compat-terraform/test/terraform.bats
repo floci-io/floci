@@ -114,3 +114,31 @@ setup() {
     assert_success
     assert_output --partial "compat-test"
 }
+
+@test "Terraform: VPC created with custom DNS settings" {
+    run aws_cmd ec2 describe-vpcs \
+        --filters "Name=tag:Name,Values=floci-compat-vpc"
+    assert_success
+    assert_output --partial "floci-compat-vpc"
+    assert_output --partial "10.0.0.0/16"
+}
+
+@test "Terraform: VPC enableDnsSupport persisted as false" {
+    VPC_ID=$(aws_cmd ec2 describe-vpcs \
+        --filters "Name=tag:Name,Values=floci-compat-vpc" \
+        --query 'Vpcs[0].VpcId' --output text)
+    run aws_cmd ec2 describe-vpc-attribute \
+        --vpc-id "$VPC_ID" --attribute enableDnsSupport
+    assert_success
+    assert_output --partial '"Value": false'
+}
+
+@test "Terraform: VPC enableDnsHostnames persisted as false" {
+    VPC_ID=$(aws_cmd ec2 describe-vpcs \
+        --filters "Name=tag:Name,Values=floci-compat-vpc" \
+        --query 'Vpcs[0].VpcId' --output text)
+    run aws_cmd ec2 describe-vpc-attribute \
+        --vpc-id "$VPC_ID" --attribute enableDnsHostnames
+    assert_success
+    assert_output --partial '"Value": false'
+}

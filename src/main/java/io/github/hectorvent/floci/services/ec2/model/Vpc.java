@@ -19,6 +19,9 @@ public class Vpc {
     private String ownerId;
     private String region;
     private List<VpcCidrBlockAssociation> cidrBlockAssociationSet = new ArrayList<>();
+    private boolean enableDnsSupport = true;
+    private boolean enableDnsHostnames = false;
+    private boolean enableNetworkAddressUsageMetrics = false;
     private List<Tag> tags = new ArrayList<>();
 
     public Vpc() {}
@@ -49,6 +52,15 @@ public class Vpc {
 
     public List<VpcCidrBlockAssociation> getCidrBlockAssociationSet() { return cidrBlockAssociationSet; }
     public void setCidrBlockAssociationSet(List<VpcCidrBlockAssociation> cidrBlockAssociationSet) { this.cidrBlockAssociationSet = cidrBlockAssociationSet; }
+
+    public boolean isEnableDnsSupport() { return enableDnsSupport; }
+    public void setEnableDnsSupport(boolean enableDnsSupport) { this.enableDnsSupport = enableDnsSupport; }
+
+    public boolean isEnableDnsHostnames() { return enableDnsHostnames; }
+    public void setEnableDnsHostnames(boolean enableDnsHostnames) { this.enableDnsHostnames = enableDnsHostnames; }
+
+    public boolean isEnableNetworkAddressUsageMetrics() { return enableNetworkAddressUsageMetrics; }
+    public void setEnableNetworkAddressUsageMetrics(boolean enableNetworkAddressUsageMetrics) { this.enableNetworkAddressUsageMetrics = enableNetworkAddressUsageMetrics; }
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }

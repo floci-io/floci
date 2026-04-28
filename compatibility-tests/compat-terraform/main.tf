@@ -207,3 +207,19 @@ resource "aws_cloudwatch_metric_alarm" "cpu" {
 output "alarm_arn" {
   value = aws_cloudwatch_metric_alarm.cpu.arn
 }
+
+# -- VPC (issue #468: ModifyVpcAttribute / DescribeVpcAttribute) ---------------
+resource "aws_vpc" "compat" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = false
+  enable_dns_hostnames = false
+
+  tags = {
+    Name        = "floci-compat-vpc"
+    Environment = "compat-test"
+  }
+}
+
+output "vpc_id" {
+  value = aws_vpc.compat.id
+}

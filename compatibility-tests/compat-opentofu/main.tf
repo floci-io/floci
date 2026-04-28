@@ -129,3 +129,19 @@ output "table_name" {
 output "secret_arn" {
   value = aws_secretsmanager_secret.db_creds.arn
 }
+
+# ── VPC (issue #468: ModifyVpcAttribute / DescribeVpcAttribute) ────────────
+resource "aws_vpc" "compat" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = false
+  enable_dns_hostnames = false
+
+  tags = {
+    Name        = "floci-compat-vpc"
+    Environment = "compat-test"
+  }
+}
+
+output "vpc_id" {
+  value = aws_vpc.compat.id
+}

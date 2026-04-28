@@ -50,6 +50,7 @@ public class Ec2QueryHandler {
                 case "DeleteVpc" -> handleDeleteVpc(params, region);
                 case "ModifyVpcAttribute" -> handleModifyVpcAttribute(params, region);
                 case "DescribeVpcAttribute" -> handleDescribeVpcAttribute(params, region);
+                case "DescribeVpcEndpointServices" -> handleDescribeVpcEndpointServices(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -423,6 +424,22 @@ public class Ec2QueryHandler {
     private Response handleCreateVpc(MultivaluedMap<String, String> p, String region) {
         String cidrBlock = p.getFirst("CidrBlock");
         Vpc vpc = service.createVpc(region, cidrBlock, false);
+        List<Tag> vpcTags = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
+            if (resType == null) break;
+            if ("vpc".equals(resType)) {
+                for (int j = 1; ; j++) {
+                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
+                    if (k == null) break;
+                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
+                    vpcTags.add(new Tag(k, v));
+                }
+            }
+        }
+        if (!vpcTags.isEmpty()) {
+            service.createTags(region, List.of(vpc.getVpcId()), vpcTags);
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -453,7 +470,13 @@ public class Ec2QueryHandler {
 
     private Response handleModifyVpcAttribute(MultivaluedMap<String, String> p, String region) {
         String vpcId = p.getFirst("VpcId");
-        service.modifyVpcAttribute(region, vpcId, "attribute", "value");
+        if (p.containsKey("EnableDnsSupport.Value")) {
+            service.modifyVpcAttribute(region, vpcId, "enableDnsSupport", p.getFirst("EnableDnsSupport.Value"));
+        } else if (p.containsKey("EnableDnsHostnames.Value")) {
+            service.modifyVpcAttribute(region, vpcId, "enableDnsHostnames", p.getFirst("EnableDnsHostnames.Value"));
+        } else if (p.containsKey("EnableNetworkAddressUsageMetrics.Value")) {
+            service.modifyVpcAttribute(region, vpcId, "enableNetworkAddressUsageMetrics", p.getFirst("EnableNetworkAddressUsageMetrics.Value"));
+        }
         return booleanResponse("ModifyVpcAttribute");
     }
 
@@ -466,11 +489,23 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("vpcId", vpcId);
         if ("enableDnsSupport".equals(attribute)) {
-            xml.start("enableDnsSupport").elem("value", "true").end("enableDnsSupport");
+            xml.start("enableDnsSupport").elem("value", String.valueOf(vpc.isEnableDnsSupport())).end("enableDnsSupport");
         } else if ("enableDnsHostnames".equals(attribute)) {
-            xml.start("enableDnsHostnames").elem("value", "true").end("enableDnsHostnames");
+            xml.start("enableDnsHostnames").elem("value", String.valueOf(vpc.isEnableDnsHostnames())).end("enableDnsHostnames");
+        } else if ("enableNetworkAddressUsageMetrics".equals(attribute)) {
+            xml.start("enableNetworkAddressUsageMetrics").elem("value", String.valueOf(vpc.isEnableNetworkAddressUsageMetrics())).end("enableNetworkAddressUsageMetrics");
         }
         xml.end("DescribeVpcAttributeResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpcEndpointServices(MultivaluedMap<String, String> p, String region) {
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("serviceNameSet").end("serviceNameSet")
+                .start("serviceDetailSet").end("serviceDetailSet")
+                .end("DescribeVpcEndpointServicesResponse");
         return xmlResponse(xml.build());
     }
 

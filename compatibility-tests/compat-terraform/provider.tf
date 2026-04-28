@@ -37,5 +37,6 @@ provider "aws" {
     cognitoidp     = var.endpoint
     rds            = var.endpoint
     cloudwatch     = var.endpoint
+    ec2            = var.endpoint
   }
 }

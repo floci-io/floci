@@ -436,7 +436,12 @@ public class Ec2Service {
         if (vpc == null) {
             throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
         }
-        // no-op for mock
+        switch (attribute) {
+            case "enableDnsSupport"                    -> vpc.setEnableDnsSupport(Boolean.parseBoolean(value));
+            case "enableDnsHostnames"                  -> vpc.setEnableDnsHostnames(Boolean.parseBoolean(value));
+            case "enableNetworkAddressUsageMetrics"    -> vpc.setEnableNetworkAddressUsageMetrics(Boolean.parseBoolean(value));
+        }
+        vpcs.put(key(region, vpcId), vpc);
     }
 
     public Vpc describeVpcAttribute(String region, String vpcId, String attribute) {
