@@ -189,3 +189,33 @@ class TestCognitoAuth:
                 UserPoolId=pool_id, ClientId=client_id
             )
             cognito_client.delete_user_pool(UserPoolId=pool_id)
+
+
+class TestCognitoDescribeUserPoolStandardAttributes:
+    """DescribeUserPool must return all 20 standard OIDC attributes."""
+
+    STANDARD_ATTRIBUTES = [
+        "sub", "name", "given_name", "family_name", "middle_name", "nickname",
+        "preferred_username", "profile", "picture", "website", "email",
+        "email_verified", "gender", "birthdate", "zoneinfo", "locale",
+        "phone_number", "phone_number_verified", "address", "updated_at",
+    ]
+
+    def test_describe_user_pool_returns_all_standard_schema_attributes(self, cognito_client, unique_name):
+        response = cognito_client.create_user_pool(PoolName=f"pytest-schema-{unique_name}")
+        pool_id = response["UserPool"]["Id"]
+
+        try:
+            described = cognito_client.describe_user_pool(UserPoolId=pool_id)
+            schema = described["UserPool"]["SchemaAttributes"]
+            names = [a["Name"] for a in schema]
+
+            assert len(schema) == 20
+            for attr in self.STANDARD_ATTRIBUTES:
+                assert attr in names, f"Missing standard attribute: {attr}"
+
+            sub = next(a for a in schema if a["Name"] == "sub")
+            assert sub["Required"] is True
+            assert sub["Mutable"] is False
+        finally:
+            cognito_client.delete_user_pool(UserPoolId=pool_id)

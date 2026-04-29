@@ -382,6 +382,24 @@ class CognitoFeaturesTest {
         assertThat(resp.users()).isEmpty();
     }
 
+    @Test
+    @Order(55)
+    void describeUserPoolReturnsAllTwentyStandardAttributes() {
+        DescribeUserPoolResponse resp = cognito.describeUserPool(b -> b.userPoolId(poolId));
+        List<SchemaAttributeType> schema = resp.userPool().schemaAttributes();
+        assertThat(schema).hasSize(20);
+        List<String> names = schema.stream().map(SchemaAttributeType::name).toList();
+        assertThat(names).contains(
+                "sub", "name", "given_name", "family_name", "middle_name", "nickname",
+                "preferred_username", "profile", "picture", "website", "email",
+                "email_verified", "gender", "birthdate", "zoneinfo", "locale",
+                "phone_number", "phone_number_verified", "address", "updated_at");
+
+        SchemaAttributeType sub = schema.stream().filter(a -> "sub".equals(a.name())).findFirst().orElseThrow();
+        assertThat(sub.required()).isTrue();
+        assertThat(sub.mutable()).isFalse();
+    }
+
     // ── Issue #234 note ───────────────────────────────────────────────────────
     // GetTokensFromRefreshToken is tested in sdk-test-node/tests/cognito-features.test.ts
     // because GetTokensFromRefreshTokenCommand is not available in Java SDK 2.31.8.

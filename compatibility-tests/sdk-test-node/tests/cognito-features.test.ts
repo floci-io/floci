@@ -21,6 +21,7 @@ import {
   InitiateAuthCommand,
   ListUsersCommand,
   GetTokensFromRefreshTokenCommand,
+  DescribeUserPoolCommand,
   DeleteUserPoolCommand,
   MessageActionType,
   ExplicitAuthFlowsType,
@@ -413,6 +414,25 @@ describe('Cognito features (#218 #220 #228 #229 #233 #234 #235)', () => {
         })
       )
     ).rejects.toThrow();
+  });
+
+  it('DescribeUserPool returns all 20 standard SchemaAttributes', async () => {
+    const resp = await cognito.send(new DescribeUserPoolCommand({ UserPoolId: poolId }));
+    const schema = resp.UserPool?.SchemaAttributes ?? [];
+    expect(schema).toHaveLength(20);
+    const names = schema.map((a) => a.Name);
+    const expected = [
+      'sub', 'name', 'given_name', 'family_name', 'middle_name', 'nickname',
+      'preferred_username', 'profile', 'picture', 'website', 'email',
+      'email_verified', 'gender', 'birthdate', 'zoneinfo', 'locale',
+      'phone_number', 'phone_number_verified', 'address', 'updated_at',
+    ];
+    for (const attr of expected) {
+      expect(names).toContain(attr);
+    }
+    const sub = schema.find((a) => a.Name === 'sub');
+    expect(sub?.Required).toBe(true);
+    expect(sub?.Mutable).toBe(false);
   });
 
   it('#234: REFRESH_TOKEN_AUTH flow also works with structured token', async () => {

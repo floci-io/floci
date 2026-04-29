@@ -229,3 +229,28 @@ teardown() {
     assert_failure
     [[ "$output" == *"ValidationException"* ]]
 }
+
+@test "Cognito: describe-user-pool returns all 20 standard SchemaAttributes" {
+    out=$(aws_cmd cognito-idp create-user-pool --pool-name "bats-test-pool-$(unique_name)")
+    POOL_ID=$(json_get "$out" '.UserPool.Id')
+
+    run aws_cmd cognito-idp describe-user-pool --user-pool-id "$POOL_ID"
+    assert_success
+
+    count=$(echo "$output" | jq '.UserPool.SchemaAttributes | length')
+    [ "$count" -eq 20 ]
+
+    for attr in sub name given_name family_name middle_name nickname \
+                preferred_username profile picture website email email_verified \
+                gender birthdate zoneinfo locale phone_number phone_number_verified \
+                address updated_at; do
+        found=$(echo "$output" | jq --arg n "$attr" '[.UserPool.SchemaAttributes[] | select(.Name == $n)] | length')
+        [ "$found" -eq 1 ] || { echo "missing standard attribute: $attr"; return 1; }
+    done
+
+    sub_required=$(echo "$output" | jq '[.UserPool.SchemaAttributes[] | select(.Name == "sub")] | .[0].Required')
+    [ "$sub_required" = "true" ]
+
+    sub_mutable=$(echo "$output" | jq '[.UserPool.SchemaAttributes[] | select(.Name == "sub")] | .[0].Mutable')
+    [ "$sub_mutable" = "false" ]
+}

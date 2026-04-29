@@ -11,6 +11,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/acm"
+	"github.com/aws/aws-sdk-go-v2/service/cognitoidentityprovider"
 	"github.com/aws/aws-sdk-go-v2/service/ecr"
 	"github.com/aws/aws-sdk-go-v2/service/pipes"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
@@ -130,6 +131,11 @@ func PipesClient() *pipes.Client {
 // RDSClient returns a new RDS client.
 func RDSClient() *rds.Client {
 	return rds.NewFromConfig(Config())
+}
+
+// CognitoClient returns a new Cognito Identity Provider client.
+func CognitoClient() *cognitoidentityprovider.Client {
+	return cognitoidentityprovider.NewFromConfig(Config())
 }
 
 // ProxyHost returns the host to use for direct TCP connections to RDS/ElastiCache proxies.
