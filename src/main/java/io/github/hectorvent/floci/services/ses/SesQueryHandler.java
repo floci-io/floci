@@ -140,6 +140,10 @@ public class SesQueryHandler {
     }
 
     private Response handleSendEmail(MultivaluedMap<String, String> params, String region) {
+        if (!sesService.isAccountSendingEnabled(region)) {
+            throw new AwsException("AccountSendingPausedException",
+                    "Account sending is disabled.", 400);
+        }
         String source = getParam(params, "Source");
         List<String> toAddresses = extractMembers(params, "Destination.ToAddresses");
         List<String> ccAddresses = extractMembers(params, "Destination.CcAddresses");
@@ -157,6 +161,10 @@ public class SesQueryHandler {
     }
 
     private Response handleSendRawEmail(MultivaluedMap<String, String> params, String region) {
+        if (!sesService.isAccountSendingEnabled(region)) {
+            throw new AwsException("AccountSendingPausedException",
+                    "Account sending is disabled.", 400);
+        }
         String source = getParam(params, "Source");
         List<String> destinations = extractMembers(params, "Destinations");
         String rawMessage = getParam(params, "RawMessage.Data");
@@ -319,6 +327,10 @@ public class SesQueryHandler {
     }
 
     private Response handleSendTemplatedEmail(MultivaluedMap<String, String> params, String region) {
+        if (!sesService.isAccountSendingEnabled(region)) {
+            throw new AwsException("AccountSendingPausedException",
+                    "Account sending is disabled.", 400);
+        }
         String source = getParam(params, "Source");
         List<String> toAddresses = extractMembers(params, "Destination.ToAddresses");
         List<String> ccAddresses = extractMembers(params, "Destination.CcAddresses");
