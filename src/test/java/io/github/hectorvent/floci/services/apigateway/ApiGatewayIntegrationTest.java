@@ -336,4 +336,39 @@ class ApiGatewayIntegrationTest {
                 .then()
                 .statusCode(404);
     }
+
+    // ──────────────────────────── _custom_id_ tag ────────────────────────────
+
+    @Test @Order(50)
+    void createRestApi_customIdTag_usesTagValueAsApiId() {
+        String body = """
+                {"name":"custom-id-api","tags":{"_custom_id_":"MYCUSTOMNAME"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("id", equalTo("MYCUSTOMNAME"))
+                .body("tags._custom_id_", equalTo("MYCUSTOMNAME"));
+    }
+
+    @Test @Order(51)
+    void getRestApi_customId_resolvesById() {
+        given()
+                .when().get("/restapis/MYCUSTOMNAME")
+                .then()
+                .statusCode(200)
+                .body("id", equalTo("MYCUSTOMNAME"))
+                .body("name", equalTo("custom-id-api"));
+    }
+
+    @Test @Order(52)
+    void deleteRestApi_customId() {
+        given()
+                .when().delete("/restapis/MYCUSTOMNAME")
+                .then()
+                .statusCode(202);
+    }
 }

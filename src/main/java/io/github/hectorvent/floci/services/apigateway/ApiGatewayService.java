@@ -82,11 +82,19 @@ public class ApiGatewayService {
         String name = (String) request.get("name");
         String description = (String) request.get("description");
 
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = request.get("tags") instanceof Map<?, ?> m
+                ? (Map<String, String>) m : new HashMap<>();
+
+        String customId = tags.get("_custom_id_");
+        String apiId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
+
         RestApi api = new RestApi();
-        api.setId(shortId(10));
+        api.setId(apiId);
         api.setName(name);
         api.setDescription(description);
         api.setCreatedDate(System.currentTimeMillis() / 1000L);
+        api.setTags(tags);
 
         apiStore.put(apiKey(region, api.getId()), api);
 
