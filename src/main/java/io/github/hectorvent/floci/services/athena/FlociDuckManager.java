@@ -4,6 +4,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.quarkus.runtime.ShutdownEvent;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -89,12 +91,11 @@ public class FlociDuckManager {
                 .withLogRotation()
                 .build();
 
-        containerId = lifecycleManager.createAndStart(spec).containerId();
+        ContainerInfo info = lifecycleManager.createAndStart(spec);
+        EndpointInfo endpoint = info.getEndpoint(DUCK_PORT);
+        containerId = info.containerId();
 
-        String url = containerDetector.isRunningInContainer()
-                ? "http://" + CONTAINER_NAME + ":" + DUCK_PORT
-                : "http://localhost:" + DUCK_PORT;
-
+        String url = "http://" + endpoint;
         LOG.infov("floci-duck container started, waiting for health check at {0}", url);
         waitForHealth(url);
 
