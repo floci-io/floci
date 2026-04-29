@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
@@ -54,6 +55,7 @@ public class ContainerLauncher {
     private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
     private final EcrRegistryManager ecrRegistryManager;
+    private final EmbeddedDnsServer embeddedDnsServer;
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -67,7 +69,8 @@ public class ContainerLauncher {
                              RuntimeApiServerFactory runtimeApiServerFactory,
                              DockerHostResolver dockerHostResolver,
                              EmulatorConfig config,
-                             EcrRegistryManager ecrRegistryManager) {
+                             EcrRegistryManager ecrRegistryManager,
+                             EmbeddedDnsServer embeddedDnsServer) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -76,6 +79,7 @@ public class ContainerLauncher {
         this.dockerHostResolver = dockerHostResolver;
         this.config = config;
         this.ecrRegistryManager = ecrRegistryManager;
+        this.embeddedDnsServer = embeddedDnsServer;
     }
 
     /**
@@ -132,6 +136,24 @@ public class ContainerLauncher {
         String hostAddress = dockerHostResolver.resolve();
         String runtimeApiEndpoint = hostAddress + ":" + runtimeApiServer.getPort();
 
+        // Give the container a human-readable name (needed for log stream name below)
+        String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        String containerName = "floci-" + fn.getFunctionName() + "-" + shortId;
+
+        // CloudWatch log coordinates — computed here so they can be injected as env vars
+        String cwLogGroup  = "/aws/lambda/" + fn.getFunctionName();
+        String cwLogStream = LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/[$LATEST]" + shortId;
+
+        // Floci endpoint reachable from inside the container.
+        // When the embedded DNS server is active, Lambda containers already have it wired as their
+        // resolver and can reach Floci by the configured hostname (or the default DNS suffix).
+        // Fall back to the raw Docker host IP when the embedded DNS is not running (local dev mode).
+        int flociPort = java.net.URI.create(config.baseUrl()).getPort();
+        String flociHostname = embeddedDnsServer.getServerIp().isPresent()
+                ? config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
+                : hostAddress;
+        String flociEndpoint = "http://" + flociHostname + ":" + flociPort;
+
         // Build env vars
         List<String> env = new ArrayList<>();
         env.add("AWS_LAMBDA_RUNTIME_API=" + runtimeApiEndpoint);
@@ -139,6 +161,8 @@ public class ContainerLauncher {
         env.add("AWS_LAMBDA_FUNCTION_MEMORY_SIZE=" + fn.getMemorySize());
         env.add("AWS_LAMBDA_FUNCTION_TIMEOUT=" + fn.getTimeout());
         env.add("AWS_LAMBDA_FUNCTION_VERSION=$LATEST");
+        env.add("AWS_LAMBDA_LOG_GROUP_NAME=" + cwLogGroup);
+        env.add("AWS_LAMBDA_LOG_STREAM_NAME=" + cwLogStream);
         if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
             env.add("_HANDLER=" + fn.getHandler());
         }
@@ -147,13 +171,12 @@ public class ContainerLauncher {
         env.add("AWS_ACCESS_KEY_ID=test");
         env.add("AWS_SECRET_ACCESS_KEY=test");
         env.add("AWS_SESSION_TOKEN=test");
+        env.add("FLOCI_HOSTNAME=" + flociHostname);
+        env.add("FLOCI_ENDPOINT=" + flociEndpoint);
+        env.add("AWS_ENDPOINT_URL=" + flociEndpoint);
         if (fn.getEnvironment() != null) {
             fn.getEnvironment().forEach((k, v) -> env.add(k + "=" + v));
         }
-
-        // Give the container a human-readable name
-        String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        String containerName = "floci-" + fn.getFunctionName() + "-" + shortId;
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
@@ -214,12 +237,8 @@ public class ContainerLauncher {
 
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
-        // Determine CloudWatch Logs destination for this container instance
-        String cwLogGroup = "/aws/lambda/" + fn.getFunctionName();
-        String region = extractRegionFromArn(fn.getFunctionArn());
-        String cwLogStream = LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/[$LATEST]" + shortId;
-
         // Attach log streaming
+        String region = extractRegionFromArn(fn.getFunctionArn());
         Closeable logHandle = logStreamer.attach(
                 containerId, cwLogGroup, cwLogStream, region, "lambda:" + fn.getFunctionName());
         handle.setLogStream(logHandle);
