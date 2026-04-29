@@ -67,6 +67,8 @@ class ContainerLauncherTest {
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
+        when(config.baseUrl()).thenReturn("http://localhost:4566");
+        lenient().when(config.hostname()).thenReturn(Optional.empty());
 
         when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
 
