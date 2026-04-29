@@ -6,6 +6,7 @@
 * **athena:** real SQL execution via `floci-duck` DuckDB sidecar — queries run against actual S3 data; Glue tables are auto-registered as DuckDB views at query time
 * **athena:** lazy sidecar lifecycle — `floci/floci-duck:latest` container is started on first query and reused for subsequent executions; `FLOCI_SERVICES_ATHENA_DUCK_URL` bypasses container management
 * **athena:** `mock` mode (`FLOCI_SERVICES_ATHENA_MOCK=true`) keeps the previous behavior for unit tests that only verify the state machine
+* **glue:** add Schema Registry support for registries, schemas, versions, compatibility checks, metadata, tags, and Java SerDe SDK compatibility
 * **glue,athena:** SerDe-aware format inference — `inferReadFunction` now checks `SerdeInfo.SerializationLibrary` in addition to `InputFormat`; standard AWS JSON tables (`TextInputFormat` + `JsonSerDe`) correctly map to `read_json_auto`
 * **bedrock-runtime:** add stub for Converse and InvokeModel ([#87](https://github.com/floci-io/floci/issues/87))
 * **s3:** preserve explicit object server-side-encryption headers on PutObject, GetObject, HeadObject, CopyObject, and multipart uploads

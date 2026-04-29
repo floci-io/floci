@@ -23,6 +23,8 @@ public class StorageDescriptor {
     private SerDeInfo serdeInfo;
     @JsonProperty("Parameters")
     private Map<String, String> parameters;
+    @JsonProperty("SchemaReference")
+    private SchemaReference schemaReference;
 
     public StorageDescriptor() {}
 
@@ -42,6 +44,8 @@ public class StorageDescriptor {
     public void setSerdeInfo(SerDeInfo serdeInfo) { this.serdeInfo = serdeInfo; }
     public Map<String, String> getParameters() { return parameters; }
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
+    public SchemaReference getSchemaReference() { return schemaReference; }
+    public void setSchemaReference(SchemaReference schemaReference) { this.schemaReference = schemaReference; }
 
     @RegisterForReflection
     public static class SerDeInfo {

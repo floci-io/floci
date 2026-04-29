@@ -3,22 +3,34 @@
 **Protocol:** JSON 1.1
 **Endpoint:** `http://localhost:4566/`
 
-Floci emulates the AWS Glue Data Catalog, allowing you to manage metadata for your data lake locally.
+Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you to manage local data lake metadata and schema-version workflows.
 
 ## Supported Actions
 
-### Databases
-`CreateDatabase` · `GetDatabase` · `GetDatabases` · `DeleteDatabase` · `UpdateDatabase`
+### Data Catalog
 
-### Tables
-`CreateTable` · `GetTable` · `GetTables` · `DeleteTable` · `UpdateTable`
+| Area | Actions |
+|---|---|
+| Databases | `CreateDatabase` · `GetDatabase` · `GetDatabases` |
+| Tables | `CreateTable` · `GetTable` · `GetTables` · `DeleteTable` |
+| Partitions | `CreatePartition` · `GetPartitions` |
 
-### Partitions
-`CreatePartition` · `BatchCreatePartition` · `GetPartition` · `GetPartitions` · `DeletePartition`
+### Schema Registry
+
+| Area | Actions |
+|---|---|
+| Registries | `CreateRegistry` · `GetRegistry` · `ListRegistries` · `UpdateRegistry` · `DeleteRegistry` |
+| Schemas | `CreateSchema` · `GetSchema` · `ListSchemas` · `UpdateSchema` · `DeleteSchema` |
+| Versions | `RegisterSchemaVersion` · `GetSchemaByDefinition` · `GetSchemaVersion` · `ListSchemaVersions` · `DeleteSchemaVersions` · `GetSchemaVersionsDiff` · `CheckSchemaVersionValidity` |
+| Metadata and tags | `PutSchemaVersionMetadata` · `RemoveSchemaVersionMetadata` · `QuerySchemaVersionMetadata` · `TagResource` · `UntagResource` · `GetTags` |
+
+Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes are `NONE`, `DISABLED`, `BACKWARD`, `BACKWARD_ALL`, `FORWARD`, `FORWARD_ALL`, `FULL`, and `FULL_ALL`.
 
 ## Integration with Athena
 
 The Glue Data Catalog is automatically used by **Athena** to resolve table names to S3 locations and formats. When you submit an Athena query, Floci reads all Glue tables for the target database and generates DuckDB views on top of the underlying S3 objects before executing the SQL.
+
+Tables can reference a Schema Registry schema version through `StorageDescriptor.SchemaReference`. On `GetTable` and `GetTables`, Floci resolves the schema definition into Glue columns when possible.
 
 The DuckDB read function is selected based on the table's `StorageDescriptor.InputFormat` and `StorageDescriptor.SerdeInfo.SerializationLibrary`:
 
@@ -29,7 +41,7 @@ The DuckDB read function is selected based on the table's `StorageDescriptor.Inp
 | `InputFormat` contains `hive` | `read_json_auto` |
 | Anything else | `read_csv_auto` |
 
-## Example
+## Data Catalog Example
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
@@ -76,5 +88,40 @@ aws glue create-table \
       ]
     }
   }' \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+## Schema Registry Example
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+
+cat > /tmp/order.avsc <<'JSON'
+{"type":"record","name":"Order","namespace":"example","fields":[{"name":"id","type":"long"}]}
+JSON
+
+cat > /tmp/order-v2.avsc <<'JSON'
+{"type":"record","name":"Order","namespace":"example","fields":[{"name":"id","type":"long"},{"name":"amount","type":["null","double"],"default":null}]}
+JSON
+
+aws glue create-registry \
+  --registry-name local-registry \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws glue create-schema \
+  --registry-id RegistryName=local-registry \
+  --schema-name orders \
+  --data-format AVRO \
+  --compatibility BACKWARD \
+  --schema-definition file:///tmp/order.avsc \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws glue register-schema-version \
+  --schema-id RegistryName=local-registry,SchemaName=orders \
+  --schema-definition file:///tmp/order-v2.avsc \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+aws glue list-schema-versions \
+  --schema-id RegistryName=local-registry,SchemaName=orders \
   --endpoint-url $AWS_ENDPOINT_URL
 ```

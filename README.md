@@ -58,7 +58,7 @@
 | RDS (PostgreSQL + MySQL + IAM auth) | ✅ | ❌ |
 | MSK (Kafka + Redpanda) | ✅ | ❌ |
 | Athena (real SQL via DuckDB sidecar + Glue views) | ✅ | ❌ |
-| Glue Data Catalog | ✅ | ❌ |
+| Glue Data Catalog + Schema Registry | ✅ | ❌ |
 | Data Firehose (NDJSON delivery) | ✅ | ❌ |
 | S3 Object Lock (COMPLIANCE / GOVERNANCE) | ✅ | ⚠️ Partial |
 | DynamoDB Streams | ✅ | ⚠️ Partial |
@@ -200,7 +200,7 @@ All default images are configurable via environment variables, useful for pinnin
 | **RDS** | **Real Docker containers** | PostgreSQL & MySQL, IAM auth, JDBC-compatible |
 | **MSK** | **Real Docker containers** | Kafka compatible via Redpanda orchestration |
 | **Athena** | In-process + **DuckDB sidecar** | Real SQL execution; Glue-backed views over S3 data; `read_parquet` / `read_json_auto` / `read_csv_auto` inferred from SerDe |
-| **Glue** | In-process | Data Catalog; tables consumed by Athena as DuckDB views at query time |
+| **Glue** | In-process | Data Catalog; Schema Registry for Avro / JSON Schema / Protobuf; tables consumed by Athena as DuckDB views at query time |
 | **Data Firehose** | In-process | Streaming data delivery; records flushed as NDJSON to S3 |
 | **ECS** | **Real Docker containers** | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | **EC2** | In-process | VPCs, subnets, security groups, instances, AMIs, key pairs, internet gateways, route tables, Elastic IPs, tags |
