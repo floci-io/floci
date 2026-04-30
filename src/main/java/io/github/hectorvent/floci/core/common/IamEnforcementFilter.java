@@ -16,6 +16,7 @@ import jakarta.ws.rs.ext.Provider;
 import org.jboss.logging.Logger;
 
 import java.util.List;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -105,7 +106,7 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         Decision decision = evaluator.evaluate(policies, action, resource);
         if (decision == Decision.DENY) {
             LOG.infov("IAM enforcement DENY: akid={0} action={1} resource={2}", akid, action, resource);
-            ctx.abortWith(accessDeniedResponse(action));
+            ctx.abortWith(accessDeniedResponse(action, credentialScope, ctx.getMediaType()));
         }
     }
 
@@ -119,12 +120,65 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
         return m.find() ? m.group(1) : null;
     }
 
-    private Response accessDeniedResponse(String action) {
+    /**
+     * Builds a 403 Access Denied response in the wire format the calling SDK
+     * expects. AWS SDKs hard-fail when they receive the wrong shape: an XML
+     * parser blows up on a leading {@code {}, and a JSON parser blows up on
+     * {@code <}. Pick the shape from request signals:
+     *
+     * <ul>
+     *   <li>S3 → S3-flavored XML {@code <Error>...</Error>}</li>
+     *   <li>{@code application/x-www-form-urlencoded} body → AWS Query
+     *       {@code <ErrorResponse>...</ErrorResponse>} (IAM/STS/EC2/SQS/SNS/...)</li>
+     *   <li>everything else (JSON 1.x, REST-JSON) → keep the historical JSON shape</li>
+     * </ul>
+     */
+    // Package-private for unit testing.
+    static Response accessDeniedResponse(String action, String credentialScope, MediaType requestMediaType) {
         String message = "User is not authorized to perform: " + action;
-        String body = "{\"__type\":\"AccessDeniedException\",\"message\":\"" + message + "\"}";
-        return Response.status(403)
-                .type(MediaType.APPLICATION_JSON)
-                .entity(body)
+        if ("s3".equals(credentialScope)) {
+            return s3XmlAccessDenied(message);
+        }
+        if (isFormEncoded(requestMediaType)) {
+            return queryXmlAccessDenied(message);
+        }
+        return jsonAccessDenied(message);
+    }
+
+    private static boolean isFormEncoded(MediaType mt) {
+        return mt != null
+                && "application".equalsIgnoreCase(mt.getType())
+                && "x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype());
+    }
+
+    private static Response queryXmlAccessDenied(String message) {
+        String xml = new XmlBuilder()
+                .start("ErrorResponse")
+                  .start("Error")
+                    .elem("Type", "Sender")
+                    .elem("Code", "AccessDenied")
+                    .elem("Message", message)
+                  .end("Error")
+                  .elem("RequestId", UUID.randomUUID().toString())
+                .end("ErrorResponse")
                 .build();
+        return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml).build();
+    }
+
+    private static Response s3XmlAccessDenied(String message) {
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("Error")
+                  .elem("Code", "AccessDenied")
+                  .elem("Message", message)
+                  .elem("RequestId", UUID.randomUUID().toString())
+                .end("Error")
+                .build();
+        return Response.status(403).type(MediaType.APPLICATION_XML).entity(xml).build();
+    }
+
+    private static Response jsonAccessDenied(String message) {
+        String body = "{\"__type\":\"AccessDeniedException\",\"message\":\"" + message + "\"}";
+        return Response.status(403).type(MediaType.APPLICATION_JSON).entity(body).build();
     }
 }
