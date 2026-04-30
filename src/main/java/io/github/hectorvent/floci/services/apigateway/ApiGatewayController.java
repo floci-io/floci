@@ -442,6 +442,16 @@ public class ApiGatewayController {
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
+    @GET
+    @Path("/restapis/{apiId}/deployments/{deploymentId}")
+    public Response getDeployment(@Context HttpHeaders headers,
+                                   @PathParam("apiId") String apiId,
+                                   @PathParam("deploymentId") String deploymentId) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(toDeploymentNode(service.getDeployment(region, apiId, deploymentId)).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
     @POST
     @Path("/restapis/{apiId}/stages")
     public Response createStage(@Context HttpHeaders headers,
