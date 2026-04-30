@@ -1196,4 +1196,76 @@ class CognitoServiceTest {
         assertNotNull(auth);
         assertNotNull(auth.get("AccessToken"));
     }
+
+    // =========================================================================
+    // AdminRespondToAuthChallenge
+    // =========================================================================
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void adminRespondToAuthChallengeNewPasswordRequired() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), "TempPass1!");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> challengeResp = service.adminInitiateAuth(
+                pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "bob", "PASSWORD", "TempPass1!"), Map.of());
+        assertEquals("NEW_PASSWORD_REQUIRED", challengeResp.get("ChallengeName"));
+        String session = (String) challengeResp.get("Session");
+
+        Map<String, Object> result = service.adminRespondToAuthChallenge(
+                pool.getId(), client.getClientId(), "NEW_PASSWORD_REQUIRED", session,
+                Map.of("USERNAME", "bob", "NEW_PASSWORD", "Permanent99!"));
+        Map<String, Object> auth = (Map<String, Object>) result.get("AuthenticationResult");
+        assertNotNull(auth, "AuthenticationResult should be present");
+        assertNotNull(auth.get("AccessToken"));
+        assertNotNull(auth.get("IdToken"));
+        assertNotNull(auth.get("RefreshToken"));
+
+        CognitoUser user = service.adminGetUser(pool.getId(), "bob");
+        assertEquals("CONFIRMED", user.getUserStatus());
+    }
+
+    @Test
+    void adminRespondToAuthChallengeInvalidPool() {
+        UserPool pool1 = service.createUserPool(Map.of("PoolName", "Pool1"), "us-east-1");
+        UserPool pool2 = service.createUserPool(Map.of("PoolName", "Pool2"), "us-east-1");
+        service.adminCreateUser(pool1.getId(), "alice", Map.of("email", "a@example.com"), "TempPass1!");
+        UserPoolClient client = service.createUserPoolClient(
+                pool1.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.adminRespondToAuthChallenge(
+                        pool2.getId(), client.getClientId(), "NEW_PASSWORD_REQUIRED", null,
+                        Map.of("USERNAME", "alice", "NEW_PASSWORD", "NewPass1!")));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    @SuppressWarnings("unchecked")
+    void adminRespondToAuthChallengeWithUserAttributes() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "carol", Map.of("email", "carol@example.com"), "TempPass1!");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+
+        Map<String, Object> challengeResp = service.adminInitiateAuth(
+                pool.getId(), client.getClientId(), "ADMIN_USER_PASSWORD_AUTH",
+                Map.of("USERNAME", "carol", "PASSWORD", "TempPass1!"), Map.of());
+        String session = (String) challengeResp.get("Session");
+
+        Map<String, String> responses = new HashMap<>();
+        responses.put("USERNAME", "carol");
+        responses.put("NEW_PASSWORD", "Permanent99!");
+        responses.put("userAttributes.given_name", "Carolyn");
+
+        Map<String, Object> result = service.adminRespondToAuthChallenge(
+                pool.getId(), client.getClientId(), "NEW_PASSWORD_REQUIRED", session, responses);
+        assertNotNull(((Map<String, Object>) result.get("AuthenticationResult")).get("AccessToken"));
+
+        CognitoUser user = service.adminGetUser(pool.getId(), "carol");
+        assertEquals("Carolyn", user.getAttributes().get("given_name"));
+    }
 }

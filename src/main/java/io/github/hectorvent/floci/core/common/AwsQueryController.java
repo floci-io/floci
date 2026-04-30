@@ -287,7 +287,7 @@ public class AwsQueryController {
     private static final Set<String> COGNITO_ACTIONS = Set.of(
             "AdminCreateUser", "AdminGetUser", "AdminDeleteUser", "AdminSetUserPassword",
             "AdminUpdateUserAttributes", "AdminUserGlobalSignOut", "ListUsers",
-            "InitiateAuth", "AdminInitiateAuth", "RespondToAuthChallenge",
+            "InitiateAuth", "AdminInitiateAuth", "RespondToAuthChallenge", "AdminRespondToAuthChallenge",
             "SignUp", "ConfirmSignUp", "ChangePassword", "ForgotPassword",
             "ConfirmForgotPassword", "GetUser", "UpdateUserAttributes",
             "CreateUserPool", "DescribeUserPool", "ListUserPools", "UpdateUserPool", "DeleteUserPool",
