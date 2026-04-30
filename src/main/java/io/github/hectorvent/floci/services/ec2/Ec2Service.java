@@ -19,6 +19,9 @@ public class Ec2Service {
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
 
     private final String accountId;
+    private final EmulatorConfig config;
+    private final Ec2ContainerManager containerManager;
+    private final AmiImageResolver amiImageResolver;
 
     // region::id → resource
     private final Map<String, Vpc> vpcs = new ConcurrentHashMap<>();
@@ -38,8 +41,12 @@ public class Ec2Service {
     private final Map<String, AtomicInteger> subnetIpCounters = new ConcurrentHashMap<>();
 
     @Inject
-    public Ec2Service(EmulatorConfig config) {
+    public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      AmiImageResolver amiImageResolver) {
         this.accountId = config.defaultAccountId();
+        this.config = config;
+        this.containerManager = containerManager;
+        this.amiImageResolver = amiImageResolver;
     }
 
     // ─── Default resource seeding ──────────────────────────────────────────────
@@ -145,7 +152,8 @@ public class Ec2Service {
     public Reservation runInstances(String region, String imageId, String instanceType,
                                     int minCount, int maxCount, String keyName,
                                     List<String> securityGroupIds, String subnetId,
-                                    String clientToken, List<Tag> instanceTags) {
+                                    String clientToken, List<Tag> instanceTags,
+                                    String userData, String iamInstanceProfileArn) {
         ensureDefaultResources(region);
 
         // Resolve subnet
@@ -212,6 +220,8 @@ public class Ec2Service {
             inst.setAmiLaunchIndex(i);
             inst.setClientToken(clientToken);
             inst.setRegion(region);
+            inst.setUserData(userData);
+            inst.setIamInstanceProfileArn(iamInstanceProfileArn);
             if (instanceTags != null && !instanceTags.isEmpty()) {
                 inst.setTags(new ArrayList<>(instanceTags));
                 tags.put(instanceId, new ArrayList<>(instanceTags));
@@ -230,6 +240,18 @@ public class Ec2Service {
 
             instances.put(key(region, instanceId), inst);
             reservation.getInstances().add(inst);
+
+            if (!config.services().ec2().mock()) {
+                String dockerImage = amiImageResolver.resolve(imageId);
+                String publicKey = null;
+                if (keyName != null) {
+                    KeyPair kp = findKeyPair(region, keyName);
+                    if (kp != null) {
+                        publicKey = kp.getPublicKey();
+                    }
+                }
+                containerManager.launch(inst, dockerImage, publicKey, region);
+            }
         }
 
         return reservation;
@@ -289,13 +311,18 @@ public class Ec2Service {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
             InstanceState prev = inst.getState();
-            inst.setState(InstanceState.terminated());
+            if (config.services().ec2().mock()) {
+                inst.setState(InstanceState.terminated());
+                inst.setTerminatedAt(System.currentTimeMillis());
+            } else {
+                containerManager.terminate(inst);
+            }
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
             entry.put("previousState", prev.getName());
             entry.put("previousCode", String.valueOf(prev.getCode()));
-            entry.put("currentState", "terminated");
-            entry.put("currentCode", "48");
+            entry.put("currentState", "shutting-down");
+            entry.put("currentCode", "32");
             result.add(entry);
         }
         return result;
@@ -310,13 +337,17 @@ public class Ec2Service {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
             InstanceState prev = inst.getState();
-            inst.setState(InstanceState.stopped());
+            if (config.services().ec2().mock()) {
+                inst.setState(InstanceState.stopped());
+            } else {
+                containerManager.stop(inst);
+            }
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
             entry.put("previousState", prev.getName());
             entry.put("previousCode", String.valueOf(prev.getCode()));
-            entry.put("currentState", "stopped");
-            entry.put("currentCode", "80");
+            entry.put("currentState", "stopping");
+            entry.put("currentCode", "64");
             result.add(entry);
         }
         return result;
@@ -330,14 +361,22 @@ public class Ec2Service {
             if (inst == null) {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
+            if ("terminated".equals(inst.getState().getName())) {
+                throw new AwsException("IncorrectInstanceState",
+                        "The instance '" + id + "' is not in a state from which it can be started.", 400);
+            }
             InstanceState prev = inst.getState();
-            inst.setState(InstanceState.running());
+            if (config.services().ec2().mock()) {
+                inst.setState(InstanceState.running());
+            } else {
+                containerManager.start(inst);
+            }
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
             entry.put("previousState", prev.getName());
             entry.put("previousCode", String.valueOf(prev.getCode()));
-            entry.put("currentState", "running");
-            entry.put("currentCode", "16");
+            entry.put("currentState", "pending");
+            entry.put("currentCode", "0");
             result.add(entry);
         }
         return result;
@@ -350,8 +389,21 @@ public class Ec2Service {
             if (inst == null) {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
-            // no-op in mock mode
+            if (!config.services().ec2().mock()) {
+                containerManager.reboot(inst);
+            }
         }
+    }
+
+    /** Removes terminated instances older than 1 hour. Called periodically by lifecycle. */
+    public void pruneTerminatedInstances() {
+        long cutoff = System.currentTimeMillis() - 3_600_000L;
+        instances.entrySet().removeIf(e -> {
+            Instance inst = e.getValue();
+            return "terminated".equals(inst.getState().getName())
+                    && inst.getTerminatedAt() > 0
+                    && inst.getTerminatedAt() < cutoff;
+        });
     }
 
     public List<Instance> describeInstanceStatus(String region, List<String> instanceIds) {
@@ -756,9 +808,27 @@ public class Ec2Service {
         kp.setKeyPairId(keyPairId);
         kp.setKeyName(keyName);
         kp.setKeyFingerprint("00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00");
+        kp.setPublicKey(publicKeyMaterial);
         kp.setRegion(region);
         keyPairs.put(key(region, keyPairId), kp);
         return kp;
+    }
+
+    public Instance findInstanceById(String instanceId) {
+        return instances.values().stream()
+                .filter(i -> instanceId.equals(i.getInstanceId()))
+                .findFirst()
+                .orElse(null);
+    }
+
+    public KeyPair findKeyPair(String region, String keyName) {
+        if (keyName == null) {
+            return null;
+        }
+        return keyPairs.values().stream()
+                .filter(k -> k.getRegion().equals(region) && keyName.equals(k.getKeyName()))
+                .findFirst()
+                .orElse(null);
     }
 
     // ─── AMIs ──────────────────────────────────────────────────────────────────

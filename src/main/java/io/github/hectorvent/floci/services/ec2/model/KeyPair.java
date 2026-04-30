@@ -14,6 +14,7 @@ public class KeyPair {
     private String keyPairId;
     private String keyFingerprint;
     private String keyMaterial;
+    private String publicKey;
     private String region;
     private List<Tag> tags = new ArrayList<>();
 
@@ -30,6 +31,9 @@ public class KeyPair {
 
     public String getKeyMaterial() { return keyMaterial; }
     public void setKeyMaterial(String keyMaterial) { this.keyMaterial = keyMaterial; }
+
+    public String getPublicKey() { return publicKey; }
+    public void setPublicKey(String publicKey) { this.publicKey = publicKey; }
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }

@@ -68,7 +68,7 @@
 | KMS (sign, verify, re-encrypt) | ✅ | ⚠️ Partial |
 | ECS (clusters, services, tasks) | ✅ | ❌ |
 | EKS (clusters, mock + real k3s) | ✅ | ❌ |
-| EC2 (VPCs, instances, security groups) | ✅ | ⚠️ Partial |
+| EC2 (real Docker instances, IMDS, SSH, UserData) | ✅ | ❌ |
 | CodeBuild (real Docker build execution, S3 artifacts, CloudWatch logs) | ✅ | ❌ |
 | CodeDeploy (Lambda traffic shifting, lifecycle hooks, auto-rollback) | ✅ | ❌ |
 | Native binary | ✅ ~40 MB | ❌ |
@@ -85,7 +85,7 @@ flowchart LR
         Router["HTTP Router\n(JAX-RS / Vert.x)"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis · OpenSearch\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM\nAPI Gateway · EC2\nCodeBuild · CodeDeploy"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM\nAPI Gateway · ELB v2\nCodeDeploy · Bedrock Runtime"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -93,7 +93,7 @@ flowchart LR
         end
 
         subgraph Containers ["Container Services  🐳"]
-            C["Lambda\nElastiCache\nRDS\nECS\nMSK\nEKS"]
+            C["Lambda\nElastiCache\nRDS\nECS\nEC2\nMSK\nEKS\nOpenSearch\nCodeBuild"]
             D["Athena ➜ floci-duck\n(DuckDB sidecar)"]
         end
 
@@ -120,8 +120,10 @@ Unlike mock-only emulators, Floci runs **real Docker containers** for services w
 | **RDS (MySQL / Aurora)** | `mysql:8.0` | Real MySQL engine, IAM auth, JDBC-compatible |
 | **RDS (MariaDB)** | `mariadb:11` | Real MariaDB engine, IAM auth, JDBC-compatible |
 | **MSK** | `redpandadata/redpanda:latest` | Real Kafka-compatible broker via Redpanda |
+| **EC2** | AMI-mapped (e.g. `public.ecr.aws/amazonlinux/amazonlinux:2023`) | Real Linux containers; SSH key injection; UserData execution; IMDS with IMDSv1+IMDSv2 and IAM credential serving |
 | **ECS** | User-specified in task definition | Actual container lifecycle — start, stop, health checks |
 | **EKS** | `rancher/k3s:latest` | Live Kubernetes API server (k3s), full kubeconfig |
+| **CodeBuild** | User-specified environment image (e.g. `public.ecr.aws/codebuild/amazonlinux2-x86_64-standard:5.0`) | Real buildspec execution — install/pre_build/build/post_build phases in container; S3 artifact upload; CloudWatch log streaming |
 | **OpenSearch** | `opensearchproject/opensearch:2` | Full OpenSearch engine with REST API |
 | **ECR** | `registry:2` | Real OCI-compatible registry — `docker push` / `docker pull` work natively |
 
@@ -203,7 +205,7 @@ All default images are configurable via environment variables, useful for pinnin
 | **Glue** | In-process | Data Catalog; tables consumed by Athena as DuckDB views at query time |
 | **Data Firehose** | In-process | Streaming data delivery; records flushed as NDJSON to S3 |
 | **ECS** | **Real Docker containers** | Clusters, task definitions, tasks, services, capacity providers, task sets |
-| **EC2** | In-process | VPCs, subnets, security groups, instances, AMIs, key pairs, internet gateways, route tables, Elastic IPs, tags |
+| **EC2** | **Real Docker containers** | `RunInstances` launches real Docker containers; SSH key injection; UserData execution; IMDS (IMDSv1+IMDSv2, port 9169) with IAM credential serving; VPCs, subnets, security groups, AMIs, key pairs, internet gateways, route tables, Elastic IPs, tags |
 | **ACM** | In-process | Certificate issuance, validation lifecycle |
 | **ECR** | In-process + **real OCI registry** | Repositories, image push / pull via stock `docker`, image-backed Lambda functions |
 | **SES** | In-process | Send email / raw email, identity verification, DKIM attributes, email templates with `{{var}}` substitution |
@@ -217,7 +219,7 @@ All default images are configurable via environment variables, useful for pinnin
 | **CodeBuild** | In-process + **real Docker containers** | Projects, report groups, source credentials; `StartBuild` runs real Docker containers, streams logs to CloudWatch, uploads artifacts to S3 via `docker cp` (works in Docker-in-Docker) |
 | **CodeDeploy** | In-process + **Lambda traffic shifting** | Applications, deployment groups, deployment configs; 17 `CodeDeployDefault.*` built-ins pre-seeded; `CreateDeployment` shifts Lambda alias `RoutingConfig` weights, invokes lifecycle hooks, auto-rolls back on failure |
 
-> **Lambda, ElastiCache, RDS, MSK, ECS, EKS, and OpenSearch** spin up real Docker containers and support IAM authentication and SigV4 request signing — the same auth flow as production AWS. **ECR** runs a shared `registry:2` container so the stock `docker` client can push and pull image bytes against repositories returned by the AWS-shaped control plane.
+> **Lambda, ElastiCache, RDS, MSK, ECS, EC2, EKS, OpenSearch, and CodeBuild** spin up real Docker containers and support IAM authentication and SigV4 request signing — the same auth flow as production AWS. **ECR** runs a shared `registry:2` container so the stock `docker` client can push and pull image bytes against repositories returned by the AWS-shaped control plane.
 >
 > For per-service operation counts and endpoint protocols, see the [Services Overview](https://floci.io/floci/services/) in the documentation site.
 
