@@ -663,7 +663,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("StopInstancesResponse.instancesSet.item.instanceId", equalTo(instanceId))
-            .body("StopInstancesResponse.instancesSet.item.currentState.name", equalTo("stopped"));
+            .body("StopInstancesResponse.instancesSet.item.currentState.name", equalTo("stopping"));
     }
 
     @Test
@@ -678,7 +678,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("StartInstancesResponse.instancesSet.item.instanceId", equalTo(instanceId))
-            .body("StartInstancesResponse.instancesSet.item.currentState.name", equalTo("running"));
+            .body("StartInstancesResponse.instancesSet.item.currentState.name", equalTo("pending"));
     }
 
     @Test
@@ -849,7 +849,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("TerminateInstancesResponse.instancesSet.item.instanceId", equalTo(instanceId))
-            .body("TerminateInstancesResponse.instancesSet.item.currentState.name", equalTo("terminated"));
+            .body("TerminateInstancesResponse.instancesSet.item.currentState.name", equalTo("shutting-down"));
     }
 
     @Test

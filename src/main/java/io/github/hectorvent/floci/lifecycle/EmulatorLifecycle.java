@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.ServiceRegistry;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
+import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
@@ -44,6 +45,7 @@ public class EmulatorLifecycle {
     private final KinesisEventSourcePoller kinesisPoller;
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final PipesService pipesService;
+    private final Ec2MetadataServer ec2MetadataServer;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -56,7 +58,8 @@ public class EmulatorLifecycle {
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
                              DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
-                             PipesService pipesService) {
+                             PipesService pipesService,
+                             Ec2MetadataServer ec2MetadataServer) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -69,6 +72,7 @@ public class EmulatorLifecycle {
         this.kinesisPoller = kinesisPoller;
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
         this.pipesService = pipesService;
+        this.ec2MetadataServer = ec2MetadataServer;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -83,6 +87,13 @@ public class EmulatorLifecycle {
         kinesisPoller.startPersistedPollers();
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
+
+        if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+            ec2MetadataServer.start().exceptionally(ex -> {
+                LOG.warnv("EC2 IMDS server failed to start: {0}", ex.getMessage());
+                return null;
+            });
+        }
 
         if (!initializationHooksRunner.hasHooks(InitializationHook.START)) {
             LOG.info("=== AWS Local Emulator Ready ===");
@@ -123,6 +134,9 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
+        if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
+            ec2MetadataServer.stop();
+        }
         elastiCacheProxyManager.stopAll();
         rdsProxyManager.stopAll();
         elastiCacheContainerManager.stopAll();

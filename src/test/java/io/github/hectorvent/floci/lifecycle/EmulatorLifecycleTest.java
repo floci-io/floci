@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyMan
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
+import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
@@ -38,6 +39,8 @@ class EmulatorLifecycleTest {
     @Mock private ServiceRegistry serviceRegistry;
     @Mock private EmulatorConfig config;
     @Mock private EmulatorConfig.StorageConfig storageConfig;
+    @Mock private EmulatorConfig.ServicesConfig servicesConfig;
+    @Mock private EmulatorConfig.Ec2ServiceConfig ec2ServiceConfig;
     @Mock private ElastiCacheContainerManager elastiCacheContainerManager;
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
     @Mock private RdsContainerManager rdsContainerManager;
@@ -47,16 +50,22 @@ class EmulatorLifecycleTest {
     @Mock private KinesisEventSourcePoller kinesisPoller;
     @Mock private DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     @Mock private PipesService pipesService;
+    @Mock private Ec2MetadataServer ec2MetadataServer;
 
     private EmulatorLifecycle emulatorLifecycle;
 
     @BeforeEach
     void setUp() {
+        Mockito.lenient().when(config.services()).thenReturn(servicesConfig);
+        Mockito.lenient().when(servicesConfig.ec2()).thenReturn(ec2ServiceConfig);
+        Mockito.lenient().when(ec2ServiceConfig.enabled()).thenReturn(false);
+
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheProxyManager,
                 rdsContainerManager, rdsProxyManager, initializationHooksRunner,
-                sqsPoller, kinesisPoller, dynamodbStreamsPoller, pipesService);
+                sqsPoller, kinesisPoller, dynamodbStreamsPoller, pipesService,
+                ec2MetadataServer);
     }
 
     private void stubStorageConfig() {

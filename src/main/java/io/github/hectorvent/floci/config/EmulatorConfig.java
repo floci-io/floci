@@ -682,6 +682,22 @@ public interface EmulatorConfig {
     interface Ec2ServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        /** Port on the Floci host for the IMDS HTTP server (169.254.169.254 equivalent). */
+        @WithDefault("9169")
+        int imdsPort();
+
+        /** Lowest host port in the range published for EC2 instance SSH (port 22). */
+        @WithDefault("2200")
+        int sshPortRangeStart();
+
+        /** Highest host port in the range published for EC2 instance SSH (port 22). */
+        @WithDefault("2299")
+        int sshPortRangeEnd();
+
+        /** When true, instances go straight to RUNNING without launching Docker containers. */
+        @WithDefault("false")
+        boolean mock();
     }
 
     interface AppConfigServiceConfig {

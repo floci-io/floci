@@ -42,6 +42,13 @@ public class Instance {
     private String region;
     private List<Tag> tags = new ArrayList<>();
 
+    // Docker backing fields (not serialised to AWS wire format)
+    private String dockerContainerId;
+    private String containerBridgeIp;
+    private String userData;
+    private int sshHostPort;
+    private long terminatedAt;
+
     public Instance() {}
 
     public String getInstanceId() { return instanceId; }
@@ -133,4 +140,19 @@ public class Instance {
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
+
+    public String getDockerContainerId() { return dockerContainerId; }
+    public void setDockerContainerId(String dockerContainerId) { this.dockerContainerId = dockerContainerId; }
+
+    public String getUserData() { return userData; }
+    public void setUserData(String userData) { this.userData = userData; }
+
+    public int getSshHostPort() { return sshHostPort; }
+    public void setSshHostPort(int sshHostPort) { this.sshHostPort = sshHostPort; }
+
+    public long getTerminatedAt() { return terminatedAt; }
+    public void setTerminatedAt(long terminatedAt) { this.terminatedAt = terminatedAt; }
+
+    public String getContainerBridgeIp() { return containerBridgeIp; }
+    public void setContainerBridgeIp(String containerBridgeIp) { this.containerBridgeIp = containerBridgeIp; }
 }

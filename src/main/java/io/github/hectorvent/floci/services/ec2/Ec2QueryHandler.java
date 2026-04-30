@@ -12,9 +12,11 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.Base64;
 
 @ApplicationScoped
 public class Ec2QueryHandler {
@@ -217,6 +219,16 @@ public class Ec2QueryHandler {
         String clientToken = p.getFirst("ClientToken");
         List<String> sgIds = getList(p, "SecurityGroupId");
 
+        // UserData is base64-encoded in the wire format
+        String userDataEncoded = p.getFirst("UserData");
+        String userData = null;
+        if (userDataEncoded != null && !userDataEncoded.isBlank()) {
+            userData = new String(Base64.getDecoder().decode(userDataEncoded), StandardCharsets.UTF_8);
+        }
+
+        // IamInstanceProfile
+        String iamInstanceProfileArn = p.getFirst("IamInstanceProfile.Arn");
+
         // Parse TagSpecifications
         List<Tag> instanceTags = new ArrayList<>();
         for (int i = 1; ; i++) {
@@ -233,7 +245,7 @@ public class Ec2QueryHandler {
         }
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -760,7 +772,8 @@ public class Ec2QueryHandler {
 
     private Response handleImportKeyPair(MultivaluedMap<String, String> p, String region) {
         String keyName = p.getFirst("KeyName");
-        String publicKeyMaterial = p.getFirst("PublicKeyMaterial");
+        String encoded = p.getFirst("PublicKeyMaterial");
+        String publicKeyMaterial = new String(Base64.getDecoder().decode(encoded), StandardCharsets.UTF_8);
         KeyPair kp = service.importKeyPair(region, keyName, publicKeyMaterial);
         XmlBuilder xml = new XmlBuilder()
                 .start("ImportKeyPairResponse", AwsNamespaces.EC2)

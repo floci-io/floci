@@ -189,6 +189,10 @@ floci:
       keep-running-on-shutdown: false
     ec2:
       enabled: true
+      imds-port: 9169
+      ssh-port-range-start: 2200
+      ssh-port-range-end: 2299
+      mock: false
     ecs:
       enabled: true
       mock: false
