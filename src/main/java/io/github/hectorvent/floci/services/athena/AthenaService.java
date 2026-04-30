@@ -4,6 +4,8 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.athena.model.*;
@@ -39,6 +41,8 @@ public class AthenaService {
     private final GlueService glueService;
     private final S3Service s3Service;
     private final EmulatorConfig config;
+    private final DockerHostResolver dockerHostResolver;
+    private final EmbeddedDnsServer embeddedDnsServer;
     private final Vertx vertx;
     private final ObjectMapper mapper;
     private final HttpClient httpClient;
@@ -49,6 +53,8 @@ public class AthenaService {
                          GlueService glueService,
                          S3Service s3Service,
                          EmulatorConfig config,
+                         DockerHostResolver dockerHostResolver,
+                         EmbeddedDnsServer embeddedDnsServer,
                          Vertx vertx,
                          ObjectMapper mapper) {
         this.queryStore = storageFactory.create("athena", "queries.json",
@@ -57,6 +63,8 @@ public class AthenaService {
         this.glueService = glueService;
         this.s3Service = s3Service;
         this.config = config;
+        this.dockerHostResolver = dockerHostResolver;
+        this.embeddedDnsServer = embeddedDnsServer;
         this.vertx = vertx;
         this.mapper = mapper;
         this.httpClient = HttpClient.newHttpClient();
@@ -205,7 +213,11 @@ public class AthenaService {
             if (setupDdl != null && !setupDdl.isBlank()) {
                 body.put("setup_sql", setupDdl);
             }
-            body.put("s3_endpoint", config.baseUrl());
+            body.put("s3_endpoint", resolveS3EndpointForDuck(
+                    config.baseUrl(),
+                    embeddedDnsServer.getServerIp(),
+                    config.hostname(),
+                    dockerHostResolver.resolve()));
             body.put("s3_region", config.defaultRegion());
             body.put("s3_access_key", "test");
             body.put("s3_secret_key", "test");
@@ -231,6 +243,29 @@ public class AthenaService {
         } catch (Exception e) {
             throw new RuntimeException("Failed to call floci-duck for query " + queryId + ": " + e.getMessage(), e);
         }
+    }
+
+    /**
+     * Resolves the Floci S3 endpoint URL that floci-duck uses to read source data.
+     *
+     * <p>{@code config.baseUrl()} typically points to {@code http://localhost:4566}, which
+     * inside the floci-duck container resolves to the duck container itself, not Floci.
+     * We follow the same pattern as
+     * {@code services.lambda.launcher.ContainerLauncher}: prefer the DNS-resolvable
+     * Floci hostname when the embedded DNS is active, otherwise fall back to the
+     * Docker-host address (Floci's container IP, or {@code host.docker.internal}).
+     *
+     * <p>Visible for testing.
+     */
+    static String resolveS3EndpointForDuck(String configBaseUrl,
+                                            Optional<String> embeddedDnsServerIp,
+                                            Optional<String> configHostname,
+                                            String dockerHostAddress) {
+        int flociPort = URI.create(configBaseUrl).getPort();
+        String hostname = embeddedDnsServerIp.isPresent()
+                ? configHostname.orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
+                : dockerHostAddress;
+        return "http://" + hostname + ":" + flociPort;
     }
 
     private ResultSet readResultsFromS3(String outputLocation, String queryId) {
