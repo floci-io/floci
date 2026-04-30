@@ -2,8 +2,15 @@ package io.github.hectorvent.floci.services.iam;
 
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URLDecoder;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.regex.Pattern;
 
@@ -92,8 +99,14 @@ public class IamActionRegistry {
      * Returns {@code null} when the action is unknown (caller treats this as ALLOW).
      */
     public String resolve(String credentialScope, ContainerRequestContext ctx) {
-        // Query-protocol: Action form param → service:Action
+        // Query-protocol: Action param → service:Action.
+        // AWS SDKs send Query-protocol calls (IAM, STS, EC2, SQS, SNS, ...) as
+        // POST with Action=... in the application/x-www-form-urlencoded body,
+        // not the URL query string — so we look in both places.
         String queryAction = ctx.getUriInfo().getQueryParameters().getFirst("Action");
+        if (queryAction == null || queryAction.isBlank()) {
+            queryAction = readFormAction(ctx);
+        }
         if (queryAction != null && !queryAction.isBlank()) {
             return credentialScope + ":" + queryAction;
         }
@@ -120,5 +133,59 @@ public class IamActionRegistry {
 
         LOG.debugv("No action mapping for {0} {1} {2} — defaulting to ALLOW", credentialScope, method, path);
         return null;
+    }
+
+    /**
+     * Reads {@code Action} from a {@code application/x-www-form-urlencoded}
+     * request body and restores the entity stream so downstream consumers
+     * (e.g. {@code AwsQueryController}'s {@code MultivaluedMap} injection)
+     * can still parse the form themselves. Returns {@code null} if the
+     * request is not form-encoded or the body has no {@code Action} field.
+     */
+    private static String readFormAction(ContainerRequestContext ctx) {
+        MediaType mt = ctx.getMediaType();
+        if (mt == null
+                || !"application".equalsIgnoreCase(mt.getType())
+                || !"x-www-form-urlencoded".equalsIgnoreCase(mt.getSubtype())) {
+            return null;
+        }
+        InputStream in = ctx.getEntityStream();
+        if (in == null) {
+            return null;
+        }
+        byte[] body;
+        try {
+            body = in.readAllBytes();
+        } catch (IOException e) {
+            LOG.debugv(e, "Failed to buffer form body for IAM action resolution");
+            return null;
+        }
+        ctx.setEntityStream(new ByteArrayInputStream(body));
+        if (body.length == 0) {
+            return null;
+        }
+        Charset charset = resolveCharset(mt);
+        String form = new String(body, charset);
+        for (String pair : form.split("&")) {
+            int eq = pair.indexOf('=');
+            String key = eq < 0 ? pair : pair.substring(0, eq);
+            if (!"Action".equals(URLDecoder.decode(key, charset))) {
+                continue;
+            }
+            return eq < 0 ? "" : URLDecoder.decode(pair.substring(eq + 1), charset);
+        }
+        return null;
+    }
+
+    private static Charset resolveCharset(MediaType mt) {
+        String name = mt.getParameters().get("charset");
+        if (name == null || name.isBlank()) {
+            return StandardCharsets.UTF_8;
+        }
+        try {
+            return Charset.forName(name);
+        } catch (RuntimeException e) {
+            return StandardCharsets.UTF_8;
+        }
     }
 }
