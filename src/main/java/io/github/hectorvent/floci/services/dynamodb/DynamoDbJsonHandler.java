@@ -63,6 +63,9 @@ public class DynamoDbJsonHandler {
             case "EnableKinesisStreamingDestination" -> handleEnableKinesisStreamingDestination(request, region);
             case "DisableKinesisStreamingDestination" -> handleDisableKinesisStreamingDestination(request, region);
             case "DescribeKinesisStreamingDestination" -> handleDescribeKinesisStreamingDestination(request, region);
+            case "ExportTableToPointInTime" -> handleExportTable(request, region);
+            case "DescribeExport" -> handleDescribeExport(request, region);
+            case "ListExports" -> handleListExports(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException", "Operation " + action + " is not supported."))
                     .build();
@@ -1004,5 +1007,48 @@ public class DynamoDbJsonHandler {
         }
         node.set("PointInTimeRecoveryDescription", pitrNode);
         return node;
+    }
+
+    private Response handleExportTable(JsonNode request, String region) {
+        Map<String, Object> params = new java.util.HashMap<>();
+        request.fields().forEachRemaining(e -> params.put(e.getKey(), e.getValue().isTextual()
+                ? e.getValue().asText() : e.getValue()));
+
+        io.github.hectorvent.floci.services.dynamodb.model.ExportDescription desc =
+                dynamoDbService.exportTable(params, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ExportDescription", objectMapper.valueToTree(desc));
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeExport(JsonNode request, String region) {
+        String exportArn = request.path("ExportArn").asText();
+        io.github.hectorvent.floci.services.dynamodb.model.ExportDescription desc =
+                dynamoDbService.describeExport(exportArn);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("ExportDescription", objectMapper.valueToTree(desc));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListExports(JsonNode request, String region) {
+        String tableArn = request.has("TableArn") ? request.get("TableArn").asText() : null;
+        Integer maxResults = request.has("MaxResults") ? request.get("MaxResults").asInt() : null;
+        String nextToken = request.has("NextToken") && !request.get("NextToken").isNull()
+                ? request.get("NextToken").asText() : null;
+
+        DynamoDbService.ListExportsResult result = dynamoDbService.listExports(tableArn, maxResults, nextToken);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode summaries = objectMapper.createArrayNode();
+        for (io.github.hectorvent.floci.services.dynamodb.model.ExportSummary s : result.exportSummaries()) {
+            summaries.add(objectMapper.valueToTree(s));
+        }
+        response.set("ExportSummaries", summaries);
+        if (result.nextToken() != null) {
+            response.put("NextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
     }
 }

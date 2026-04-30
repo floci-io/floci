@@ -5,31 +5,44 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportDescription;
+import io.github.hectorvent.floci.services.dynamodb.model.ExportSummary;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailedException;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HexFormat;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Supplier;
+import java.util.zip.GZIPOutputStream;
 
 @ApplicationScoped
 public class DynamoDbService {
@@ -38,6 +51,7 @@ public class DynamoDbService {
 
     private final StorageBackend<String, TableDefinition> tableStore;
     private final StorageBackend<String, Map<String, JsonNode>> itemStore;
+    private final StorageBackend<String, ExportDescription> exportStore;
     // Items stored per table: storageKey -> Map<itemKey, item>
     // itemKey is "pk" or "pk#sk" depending on table schema
     private final ConcurrentHashMap<String, ConcurrentSkipListMap<String, JsonNode>> itemsByTable = new ConcurrentHashMap<>();
@@ -47,33 +61,39 @@ public class DynamoDbService {
     // not deadlock after the outer transaction already took each participant's lock.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
     private final RegionResolver regionResolver;
+    private final ObjectMapper objectMapper;
     private DynamoDbStreamService streamService;
     private KinesisStreamingForwarder kinesisForwarder;
+    private S3Service s3Service;
 
     @Inject
     public DynamoDbService(StorageFactory storageFactory, RegionResolver regionResolver,
                            DynamoDbStreamService streamService,
-                           KinesisStreamingForwarder kinesisForwarder) {
+                           KinesisStreamingForwarder kinesisForwarder,
+                           S3Service s3Service,
+                           ObjectMapper objectMapper) {
         this(storageFactory.create("dynamodb", "dynamodb-tables.json",
                 new TypeReference<Map<String, TableDefinition>>() {}),
              storageFactory.create("dynamodb", "dynamodb-items.json",
                 new TypeReference<Map<String, Map<String, JsonNode>>>() {}),
-             regionResolver, streamService, kinesisForwarder);
+             storageFactory.create("dynamodb", "dynamodb-exports.json",
+                new TypeReference<Map<String, ExportDescription>>() {}),
+             regionResolver, streamService, kinesisForwarder, s3Service, objectMapper);
     }
 
     /** Package-private constructor for testing. */
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore) {
-        this(tableStore, null, new RegionResolver("us-east-1", "000000000000"), null, null);
+        this(tableStore, null, null, new RegionResolver("us-east-1", "000000000000"), null, null, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore, RegionResolver regionResolver) {
-        this(tableStore, null, regionResolver, null, null);
+        this(tableStore, null, null, regionResolver, null, null, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
                     StorageBackend<String, Map<String, JsonNode>> itemStore,
                     RegionResolver regionResolver) {
-        this(tableStore, itemStore, regionResolver, null, null);
+        this(tableStore, itemStore, null, regionResolver, null, null, null, null);
     }
 
     DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
@@ -81,11 +101,25 @@ public class DynamoDbService {
                     RegionResolver regionResolver,
                     DynamoDbStreamService streamService,
                     KinesisStreamingForwarder kinesisForwarder) {
+        this(tableStore, itemStore, null, regionResolver, streamService, kinesisForwarder, null, null);
+    }
+
+    DynamoDbService(StorageBackend<String, TableDefinition> tableStore,
+                    StorageBackend<String, Map<String, JsonNode>> itemStore,
+                    StorageBackend<String, ExportDescription> exportStore,
+                    RegionResolver regionResolver,
+                    DynamoDbStreamService streamService,
+                    KinesisStreamingForwarder kinesisForwarder,
+                    S3Service s3Service,
+                    ObjectMapper objectMapper) {
         this.tableStore = tableStore;
         this.itemStore = itemStore;
+        this.exportStore = exportStore;
         this.regionResolver = regionResolver;
         this.streamService = streamService;
         this.kinesisForwarder = kinesisForwarder;
+        this.s3Service = s3Service;
+        this.objectMapper = objectMapper != null ? objectMapper : new ObjectMapper();
         loadPersistedItems();
     }
 
@@ -1926,4 +1960,246 @@ public class DynamoDbService {
     public record UpdateResult(JsonNode newItem, JsonNode oldItem) {}
     public record ScanResult(List<JsonNode> items, int scannedCount, JsonNode lastEvaluatedKey) {}
     public record QueryResult(List<JsonNode> items, int scannedCount, JsonNode lastEvaluatedKey) {}
+
+    // --- Export Operations ---
+
+    public ExportDescription exportTable(Map<String, Object> request, String region) {
+        String tableArn = (String) request.get("TableArn");
+        String s3Bucket = (String) request.get("S3Bucket");
+        String s3Prefix = request.containsKey("S3Prefix") ? (String) request.get("S3Prefix") : null;
+        String exportFormat = request.containsKey("ExportFormat") ? (String) request.get("ExportFormat") : "DYNAMODB_JSON";
+        String exportType = request.containsKey("ExportType") ? (String) request.get("ExportType") : "FULL_EXPORT";
+        String clientToken = request.containsKey("ClientToken") ? (String) request.get("ClientToken") : null;
+        String s3SseAlgorithm = request.containsKey("S3SseAlgorithm") ? (String) request.get("S3SseAlgorithm") : null;
+        String s3BucketOwner = request.containsKey("S3BucketOwner") ? (String) request.get("S3BucketOwner") : null;
+
+        if ("INCREMENTAL_EXPORT".equals(exportType)) {
+            throw new AwsException("ValidationException",
+                    "ExportType INCREMENTAL_EXPORT is not supported", 400);
+        }
+        if ("ION".equals(exportFormat)) {
+            throw new AwsException("ValidationException",
+                    "ExportFormat ION is not supported", 400);
+        }
+
+        DynamoDbTableNames.ResolvedTableRef ref = DynamoDbTableNames.resolveWithRegion(tableArn, region);
+        String tableName = ref.name();
+        String tableRegion = ref.region() != null ? ref.region() : region;
+        String storageKey = regionKey(tableRegion, tableName);
+
+        TableDefinition table = tableStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Requested resource not found: Table: " + tableName + " not found", 400));
+
+        long now = Instant.now().getEpochSecond();
+        String exportId = System.currentTimeMillis() + "-" + UUID.randomUUID().toString().replace("-", "");
+        String exportArn = "arn:aws:dynamodb:" + tableRegion + ":" + regionResolver.getAccountId()
+                + ":table/" + table.getTableName() + "/export/" + exportId;
+
+        ExportDescription desc = new ExportDescription();
+        desc.setExportArn(exportArn);
+        desc.setExportStatus("IN_PROGRESS");
+        desc.setTableArn(table.getTableArn());
+        desc.setTableId(table.getTableName());
+        desc.setS3Bucket(s3Bucket);
+        desc.setS3Prefix(s3Prefix);
+        desc.setExportFormat(exportFormat);
+        desc.setExportType("FULL_EXPORT");
+        desc.setExportTime(now);
+        desc.setStartTime(now);
+        desc.setClientToken(clientToken);
+        desc.setS3SseAlgorithm(s3SseAlgorithm);
+        desc.setS3BucketOwner(s3BucketOwner);
+
+        if (exportStore != null) {
+            exportStore.put(exportArn, desc);
+        }
+
+        ExportDescription finalDesc = desc;
+        ConcurrentSkipListMap<String, JsonNode> tableItems = itemsByTable.get(storageKey);
+        List<JsonNode> snapshot = tableItems != null
+                ? List.copyOf(tableItems.values())
+                : List.of();
+
+        Thread.ofVirtual().start(() -> runExport(finalDesc, snapshot, exportArn));
+
+        return desc;
+    }
+
+    private void runExport(ExportDescription desc, List<JsonNode> snapshot, String exportArn) {
+        try {
+            String s3Bucket = desc.getS3Bucket();
+            String s3Prefix = desc.getS3Prefix() != null ? desc.getS3Prefix() : "";
+            String exportId = exportArn.substring(exportArn.lastIndexOf('/') + 1);
+            String dataFileUuid = UUID.randomUUID().toString();
+            String dataKey = (s3Prefix.isEmpty() ? "" : s3Prefix + "/")
+                    + "AWSDynamoDB/" + exportId + "/data/" + dataFileUuid + ".json.gz";
+            String manifestFilesKey = (s3Prefix.isEmpty() ? "" : s3Prefix + "/")
+                    + "AWSDynamoDB/" + exportId + "/manifest-files.json";
+            String manifestSummaryKey = (s3Prefix.isEmpty() ? "" : s3Prefix + "/")
+                    + "AWSDynamoDB/" + exportId + "/manifest-summary.json";
+
+            byte[] gzipData = buildGzipNdjson(snapshot);
+
+            try {
+                s3Service.putObject(s3Bucket, dataKey, gzipData, "application/octet-stream", Map.of());
+            } catch (AwsException e) {
+                if ("NoSuchBucket".equals(e.getErrorCode())) {
+                    desc.setExportStatus("FAILED");
+                    desc.setFailureCode("S3NoSuchBucket");
+                    desc.setFailureMessage("The specified bucket does not exist: " + s3Bucket);
+                    desc.setEndTime(Instant.now().getEpochSecond());
+                    if (exportStore != null) {
+                        exportStore.put(exportArn, desc);
+                    }
+                    return;
+                }
+                throw e;
+            }
+
+            String md5 = computeMd5Hex(gzipData);
+            String etag = md5;
+
+            String manifestFilesContent = dataKey + "\n";
+            s3Service.putObject(s3Bucket, manifestFilesKey,
+                    manifestFilesContent.getBytes(StandardCharsets.UTF_8),
+                    "application/json", Map.of());
+
+            long billedSize = gzipData.length;
+            long itemCount = snapshot.size();
+
+            String manifestSummaryContent = buildManifestSummary(
+                    desc, exportId, dataKey, itemCount, billedSize, md5, etag, manifestSummaryKey);
+            s3Service.putObject(s3Bucket, manifestSummaryKey,
+                    manifestSummaryContent.getBytes(StandardCharsets.UTF_8),
+                    "application/json", Map.of());
+
+            long endTime = Instant.now().getEpochSecond();
+            desc.setExportStatus("COMPLETED");
+            desc.setEndTime(endTime);
+            desc.setItemCount(itemCount);
+            desc.setBilledSizeBytes(billedSize);
+            desc.setExportManifest(manifestSummaryKey);
+
+            if (exportStore != null) {
+                exportStore.put(exportArn, desc);
+            }
+            LOG.infov("Export completed: {0}, items={1}", exportArn, itemCount);
+
+        } catch (Exception e) {
+            LOG.errorv(e, "Export failed: {0}", exportArn);
+            desc.setExportStatus("FAILED");
+            desc.setFailureCode("UNKNOWN");
+            desc.setFailureMessage(e.getMessage());
+            desc.setEndTime(Instant.now().getEpochSecond());
+            if (exportStore != null) {
+                exportStore.put(exportArn, desc);
+            }
+        }
+    }
+
+    private byte[] buildGzipNdjson(List<JsonNode> items) throws IOException {
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(baos)) {
+            for (JsonNode item : items) {
+                ObjectNode line = objectMapper.createObjectNode();
+                line.set("Item", item);
+                byte[] lineBytes = objectMapper.writeValueAsBytes(line);
+                gzip.write(lineBytes);
+                gzip.write('\n');
+            }
+        }
+        return baos.toByteArray();
+    }
+
+    private String computeMd5Hex(byte[] data) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("MD5");
+            byte[] digest = md.digest(data);
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            return "unknown";
+        }
+    }
+
+    private String buildManifestSummary(ExportDescription desc, String exportId,
+                                         String dataKey, long itemCount, long billedSize,
+                                         String md5, String etag, String manifestSummaryKey) {
+        try {
+            com.fasterxml.jackson.databind.node.ObjectNode root = objectMapper.createObjectNode();
+            root.put("version", "2020-06-30");
+            root.put("exportArn", desc.getExportArn());
+            root.put("startTime", Instant.ofEpochSecond(desc.getStartTime()).toString());
+            root.put("endTime", Instant.now().toString());
+            root.put("tableArn", desc.getTableArn());
+            root.put("tableId", desc.getTableId());
+            root.put("exportTime", Instant.ofEpochSecond(desc.getExportTime()).toString());
+            root.put("s3Bucket", desc.getS3Bucket());
+            root.putNull("s3Prefix");
+            if (desc.getS3Prefix() != null) {
+                root.put("s3Prefix", desc.getS3Prefix());
+            }
+            root.put("s3SseAlgorithm", desc.getS3SseAlgorithm() != null ? desc.getS3SseAlgorithm() : "AES256");
+            root.putNull("s3SseKmsKeyId");
+            root.put("exportFormat", desc.getExportFormat());
+            root.put("billedSizeBytes", billedSize);
+            root.put("itemCount", itemCount);
+
+            com.fasterxml.jackson.databind.node.ArrayNode outputFiles = root.putArray("outputFiles");
+            com.fasterxml.jackson.databind.node.ObjectNode fileEntry = outputFiles.addObject();
+            fileEntry.put("itemCount", itemCount);
+            fileEntry.put("md5Checksum", md5);
+            fileEntry.put("etag", etag);
+            fileEntry.put("dataFileS3Key", dataKey);
+
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+        } catch (JsonProcessingException e) {
+            return "{}";
+        }
+    }
+
+    public ExportDescription describeExport(String exportArn) {
+        if (exportStore == null) {
+            throw new AwsException("ExportNotFoundException",
+                    "Export not found: " + exportArn, 400);
+        }
+        return exportStore.get(exportArn)
+                .orElseThrow(() -> new AwsException("ExportNotFoundException",
+                        "Export not found: " + exportArn, 400));
+    }
+
+    public record ListExportsResult(List<ExportSummary> exportSummaries, String nextToken) {}
+
+    public ListExportsResult listExports(String tableArn, Integer maxResults, String nextToken) {
+        if (exportStore == null) {
+            return new ListExportsResult(List.of(), null);
+        }
+        int limit = maxResults != null ? Math.min(maxResults, 25) : 25;
+
+        List<ExportDescription> all = exportStore.keys().stream()
+                .map(k -> exportStore.get(k).orElse(null))
+                .filter(d -> d != null)
+                .filter(d -> tableArn == null || tableArn.equals(d.getTableArn()))
+                .sorted(Comparator.comparing(ExportDescription::getExportArn).reversed())
+                .toList();
+
+        int startIdx = 0;
+        if (nextToken != null) {
+            for (int i = 0; i < all.size(); i++) {
+                if (all.get(i).getExportArn().equals(nextToken)) {
+                    startIdx = i + 1;
+                    break;
+                }
+            }
+        }
+
+        List<ExportDescription> page = all.subList(startIdx, Math.min(startIdx + limit, all.size()));
+        String newNextToken = (startIdx + limit < all.size()) ? all.get(startIdx + limit - 1).getExportArn() : null;
+
+        List<ExportSummary> summaries = page.stream()
+                .map(ExportSummary::new)
+                .toList();
+
+        return new ListExportsResult(summaries, newNextToken);
+    }
 }
