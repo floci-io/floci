@@ -27,10 +27,33 @@ public class DockerClientProducer {
         this.config = config;
     }
 
+    /**
+     * Normalizes a Docker host value by prepending {@code tcp://} when no recognized
+     * URI scheme ({@code tcp://}, {@code unix://}, {@code npipe://}) is present.
+     *
+     * @param dockerHost the raw Docker host configuration value
+     * @return the normalized Docker host value, or the original value if it already has a scheme
+     */
+    static String normalizeDockerHost(String dockerHost) {
+        if (dockerHost == null) {
+            return null;
+        }
+        if (dockerHost.isEmpty()) {
+            return dockerHost;
+        }
+        String lower = dockerHost.toLowerCase();
+        if (lower.startsWith("tcp://") || lower.startsWith("unix://") || lower.startsWith("npipe://")) {
+            return dockerHost;
+        }
+        String normalized = "tcp://" + dockerHost;
+        LOG.infov("Docker host value ''{0}'' has no URI scheme; normalizing to ''{1}''", dockerHost, normalized);
+        return normalized;
+    }
+
     @Produces
     @ApplicationScoped
     public DockerClient dockerClient() {
-        String dockerHost = config.docker().dockerHost();
+        String dockerHost = normalizeDockerHost(config.docker().dockerHost());
         LOG.infov("Creating DockerClient for host: {0}", dockerHost);
 
         DefaultDockerClientConfig.Builder builder = DefaultDockerClientConfig.createDefaultConfigBuilder()
