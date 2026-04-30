@@ -770,6 +770,19 @@ public class CognitoService {
         return authFlowHandler.respondToAuthChallenge(clientId, challengeName, session, responses, clientMetadata);
     }
 
+    public Map<String, Object> adminRespondToAuthChallenge(String userPoolId, String clientId,
+                                                             String challengeName, String session,
+                                                             Map<String, String> responses) {
+        return authFlowHandler.adminRespondToAuthChallenge(userPoolId, clientId, challengeName, session, responses, Map.of());
+    }
+
+    public Map<String, Object> adminRespondToAuthChallenge(String userPoolId, String clientId,
+                                                             String challengeName, String session,
+                                                             Map<String, String> responses,
+                                                             Map<String, String> clientMetadata) {
+        return authFlowHandler.adminRespondToAuthChallenge(userPoolId, clientId, challengeName, session, responses, clientMetadata);
+    }
+
     public void changePassword(String accessToken, String previousPassword, String proposedPassword) {
         String username = extractUsernameFromToken(accessToken);
         String poolId = extractPoolIdFromToken(accessToken);

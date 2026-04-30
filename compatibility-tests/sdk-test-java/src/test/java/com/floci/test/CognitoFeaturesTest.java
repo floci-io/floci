@@ -400,6 +400,46 @@ class CognitoFeaturesTest {
         assertThat(sub.mutable()).isFalse();
     }
 
+    // ── AdminRespondToAuthChallenge ─────────────────────────────────────────
+
+    @Test
+    @Order(60)
+    void adminRespondToAuthChallengeNewPasswordRequired() {
+        String tempUser = "admin-challenge-user-" + java.util.UUID.randomUUID();
+        String tempPassword = "TempPass1!";
+        String newPassword = "Permanent99!";
+
+        cognito.adminCreateUser(b -> b
+                .userPoolId(poolId)
+                .username(tempUser)
+                .temporaryPassword(tempPassword)
+                .userAttributes(AttributeType.builder().name("email").value(tempUser + "@example.com").build())
+                .messageAction(MessageActionType.SUPPRESS));
+
+        AdminInitiateAuthResponse initResp = cognito.adminInitiateAuth(b -> b
+                .userPoolId(poolId)
+                .clientId(clientId)
+                .authFlow(AuthFlowType.ADMIN_USER_PASSWORD_AUTH)
+                .authParameters(Map.of("USERNAME", tempUser, "PASSWORD", tempPassword)));
+
+        assertThat(initResp.challengeNameAsString()).isEqualTo("NEW_PASSWORD_REQUIRED");
+        assertThat(initResp.session()).isNotBlank();
+
+        AdminRespondToAuthChallengeResponse challengeResp = cognito.adminRespondToAuthChallenge(b -> b
+                .userPoolId(poolId)
+                .clientId(clientId)
+                .challengeName(ChallengeNameType.NEW_PASSWORD_REQUIRED)
+                .session(initResp.session())
+                .challengeResponses(Map.of("USERNAME", tempUser, "NEW_PASSWORD", newPassword)));
+
+        assertThat(challengeResp.authenticationResult()).isNotNull();
+        assertThat(challengeResp.authenticationResult().accessToken()).isNotBlank();
+        assertThat(challengeResp.authenticationResult().idToken()).isNotBlank();
+        assertThat(challengeResp.authenticationResult().refreshToken()).isNotBlank();
+
+        cognito.adminDeleteUser(b -> b.userPoolId(poolId).username(tempUser));
+    }
+
     // ── Issue #234 note ───────────────────────────────────────────────────────
     // GetTokensFromRefreshToken is tested in sdk-test-node/tests/cognito-features.test.ts
     // because GetTokensFromRefreshTokenCommand is not available in Java SDK 2.31.8.

@@ -137,7 +137,20 @@ final class CognitoAuthFlowHandler {
                                                 Map<String, String> responses, Map<String, String> clientMetadata) {
         UserPoolClient client = service.findClientById(clientId);
         UserPool pool = service.describeUserPool(client.getUserPoolId());
+        return processChallenge(pool, client, challengeName, session, responses, clientMetadata);
+    }
 
+    Map<String, Object> adminRespondToAuthChallenge(String userPoolId, String clientId, String challengeName,
+                                                      String session, Map<String, String> responses,
+                                                      Map<String, String> clientMetadata) {
+        UserPoolClient client = service.describeUserPoolClient(userPoolId, clientId);
+        UserPool pool = service.describeUserPool(userPoolId);
+        return processChallenge(pool, client, challengeName, session, responses, clientMetadata);
+    }
+
+    private Map<String, Object> processChallenge(UserPool pool, UserPoolClient client, String challengeName,
+                                                   String session, Map<String, String> responses,
+                                                   Map<String, String> clientMetadata) {
         if ("PASSWORD_VERIFIER".equals(challengeName)) {
             return handlePasswordVerifierChallenge(pool, client, session, responses, clientMetadata);
         }

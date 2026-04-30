@@ -66,6 +66,7 @@ public class CognitoJsonHandler {
             case "InitiateAuth" -> handleInitiateAuth(request);
             case "AdminInitiateAuth" -> handleAdminInitiateAuth(request);
             case "RespondToAuthChallenge" -> handleRespondToAuthChallenge(request);
+            case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
             case "ChangePassword" -> handleChangePassword(request);
@@ -398,6 +399,23 @@ public class CognitoJsonHandler {
         request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
 
         Map<String, Object> result = service.respondToAuthChallenge(
+                request.path("ClientId").asText(),
+                request.path("ChallengeName").asText(),
+                request.path("Session").asText(null),
+                responses,
+                clientMetadata
+        );
+        return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleAdminRespondToAuthChallenge(JsonNode request) {
+        Map<String, String> responses = new HashMap<>();
+        request.path("ChallengeResponses").fields().forEachRemaining(e -> responses.put(e.getKey(), e.getValue().asText()));
+        Map<String, String> clientMetadata = new HashMap<>();
+        request.path("ClientMetadata").fields().forEachRemaining(e -> clientMetadata.put(e.getKey(), e.getValue().asText()));
+
+        Map<String, Object> result = service.adminRespondToAuthChallenge(
+                request.path("UserPoolId").asText(),
                 request.path("ClientId").asText(),
                 request.path("ChallengeName").asText(),
                 request.path("Session").asText(null),
