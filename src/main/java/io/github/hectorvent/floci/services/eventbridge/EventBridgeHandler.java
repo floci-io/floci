@@ -3,10 +3,14 @@ package io.github.hectorvent.floci.services.eventbridge;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
+import io.github.hectorvent.floci.services.eventbridge.model.Archive;
+import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
+import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
+import io.github.hectorvent.floci.services.eventbridge.model.Replay;
+import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
-import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -17,6 +21,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -63,6 +68,15 @@ public class EventBridgeHandler {
                 case "UntagResource" -> handleUntagResource(request, region);
                 case "PutPermission" -> handlePutPermission(request, region);
                 case "RemovePermission" -> handleRemovePermission(request, region);
+                case "CreateArchive" -> handleCreateArchive(request, region);
+                case "DescribeArchive" -> handleDescribeArchive(request, region);
+                case "UpdateArchive" -> handleUpdateArchive(request, region);
+                case "DeleteArchive" -> handleDeleteArchive(request, region);
+                case "ListArchives" -> handleListArchives(request, region);
+                case "StartReplay" -> handleStartReplay(request, region);
+                case "DescribeReplay" -> handleDescribeReplay(request, region);
+                case "CancelReplay" -> handleCancelReplay(request, region);
+                case "ListReplays" -> handleListReplays(request, region);
                 default -> Response.status(400)
                         .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                         .build();
@@ -348,6 +362,112 @@ public class EventBridgeHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    // ──────────────────────────── Archives ────────────────────────────
+
+    private Response handleCreateArchive(JsonNode request, String region) {
+        String archiveName = request.path("ArchiveName").asText(null);
+        String eventSourceArn = request.path("EventSourceArn").asText(null);
+        String description = request.path("Description").asText(null);
+        String eventPattern = request.path("EventPattern").asText(null);
+        int retentionDays = request.path("RetentionDays").asInt(0);
+        Archive archive = eventBridgeService.createArchive(
+                archiveName, eventSourceArn, description, eventPattern, retentionDays, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ArchiveArn", archive.getArchiveArn());
+        response.put("State", archive.getState().name());
+        response.put("CreationTime", archive.getCreationTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeArchive(JsonNode request, String region) {
+        String archiveName = request.path("ArchiveName").asText(null);
+        Archive archive = eventBridgeService.describeArchive(archiveName, region);
+        return Response.ok(buildArchiveNode(archive, true)).build();
+    }
+
+    private Response handleUpdateArchive(JsonNode request, String region) {
+        String archiveName = request.path("ArchiveName").asText(null);
+        String description = request.path("Description").asText(null);
+        String eventPattern = request.path("EventPattern").asText(null);
+        int retentionDays = request.path("RetentionDays").asInt(0);
+        Archive archive = eventBridgeService.updateArchive(
+                archiveName, description, eventPattern, retentionDays, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ArchiveArn", archive.getArchiveArn());
+        response.put("State", archive.getState().name());
+        response.put("CreationTime", archive.getCreationTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteArchive(JsonNode request, String region) {
+        String archiveName = request.path("ArchiveName").asText(null);
+        eventBridgeService.deleteArchive(archiveName, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleListArchives(JsonNode request, String region) {
+        String namePrefix = request.path("NamePrefix").asText(null);
+        String eventSourceArn = request.path("EventSourceArn").asText(null);
+        ArchiveState state = parseArchiveState(request.path("State").asText(null));
+        List<Archive> archives = eventBridgeService.listArchives(namePrefix, eventSourceArn, state, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode archivesArray = response.putArray("Archives");
+        for (Archive archive : archives) {
+            archivesArray.add(buildArchiveNode(archive, false));
+        }
+        return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Replays ────────────────────────────
+
+    private Response handleStartReplay(JsonNode request, String region) {
+        String replayName = request.path("ReplayName").asText(null);
+        String description = request.path("Description").asText(null);
+        String eventSourceArn = request.path("EventSourceArn").asText(null);
+        Instant eventStartTime = parseTimestamp(request.path("EventStartTime"));
+        Instant eventEndTime = parseTimestamp(request.path("EventEndTime"));
+        String destinationArn = request.path("Destination").path("Arn").asText(null);
+        Replay replay = eventBridgeService.startReplay(
+                replayName, description, eventSourceArn,
+                eventStartTime, eventEndTime, destinationArn, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ReplayArn", replay.getReplayArn());
+        response.put("State", replay.getState().name());
+        response.put("ReplayStartTime", replay.getReplayStartTime().getEpochSecond());
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribeReplay(JsonNode request, String region) {
+        String replayName = request.path("ReplayName").asText(null);
+        Replay replay = eventBridgeService.describeReplay(replayName, region);
+        return Response.ok(buildReplayNode(replay, true)).build();
+    }
+
+    private Response handleCancelReplay(JsonNode request, String region) {
+        String replayName = request.path("ReplayName").asText(null);
+        Replay replay = eventBridgeService.cancelReplay(replayName, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ReplayArn", replay.getReplayArn());
+        response.put("State", replay.getState().name());
+        if (replay.getStateReason() != null) {
+            response.put("StateReason", replay.getStateReason());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleListReplays(JsonNode request, String region) {
+        String namePrefix = request.path("NamePrefix").asText(null);
+        String eventSourceArn = request.path("EventSourceArn").asText(null);
+        ReplayState state = parseReplayState(request.path("State").asText(null));
+        List<Replay> replays = eventBridgeService.listReplays(namePrefix, eventSourceArn, state, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode replaysArray = response.putArray("Replays");
+        for (Replay replay : replays) {
+            replaysArray.add(buildReplayNode(replay, false));
+        }
+        return Response.ok(response).build();
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private ObjectNode buildBusNode(EventBus bus) {
@@ -409,5 +529,97 @@ public class EventBridgeHandler {
             }
         }
         return tags;
+    }
+
+    private ObjectNode buildArchiveNode(Archive archive, boolean full) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("ArchiveName", archive.getArchiveName());
+        node.put("EventSourceArn", archive.getEventSourceArn());
+        node.put("State", archive.getState().name());
+        node.put("EventCount", archive.getEventCount());
+        node.put("SizeBytes", archive.getSizeBytes());
+        node.put("RetentionDays", archive.getRetentionDays());
+        if (archive.getCreationTime() != null) {
+            node.put("CreationTime", archive.getCreationTime().getEpochSecond());
+        }
+        if (full) {
+            node.put("ArchiveArn", archive.getArchiveArn());
+            if (archive.getDescription() != null) {
+                node.put("Description", archive.getDescription());
+            }
+            if (archive.getEventPattern() != null) {
+                node.put("EventPattern", archive.getEventPattern());
+            }
+            if (archive.getStateReason() != null) {
+                node.put("StateReason", archive.getStateReason());
+            }
+        }
+        return node;
+    }
+
+    private ObjectNode buildReplayNode(Replay replay, boolean full) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("ReplayName", replay.getReplayName());
+        node.put("EventSourceArn", replay.getEventSourceArn());
+        node.put("State", replay.getState().name());
+        if (replay.getEventStartTime() != null) {
+            node.put("EventStartTime", replay.getEventStartTime().getEpochSecond());
+        }
+        if (replay.getEventEndTime() != null) {
+            node.put("EventEndTime", replay.getEventEndTime().getEpochSecond());
+        }
+        if (replay.getEventLastReplayedTime() != null) {
+            node.put("EventLastReplayedTime", replay.getEventLastReplayedTime().getEpochSecond());
+        }
+        if (replay.getReplayStartTime() != null) {
+            node.put("ReplayStartTime", replay.getReplayStartTime().getEpochSecond());
+        }
+        if (replay.getReplayEndTime() != null) {
+            node.put("ReplayEndTime", replay.getReplayEndTime().getEpochSecond());
+        }
+        if (full) {
+            node.put("ReplayArn", replay.getReplayArn());
+            if (replay.getDescription() != null) {
+                node.put("Description", replay.getDescription());
+            }
+            if (replay.getStateReason() != null) {
+                node.put("StateReason", replay.getStateReason());
+            }
+            if (replay.getDestinationArn() != null) {
+                ObjectNode dest = node.putObject("Destination");
+                dest.put("Arn", replay.getDestinationArn());
+            }
+        }
+        return node;
+    }
+
+    private ArchiveState parseArchiveState(String state) {
+        if (state == null || state.isBlank()) return null;
+        try {
+            return ArchiveState.valueOf(state);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private ReplayState parseReplayState(String state) {
+        if (state == null || state.isBlank()) return null;
+        try {
+            return ReplayState.valueOf(state);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private Instant parseTimestamp(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) return null;
+        if (node.isNumber()) {
+            return Instant.ofEpochSecond(node.asLong());
+        }
+        try {
+            return Instant.parse(node.asText());
+        } catch (Exception e) {
+            return null;
+        }
     }
 }

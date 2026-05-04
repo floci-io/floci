@@ -6,7 +6,12 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.eventbridge.model.Archive;
+import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
+import io.github.hectorvent.floci.services.eventbridge.model.ArchivedEvent;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
+import io.github.hectorvent.floci.services.eventbridge.model.Replay;
+import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -34,10 +39,14 @@ public class EventBridgeService {
     private final StorageBackend<String, EventBus> busStore;
     private final StorageBackend<String, Rule> ruleStore;
     private final StorageBackend<String, List<Target>> targetStore;
+    private final StorageBackend<String, Archive> archiveStore;
+    private final StorageBackend<String, List<ArchivedEvent>> archivedEventStore;
+    private final StorageBackend<String, Replay> replayStore;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final RuleScheduler ruleScheduler;
     private final EventBridgeInvoker invoker;
+    private final ReplayDispatcher replayDispatcher;
 
     @Inject
     public EventBridgeService(StorageFactory storageFactory,
@@ -45,7 +54,8 @@ public class EventBridgeService {
                               RegionResolver regionResolver,
                               ObjectMapper objectMapper,
                               RuleScheduler ruleScheduler,
-                              EventBridgeInvoker invoker) {
+                              EventBridgeInvoker invoker,
+                              ReplayDispatcher replayDispatcher) {
         this(
                 storageFactory.create("eventbridge", "eventbridge-buses.json",
                         new TypeReference<Map<String, EventBus>>() {}),
@@ -53,24 +63,38 @@ public class EventBridgeService {
                         new TypeReference<Map<String, Rule>>() {}),
                 storageFactory.create("eventbridge", "eventbridge-targets.json",
                         new TypeReference<Map<String, List<Target>>>() {}),
-                regionResolver, objectMapper, ruleScheduler, invoker
+                storageFactory.create("eventbridge", "eventbridge-archives.json",
+                        new TypeReference<Map<String, Archive>>() {}),
+                storageFactory.create("eventbridge", "eventbridge-archived-events.json",
+                        new TypeReference<Map<String, List<ArchivedEvent>>>() {}),
+                storageFactory.create("eventbridge", "eventbridge-replays.json",
+                        new TypeReference<Map<String, Replay>>() {}),
+                regionResolver, objectMapper, ruleScheduler, invoker, replayDispatcher
         );
     }
 
     EventBridgeService(StorageBackend<String, EventBus> busStore,
                        StorageBackend<String, Rule> ruleStore,
                        StorageBackend<String, List<Target>> targetStore,
+                       StorageBackend<String, Archive> archiveStore,
+                       StorageBackend<String, List<ArchivedEvent>> archivedEventStore,
+                       StorageBackend<String, Replay> replayStore,
                        RegionResolver regionResolver,
                        ObjectMapper objectMapper,
                        RuleScheduler ruleScheduler,
-                       EventBridgeInvoker invoker) {
+                       EventBridgeInvoker invoker,
+                       ReplayDispatcher replayDispatcher) {
         this.busStore = busStore;
         this.ruleStore = ruleStore;
         this.targetStore = targetStore;
+        this.archiveStore = archiveStore;
+        this.archivedEventStore = archivedEventStore;
+        this.replayStore = replayStore;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.ruleScheduler = ruleScheduler;
         this.invoker = invoker;
+        this.replayDispatcher = replayDispatcher;
     }
 
     @PostConstruct
@@ -336,10 +360,27 @@ public class EventBridgeService {
                     .map(Rule::getTags)
                     .orElse(Map.of());
         }
+        if (resourceArn.contains("archive/")) {
+            String archiveName = resourceArn.substring(resourceArn.lastIndexOf("archive/") + "archive/".length());
+            String key = archiveKey(region, archiveName);
+            return archiveStore.get(key)
+                    .map(Archive::getTags)
+                    .orElse(Map.of());
+        }
         return Map.of();
     }
 
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
+        if (resourceArn.contains("archive/")) {
+            String archiveName = resourceArn.substring(resourceArn.lastIndexOf("archive/") + "archive/".length());
+            String key = archiveKey(region, archiveName);
+            Archive archive = archiveStore.get(key)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Archive not found: " + archiveName, 404));
+            archive.getTags().putAll(tags);
+            archiveStore.put(key, archive);
+            return;
+        }
         if (resourceArn.contains("event-bus/")) {
             String busName = resourceArn.substring(resourceArn.lastIndexOf("event-bus/") + "event-bus/".length());
             String key = busKey(region, busName);
@@ -374,6 +415,16 @@ public class EventBridgeService {
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
+        if (resourceArn.contains("archive/")) {
+            String archiveName = resourceArn.substring(resourceArn.lastIndexOf("archive/") + "archive/".length());
+            String key = archiveKey(region, archiveName);
+            Archive archive = archiveStore.get(key)
+                    .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                            "Archive not found: " + archiveName, 404));
+            tagKeys.forEach(archive.getTags()::remove);
+            archiveStore.put(key, archive);
+            return;
+        }
         if (resourceArn.contains("event-bus/")) {
             String busName = resourceArn.substring(resourceArn.lastIndexOf("event-bus/") + "event-bus/".length());
             String key = busKey(region, busName);
@@ -556,6 +607,8 @@ public class EventBridgeService {
                 }
             }
 
+            captureToArchives(entry, busStoreKey, eventId, region);
+
             Map<String, String> successEntry = new HashMap<>();
             successEntry.put("EventId", eventId);
             resultEntries.add(successEntry);
@@ -737,6 +790,261 @@ public class EventBridgeService {
             return regionResolver.buildArn("events", region, "rule/" + ruleName);
         }
         return regionResolver.buildArn("events", region, "rule/" + busName + "/" + ruleName);
+    }
+
+    // ──────────────────────────── Archives ────────────────────────────
+
+    public Archive createArchive(String archiveName, String eventSourceArn, String description,
+                                 String eventPattern, int retentionDays, String region) {
+        if (archiveName == null || archiveName.isBlank()) {
+            throw new AwsException("ValidationException", "ArchiveName is required.", 400);
+        }
+        if (eventSourceArn == null || eventSourceArn.isBlank()) {
+            throw new AwsException("ValidationException", "EventSourceArn is required.", 400);
+        }
+        String key = archiveKey(region, archiveName);
+        if (archiveStore.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Archive already exists: " + archiveName, 400);
+        }
+        Archive archive = new Archive();
+        archive.setArchiveName(archiveName);
+        archive.setArchiveArn(regionResolver.buildArn("events", region, "archive/" + archiveName));
+        archive.setEventSourceArn(eventSourceArn);
+        archive.setDescription(description);
+        archive.setEventPattern(eventPattern);
+        archive.setRetentionDays(retentionDays);
+        archive.setState(ArchiveState.ENABLED);
+        archive.setCreationTime(Instant.now());
+        archiveStore.put(key, archive);
+        LOG.infov("Created archive: {0} for source {1}", archiveName, eventSourceArn);
+        return archive;
+    }
+
+    public Archive describeArchive(String archiveName, String region) {
+        return archiveStore.get(archiveKey(region, archiveName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Archive not found: " + archiveName, 404));
+    }
+
+    public Archive updateArchive(String archiveName, String description,
+                                 String eventPattern, int retentionDays, String region) {
+        String key = archiveKey(region, archiveName);
+        Archive archive = archiveStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Archive not found: " + archiveName, 404));
+        if (description != null) {
+            archive.setDescription(description);
+        }
+        archive.setEventPattern(eventPattern);
+        archive.setRetentionDays(retentionDays);
+        archiveStore.put(key, archive);
+        return archive;
+    }
+
+    public void deleteArchive(String archiveName, String region) {
+        String key = archiveKey(region, archiveName);
+        archiveStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Archive not found: " + archiveName, 404));
+        archiveStore.delete(key);
+        archivedEventStore.delete(archivedEventKey(region, archiveName));
+        LOG.infov("Deleted archive: {0}", archiveName);
+    }
+
+    public List<Archive> listArchives(String namePrefix, String eventSourceArn,
+                                      ArchiveState state, String region) {
+        String prefix = "archive:" + region + ":";
+        return archiveStore.scan(k -> {
+            if (!k.startsWith(prefix)) return false;
+            Archive a = archiveStore.get(k).orElse(null);
+            if (a == null) return false;
+            if (namePrefix != null && !namePrefix.isBlank()
+                    && !a.getArchiveName().startsWith(namePrefix)) {
+                return false;
+            }
+            if (eventSourceArn != null && !eventSourceArn.isBlank()
+                    && !eventSourceArn.equals(a.getEventSourceArn())) {
+                return false;
+            }
+            if (state != null && state != a.getState()) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    private void captureToArchives(Map<String, Object> entry, String busStoreKey,
+                                   String eventId, String region) {
+        EventBus bus = busStore.get(busStoreKey).orElse(null);
+        if (bus == null) {
+            return;
+        }
+        String busArn = bus.getArn();
+        String archivePrefix = "archive:" + region + ":";
+        List<Archive> candidates = archiveStore.scan(k ->
+                k.startsWith(archivePrefix)
+                        && archiveStore.get(k).map(a ->
+                        a.getState() == ArchiveState.ENABLED
+                                && busArn.equals(a.getEventSourceArn())).orElse(false));
+
+        for (Archive archive : candidates) {
+            if (matchesPattern(entry, archive.getEventPattern())) {
+                String evKey = archivedEventKey(region, archive.getArchiveName());
+                List<ArchivedEvent> stored = new ArrayList<>(
+                        archivedEventStore.get(evKey).orElse(new ArrayList<>()));
+                ArchivedEvent ae = new ArchivedEvent(
+                        eventId,
+                        Instant.now(),
+                        (String) entry.get("Source"),
+                        (String) entry.get("DetailType"),
+                        (String) entry.get("Detail"),
+                        busArn
+                );
+                stored.add(ae);
+                archivedEventStore.put(evKey, stored);
+                archive.setEventCount(archive.getEventCount() + 1);
+                archiveStore.put(archiveKey(region, archive.getArchiveName()), archive);
+            }
+        }
+    }
+
+    // ──────────────────────────── Replays ────────────────────────────
+
+    public Replay startReplay(String replayName, String description, String eventSourceArn,
+                              Instant eventStartTime, Instant eventEndTime,
+                              String destinationArn, String region) {
+        if (replayName == null || replayName.isBlank()) {
+            throw new AwsException("ValidationException", "ReplayName is required.", 400);
+        }
+        String key = replayKey(region, replayName);
+        if (replayStore.get(key).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException",
+                    "Replay already exists: " + replayName, 400);
+        }
+
+        // resolve archive
+        String archiveName = archiveNameFromArn(eventSourceArn);
+        Archive archive = archiveStore.get(archiveKey(region, archiveName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Archive not found: " + archiveName, 404));
+
+        List<ArchivedEvent> events = archivedEventStore
+                .get(archivedEventKey(region, archiveName))
+                .orElse(List.of());
+
+        Replay replay = new Replay();
+        replay.setReplayName(replayName);
+        replay.setReplayArn(regionResolver.buildArn("events", region, "replay/" + replayName));
+        replay.setDescription(description);
+        replay.setEventSourceArn(eventSourceArn);
+        replay.setDestinationArn(destinationArn);
+        replay.setEventStartTime(eventStartTime);
+        replay.setEventEndTime(eventEndTime);
+        replay.setState(ReplayState.STARTING);
+        replay.setReplayStartTime(Instant.now());
+        replayStore.put(key, replay);
+
+        replayDispatcher.dispatch(
+                replay,
+                events,
+                entries -> putEvents(entries, region),
+                (name, state) -> updateReplayState(name, state, region),
+                time -> updateReplayLastReplayed(replayName, time, region)
+        );
+
+        LOG.infov("Started replay: {0} from archive {1}", replayName, archiveName);
+        return replay;
+    }
+
+    public Replay describeReplay(String replayName, String region) {
+        return replayStore.get(replayKey(region, replayName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Replay not found: " + replayName, 404));
+    }
+
+    public Replay cancelReplay(String replayName, String region) {
+        String key = replayKey(region, replayName);
+        Replay replay = replayStore.get(key)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "Replay not found: " + replayName, 404));
+        if (replay.getState() != ReplayState.RUNNING && replay.getState() != ReplayState.STARTING) {
+            throw new AwsException("IllegalStatusException",
+                    "Replay is not in a cancellable state: " + replay.getState(), 400);
+        }
+        boolean signalled = replayDispatcher.requestCancel(replayName);
+        if (!signalled) {
+            // already completed between check and cancel
+            replay = replayStore.get(key).orElse(replay);
+        } else {
+            replay.setState(ReplayState.CANCELLING);
+            replay.setStateReason("Cancellation requested.");
+            replayStore.put(key, replay);
+        }
+        return replay;
+    }
+
+    public List<Replay> listReplays(String namePrefix, String eventSourceArn,
+                                    ReplayState state, String region) {
+        String prefix = "replay:" + region + ":";
+        return replayStore.scan(k -> {
+            if (!k.startsWith(prefix)) return false;
+            Replay r = replayStore.get(k).orElse(null);
+            if (r == null) return false;
+            if (namePrefix != null && !namePrefix.isBlank()
+                    && !r.getReplayName().startsWith(namePrefix)) {
+                return false;
+            }
+            if (eventSourceArn != null && !eventSourceArn.isBlank()
+                    && !eventSourceArn.equals(r.getEventSourceArn())) {
+                return false;
+            }
+            if (state != null && state != r.getState()) {
+                return false;
+            }
+            return true;
+        });
+    }
+
+    void updateReplayState(String replayName, ReplayState state, String region) {
+        String key = replayKey(region, replayName);
+        replayStore.get(key).ifPresent(r -> {
+            r.setState(state);
+            if (state == ReplayState.COMPLETED || state == ReplayState.CANCELLED
+                    || state == ReplayState.FAILED) {
+                r.setReplayEndTime(Instant.now());
+            }
+            replayStore.put(key, r);
+            LOG.debugv("Replay {0} transitioned to {1}", replayName, state);
+        });
+    }
+
+    void updateReplayLastReplayed(String replayName, Instant eventTime, String region) {
+        String key = replayKey(region, replayName);
+        replayStore.get(key).ifPresent(r -> {
+            r.setEventLastReplayedTime(eventTime);
+            replayStore.put(key, r);
+        });
+    }
+
+    // ──────────────────────────── Storage key helpers ────────────────────────────
+
+    private static String archiveKey(String region, String archiveName) {
+        return "archive:" + region + ":" + archiveName;
+    }
+
+    private static String archivedEventKey(String region, String archiveName) {
+        return "archivedEvents:" + region + ":" + archiveName;
+    }
+
+    private static String replayKey(String region, String replayName) {
+        return "replay:" + region + ":" + replayName;
+    }
+
+    private static String archiveNameFromArn(String arn) {
+        if (arn == null) return null;
+        int idx = arn.lastIndexOf("archive/");
+        return idx >= 0 ? arn.substring(idx + "archive/".length()) : arn;
     }
 
     private void startSchedulerIfNeeded(Rule rule) {
