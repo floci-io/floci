@@ -29,6 +29,7 @@ import java.time.LocalDate;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 
 /**
  * Starts and stops Docker containers for Lambda function execution.
@@ -169,9 +170,22 @@ public class ContainerLauncher {
         }
         env.add("AWS_DEFAULT_REGION=" + lambdaRegion);
         env.add("AWS_REGION=" + lambdaRegion);
-        env.add("AWS_ACCESS_KEY_ID=test");
-        env.add("AWS_SECRET_ACCESS_KEY=test");
-        env.add("AWS_SESSION_TOKEN=test");
+        Optional<String> awsConfigPath = config.services().lambda().awsConfigPath()
+                .filter(s -> !s.isBlank());
+        if (awsConfigPath.isPresent()) {
+            // ~/.aws will be mounted — don't inject credentials, let SDK discover them.
+            // Set explicit file paths so discovery works regardless of container HOME.
+            env.add("AWS_SHARED_CREDENTIALS_FILE=/opt/aws-config/credentials");
+            env.add("AWS_CONFIG_FILE=/opt/aws-config/config");
+        } else {
+            // Use Floci's own env vars, fallback to test/test/test
+            String ak = System.getenv("AWS_ACCESS_KEY_ID");
+            String sk = System.getenv("AWS_SECRET_ACCESS_KEY");
+            String st = System.getenv("AWS_SESSION_TOKEN");
+            env.add("AWS_ACCESS_KEY_ID=" + (ak != null ? ak : "test"));
+            env.add("AWS_SECRET_ACCESS_KEY=" + (sk != null ? sk : "test"));
+            env.add("AWS_SESSION_TOKEN=" + (st != null ? st : "test"));
+        }
         env.add("FLOCI_HOSTNAME=" + flociHostname);
         env.add("FLOCI_ENDPOINT=" + flociEndpoint);
         env.add("AWS_ENDPOINT_URL=" + flociEndpoint);
@@ -207,6 +221,15 @@ public class ContainerLauncher {
         } else if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
             specBuilder.withCmd(fn.getHandler());
         }
+
+        // Mount host AWS config into Lambda container (read-only) for SDK credential discovery
+        awsConfigPath.ifPresent(hostPath -> {
+            if (!Files.isDirectory(Path.of(hostPath))) {
+                LOG.warnv("awsConfigPath '{0}' does not exist or is not a directory; "
+                        + "Lambda containers may fail to discover credentials", hostPath);
+            }
+            specBuilder.withReadOnlyBind(hostPath, "/opt/aws-config");
+        });
 
         ContainerSpec spec = specBuilder.build();
 

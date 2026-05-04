@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common.docker;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import com.github.dockerjava.api.model.AccessMode;
 import com.github.dockerjava.api.model.Bind;
 import com.github.dockerjava.api.model.LogConfig;
 import com.github.dockerjava.api.model.Mount;
@@ -213,6 +214,11 @@ public class ContainerBuilder {
          */
         public Builder withBind(String hostPath, String containerPath) {
             this.binds.add(new Bind(hostPath, new Volume(containerPath)));
+            return this;
+        }
+
+        public Builder withReadOnlyBind(String hostPath, String containerPath) {
+            this.binds.add(new Bind(hostPath, new Volume(containerPath), AccessMode.ro));
             return this;
         }
 

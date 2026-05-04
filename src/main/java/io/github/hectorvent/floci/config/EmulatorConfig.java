@@ -659,6 +659,19 @@ public interface EmulatorConfig {
         @WithDefault("100")
         int unreservedConcurrencyMin();
 
+        /**
+         * Host path to bind-mount (read-only) into Lambda containers at /opt/aws-config.
+         * When set, no AWS credential env vars are injected; instead
+         * AWS_SHARED_CREDENTIALS_FILE and AWS_CONFIG_FILE are set to point at
+         * the mounted files, ensuring SDK discovery works regardless of container HOME.
+         * When absent, Floci injects credentials from its own environment
+         * (AWS_ACCESS_KEY_ID, etc.) or falls back to test/test/test.
+         * Blank values are treated as absent.
+         *
+         * Env var: FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH
+         */
+        Optional<String> awsConfigPath();
+
         HotReload hotReload();
 
         interface HotReload {

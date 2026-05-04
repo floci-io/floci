@@ -64,6 +64,7 @@ class ContainerLauncherTest {
         when(config.services()).thenReturn(services);
         when(services.lambda()).thenReturn(lambda);
         when(lambda.dockerNetwork()).thenReturn(Optional.empty());
+        lenient().when(lambda.awsConfigPath()).thenReturn(Optional.empty());
         when(config.docker()).thenReturn(docker);
         when(docker.logMaxSize()).thenReturn("10m");
         when(docker.logMaxFile()).thenReturn("3");
@@ -173,12 +174,45 @@ class ContainerLauncherTest {
         verify(lifecycleManager).create(specCaptor.capture());
 
         List<String> env = specCaptor.getValue().env();
-        assertTrue(env.contains("AWS_ACCESS_KEY_ID=test"),
-                "default AWS_ACCESS_KEY_ID should be injected");
-        assertTrue(env.contains("AWS_SECRET_ACCESS_KEY=test"),
-                "default AWS_SECRET_ACCESS_KEY should be injected");
-        assertTrue(env.contains("AWS_SESSION_TOKEN=test"),
-                "default AWS_SESSION_TOKEN should be injected");
+        assertTrue(env.stream().anyMatch(e -> e.startsWith("AWS_ACCESS_KEY_ID=")),
+                "AWS_ACCESS_KEY_ID should be injected when awsConfigPath is absent");
+        assertTrue(env.stream().anyMatch(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")),
+                "AWS_SECRET_ACCESS_KEY should be injected when awsConfigPath is absent");
+        assertTrue(env.stream().anyMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")),
+                "AWS_SESSION_TOKEN should be injected when awsConfigPath is absent");
+    }
+
+    @Test
+    void launchFunction_fallsBackToTestCredentialsWhenEnvUnset() throws Exception {
+        // When System.getenv returns null for AWS vars, credentials should be test/test/test.
+        // Since we can't control System.getenv in unit tests, we verify the values are either
+        // from the environment or the "test" fallback — both are valid.
+        Path codePath = Files.createDirectory(tempDir.resolve("creds-fallback"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("fallback-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(specCaptor.capture());
+
+        List<String> env = specCaptor.getValue().env();
+        String accessKey = env.stream().filter(e -> e.startsWith("AWS_ACCESS_KEY_ID=")).findFirst().orElse("");
+        String secretKey = env.stream().filter(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")).findFirst().orElse("");
+        String sessionToken = env.stream().filter(e -> e.startsWith("AWS_SESSION_TOKEN=")).findFirst().orElse("");
+
+        // Value should be either the host env var or "test" fallback
+        String expectedAk = System.getenv("AWS_ACCESS_KEY_ID") != null ? System.getenv("AWS_ACCESS_KEY_ID") : "test";
+        String expectedSk = System.getenv("AWS_SECRET_ACCESS_KEY") != null ? System.getenv("AWS_SECRET_ACCESS_KEY") : "test";
+        String expectedSt = System.getenv("AWS_SESSION_TOKEN") != null ? System.getenv("AWS_SESSION_TOKEN") : "test";
+
+        assertEquals("AWS_ACCESS_KEY_ID=" + expectedAk, accessKey);
+        assertEquals("AWS_SECRET_ACCESS_KEY=" + expectedSk, secretKey);
+        assertEquals("AWS_SESSION_TOKEN=" + expectedSt, sessionToken);
     }
 
     @Test
@@ -246,14 +280,23 @@ class ContainerLauncherTest {
         List<String> env = specCaptor.getValue().env();
         // Docker honours the last occurrence of a duplicate Env entry, so user
         // overrides must appear after the Floci defaults.
-        int defaultKeyIdx = env.indexOf("AWS_ACCESS_KEY_ID=test");
-        int userKeyIdx = env.indexOf("AWS_ACCESS_KEY_ID=user-key");
+        int defaultKeyIdx = -1;
+        int userKeyIdx = -1;
+        int defaultSecretIdx = -1;
+        int userSecretIdx = -1;
+        for (int i = 0; i < env.size(); i++) {
+            if (env.get(i).startsWith("AWS_ACCESS_KEY_ID=") && userKeyIdx < 0 && !env.get(i).equals("AWS_ACCESS_KEY_ID=user-key")) {
+                defaultKeyIdx = i;
+            }
+            if (env.get(i).equals("AWS_ACCESS_KEY_ID=user-key")) userKeyIdx = i;
+            if (env.get(i).startsWith("AWS_SECRET_ACCESS_KEY=") && userSecretIdx < 0 && !env.get(i).equals("AWS_SECRET_ACCESS_KEY=user-secret")) {
+                defaultSecretIdx = i;
+            }
+            if (env.get(i).equals("AWS_SECRET_ACCESS_KEY=user-secret")) userSecretIdx = i;
+        }
         assertTrue(defaultKeyIdx >= 0, "default AWS_ACCESS_KEY_ID still present");
         assertTrue(userKeyIdx > defaultKeyIdx,
                 "user AWS_ACCESS_KEY_ID must appear after the default");
-
-        int defaultSecretIdx = env.indexOf("AWS_SECRET_ACCESS_KEY=test");
-        int userSecretIdx = env.indexOf("AWS_SECRET_ACCESS_KEY=user-secret");
         assertTrue(defaultSecretIdx >= 0, "default AWS_SECRET_ACCESS_KEY still present");
         assertTrue(userSecretIdx > defaultSecretIdx,
                 "user AWS_SECRET_ACCESS_KEY must appear after the default");
@@ -292,5 +335,68 @@ class ContainerLauncherTest {
                 "bootstrap should be copied to /var/runtime");
 
         verify(lifecycleManager, never()).createAndStart(any());
+    }
+
+    @Test
+    void launchFunction_awsConfigPath_bindsAndSkipsCredentials() throws Exception {
+        EmulatorConfig.LambdaServiceConfig lambda = config.services().lambda();
+        when(lambda.awsConfigPath()).thenReturn(Optional.of("/home/user/.aws"));
+
+        Path codePath = Files.createDirectory(tempDir.resolve("creds-mount"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("mount-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(specCaptor.capture());
+
+        ContainerSpec spec = specCaptor.getValue();
+
+        // Should bind-mount to /opt/aws-config (read-only)
+        assertTrue(spec.binds().stream()
+                        .anyMatch(b -> b.getPath().equals("/home/user/.aws")
+                                && b.getVolume().getPath().equals("/opt/aws-config")
+                                && b.getAccessMode() == com.github.dockerjava.api.model.AccessMode.ro),
+                "awsConfigPath should be bind-mounted read-only to /opt/aws-config");
+
+        // Should set explicit file paths for SDK discovery
+        List<String> env = spec.env();
+        assertTrue(env.contains("AWS_SHARED_CREDENTIALS_FILE=/opt/aws-config/credentials"),
+                "AWS_SHARED_CREDENTIALS_FILE should point to mounted path");
+        assertTrue(env.contains("AWS_CONFIG_FILE=/opt/aws-config/config"),
+                "AWS_CONFIG_FILE should point to mounted path");
+
+        // Should NOT inject credential env vars
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_ACCESS_KEY_ID=")),
+                "AWS_ACCESS_KEY_ID should not be injected when awsConfigPath is set");
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")),
+                "AWS_SECRET_ACCESS_KEY should not be injected when awsConfigPath is set");
+        assertTrue(env.stream().noneMatch(e -> e.startsWith("AWS_SESSION_TOKEN=")),
+                "AWS_SESSION_TOKEN should not be injected when awsConfigPath is set");
+    }
+
+    @Test
+    void launchFunction_noAwsConfigPath_noBindMount() throws Exception {
+        Path codePath = Files.createDirectory(tempDir.resolve("no-aws-config"));
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("no-mount-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+
+        launcher.launch(fn);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).create(specCaptor.capture());
+
+        assertTrue(specCaptor.getValue().binds().stream()
+                        .noneMatch(b -> b.getVolume().getPath().equals("/opt/aws-config")),
+                "no .aws bind mount when awsConfigPath is absent");
     }
 }

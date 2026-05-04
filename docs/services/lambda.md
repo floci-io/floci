@@ -287,6 +287,51 @@ FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud
 FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud,localhost.example.internal
 ```
 
+### Real AWS Credentials
+
+By default, Floci injects placeholder credentials (`test`/`test`/`test`) into Lambda containers. This is sufficient when all SDK calls target Floci's emulated services.
+
+For hybrid local/cloud testing — where some services are emulated and others hit real AWS — you can mount your host `~/.aws` directory into Lambda containers:
+
+```yaml
+services:
+  floci:
+    image: floci/floci:latest
+    environment:
+      FLOCI_SERVICES_LAMBDA_AWS_CONFIG_PATH: /Users/me/.aws
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+```
+
+When `aws-config-path` is set:
+
+- The host path is bind-mounted **read-only** into each Lambda container at `/opt/aws-config`
+- `AWS_SHARED_CREDENTIALS_FILE` and `AWS_CONFIG_FILE` env vars are set so the SDK discovers credentials regardless of the container's HOME directory
+- No `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN` env vars are injected
+
+When unset (default), Floci reads credentials from its own environment and falls back to `test`/`test`/`test`.
+
+!!! tip "Routing specific services to real AWS"
+    To keep some services on Floci while others hit real AWS, clear the global endpoint and set service-specific overrides in your function's `--environment`:
+
+    ```
+    AWS_ENDPOINT_URL=                                          # clear Floci's global endpoint
+    AWS_ENDPOINT_URL_SES=http://localhost.floci.io:4566       # SES stays on Floci
+    AWS_ENDPOINT_URL_CLOUDWATCHLOGS=http://localhost.floci.io:4566  # CloudWatch stays on Floci
+    ```
+
+    The AWS SDK supports `AWS_ENDPOINT_URL_<SERVICE>` natively. Services without an override will use real AWS endpoints.
+
+!!! note "Credential passthrough without mounting"
+    If you don't need the full `~/.aws` directory (e.g., you only have static credentials), you can pass them to Floci's environment directly. When `aws-config-path` is unset, Floci forwards its own `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN` env vars into Lambda containers:
+
+    ```yaml
+    environment:
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+    ```
+
 ### Private registry authentication
 
 Container image functions (`"PackageType": "Image"`) that pull from private registries need Docker credentials. See [Docker Configuration → Private Registry Authentication](../configuration/docker.md#private-registry-authentication) for the full guide.

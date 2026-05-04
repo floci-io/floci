@@ -64,6 +64,7 @@ floci:
       enabled: true
     lambda:
       enabled: true
+      # aws-config-path:
       hot-reload:
         enabled: true
     apigateway:
