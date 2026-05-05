@@ -35,7 +35,10 @@ import { makeClient, uniqueName, ENDPOINT, REGION, ACCOUNT, buildMinimalZip, bui
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 function wsUrl(apiId: string, stage: string): string {
-  return `ws://localhost:4566/ws/${apiId}/${stage}`;
+  const endpoint = process.env.FLOCI_ENDPOINT || 'http://localhost:4566';
+  // Convert http/https to ws/wss and strip any trailing slashes
+  const wsEndpoint = endpoint.replace(/^https?:\/\//, '').replace(/\/$/, '');
+  return `ws://${wsEndpoint}/ws/${apiId}/${stage}`;
 }
 
 function managementClient(apiId: string, stage: string): ApiGatewayManagementApiClient {
