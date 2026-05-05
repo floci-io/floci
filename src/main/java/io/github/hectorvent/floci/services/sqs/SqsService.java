@@ -309,6 +309,10 @@ public class SqsService {
         return sendMessage(queueUrl, body, delaySeconds, null, null);
     }
 
+    public Message sendMessage(String queueUrl, String body, int delaySeconds, String region) {
+        return sendMessage(queueUrl, body, delaySeconds, null, null, region);
+    }
+
     public Message sendMessage(String queueUrl, String body, int delaySeconds,
                                String messageGroupId, String messageDeduplicationId) {
         return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, null,
