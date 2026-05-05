@@ -314,6 +314,7 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
+        TextractServiceConfig textract();
     }
 
     interface AutoScalingServiceConfig {
@@ -615,6 +616,11 @@ public interface EmulatorConfig {
     }
 
     interface BedrockRuntimeServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface TextractServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

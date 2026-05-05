@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.firehose.FirehoseJsonHandler;
 import io.github.hectorvent.floci.services.glue.GlueJsonHandler;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingJsonHandler;
+import io.github.hectorvent.floci.services.textract.TextractJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -64,6 +65,7 @@ public class AwsJson11Controller {
     private final CodeDeployJsonHandler codeDeployJsonHandler;
     private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
     private final TransferHandler transferHandler;
+    private final TextractJsonHandler textractJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -83,6 +85,8 @@ public class AwsJson11Controller {
                                CodeDeployJsonHandler codeDeployJsonHandler,
                                Ec2MessagesJsonHandler ec2MessagesJsonHandler,
                                TransferHandler transferHandler) {
+                               CodeDeployJsonHandler codeDeployJsonHandler,
+                               TextractJsonHandler textractJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -105,6 +109,7 @@ public class AwsJson11Controller {
         this.codeDeployJsonHandler = codeDeployJsonHandler;
         this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
         this.transferHandler = transferHandler;
+        this.textractJsonHandler = textractJsonHandler;
     }
 
     @POST
@@ -152,6 +157,7 @@ public class AwsJson11Controller {
                 case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
                 case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
                 case "transfer" -> transferHandler.handle(action, request, region);
+                case "textract" -> textractJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

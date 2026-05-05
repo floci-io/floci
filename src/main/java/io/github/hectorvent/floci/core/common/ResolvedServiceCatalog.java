@@ -240,6 +240,11 @@ public class ResolvedServiceCatalog {
                         "route53", config.storage().mode(), 5000L, null, ServiceProtocol.REST_XML,
                         protocols(ServiceProtocol.REST_XML),
                         Set.of(), Set.of("route53"), Set.of(), Set.of(Route53Controller.class))
+                        Set.of(), Set.of("autoscaling"), Set.of(), Set.of()),
+                descriptor("textract", "textract", config.services().textract().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("Textract."), Set.of("textract"), Set.of(), Set.of())
         ));
     }
 

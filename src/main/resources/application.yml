@@ -248,3 +248,5 @@ floci:
       enabled: true
     transfer:
       enabled: true
+    textract:
+      enabled: true
