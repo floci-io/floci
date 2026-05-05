@@ -208,7 +208,7 @@ output "alarm_arn" {
   value = aws_cloudwatch_metric_alarm.cpu.arn
 }
 
-# -- VPC (issue #468: ModifyVpcAttribute / DescribeVpcAttribute) ---------------
+# -- VPC networking (issues #468, #401: VpcAttribute, RouteTableAssociation, DescribeTags) ------
 resource "aws_vpc" "compat" {
   cidr_block           = "10.0.0.0/16"
   enable_dns_support   = false
@@ -220,6 +220,79 @@ resource "aws_vpc" "compat" {
   }
 }
 
+resource "aws_internet_gateway" "compat" {
+  vpc_id = aws_vpc.compat.id
+
+  tags = {
+    Name = "floci-compat-igw"
+  }
+}
+
+resource "aws_subnet" "compat" {
+  vpc_id            = aws_vpc.compat.id
+  cidr_block        = "10.0.1.0/24"
+  availability_zone = "us-east-1a"
+
+  tags = {
+    Name = "floci-compat-subnet"
+  }
+}
+
+resource "aws_route_table" "compat" {
+  vpc_id = aws_vpc.compat.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.compat.id
+  }
+
+  tags = {
+    Name = "floci-compat-rt"
+  }
+}
+
+# Exercises AssociateRouteTable + DescribeRouteTables(association.route-table-association-id)
+resource "aws_route_table_association" "compat" {
+  subnet_id      = aws_subnet.compat.id
+  route_table_id = aws_route_table.compat.id
+}
+
+resource "aws_security_group" "compat" {
+  name        = "floci-compat-sg"
+  description = "Compat test security group"
+  vpc_id      = aws_vpc.compat.id
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = {
+    Name = "floci-compat-sg"
+  }
+}
+
 output "vpc_id" {
   value = aws_vpc.compat.id
+}
+
+output "subnet_id" {
+  value = aws_subnet.compat.id
+}
+
+output "route_table_id" {
+  value = aws_route_table.compat.id
+}
+
+output "security_group_id" {
+  value = aws_security_group.compat.id
 }

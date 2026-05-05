@@ -10,6 +10,7 @@ public class RouteTableAssociation {
     private String routeTableAssociationId;
     private String routeTableId;
     private String subnetId;
+    private String gatewayId;
     private boolean main;
     private String associationState = "associated";
 
@@ -23,6 +24,9 @@ public class RouteTableAssociation {
 
     public String getSubnetId() { return subnetId; }
     public void setSubnetId(String subnetId) { this.subnetId = subnetId; }
+
+    public String getGatewayId() { return gatewayId; }
+    public void setGatewayId(String gatewayId) { this.gatewayId = gatewayId; }
 
     public boolean isMain() { return main; }
     public void setMain(boolean main) { this.main = main; }

@@ -948,6 +948,9 @@ public class Ec2QueryHandler {
                 .start("AssociateRouteTableResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("associationId", assoc.getRouteTableAssociationId())
+                .start("associationState")
+                    .elem("state", assoc.getAssociationState())
+                .end("associationState")
                 .end("AssociateRouteTableResponse");
         return xmlResponse(xml.build());
     }

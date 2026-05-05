@@ -924,13 +924,32 @@ public class Ec2Service {
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
+        List<String> filterResourceIds   = filters != null ? filters.get("resource-id")   : null;
+        List<String> filterResourceTypes = filters != null ? filters.get("resource-type") : null;
+        List<String> filterKeys          = filters != null ? filters.get("key")            : null;
+        List<String> filterValues        = filters != null ? filters.get("value")          : null;
+
         List<Map<String, String>> result = new ArrayList<>();
         for (Map.Entry<String, List<Tag>> entry : tags.entrySet()) {
-            String resourceId = entry.getKey();
+            String resourceId   = entry.getKey();
+            String resourceType = inferResourceType(resourceId);
+
+            if (filterResourceIds != null && !filterResourceIds.contains(resourceId)) {
+                continue;
+            }
+            if (filterResourceTypes != null && !filterResourceTypes.contains(resourceType)) {
+                continue;
+            }
             for (Tag tag : entry.getValue()) {
+                if (filterKeys != null && !filterKeys.contains(tag.getKey())) {
+                    continue;
+                }
+                if (filterValues != null && !filterValues.contains(tag.getValue())) {
+                    continue;
+                }
                 Map<String, String> item = new LinkedHashMap<>();
                 item.put("resourceId", resourceId);
-                item.put("resourceType", inferResourceType(resourceId));
+                item.put("resourceType", resourceType);
                 item.put("key", tag.getKey());
                 item.put("value", tag.getValue());
                 result.add(item);
@@ -1270,6 +1289,14 @@ public class Ec2Service {
             return switch (filterName) {
                 case "route-table-id" -> values.contains(rt.getRouteTableId());
                 case "vpc-id" -> values.contains(rt.getVpcId());
+                case "association.route-table-association-id" -> rt.getAssociations().stream()
+                        .anyMatch(a -> values.contains(a.getRouteTableAssociationId()));
+                case "association.subnet-id" -> rt.getAssociations().stream()
+                        .anyMatch(a -> a.getSubnetId() != null && values.contains(a.getSubnetId()));
+                case "association.gateway-id" -> rt.getAssociations().stream()
+                        .anyMatch(a -> a.getGatewayId() != null && values.contains(a.getGatewayId()));
+                case "association.main" -> rt.getAssociations().stream()
+                        .anyMatch(a -> values.contains(String.valueOf(a.isMain())));
                 default -> true;
             };
         }

@@ -508,6 +508,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("AssociateRouteTableResponse.associationId", startsWith("rtbassoc-"))
+            .body("AssociateRouteTableResponse.associationState.state", equalTo("associated"))
             .extract().path("AssociateRouteTableResponse.associationId");
     }
 
@@ -517,6 +518,38 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "DescribeRouteTables")
             .formParam("RouteTableId.1", routeTableId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeRouteTablesResponse.routeTableSet.item.routeTableId", equalTo(routeTableId));
+    }
+
+    @Test
+    @Order(64)
+    void describeRouteTablesByAssociationId() {
+        given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("Filter.1.Name", "association.route-table-association-id")
+            .formParam("Filter.1.Value.1", rtbAssocId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeRouteTablesResponse.routeTableSet.item.routeTableId", equalTo(routeTableId))
+            .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item[0].routeTableAssociationId",
+                    equalTo(rtbAssocId));
+    }
+
+    @Test
+    @Order(65)
+    void describeRouteTablesBySubnetId() {
+        given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("Filter.1.Name", "association.subnet-id")
+            .formParam("Filter.1.Value.1", subnetId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -727,6 +760,52 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"))
             .body("DescribeTagsResponse.tagSet.item.value", equalTo("test-instance"));
+    }
+
+    @Test
+    @Order(92)
+    void describeTagsFilterByResourceId() {
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "resource-id")
+            .formParam("Filter.1.Value.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.resourceId", equalTo(instanceId))
+            .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"));
+    }
+
+    @Test
+    @Order(92)
+    void describeTagsFilterByKey() {
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "key")
+            .formParam("Filter.1.Value.1", "Name")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"));
+    }
+
+    @Test
+    @Order(92)
+    void describeTagsFilterByKeyNoMatch() {
+        given()
+            .formParam("Action", "DescribeTags")
+            .formParam("Filter.1.Name", "key")
+            .formParam("Filter.1.Value.1", "NonExistentKey")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeTagsResponse.tagSet.item.size()", equalTo(0));
     }
 
     // =========================================================================
