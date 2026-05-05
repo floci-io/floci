@@ -50,14 +50,54 @@ public class DockerClientProducer {
         return normalized;
     }
 
+    /**
+     * Resolves the effective Docker host to use when creating the client.
+     *
+     * Priority:
+     * 1. If {@code floci.docker.docker-host} is explicitly configured (non-default), use it.
+     * 2. Otherwise fall back to the standard {@code DOCKER_HOST} env var (normalized).
+     * 3. Otherwise use the default unix socket.
+     *
+     * Both the configured value and the env var are normalized to ensure a valid URI scheme.
+     */
+    static String resolveEffectiveDockerHost(String configuredHost, String dockerHostEnv) {
+        String normalizedEnvHost = normalizeDockerHost(dockerHostEnv);
+        if ("unix:///var/run/docker.sock".equals(configuredHost)
+                && normalizedEnvHost != null && !normalizedEnvHost.isBlank()) {
+            return normalizedEnvHost;
+        }
+        return normalizeDockerHost(configuredHost);
+    }
+
+    private static DefaultDockerClientConfig.Builder createDockerConfigBuilder() {
+        try {
+            return DefaultDockerClientConfig.createDefaultConfigBuilder();
+        } catch (IllegalArgumentException e) {
+            // DOCKER_HOST env var is set without a URI scheme (e.g. "10.37.124.101:2375").
+            // docker-java calls URI.create() on it immediately inside createDefaultConfigBuilder(),
+            // which throws before Floci's withDockerHost() override can take effect.
+            // Fall back to a fresh builder; the caller will supply the normalized host.
+            LOG.warnv("Could not initialize Docker config from environment "
+                    + "(DOCKER_HOST env var may be missing a URI scheme): {0}. "
+                    + "Using Floci''s configured host.", e.getMessage());
+            return new DefaultDockerClientConfig.Builder();
+        }
+    }
+
     @Produces
     @ApplicationScoped
     public DockerClient dockerClient() {
-        String dockerHost = normalizeDockerHost(config.docker().dockerHost());
+        String dockerHost = resolveEffectiveDockerHost(
+                config.docker().dockerHost(), System.getenv("DOCKER_HOST"));
         LOG.infov("Creating DockerClient for host: {0}", dockerHost);
 
-        DefaultDockerClientConfig.Builder builder = DefaultDockerClientConfig.createDefaultConfigBuilder()
-                .withDockerHost(dockerHost);
+        // createDefaultConfigBuilder() reads DOCKER_HOST directly from System.getenv() and passes
+        // it to withDockerHost(), which calls URI.create() immediately. If DOCKER_HOST is set
+        // without a URI scheme (e.g. "10.37.124.101:2375" in Bitbucket Pipelines), the
+        // URI.create() call throws before Floci's override takes effect. Fall back to a fresh
+        // builder in that case so we can supply the normalized host ourselves.
+        DefaultDockerClientConfig.Builder builder = createDockerConfigBuilder();
+        builder.withDockerHost(dockerHost);
         config.docker().dockerConfigPath().ifPresent(path -> {
             LOG.infov("Using Docker config path: {0}", path);
             builder.withDockerConfig(path);

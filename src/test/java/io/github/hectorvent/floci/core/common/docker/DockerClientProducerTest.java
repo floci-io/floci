@@ -120,4 +120,65 @@ class DockerClientProducerTest {
         String result = DockerClientProducer.normalizeDockerHost("");
         assertEquals("", result, "Empty string input should return empty string");
     }
+
+    // --- resolveEffectiveDockerHost tests ---
+
+    /**
+     * When floci.docker.docker-host is at its default (unix socket) and DOCKER_HOST env var
+     * is set to a bare host:port, the env var should be used (normalized with tcp://).
+     * This is the Bitbucket Pipelines scenario from issue #663.
+     */
+    @Test
+    void resolveEffectiveDockerHost_dockerHostEnvBareHostPort_usesNormalizedEnv() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "unix:///var/run/docker.sock", "10.37.124.101:2375");
+        assertEquals("tcp://10.37.124.101:2375", result,
+                "Bare DOCKER_HOST env var should be normalized and used when config is at its default");
+    }
+
+    /**
+     * When floci.docker.docker-host is at its default and DOCKER_HOST env var is already
+     * a valid tcp:// URI, it should be used unchanged.
+     */
+    @Test
+    void resolveEffectiveDockerHost_dockerHostEnvTcpUri_usedDirectly() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "unix:///var/run/docker.sock", "tcp://10.37.124.101:2375");
+        assertEquals("tcp://10.37.124.101:2375", result,
+                "Valid tcp:// DOCKER_HOST env var should be used when config is at its default");
+    }
+
+    /**
+     * When floci.docker.docker-host is explicitly configured to a non-default value,
+     * that value takes priority over DOCKER_HOST env var.
+     */
+    @Test
+    void resolveEffectiveDockerHost_explicitFlociConfig_takesPriorityOverEnv() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "tcp://custom-daemon:2376", "10.37.124.101:2375");
+        assertEquals("tcp://custom-daemon:2376", result,
+                "Explicit floci.docker.docker-host should take priority over DOCKER_HOST env var");
+    }
+
+    /**
+     * When DOCKER_HOST env var is null and floci.docker.docker-host is default, use the default.
+     */
+    @Test
+    void resolveEffectiveDockerHost_noEnvVar_usesDefault() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "unix:///var/run/docker.sock", null);
+        assertEquals("unix:///var/run/docker.sock", result,
+                "Default unix socket should be used when DOCKER_HOST env var is not set");
+    }
+
+    /**
+     * When DOCKER_HOST env var is blank and floci.docker.docker-host is default, use the default.
+     */
+    @Test
+    void resolveEffectiveDockerHost_blankEnvVar_usesDefault() {
+        String result = DockerClientProducer.resolveEffectiveDockerHost(
+                "unix:///var/run/docker.sock", "");
+        assertEquals("unix:///var/run/docker.sock", result,
+                "Default unix socket should be used when DOCKER_HOST env var is blank");
+    }
 }
