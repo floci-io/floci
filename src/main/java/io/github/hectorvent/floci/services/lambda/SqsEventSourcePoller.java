@@ -212,7 +212,7 @@ public class SqsEventSourcePoller {
         }
     }
 
-    private String buildSqsEvent(List<Message> messages, EventSourceMapping esm) {
+    String buildSqsEvent(List<Message> messages, EventSourceMapping esm) {
         try {
             var records = objectMapper.createArrayNode();
             for (Message msg : messages) {
@@ -222,7 +222,9 @@ public class SqsEventSourcePoller {
                 record.put("body", msg.getBody());
                 ObjectNode attrs = record.putObject("attributes");
                 attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
-                attrs.put("SentTimestamp", String.valueOf(System.currentTimeMillis()));
+                attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
+                attrs.put("SenderId", AwsArnUtils.accountOrDefault(esm.getEventSourceArn(), "000000000000"));
+                attrs.put("ApproximateFirstReceiveTimestamp", String.valueOf(System.currentTimeMillis()));
                 record.putObject("messageAttributes");
                 record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
                 record.put("eventSource", "aws:sqs");
