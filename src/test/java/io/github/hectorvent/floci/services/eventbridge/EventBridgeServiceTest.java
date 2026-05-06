@@ -483,4 +483,73 @@ class EventBridgeServiceTest {
         assertTrue(service.matchesPattern(event, "{\"detail\":{\"status\":[{\"exists\":true}]}}"));
         assertTrue(service.matchesPattern(event, "{\"detail\":{\"other\":[{\"exists\":false}]}}"));
     }
+
+    @Test
+    void matchesPatternByAccount_matches() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
+        assertTrue(service.matchesPattern(event, "{\"account\":[\"000000000000\"]}"));
     }
+
+    @Test
+    void matchesPatternByAccount_noMatch() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
+        assertFalse(service.matchesPattern(event, "{\"account\":[\"999999999999\"]}"));
+    }
+
+    @Test
+    void matchesPatternByRegion_matches() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
+        assertTrue(service.matchesPattern(event, "{\"region\":[\"us-east-1\"]}"));
+    }
+
+    @Test
+    void matchesPatternByRegion_noMatch() {
+        Map<String, Object> event = Map.of("Source", "my.app", "DetailType", "Order");
+        assertFalse(service.matchesPattern(event, "{\"region\":[\"eu-west-1\"]}"));
+    }
+
+    @Test
+    void matchesPatternByNestedDetail_matches() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"object\":{\"path\":\"uploads/image.png\",\"size\":1024}}"
+        );
+        assertTrue(service.matchesPattern(event,
+                "{\"detail\":{\"object\":{\"path\":[{\"prefix\":\"uploads/\"}]}}}"));
+    }
+
+    @Test
+    void matchesPatternByNestedDetail_noMatch() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"object\":{\"path\":\"downloads/file.txt\",\"size\":1024}}"
+        );
+        assertFalse(service.matchesPattern(event,
+                "{\"detail\":{\"object\":{\"path\":[{\"prefix\":\"uploads/\"}]}}}"));
+    }
+
+    @Test
+    void matchesPatternByDeeplyNestedDetail() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"a\":{\"b\":{\"c\":\"deep-value\"}}}"
+        );
+        assertTrue(service.matchesPattern(event,
+                "{\"detail\":{\"a\":{\"b\":{\"c\":[\"deep-value\"]}}}}"));
+        assertFalse(service.matchesPattern(event,
+                "{\"detail\":{\"a\":{\"b\":{\"c\":[\"wrong\"]}}}}"));
+    }
+
+    @Test
+    void matchesPatternCombinesAccountRegionAndDetail() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "DetailType", "Order",
+                "Detail", "{\"status\":\"CONFIRMED\"}"
+        );
+        assertTrue(service.matchesPattern(event,
+                "{\"source\":[\"my.app\"],\"account\":[\"000000000000\"],\"region\":[\"us-east-1\"],\"detail\":{\"status\":[\"CONFIRMED\"]}}"));
+        assertFalse(service.matchesPattern(event,
+                "{\"source\":[\"my.app\"],\"account\":[\"999999999999\"],\"detail\":{\"status\":[\"CONFIRMED\"]}}"));
+    }
+}
