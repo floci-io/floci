@@ -5,13 +5,13 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateTable` | Create a table with indexes |
 | `DeleteTable` | Delete a table |
 | `DescribeTable` | Get table metadata |
 | `ListTables` | List all tables |
-| `UpdateTable` | Update throughput, indexes, streams |
 | `PutItem` | Write an item |
 | `GetItem` | Read an item by primary key |
 | `DeleteItem` | Delete an item |
@@ -20,21 +20,27 @@
 | `Scan` | Full table scan with optional filter |
 | `BatchWriteItem` | Write/delete up to 25 items across tables |
 | `BatchGetItem` | Read up to 100 items across tables |
-| `TransactWriteItems` | ACID write transaction |
-| `TransactGetItems` | ACID read transaction |
+| `UpdateTable` | Update throughput, indexes, streams |
 | `DescribeTimeToLive` | Get TTL configuration |
 | `UpdateTimeToLive` | Enable/disable TTL on a table |
+| `DescribeContinuousBackups` | Get PITR backup configuration |
+| `UpdateContinuousBackups` | Enable/disable PITR |
+| `TransactWriteItems` | ACID write transaction |
+| `TransactGetItems` | ACID read transaction |
 | `TagResource` | Tag a table |
 | `UntagResource` | Remove tags |
 | `ListTagsOfResource` | List tags |
-| `DescribeContinuousBackups` | Get PITR backup configuration |
-| `UpdateContinuousBackups` | Enable/disable PITR |
-| `DescribeKinesisStreamingDestination` | List Kinesis streaming destinations |
 | `EnableKinesisStreamingDestination` | Enable Kinesis streaming for a table |
 | `DisableKinesisStreamingDestination` | Disable Kinesis streaming for a table |
+| `DescribeKinesisStreamingDestination` | List Kinesis streaming destinations |
 | `ExportTableToPointInTime` | Export table data to S3 as gzip NDJSON |
 | `DescribeExport` | Get export status and metadata |
 | `ListExports` | List exports, optionally filtered by table ARN |
+| `ListStreams` |  |
+| `DescribeStream` |  |
+| `GetShardIterator` |  |
+| `GetRecords` |  |
+<!-- floci:actions:end -->
 
 ## Streams {#streams}
 

@@ -8,8 +8,9 @@ Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies 
 
 ## Supported Management Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateDBInstance` | Start a new database instance |
 | `DescribeDBInstances` | List instances and their connection info |
 | `DeleteDBInstance` | Stop and remove an instance |
@@ -24,6 +25,7 @@ Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies 
 | `DeleteDBParameterGroup` | Delete a parameter group |
 | `ModifyDBParameterGroup` | Update parameter group settings |
 | `DescribeDBParameters` | List parameters in a group |
+<!-- floci:actions:end -->
 
 ## Configuration
 

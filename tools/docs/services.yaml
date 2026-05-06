@@ -33,3 +33,75 @@
     - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaUrlController.java,             mode: rest }
     - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaEventInvokeController.java,     mode: rest }
     # Excluded: ApiGatewayController and LambdaUrlInvocationController are request-execution proxies, not management API.
+
+- service: acm
+  doc: docs/services/acm.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/acm/AcmJsonHandler.java, mode: switch }
+
+- service: athena
+  doc: docs/services/athena.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/athena/AthenaJsonHandler.java, mode: switch }
+
+- service: cloudformation
+  doc: docs/services/cloudformation.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/cloudformation/CloudFormationQueryHandler.java, mode: switch }
+
+- service: dynamodb
+  doc: docs/services/dynamodb.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbJsonHandler.java,        mode: switch }
+    - { path: src/main/java/io/github/hectorvent/floci/services/dynamodb/DynamoDbStreamsJsonHandler.java, mode: switch }
+
+- service: elasticache
+  doc: docs/services/elasticache.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/elasticache/ElastiCacheQueryHandler.java, mode: switch }
+
+- service: eventbridge
+  doc: docs/services/eventbridge.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/eventbridge/EventBridgeHandler.java, mode: switch }
+
+- service: firehose
+  doc: docs/services/firehose.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/firehose/FirehoseJsonHandler.java, mode: switch }
+
+- service: kinesis
+  doc: docs/services/kinesis.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/kinesis/KinesisJsonHandler.java, mode: switch }
+
+- service: kms
+  doc: docs/services/kms.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/kms/KmsJsonHandler.java, mode: switch }
+
+- service: rds
+  doc: docs/services/rds.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/rds/RdsQueryHandler.java, mode: switch }
+
+- service: sqs
+  doc: docs/services/sqs.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/sqs/SqsJsonHandler.java,  mode: switch }
+    - { path: src/main/java/io/github/hectorvent/floci/services/sqs/SqsQueryHandler.java, mode: switch }
+
+- service: ssm
+  doc: docs/services/ssm.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/ssm/SsmJsonHandler.java, mode: switch }
+
+- service: stepfunctions
+  doc: docs/services/step-functions.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/stepfunctions/StepFunctionsJsonHandler.java, mode: switch }
+
+- service: sts
+  doc: docs/services/sts.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/iam/StsQueryHandler.java, mode: switch }

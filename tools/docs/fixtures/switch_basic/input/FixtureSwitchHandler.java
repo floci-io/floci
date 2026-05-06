@@ -9,4 +9,12 @@ public class FixtureSwitchHandler {
             default -> null;
         };
     }
+
+    private Status parseStatus(String s) {
+        return switch (s.toUpperCase()) {
+            case "DISABLED" -> Status.DISABLED;
+            case "ENABLED" -> Status.ENABLED;
+            default -> Status.UNKNOWN;
+        };
+    }
 }

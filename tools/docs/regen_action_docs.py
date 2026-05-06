@@ -21,7 +21,7 @@ import yaml
 MARKER_START = "<!-- floci:actions:start -->"
 MARKER_END = "<!-- floci:actions:end -->"
 
-SWITCH_ACTION_RE = re.compile(r'^\s*case\s+"([A-Z][A-Za-z0-9]+)"\s*->', re.MULTILINE)
+SWITCH_ACTION_RE = re.compile(r'^\s*case\s+"([A-Z][a-z][A-Za-z0-9]*)"\s*->', re.MULTILINE)
 
 CLASS_PATH_RE = re.compile(r"^\s*@Path\b", re.MULTILINE)
 HTTP_ANNO_RE = re.compile(r"^\s*@(?:GET|POST|PUT|DELETE|PATCH)\b")
@@ -124,7 +124,7 @@ def parse_marker_block(md: str) -> tuple[str, dict[str, str], str]:
     return prefix, _parse_table(body), suffix
 
 
-_TABLE_ROW_RE = re.compile(r"^`([A-Z][A-Za-z0-9]+)`$")
+_TABLE_ROW_RE = re.compile(r"^`([A-Z][a-z][A-Za-z0-9]*)`$")
 _SEPARATOR_ROW_RE = re.compile(r"^\|\s*[-:|\s]+\|\s*$")
 
 

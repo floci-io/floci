@@ -5,13 +5,15 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateStateMachine` | Create a state machine (Standard or Express) |
 | `DescribeStateMachine` | Get state machine definition and metadata |
 | `ListStateMachines` | List all state machines |
 | `DeleteStateMachine` | Delete a state machine |
 | `StartExecution` | Start a new execution |
+| `StartSyncExecution` |  |
 | `DescribeExecution` | Get execution status and output |
 | `ListExecutions` | List executions for a state machine |
 | `StopExecution` | Stop a running execution |
@@ -19,6 +21,12 @@
 | `SendTaskSuccess` | Report task success (for `.waitForTaskToken` tasks) |
 | `SendTaskFailure` | Report task failure |
 | `SendTaskHeartbeat` | Send a heartbeat for long-running tasks |
+| `CreateActivity` |  |
+| `DeleteActivity` |  |
+| `DescribeActivity` |  |
+| `ListActivities` |  |
+| `GetActivityTask` |  |
+<!-- floci:actions:end -->
 
 ## Examples
 

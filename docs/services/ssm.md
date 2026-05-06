@@ -5,8 +5,9 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `PutParameter` | Create or update a parameter |
 | `GetParameter` | Get a single parameter by name |
 | `GetParameters` | Get multiple parameters by name |
@@ -19,6 +20,7 @@
 | `AddTagsToResource` | Tag a parameter |
 | `ListTagsForResource` | List tags on a parameter |
 | `RemoveTagsFromResource` | Remove tags from a parameter |
+<!-- floci:actions:end -->
 
 ## Configuration
 

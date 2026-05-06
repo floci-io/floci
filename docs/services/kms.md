@@ -5,9 +5,11 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateKey` | Create a new KMS key |
+| `GetPublicKey` |  |
 | `DescribeKey` | Get key metadata |
 | `ListKeys` | List all keys |
 | `Encrypt` | Encrypt plaintext with a key |
@@ -30,6 +32,7 @@
 | `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
 | `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
 | `DisableKeyRotation` | Disable automatic key rotation |
+<!-- floci:actions:end -->
 
 ## Examples
 

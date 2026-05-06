@@ -5,29 +5,29 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
+| `DescribeStacks` | Get stack status and outputs |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources |
-| `DescribeStacks` | Get stack status and outputs |
-| `ListStacks` | List stacks by status |
-| `DescribeStackEvents` | Get stack creation/update event history |
-| `DescribeStackResources` | Get all resources in a stack |
-| `DescribeStackResource` | Get a specific stack resource |
-| `ListStackResources` | List resource summaries |
-| `GetTemplate` | Retrieve the template body |
-| `ValidateTemplate` | Validate a template without deploying |
 | `CreateChangeSet` | Create a change set |
 | `DescribeChangeSet` | Get change set details |
 | `ExecuteChangeSet` | Apply a change set |
-| `ListChangeSets` | List change sets for a stack |
 | `DeleteChangeSet` | Delete a change set |
+| `ListChangeSets` | List change sets for a stack |
+| `DescribeStackEvents` | Get stack creation/update event history |
+| `DescribeStackResources` | Get all resources in a stack |
+| `ListStackResources` | List resource summaries |
+| `GetTemplate` | Retrieve the template body |
+| `ValidateTemplate` | Validate a template without deploying |
+| `ListStacks` | List stacks by status |
+| `ListExports` |  |
 | `SetStackPolicy` | Set a stack policy |
 | `GetStackPolicy` | Retrieve the current stack policy |
-| `ListStackSets` | List StackSets |
-| `DescribeStackSet` | Get StackSet details |
-| `CreateStackSet` | Create a new StackSet |
+| `DescribeStackResource` | Get a specific stack resource |
+<!-- floci:actions:end -->
 
 ## Supported Resource Types
 

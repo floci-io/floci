@@ -5,8 +5,9 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateEventBus` | Create a custom event bus |
 | `DeleteEventBus` | Delete an event bus |
 | `DescribeEventBus` | Get event bus details |
@@ -21,6 +22,12 @@
 | `RemoveTargets` | Remove targets from a rule |
 | `ListTargetsByRule` | List targets for a rule |
 | `PutEvents` | Publish custom events to an event bus |
+| `ListTagsForResource` |  |
+| `TagResource` |  |
+| `UntagResource` |  |
+| `PutPermission` |  |
+| `RemovePermission` |  |
+<!-- floci:actions:end -->
 
 ## Examples
 
