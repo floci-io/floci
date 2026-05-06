@@ -7,8 +7,9 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateCluster` | Spawns a new Redpanda container for the cluster |
 | `CreateClusterV2` | Modern serverless/provisioned creation (mapped to provisioned) |
 | `ListClusters` | List all emulated clusters |
@@ -17,6 +18,7 @@ Floci emulates Amazon MSK by orchestrating **Redpanda** containers. This provide
 | `DescribeClusterV2` | Get cluster metadata and state using V2 API |
 | `DeleteCluster` | Stops and removes the Redpanda container |
 | `GetBootstrapBrokers` | Get the connection strings for the cluster |
+<!-- floci:actions:end -->
 
 ## Configuration
 

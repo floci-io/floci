@@ -7,25 +7,42 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 
 ## Supported Actions
 
-### Data Catalog
-
-| Area | Actions |
-|---|---|
-| Databases | `CreateDatabase` · `GetDatabase` · `GetDatabases` |
-| Tables | `CreateTable` · `GetTable` · `GetTables` · `DeleteTable` |
-| Partitions | `CreatePartition` · `GetPartitions` |
-
-### Schema Registry
-
-| Area | Actions |
-|---|---|
-| Registries | `CreateRegistry` · `GetRegistry` · `ListRegistries` · `UpdateRegistry` · `DeleteRegistry` |
-| Schemas | `CreateSchema` · `GetSchema` · `ListSchemas` · `UpdateSchema` · `DeleteSchema` |
-| Versions | `RegisterSchemaVersion` · `GetSchemaByDefinition` · `GetSchemaVersion` · `ListSchemaVersions` · `DeleteSchemaVersions` · `GetSchemaVersionsDiff` · `CheckSchemaVersionValidity` |
-| Metadata and tags | `PutSchemaVersionMetadata` · `RemoveSchemaVersionMetadata` · `QuerySchemaVersionMetadata` · `TagResource` · `UntagResource` · `GetTags` |
-
-Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes are `NONE`, `DISABLED`, `BACKWARD`, `BACKWARD_ALL`, `FORWARD`, `FORWARD_ALL`, `FULL`, and `FULL_ALL`.
-
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateDatabase` |  |
+| `GetDatabase` |  |
+| `GetDatabases` |  |
+| `CreateTable` |  |
+| `GetTable` |  |
+| `GetTables` |  |
+| `DeleteTable` |  |
+| `CreatePartition` |  |
+| `GetPartitions` |  |
+| `CreateRegistry` |  |
+| `GetRegistry` |  |
+| `ListRegistries` |  |
+| `UpdateRegistry` |  |
+| `DeleteRegistry` |  |
+| `CreateSchema` |  |
+| `RegisterSchemaVersion` |  |
+| `GetSchemaByDefinition` |  |
+| `GetSchemaVersion` |  |
+| `GetSchema` |  |
+| `UpdateSchema` |  |
+| `ListSchemas` |  |
+| `ListSchemaVersions` |  |
+| `DeleteSchema` |  |
+| `DeleteSchemaVersions` |  |
+| `GetSchemaVersionsDiff` |  |
+| `CheckSchemaVersionValidity` |  |
+| `PutSchemaVersionMetadata` |  |
+| `RemoveSchemaVersionMetadata` |  |
+| `QuerySchemaVersionMetadata` |  |
+| `TagResource` |  |
+| `UntagResource` |  |
+| `GetTags` |  |
+<!-- floci:actions:end -->
 ## Integration with Athena
 
 The Glue Data Catalog is automatically used by **Athena** to resolve table names to S3 locations and formats. When you submit an Athena query, Floci reads all Glue tables for the target database and generates DuckDB views on top of the underlying S3 objects before executing the SQL.

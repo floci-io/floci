@@ -7,40 +7,59 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 
 ## Supported Actions
 
-| Action                              | Description                                               |
-|-------------------------------------|-----------------------------------------------------------|
-| `VerifyEmailIdentity`               | Mark an email address as verified                         |
-| `VerifyEmailAddress`                | Legacy alias for email verification                       |
-| `VerifyDomainIdentity`              | Mark a domain as verified and return a verification token |
-| `DeleteIdentity`                    | Delete an email or domain identity                        |
-| `ListIdentities`                    | List verified identities                                  |
-| `GetIdentityVerificationAttributes` | Get verification status for one or more identities        |
-| `SendEmail`                         | Send a structured email with text or HTML body            |
-| `SendRawEmail`                      | Send a raw MIME payload                                   |
-| `SendTemplatedEmail`                | Send an email by resolving a stored template             |
-| `SendBulkTemplatedEmail`            | Send a templated email to multiple destinations          |
-| `CreateTemplate`                    | Create an email template with subject / text / html parts |
-| `GetTemplate`                       | Read a stored template                                    |
-| `UpdateTemplate`                    | Replace the content of a stored template                  |
-| `DeleteTemplate`                    | Remove a stored template                                  |
-| `ListTemplates`                     | List stored templates                                     |
-| `TestRenderTemplate`                | Render a stored template against supplied data, returning the MIME message |
-| `GetSendQuota`                      | Return local send quota counters                          |
-| `GetSendStatistics`                 | Return aggregate delivery stats for sent messages         |
-| `GetAccountSendingEnabled`          | Report whether sending is enabled                         |
-| `ListVerifiedEmailAddresses`        | List verified email identities                            |
-| `DeleteVerifiedEmailAddress`        | Delete a verified email identity                          |
-| `SetIdentityNotificationTopic`      | Store SNS notification topic ARNs for an identity         |
-| `GetIdentityNotificationAttributes` | Read stored notification topic settings                   |
-| `SetIdentityFeedbackForwardingEnabled`     | Toggle feedback forwarding for an identity        |
-| `SetIdentityHeadersInNotificationsEnabled` | Toggle headers-in-notifications per notification type |
-| `SetIdentityMailFromDomain`         | Set or clear the MAIL FROM domain for an identity         |
-| `GetIdentityMailFromDomainAttributes` | Read MAIL FROM domain settings                          |
-| `GetIdentityDkimAttributes`         | Return DKIM status for identities                         |
-| `CreateConfigurationSet`            | Create a configuration set                                |
-| `DescribeConfigurationSet`          | Read a configuration set                                  |
-| `ListConfigurationSets`             | List configuration sets                                   |
-| `DeleteConfigurationSet`            | Delete a configuration set                                |
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `VerifyEmailIdentity` | Mark an email address as verified |
+| `VerifyEmailAddress` | Legacy alias for email verification |
+| `VerifyDomainIdentity` | Mark a domain as verified and return a verification token |
+| `DeleteIdentity` | Delete an email or domain identity |
+| `ListIdentities` | List verified identities |
+| `GetIdentityVerificationAttributes` | Get verification status for one or more identities |
+| `SendEmail` | Send a structured email with text or HTML body |
+| `SendRawEmail` | Send a raw MIME payload |
+| `GetSendQuota` | Return local send quota counters |
+| `GetSendStatistics` | Return aggregate delivery stats for sent messages |
+| `GetAccountSendingEnabled` | Report whether sending is enabled |
+| `ListVerifiedEmailAddresses` | List verified email identities |
+| `DeleteVerifiedEmailAddress` | Delete a verified email identity |
+| `SetIdentityNotificationTopic` | Store SNS notification topic ARNs for an identity |
+| `GetIdentityNotificationAttributes` | Read stored notification topic settings |
+| `SetIdentityFeedbackForwardingEnabled` |  |
+| `SetIdentityHeadersInNotificationsEnabled` |  |
+| `SetIdentityMailFromDomain` |  |
+| `GetIdentityMailFromDomainAttributes` |  |
+| `GetIdentityDkimAttributes` | Return DKIM status for identities |
+| `CreateTemplate` | Create an email template with subject / text / html parts |
+| `UpdateTemplate` | Replace the content of a stored template |
+| `GetTemplate` | Read a stored template |
+| `DeleteTemplate` | Remove a stored template |
+| `ListTemplates` | List stored templates |
+| `SendTemplatedEmail` | Send an email by resolving a stored template |
+| `SendBulkTemplatedEmail` | Send a templated email to multiple destinations |
+| `TestRenderTemplate` | Render a stored template against supplied data, returning the MIME message |
+| `CreateConfigurationSet` | Create a configuration set |
+| `DescribeConfigurationSet` | Read a configuration set |
+| `ListConfigurationSets` | List configuration sets |
+| `DeleteConfigurationSet` | Delete a configuration set |
+| `CreateEmailIdentity` |  |
+| `ListEmailIdentities` |  |
+| `GetEmailIdentity` |  |
+| `DeleteEmailIdentity` |  |
+| `PutEmailIdentityDkimAttributes` |  |
+| `PutEmailIdentityMailFromAttributes` |  |
+| `PutEmailIdentityFeedbackAttributes` |  |
+| `SendBulkEmail` |  |
+| `CreateEmailTemplate` |  |
+| `ListEmailTemplates` |  |
+| `GetEmailTemplate` |  |
+| `UpdateEmailTemplate` |  |
+| `DeleteEmailTemplate` |  |
+| `TestRenderEmailTemplate` |  |
+| `GetConfigurationSet` |  |
+| `GetAccount` |  |
+| `PutAccountSendingAttributes` |  |
+<!-- floci:actions:end -->
 
 ## Configuration
 
@@ -170,30 +189,3 @@ curl $AWS_ENDPOINT_URL/_aws/ses
 
 Alongside the classic Query API, Floci implements a subset of the SES v2 REST JSON API used by `aws sesv2 ...` commands and SDK v2 clients that target the modern SES surface.
 
-### Supported Operations
-
-| Method | Path | Action |
-|---|---|---|
-| `POST` | `/v2/email/identities` | `CreateEmailIdentity` |
-| `GET` | `/v2/email/identities` | `ListEmailIdentities` |
-| `GET` | `/v2/email/identities/{emailIdentity}` | `GetEmailIdentity` |
-| `DELETE` | `/v2/email/identities/{emailIdentity}` | `DeleteEmailIdentity` |
-| `PUT` | `/v2/email/identities/{emailIdentity}/dkim` | `PutEmailIdentityDkimAttributes` |
-| `PUT` | `/v2/email/identities/{emailIdentity}/feedback` | `PutEmailIdentityFeedbackAttributes` |
-| `PUT` | `/v2/email/identities/{emailIdentity}/mail-from` | `PutEmailIdentityMailFromAttributes` |
-| `POST` | `/v2/email/outbound-emails` | `SendEmail` (simple / raw / templated) |
-| `POST` | `/v2/email/outbound-bulk-emails` | `SendBulkEmail` (templated, multiple destinations) |
-| `GET` | `/v2/email/account` | `GetAccount` |
-| `PUT` | `/v2/email/account/sending` | `PutAccountSendingAttributes` |
-| `POST` | `/v2/email/templates` | `CreateEmailTemplate` |
-| `GET` | `/v2/email/templates` | `ListEmailTemplates` |
-| `GET` | `/v2/email/templates/{templateName}` | `GetEmailTemplate` |
-| `PUT` | `/v2/email/templates/{templateName}` | `UpdateEmailTemplate` |
-| `DELETE` | `/v2/email/templates/{templateName}` | `DeleteEmailTemplate` |
-| `POST` | `/v2/email/templates/{templateName}/render` | `TestRenderEmailTemplate` |
-| `POST` | `/v2/email/configuration-sets` | `CreateConfigurationSet` |
-| `GET` | `/v2/email/configuration-sets` | `ListConfigurationSets` |
-| `GET` | `/v2/email/configuration-sets/{name}` | `GetConfigurationSet` |
-| `DELETE` | `/v2/email/configuration-sets/{name}` | `DeleteConfigurationSet` |
-
-Identity, template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.

@@ -11,17 +11,61 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 
 ## Supported Actions
 
-| Category | Actions |
-|---|---|
-| **User Pools** | CreateUserPool, DescribeUserPool, ListUserPools, UpdateUserPool, DeleteUserPool |
-| **User Pool Tags** | TagResource, UntagResource, ListTagsForResource |
-| **User Pool Clients** | CreateUserPoolClient, DescribeUserPoolClient, ListUserPoolClients, DeleteUserPoolClient |
-| **Resource Servers** | CreateResourceServer, DescribeResourceServer, ListResourceServers, DeleteResourceServer |
-| **Admin User Management** | AdminCreateUser, AdminGetUser, AdminDeleteUser, AdminSetUserPassword, AdminUpdateUserAttributes |
-| **User Operations** | SignUp, ConfirmSignUp, GetUser, UpdateUserAttributes, ChangePassword, ForgotPassword, ConfirmForgotPassword |
-| **Authentication** | InitiateAuth, AdminInitiateAuth, RespondToAuthChallenge (supports USER_PASSWORD_AUTH, USER_SRP_AUTH, ADMIN_USER_SRP_AUTH) |
-| **User Listing** | ListUsers |
-| **Groups** | CreateGroup, GetGroup, ListGroups, DeleteGroup, AdminAddUserToGroup, AdminRemoveUserFromGroup, AdminListGroupsForUser |
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateUserPool` |  |
+| `DescribeUserPool` |  |
+| `ListUserPools` |  |
+| `UpdateUserPool` |  |
+| `TagResource` |  |
+| `UntagResource` |  |
+| `ListTagsForResource` |  |
+| `GetUserPoolMfaConfig` |  |
+| `DeleteUserPool` |  |
+| `CreateUserPoolClient` |  |
+| `DescribeUserPoolClient` |  |
+| `ListUserPoolClients` |  |
+| `DeleteUserPoolClient` |  |
+| `UpdateUserPoolClient` |  |
+| `CreateResourceServer` |  |
+| `DescribeResourceServer` |  |
+| `ListResourceServers` |  |
+| `UpdateResourceServer` |  |
+| `DeleteResourceServer` |  |
+| `AdminResetUserPassword` |  |
+| `AdminCreateUser` |  |
+| `AdminGetUser` |  |
+| `AdminDeleteUser` |  |
+| `AdminSetUserPassword` |  |
+| `AdminUpdateUserAttributes` |  |
+| `AdminUserGlobalSignOut` |  |
+| `AdminEnableUser` |  |
+| `AdminDisableUser` |  |
+| `ListUsers` |  |
+| `InitiateAuth` |  |
+| `AdminInitiateAuth` |  |
+| `RespondToAuthChallenge` |  |
+| `AdminRespondToAuthChallenge` |  |
+| `SignUp` |  |
+| `ConfirmSignUp` |  |
+| `ChangePassword` |  |
+| `ForgotPassword` |  |
+| `ConfirmForgotPassword` |  |
+| `GetUser` |  |
+| `UpdateUserAttributes` |  |
+| `CreateGroup` |  |
+| `GetGroup` |  |
+| `ListGroups` |  |
+| `DeleteGroup` |  |
+| `AdminAddUserToGroup` |  |
+| `AdminRemoveUserFromGroup` |  |
+| `AdminListGroupsForUser` |  |
+| `GetTokensFromRefreshToken` |  |
+| `ListUserPoolClientSecrets` |  |
+| `AddUserPoolClientSecret` |  |
+| `DeleteUserPoolClientSecret` |  |
+<!-- floci:actions:end -->
 
 ## Well-Known And OAuth Endpoints
 

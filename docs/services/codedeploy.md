@@ -11,68 +11,47 @@ Floci implements the CodeDeploy API — stored-state management for applications
 - `arn:aws:codedeploy:<region>:<account>:deploymentconfig:<name>`
 - `arn:aws:codedeploy:<region>:<account>:deployment:<id>`
 
-## Supported Operations (30 total)
+## Supported Actions
 
-### Applications
-
-| Operation | Notes |
-|---|---|
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
 | `CreateApplication` | Supports `computePlatform`: `Server`, `Lambda`, `ECS` |
 | `GetApplication` | Returns application metadata |
 | `UpdateApplication` | Renames an application |
 | `DeleteApplication` | Removes application and all its deployment groups |
 | `ListApplications` | Returns all application names |
 | `BatchGetApplications` | Returns info for multiple applications |
-
-### Deployment Groups
-
-| Operation | Notes |
-|---|---|
 | `CreateDeploymentGroup` | Stores group config; supports `ecsServices` and `loadBalancerInfo` for ECS blue/green; deployment config defaults to `CodeDeployDefault.OneAtATime` |
 | `GetDeploymentGroup` | Returns group metadata |
 | `UpdateDeploymentGroup` | Partial update; supports rename via `newDeploymentGroupName` |
 | `DeleteDeploymentGroup` | Returns `hooksNotCleanedUp: []` |
 | `ListDeploymentGroups` | Returns all group names for an application |
 | `BatchGetDeploymentGroups` | Returns info for multiple groups |
-
-### Deployment Configs
-
-| Operation | Notes |
-|---|---|
 | `CreateDeploymentConfig` | Creates a custom config; names starting with `CodeDeployDefault.` are rejected |
 | `GetDeploymentConfig` | Returns config including built-ins |
 | `DeleteDeploymentConfig` | Custom configs only; built-ins cannot be deleted |
 | `ListDeploymentConfigs` | Returns all configs including all 17 pre-seeded built-ins |
-
-### Deployment Execution
-
-| Operation | Notes |
-|---|---|
+| `TagResource` | Tags any resource by ARN |
+| `UntagResource` | Removes specific tag keys |
+| `ListTagsForResource` | Returns tags for a resource ARN |
 | `CreateDeployment` | Starts a real Lambda or ECS blue/green deployment; shifts traffic via alias weights (Lambda) or ELB listener rules (ECS); invokes lifecycle hooks |
 | `GetDeployment` | Returns current deployment state; poll `status` until `Succeeded`, `Failed`, or `Stopped` |
+| `ListDeployments` | Returns deployment IDs filtered by application, group, or status |
 | `StopDeployment` | Signals an in-progress deployment to stop; transitions to `Stopped` |
 | `ContinueDeployment` | Accepted (no-op for fully automated deployments) |
-| `ListDeployments` | Returns deployment IDs filtered by application, group, or status |
 | `BatchGetDeployments` | Returns info for multiple deployments |
 | `ListDeploymentTargets` | Returns target IDs for a deployment |
 | `BatchGetDeploymentTargets` | Returns target details including lifecycle event status |
 | `PutLifecycleEventHookExecutionStatus` | Called by lifecycle hook Lambda to report `Succeeded` or `Failed`; failure triggers auto-rollback |
-
-### Tagging
-
-| Operation | Notes |
-|---|---|
-| `TagResource` | Tags any resource by ARN |
-| `UntagResource` | Removes specific tag keys |
-| `ListTagsForResource` | Returns tags for a resource ARN |
-
-### On-Premises (no-op)
-
-| Operation | Notes |
-|---|---|
-| `AddTagsToOnPremisesInstances` | Accepted, no-op |
-| `RemoveTagsFromOnPremisesInstances` | Accepted, no-op |
-
+| `RegisterOnPremisesInstance` |  |
+| `DeregisterOnPremisesInstance` |  |
+| `GetOnPremisesInstance` |  |
+| `BatchGetOnPremisesInstances` |  |
+| `ListOnPremisesInstances` |  |
+| `AddTagsToOnPremisesInstances` |  |
+| `RemoveTagsFromOnPremisesInstances` |  |
+<!-- floci:actions:end -->
 ## Pre-seeded Built-in Deployment Configs
 
 The following 17 configurations are always available (matching real AWS):

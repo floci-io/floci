@@ -5,20 +5,19 @@
 
 ## Supported Actions
 
-| Action | Method | Path | Description |
-|---|---|---|---|
-| `CreateScheduleGroup` | `POST` | `/schedule-groups/{Name}` | Create a schedule group |
-| `GetScheduleGroup` | `GET` | `/schedule-groups/{Name}` | Get schedule group details |
-| `DeleteScheduleGroup` | `DELETE` | `/schedule-groups/{Name}` | Delete a schedule group and its schedules |
-| `ListScheduleGroups` | `GET` | `/schedule-groups` | List schedule groups |
-| `CreateSchedule` | `POST` | `/schedules/{Name}` | Create a schedule |
-| `GetSchedule` | `GET` | `/schedules/{Name}` | Get schedule details |
-| `UpdateSchedule` | `PUT` | `/schedules/{Name}` | Update a schedule |
-| `DeleteSchedule` | `DELETE` | `/schedules/{Name}` | Delete a schedule |
-| `ListSchedules` | `GET` | `/schedules` | List schedules |
-| `TagResource` | `POST` | `/tags/{ResourceArn}` | Add tags to a schedule group |
-| `UntagResource` | `DELETE` | `/tags/{ResourceArn}?TagKeys=...` | Remove tags from a schedule group |
-| `ListTagsForResource` | `GET` | `/tags/{ResourceArn}` | List tags on a schedule group |
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateScheduleGroup` | `POST` |
+| `GetScheduleGroup` | `GET` |
+| `DeleteScheduleGroup` | `DELETE` |
+| `ListScheduleGroups` | `GET` |
+| `CreateSchedule` | `POST` |
+| `GetSchedule` | `GET` |
+| `UpdateSchedule` | `PUT` |
+| `DeleteSchedule` | `DELETE` |
+| `ListSchedules` | `GET` |
+<!-- floci:actions:end -->
 
 ## Schedule Invocation
 

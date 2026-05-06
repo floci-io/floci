@@ -11,53 +11,32 @@ Floci implements the CodeBuild API — stored-state management plus real build e
 - `arn:aws:codebuild:<region>:<account>:token/<type>-<uuid>`
 - `arn:aws:codebuild:<region>:<account>:build/<project>:<uuid>`
 
-## Supported Operations (20 total)
+## Supported Actions
 
-### Projects
-
-| Operation | Notes |
-|---|---|
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
 | `CreateProject` | Stores project config; requires `name`, `source.type`, `artifacts.type`, `environment`, `serviceRole` |
 | `UpdateProject` | Partial update — only supplied fields are modified |
 | `DeleteProject` | Removes project by name |
 | `BatchGetProjects` | Returns found projects and a `projectsNotFound` list |
 | `ListProjects` | Returns all project names in the region |
-
-### Build Execution
-
-| Operation | Notes |
-|---|---|
+| `CreateReportGroup` | Stores report group config |
+| `UpdateReportGroup` | Partial update by ARN |
+| `DeleteReportGroup` | Removes report group by ARN |
+| `BatchGetReportGroups` | Returns found report groups and a `reportGroupsNotFound` list |
+| `ListReportGroups` | Returns all report group ARNs in the region |
+| `ImportSourceCredentials` | Stores server type and auth type; deduplicated by `serverType+authType`; token is accepted but not returned |
+| `ListSourceCredentials` | Returns stored credential metadata (no tokens) |
+| `DeleteSourceCredentials` | Removes source credentials by ARN |
+| `ListCuratedEnvironmentImages` | Returns a static list of standard CodeBuild images for AL2 and Ubuntu |
 | `StartBuild` | Launches a real Docker container using the project's image; runs buildspec phases (`INSTALL`, `PRE_BUILD`, `BUILD`, `POST_BUILD`); returns immediately with `IN_PROGRESS` status |
 | `BatchGetBuilds` | Returns current build state; poll until `buildComplete` is `true` |
 | `ListBuilds` | Returns all build IDs in the region, most recent first |
 | `ListBuildsForProject` | Returns build IDs for a specific project |
 | `StopBuild` | Signals a running build to stop; build transitions to `STOPPED` |
 | `RetryBuild` | Starts a new build using the same config as a completed build; returns a new build record |
-
-### Report Groups
-
-| Operation | Notes |
-|---|---|
-| `CreateReportGroup` | Stores report group config |
-| `UpdateReportGroup` | Partial update by ARN |
-| `DeleteReportGroup` | Removes report group by ARN |
-| `BatchGetReportGroups` | Returns found report groups and a `reportGroupsNotFound` list |
-| `ListReportGroups` | Returns all report group ARNs in the region |
-
-### Source Credentials
-
-| Operation | Notes |
-|---|---|
-| `ImportSourceCredentials` | Stores server type and auth type; deduplicated by `serverType+authType`; token is accepted but not returned |
-| `ListSourceCredentials` | Returns stored credential metadata (no tokens) |
-| `DeleteSourceCredentials` | Removes source credentials by ARN |
-
-### Images
-
-| Operation | Notes |
-|---|---|
-| `ListCuratedEnvironmentImages` | Returns a static list of standard CodeBuild images for AL2 and Ubuntu |
-
+<!-- floci:actions:end -->
 ## Build Execution Model
 
 Each `StartBuild` call:

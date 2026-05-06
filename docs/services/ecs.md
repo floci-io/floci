@@ -5,35 +5,24 @@
 
 ECS emulates clusters, task definitions, tasks, and services. In the default configuration tasks run as real Docker containers. Set `mock: true` (enabled automatically in tests) to run tasks as in-process stubs without Docker.
 
-## Supported Operations
+## Supported Actions
 
-### Clusters
-
-| Operation | Description |
-|---|---|
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
 | `CreateCluster` | Create a cluster (idempotent) |
 | `DescribeClusters` | Describe one or more clusters |
 | `ListClusters` | List cluster ARNs |
+| `DeleteCluster` | Delete an empty cluster |
 | `UpdateCluster` | Update cluster settings |
 | `UpdateClusterSettings` | Update `containerInsights` and other settings |
 | `PutClusterCapacityProviders` | Associate capacity providers with a cluster |
-| `DeleteCluster` | Delete an empty cluster |
-
-### Task Definitions
-
-| Operation | Description |
-|---|---|
 | `RegisterTaskDefinition` | Register a new revision of a task definition |
 | `DescribeTaskDefinition` | Describe a task definition by family:revision or ARN |
 | `ListTaskDefinitions` | List task definition ARNs |
 | `ListTaskDefinitionFamilies` | List task definition family names |
 | `DeregisterTaskDefinition` | Mark a revision INACTIVE |
 | `DeleteTaskDefinitions` | Delete one or more task definitions |
-
-### Tasks
-
-| Operation | Description |
-|---|---|
 | `RunTask` | Launch one or more task instances |
 | `StartTask` | Start a task on specific container instances |
 | `StopTask` | Stop a running task |
@@ -41,68 +30,15 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 | `ListTasks` | List task ARNs (filterable by cluster, family, service, status) |
 | `UpdateTaskProtection` | Set scale-in protection for tasks |
 | `GetTaskProtection` | Get current task protection state |
-
-### Services
-
-| Operation | Description |
-|---|---|
 | `CreateService` | Create a long-running service |
 | `UpdateService` | Update desired count, task definition, or deployment config |
 | `DeleteService` | Delete a service (supports `force`) |
 | `DescribeServices` | Describe one or more services |
 | `ListServices` | List service ARNs in a cluster |
 | `ListServicesByNamespace` | List services filtered by Cloud Map namespace |
-
-### Task Sets
-
-| Operation | Description |
-|---|---|
-| `CreateTaskSet` | Create a task set inside a service |
-| `UpdateTaskSet` | Update a task set's scale |
-| `DeleteTaskSet` | Delete a task set |
-| `DescribeTaskSets` | Describe task sets for a service |
-| `UpdateServicePrimaryTaskSet` | Promote a task set to primary |
-
-### Container Instances
-
-| Operation | Description |
-|---|---|
-| `RegisterContainerInstance` | Register a container instance with a cluster |
-| `DeregisterContainerInstance` | Deregister a container instance |
-| `DescribeContainerInstances` | Describe container instances |
-| `ListContainerInstances` | List container instance ARNs |
-| `UpdateContainerAgent` | Trigger agent update (stub) |
-| `UpdateContainerInstancesState` | Drain or activate container instances |
-
-### Capacity Providers
-
-| Operation | Description |
-|---|---|
-| `CreateCapacityProvider` | Create a custom capacity provider |
-| `UpdateCapacityProvider` | Update a capacity provider |
-| `DeleteCapacityProvider` | Delete a capacity provider |
-| `DescribeCapacityProviders` | Describe capacity providers (includes FARGATE built-ins) |
-
-### Service Deployments & Revisions
-
-| Operation | Description |
-|---|---|
-| `DescribeServiceDeployments` | Describe service deployments |
-| `ListServiceDeployments` | List service deployment ARNs |
-| `DescribeServiceRevisions` | Describe service revisions |
-
-### Tags
-
-| Operation | Description |
-|---|---|
 | `TagResource` | Add tags to a cluster, service, task, or task definition |
 | `UntagResource` | Remove tags from a resource |
 | `ListTagsForResource` | List tags on a resource |
-
-### Account Settings & Attributes
-
-| Operation | Description |
-|---|---|
 | `PutAccountSetting` | Set an account-level setting for the calling user |
 | `PutAccountSettingDefault` | Set the default account-level setting |
 | `DeleteAccountSetting` | Delete an account setting |
@@ -110,16 +46,29 @@ ECS emulates clusters, task definitions, tasks, and services. In the default con
 | `PutAttributes` | Set custom key-value attributes on resources |
 | `DeleteAttributes` | Remove attributes from resources |
 | `ListAttributes` | List resources with a given attribute |
-
-### Agent / State Change Stubs
-
-| Operation | Description |
-|---|---|
+| `RegisterContainerInstance` | Register a container instance with a cluster |
+| `DeregisterContainerInstance` | Deregister a container instance |
+| `DescribeContainerInstances` | Describe container instances |
+| `ListContainerInstances` | List container instance ARNs |
+| `UpdateContainerAgent` | Trigger agent update (stub) |
+| `UpdateContainerInstancesState` | Drain or activate container instances |
+| `CreateCapacityProvider` | Create a custom capacity provider |
+| `UpdateCapacityProvider` | Update a capacity provider |
+| `DeleteCapacityProvider` | Delete a capacity provider |
+| `DescribeCapacityProviders` | Describe capacity providers (includes FARGATE built-ins) |
+| `CreateTaskSet` | Create a task set inside a service |
+| `UpdateTaskSet` | Update a task set's scale |
+| `DeleteTaskSet` | Delete a task set |
+| `DescribeTaskSets` | Describe task sets for a service |
+| `UpdateServicePrimaryTaskSet` | Promote a task set to primary |
+| `DescribeServiceDeployments` | Describe service deployments |
+| `ListServiceDeployments` | List service deployment ARNs |
+| `DescribeServiceRevisions` | Describe service revisions |
 | `SubmitTaskStateChange` | Agent callback stub |
 | `SubmitContainerStateChange` | Agent callback stub |
 | `SubmitAttachmentStateChanges` | Agent callback stub |
 | `DiscoverPollEndpoint` | Returns the agent polling endpoint |
-
+<!-- floci:actions:end -->
 ## Configuration
 
 ```yaml

@@ -207,6 +207,21 @@ def _process_entry(entry: ServiceEntry) -> tuple[bool, list[str]]:
     return False, orphans
 
 
+def _find_unregistered_handlers(repo_root: Path, entries: list[ServiceEntry]) -> list[str]:
+    """Return paths (relative to repo) of *Handler.java files that aren't in the registry
+    but do produce actions (so they're a real handler, not a helper)."""
+    services_root = repo_root / "src/main/java/io/github/hectorvent/floci/services"
+    registered = {s.path.resolve() for entry in entries for s in entry.sources}
+    unregistered: list[str] = []
+    for path in sorted(services_root.glob("*/[A-Z]*Handler.java")):
+        if path.resolve() in registered:
+            continue
+        if not extract_switch_actions(path.read_text()):
+            continue
+        unregistered.append(str(path.relative_to(repo_root)))
+    return unregistered
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -232,6 +247,11 @@ def main(argv: list[str] | None = None) -> int:
             warnings.append(
                 f"{entry.service}: action '{orphan}' in marker block but not in source"
             )
+
+    for handler in _find_unregistered_handlers(repo_root, entries):
+        warnings.append(
+            f"unregistered handler '{handler}' produces actions but is not listed in tools/docs/services.yaml"
+        )
 
     for w in warnings:
         print(f"warning: {w}", file=sys.stderr)

@@ -4,6 +4,37 @@
 **Endpoint:** `http://localhost:4566/2021-01-01/...`  
 **Credential scope:** `es`
 
+## Supported Actions
+
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateDomain` | Create a new domain |
+| `DescribeDomain` | Get domain details |
+| `DescribeDomains` | Batch describe domains |
+| `ListDomainNames` | List all domains (supports `?engineType=` filter) |
+| `DescribeDomainConfig` | Get domain configuration |
+| `UpdateDomainConfig` | Update cluster config, EBS options, engine version |
+| `DeleteDomain` | Delete a domain |
+| `AddTags` | Add tags to a domain by ARN |
+| `ListTags` | List tags for a domain |
+| `RemoveTags` | Remove tag keys from a domain |
+| `ListVersions` | List supported engine versions |
+| `GetCompatibleVersions` | List valid upgrade paths |
+| `ListInstanceTypeDetails` | List available instance types |
+| `DescribeInstanceTypeLimits` | Get limits for an instance type |
+| `DescribeDomainChangeProgress` | Returns empty `ChangeProgressStatus` |
+| `DescribeDomainAutoTunes` | Returns empty `AutoTunes` list |
+| `DescribeDryRunProgress` | Returns empty `DryRunProgressStatus` |
+| `DescribeDomainHealth` | Returns `ClusterHealth: Green` |
+| `GetUpgradeHistory` | Returns empty list |
+| `GetUpgradeStatus` | Returns `StepStatus: SUCCEEDED` |
+| `UpgradeDomain` | Stores new engine version, returns immediately with a generated `UpgradeId` |
+| `CancelDomainConfigChange` | Returns empty `CancelledChangeIds` |
+| `StartServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
+| `CancelServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
+<!-- floci:actions:end -->
+
 ## Implementation Modes
 
 OpenSearch supports two modes controlled by `FLOCI_SERVICES_OPENSEARCH_MOCK`.
@@ -30,52 +61,6 @@ services:
     environment:
       FLOCI_SERVICES_DOCKER_NETWORK: my_project_default
 ```
-
-## Supported Operations
-
-### Domain Lifecycle
-
-| Operation | Method + Path | Description |
-|---|---|---|
-| `CreateDomain` | `POST /2021-01-01/opensearch/domain` | Create a new domain |
-| `DescribeDomain` | `GET /2021-01-01/opensearch/domain/{name}` | Get domain details |
-| `DescribeDomains` | `POST /2021-01-01/opensearch/domain-info` | Batch describe domains |
-| `DescribeDomainConfig` | `GET /2021-01-01/opensearch/domain/{name}/config` | Get domain configuration |
-| `UpdateDomainConfig` | `POST /2021-01-01/opensearch/domain/{name}/config` | Update cluster config, EBS options, engine version |
-| `DeleteDomain` | `DELETE /2021-01-01/opensearch/domain/{name}` | Delete a domain |
-| `ListDomainNames` | `GET /2021-01-01/domain` | List all domains (supports `?engineType=` filter) |
-
-### Tags
-
-| Operation | Method + Path | Description |
-|---|---|---|
-| `AddTags` | `POST /2021-01-01/tags` | Add tags to a domain by ARN |
-| `ListTags` | `GET /2021-01-01/tags/?arn=` | List tags for a domain |
-| `RemoveTags` | `POST /2021-01-01/tags-removal` | Remove tag keys from a domain |
-
-### Versions & Instance Types
-
-| Operation | Method + Path | Description |
-|---|---|---|
-| `ListVersions` | `GET /2021-01-01/opensearch/versions` | List supported engine versions |
-| `GetCompatibleVersions` | `GET /2021-01-01/opensearch/compatibleVersions` | List valid upgrade paths |
-| `ListInstanceTypeDetails` | `GET /2021-01-01/opensearch/instanceTypeDetails/{version}` | List available instance types |
-| `DescribeInstanceTypeLimits` | `GET /2021-01-01/opensearch/instanceTypeLimits/{version}/{type}` | Get limits for an instance type |
-
-### Stubs (SDK-compatible, no-op responses)
-
-| Operation | Notes |
-|---|---|
-| `DescribeDomainChangeProgress` | Returns empty `ChangeProgressStatus` |
-| `DescribeDomainAutoTunes` | Returns empty `AutoTunes` list |
-| `DescribeDryRunProgress` | Returns empty `DryRunProgressStatus` |
-| `DescribeDomainHealth` | Returns `ClusterHealth: Green` |
-| `GetUpgradeHistory` | Returns empty list |
-| `GetUpgradeStatus` | Returns `StepStatus: SUCCEEDED` |
-| `UpgradeDomain` | Stores new engine version, returns immediately with a generated `UpgradeId` |
-| `CancelDomainConfigChange` | Returns empty `CancelledChangeIds` |
-| `StartServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
-| `CancelServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
 
 ## Configuration
 

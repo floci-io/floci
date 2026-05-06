@@ -6,27 +6,44 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 
 ## Supported Actions
 
-### Load Balancers
-`CreateLoadBalancer` · `DescribeLoadBalancers` · `DeleteLoadBalancer` · `ModifyLoadBalancerAttributes` · `DescribeLoadBalancerAttributes` · `SetSecurityGroups` · `SetSubnets` · `SetIpAddressType`
-
-### Target Groups
-`CreateTargetGroup` · `DescribeTargetGroups` · `ModifyTargetGroup` · `DeleteTargetGroup` · `ModifyTargetGroupAttributes` · `DescribeTargetGroupAttributes`
-
-### Targets
-`RegisterTargets` · `DeregisterTargets` · `DescribeTargetHealth`
-
-### Listeners
-`CreateListener` · `DescribeListeners` · `ModifyListener` · `DeleteListener` · `AddListenerCertificates` · `RemoveListenerCertificates` · `DescribeListenerCertificates`
-
-### Rules
-`CreateRule` · `DescribeRules` · `ModifyRule` · `DeleteRule` · `SetRulePriorities`
-
-### Tags
-`AddTags` · `RemoveTags` · `DescribeTags`
-
-### Metadata
-`DescribeSSLPolicies` · `DescribeAccountLimits`
-
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateLoadBalancer` |  |
+| `DescribeLoadBalancers` |  |
+| `DeleteLoadBalancer` |  |
+| `ModifyLoadBalancerAttributes` |  |
+| `DescribeLoadBalancerAttributes` |  |
+| `SetSecurityGroups` |  |
+| `SetSubnets` |  |
+| `SetIpAddressType` |  |
+| `CreateTargetGroup` |  |
+| `DescribeTargetGroups` |  |
+| `DeleteTargetGroup` |  |
+| `ModifyTargetGroup` |  |
+| `ModifyTargetGroupAttributes` |  |
+| `DescribeTargetGroupAttributes` |  |
+| `CreateListener` |  |
+| `DescribeListeners` |  |
+| `DeleteListener` |  |
+| `ModifyListener` |  |
+| `CreateRule` |  |
+| `DescribeRules` |  |
+| `DeleteRule` |  |
+| `ModifyRule` |  |
+| `SetRulePriorities` |  |
+| `RegisterTargets` |  |
+| `DeregisterTargets` |  |
+| `DescribeTargetHealth` |  |
+| `AddTags` |  |
+| `RemoveTags` |  |
+| `DescribeTags` |  |
+| `DescribeAccountLimits` |  |
+| `DescribeSSLPolicies` |  |
+| `AddListenerCertificates` |  |
+| `RemoveListenerCertificates` |  |
+| `DescribeListenerCertificates` |  |
+<!-- floci:actions:end -->
 ## Behavior Notes
 
 - Load balancers are created in `provisioning` state and transition to `active` immediately on subsequent describes.

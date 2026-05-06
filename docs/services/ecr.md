@@ -4,8 +4,15 @@
 **Data plane:** OCI Distribution Spec v2 (`/v2/...`), served by a real `registry:2` container managed by Floci.
 **Endpoint:** `POST http://localhost:4566/` for the control plane; `<account>.dkr.ecr.<region>.localhost:<port>/<repo>` for `docker push` / `docker pull`.
 
+### Admin Endpoints
+
+| Endpoint | Description |
+| --- | --- |
+| `POST /_floci/ecr/gc` | Run garbage collection on the backing `registry:2` container to reclaim disk after image deletions |
+
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
 | --- | --- |
 | `CreateRepository` | Create a new repository (lazy-starts the backing registry on first call) |
@@ -17,15 +24,16 @@
 | `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
 | `BatchDeleteImage` | Delete images by tag or digest |
 | `PutImageTagMutability` | Set tag mutability (round-trip; not enforced on push) |
-| `TagResource` / `UntagResource` / `ListTagsForResource` | Resource tagging |
-| `PutLifecyclePolicy` / `GetLifecyclePolicy` / `DeleteLifecyclePolicy` | Lifecycle policy round-trip (stored, not enforced) |
-| `SetRepositoryPolicy` / `GetRepositoryPolicy` / `DeleteRepositoryPolicy` | Repository policy round-trip (stored, not enforced) |
-
-### Admin Endpoints
-
-| Endpoint | Description |
-| --- | --- |
-| `POST /_floci/ecr/gc` | Run garbage collection on the backing `registry:2` container to reclaim disk after image deletions |
+| `TagResource` |  |
+| `UntagResource` |  |
+| `ListTagsForResource` |  |
+| `PutLifecyclePolicy` |  |
+| `GetLifecyclePolicy` |  |
+| `DeleteLifecyclePolicy` |  |
+| `SetRepositoryPolicy` |  |
+| `GetRepositoryPolicy` |  |
+| `DeleteRepositoryPolicy` |  |
+<!-- floci:actions:end -->
 
 ## Emulation Behavior
 

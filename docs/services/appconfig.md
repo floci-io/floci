@@ -2,37 +2,38 @@
 
 Floci supports AWS AppConfig and AppConfigData for local configuration management.
 
+## Supported Actions
+
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
+| `CreateApplication` |  |
+| `GetApplication` |  |
+| `ListApplications` |  |
+| `DeleteApplication` |  |
+| `CreateEnvironment` |  |
+| `GetEnvironment` |  |
+| `ListEnvironments` |  |
+| `CreateConfigurationProfile` |  |
+| `GetConfigurationProfile` |  |
+| `ListConfigurationProfiles` |  |
+| `CreateHostedConfigurationVersion` |  |
+| `GetHostedConfigurationVersion` |  |
+| `CreateDeploymentStrategy` |  |
+| `GetDeploymentStrategy` |  |
+| `StartDeployment` |  |
+| `GetDeployment` |  |
+| `StartConfigurationSession` |  |
+| `GetLatestConfiguration` |  |
+<!-- floci:actions:end -->
+
 ## Management Plane (AppConfig)
 
 The management plane allows you to create and manage applications, environments, configuration profiles, and hosted configuration versions.
 
-### Supported Operations
-
-- `CreateApplication`
-- `GetApplication`
-- `ListApplications`
-- `DeleteApplication`
-- `CreateEnvironment`
-- `GetEnvironment`
-- `ListEnvironments`
-- `CreateConfigurationProfile`
-- `GetConfigurationProfile`
-- `ListConfigurationProfiles`
-- `CreateHostedConfigurationVersion`
-- `GetHostedConfigurationVersion`
-- `CreateDeploymentStrategy`
-- `GetDeploymentStrategy`
-- `StartDeployment`
-- `GetDeployment`
-
 ## Data Plane (AppConfigData) {#data-plane}
 
 The data plane is used by applications to retrieve the active configuration for an environment and profile.
-
-### Supported Operations
-
-- `StartConfigurationSession`
-- `GetLatestConfiguration`
 
 ## Example Usage
 

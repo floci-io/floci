@@ -8,7 +8,8 @@ docs-sync:
 docs-test:
 	PYTHONPATH=tools/docs $(PYTHON) -m pytest tools/docs/
 
-docs-check: docs-sync
+docs-check:
+	$(PYTHON) tools/docs/regen_action_docs.py --strict
 	@if ! git diff --quiet -- docs/; then \
 	  echo ""; \
 	  echo "ERROR: docs/services/*.md is out of sync with handler source."; \

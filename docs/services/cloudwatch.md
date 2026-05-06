@@ -4,15 +4,11 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 
 ---
 
-## CloudWatch Logs
+## Supported Actions
 
-**Protocol:** JSON 1.1 (`X-Amz-Target: Logs.*`)
-**Endpoint:** `POST http://localhost:4566/`
-
-### Supported Actions
-
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateLogGroup` | Create a log group |
 | `DeleteLogGroup` | Delete a log group |
 | `DescribeLogGroups` | List log groups |
@@ -27,6 +23,23 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 | `TagLogGroup` | Tag a log group |
 | `UntagLogGroup` | Remove tags |
 | `ListTagsLogGroup` | List tags |
+| `ListTagsForResource` |  |
+| `TagResource` |  |
+| `UntagResource` |  |
+| `PutMetricData` | Publish custom metrics |
+| `ListMetrics` | List available metrics |
+| `GetMetricStatistics` | Get metric statistics (Average, Sum, etc.) |
+| `PutMetricAlarm` | Create a metric alarm |
+| `DescribeAlarms` | List alarms |
+| `DeleteAlarms` | Delete alarms |
+| `SetAlarmState` | Manually set alarm state |
+| `GetMetricData` | Query metrics with math expressions |
+<!-- floci:actions:end -->
+
+## CloudWatch Logs
+
+**Protocol:** JSON 1.1 (`X-Amz-Target: Logs.*`)
+**Endpoint:** `POST http://localhost:4566/`
 
 ### Configuration
 
@@ -83,19 +96,6 @@ aws logs put-retention-policy \
 
 **Protocol:** Query (XML) and JSON 1.1 (both supported)
 **Endpoint:** `POST http://localhost:4566/`
-
-### Supported Actions
-
-| Action | Description |
-|---|---|
-| `PutMetricData` | Publish custom metrics |
-| `ListMetrics` | List available metrics |
-| `GetMetricStatistics` | Get metric statistics (Average, Sum, etc.) |
-| `GetMetricData` | Query metrics with math expressions |
-| `PutMetricAlarm` | Create a metric alarm |
-| `DescribeAlarms` | List alarms |
-| `DeleteAlarms` | Delete alarms |
-| `SetAlarmState` | Manually set alarm state |
 
 ### Examples
 

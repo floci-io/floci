@@ -5,17 +5,16 @@
 
 EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Target`) or Query protocol.
 
-## Supported Operations
+## Supported Actions
 
-| Operation | Description |
-|---|---|
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
 | `CreateCluster` | Create a new EKS cluster |
-| `DescribeCluster` | Describe a cluster by name |
 | `ListClusters` | List all cluster names |
+| `DescribeCluster` | Describe a cluster by name |
 | `DeleteCluster` | Delete a cluster |
-| `TagResource` | Add tags to a cluster |
-| `UntagResource` | Remove tags from a cluster |
-| `ListTagsForResource` | List tags on a cluster |
+<!-- floci:actions:end -->
 
 ## Modes
 
