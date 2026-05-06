@@ -7,11 +7,17 @@ on:
     paths:
       - 'src/**'
       - 'pom.xml'
+      - 'docs/services/**'
+      - 'tools/docs/**'
+      - 'Makefile'
       - '.github/workflows/ci.yml'
   pull_request:
     paths:
       - 'src/**'
       - 'pom.xml'
+      - 'docs/services/**'
+      - 'tools/docs/**'
+      - 'Makefile'
       - '.github/workflows/ci.yml'
 
 permissions:
@@ -37,3 +43,23 @@ jobs:
 
       - name: Run tests
         run: mvn test -B
+
+  docs-sync:
+    name: Docs in sync with handlers
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Install tooling deps
+        run: pip install -r tools/docs/requirements.txt
+
+      - name: Run docs tooling tests
+        run: make docs-test
+
+      - name: Verify docs match handler source
+        run: make docs-check

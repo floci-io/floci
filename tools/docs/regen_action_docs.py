@@ -23,6 +23,13 @@ MARKER_END = "<!-- floci:actions:end -->"
 
 SWITCH_ACTION_RE = re.compile(r'^\s*case\s+"([A-Z][A-Za-z0-9]+)"\s*->', re.MULTILINE)
 
+CLASS_PATH_RE = re.compile(r"^\s*@Path\b", re.MULTILINE)
+HTTP_ANNO_RE = re.compile(r"^\s*@(?:GET|POST|PUT|DELETE|PATCH)\b")
+ANNOTATION_LINE_RE = re.compile(r"^\s*@\w")
+PUBLIC_METHOD_RE = re.compile(
+    r"^\s*public\s+\S+(?:<[^>]*>)?\s+([a-z][A-Za-z0-9]*)\s*\("
+)
+
 
 @dataclass(frozen=True)
 class Source:
@@ -43,7 +50,32 @@ def extract_switch_actions(java_source: str) -> list[str]:
 
 
 def extract_rest_actions(java_source: str) -> list[str]:
-    raise NotImplementedError("rest mode is not implemented in Slice 1")
+    """PascalCased method names of @GET/@POST/@PUT/@DELETE/@PATCH methods.
+
+    Only applies to classes containing a class-level @Path. Returns [] otherwise.
+    Methods are returned in source order. The action name is `ucfirst(method_name)`.
+    """
+    if not CLASS_PATH_RE.search(java_source):
+        return []
+
+    actions: list[str] = []
+    pending = False
+    for line in java_source.splitlines():
+        if not line.strip():
+            continue
+        if HTTP_ANNO_RE.match(line):
+            pending = True
+            continue
+        if not pending:
+            continue
+        if ANNOTATION_LINE_RE.match(line):
+            continue
+        m = PUBLIC_METHOD_RE.match(line)
+        if m:
+            name = m.group(1)
+            actions.append(name[0].upper() + name[1:])
+        pending = False
+    return actions
 
 
 def extract_actions_from_sources(sources: Iterable[tuple[str, str]]) -> list[str]:

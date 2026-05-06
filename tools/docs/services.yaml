@@ -7,7 +7,29 @@
 #   sources : list of { path, mode } — mode is 'switch' or 'rest'
 #             empty list means the service is intentionally excluded (no markers)
 
+- service: s3
+  doc: docs/services/s3.md
+  sources: []  # Skip: dispatch is by query-string inside controller methods, not @Path-per-action. Tracked for refactor.
+
 - service: secretsmanager
   doc: docs/services/secrets-manager.md
   sources:
     - { path: src/main/java/io/github/hectorvent/floci/services/secretsmanager/SecretsManagerJsonHandler.java, mode: switch }
+
+- service: sns
+  doc: docs/services/sns.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/sns/SnsJsonHandler.java,  mode: switch }
+    - { path: src/main/java/io/github/hectorvent/floci/services/sns/SnsQueryHandler.java, mode: switch }
+
+- service: lambda
+  doc: docs/services/lambda.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaController.java,                mode: rest }
+    - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaTagController.java,             mode: rest }
+    - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaLayerController.java,           mode: rest }
+    - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaConcurrencyController.java,     mode: rest }
+    - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaCodeSigningController.java,     mode: rest }
+    - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaUrlController.java,             mode: rest }
+    - { path: src/main/java/io/github/hectorvent/floci/services/lambda/LambdaEventInvokeController.java,     mode: rest }
+    # Excluded: ApiGatewayController and LambdaUrlInvocationController are request-execution proxies, not management API.

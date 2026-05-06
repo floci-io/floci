@@ -5,17 +5,19 @@
 
 Floci Lambda runs your function code locally inside real Docker containers - close enough as AWS Lambda does (using Firecracker micro VM).
 
-## Supported Operations
+## Supported Actions
 
-| Operation | Description |
-|---|---|
+<!-- floci:actions:start -->
+| Action | Description |
+| --- | --- |
 | `CreateFunction` | Deploy a Lambda function |
 | `GetFunction` | Get function details and download URL |
-| `GetFunctionConfiguration` | Get runtime configuration |
 | `ListFunctions` | List all functions |
-| `UpdateFunctionCode` | Upload new code |
+| `GetFunctionConfiguration` | Get runtime configuration |
 | `UpdateFunctionConfiguration` | Update runtime, handler, memory, timeout, environment, architectures, tracing, layers, and more |
+| `UpdateFunctionCode` | Upload new code |
 | `DeleteFunction` | Remove a function |
+| `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
 | `Invoke` | Invoke a function synchronously or asynchronously |
 | `CreateEventSourceMapping` | Connect SQS / Kinesis / DynamoDB Streams to a function |
 | `GetEventSourceMapping` | Get event source mapping details |
@@ -32,17 +34,24 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 | `AddPermission` | Add a resource-policy statement |
 | `GetPolicy` | Get the function resource policy |
 | `RemovePermission` | Remove a resource-policy statement |
-| `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
+| `ListTags` | List tags on a function |
+| `TagResource` | Tag a function |
+| `UntagResource` | Untag a function |
+| `ListLayers` |  |
+| `ListLayerVersions` |  |
+| `PutFunctionConcurrency` | Set reserved concurrent executions |
+| `GetFunctionConcurrency` | Get reserved concurrent executions |
+| `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
 | `CreateFunctionUrlConfig` | Provision a function URL |
 | `GetFunctionUrlConfig` | Read function URL config |
 | `UpdateFunctionUrlConfig` | Update function URL config |
 | `DeleteFunctionUrlConfig` | Delete function URL config |
-| `ListTags` | List tags on a function |
-| `TagResource` | Tag a function |
-| `UntagResource` | Untag a function |
-| `PutFunctionConcurrency` | Set reserved concurrent executions |
-| `GetFunctionConcurrency` | Get reserved concurrent executions |
-| `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
+| `PutFunctionEventInvokeConfig` |  |
+| `UpdateFunctionEventInvokeConfig` |  |
+| `GetFunctionEventInvokeConfig` |  |
+| `DeleteFunctionEventInvokeConfig` |  |
+| `ListFunctionEventInvokeConfigs` |  |
+<!-- floci:actions:end -->
 
 ## Hot-Reloading via Reactive S3 Sync
 

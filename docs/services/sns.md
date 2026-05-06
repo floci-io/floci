@@ -5,8 +5,9 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateTopic` | Create a topic |
 | `DeleteTopic` | Delete a topic |
 | `ListTopics` | List all topics |
@@ -16,14 +17,15 @@
 | `Unsubscribe` | Remove a subscription |
 | `ListSubscriptions` | List all subscriptions |
 | `ListSubscriptionsByTopic` | List subscriptions for a specific topic |
+| `Publish` | Publish a message to a topic |
+| `PublishBatch` | Publish up to 10 messages in one call |
 | `GetSubscriptionAttributes` | Get subscription settings |
 | `SetSubscriptionAttributes` | Update subscription settings |
 | `ConfirmSubscription` | Confirm a pending subscription |
-| `Publish` | Publish a message to a topic |
-| `PublishBatch` | Publish up to 10 messages in one call |
 | `TagResource` | Tag a topic |
 | `UntagResource` | Remove tags from a topic |
 | `ListTagsForResource` | List tags on a topic |
+<!-- floci:actions:end -->
 
 ## Examples
 

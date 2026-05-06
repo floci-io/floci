@@ -1,0 +1,2 @@
+sources:
+  - { file: FixtureRestController.java, mode: rest }

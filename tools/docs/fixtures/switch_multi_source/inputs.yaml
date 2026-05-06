@@ -1,0 +1,3 @@
+sources:
+  - { file: FixtureFirstHandler.java, mode: switch }
+  - { file: FixtureSecondHandler.java, mode: switch }

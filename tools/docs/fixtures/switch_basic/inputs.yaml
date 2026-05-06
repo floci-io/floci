@@ -1,2 +1,2 @@
 sources:
-  - { file: SecretsManagerJsonHandler.java, mode: switch }
+  - { file: FixtureSwitchHandler.java, mode: switch }
