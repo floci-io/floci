@@ -1,0 +1,13 @@
+# Registry of services whose action tables are auto-generated.
+# Spec: ideas/auto-generated-action-tables.spec.md
+#
+# Each entry:
+#   service : free-form key, used in error messages
+#   doc     : path (from repo root) to the markdown page
+#   sources : list of { path, mode } — mode is 'switch' or 'rest'
+#             empty list means the service is intentionally excluded (no markers)
+
+- service: secretsmanager
+  doc: docs/services/secrets-manager.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/secretsmanager/SecretsManagerJsonHandler.java, mode: switch }
