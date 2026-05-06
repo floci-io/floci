@@ -3,7 +3,7 @@
 **Protocol:** REST JSON
 **Endpoint:** `http://localhost:4566/2015-03-31/functions/...`
 
-Lambda runs your function code inside real Docker containers — the same way real AWS Lambda does.
+Floci Lambda runs your function code locally inside real Docker containers - close enough as AWS Lambda does (using Firecracker micro VM).
 
 ## Supported Operations
 
