@@ -70,6 +70,8 @@ public class TextractService {
         root.set("DocumentMetadata", buildDocumentMetadata(1));
         root.set("Blocks", buildStubBlocks());
         root.put("DetectDocumentTextModelVersion", MODEL_VERSION);
+        //after a successful job, we remove it to avoid memory growth
+        asyncJobs.remove(jobId);
         return Response.ok(root).build();
     }
     /**
@@ -94,6 +96,10 @@ public class TextractService {
         root.set("DocumentMetadata", buildDocumentMetadata(1));
         root.set("Blocks", buildStubBlocks());
         root.put("AnalyzeDocumentModelVersion", MODEL_VERSION);
+
+        //after a successful job, we remove it to avoid memory growth
+        asyncJobs.remove(jobId);
+
         return Response.ok(root).build();
     }
     // Private helpers

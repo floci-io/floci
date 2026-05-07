@@ -84,8 +84,7 @@ public class AwsJson11Controller {
                                CodeBuildJsonHandler codeBuildJsonHandler,
                                CodeDeployJsonHandler codeDeployJsonHandler,
                                Ec2MessagesJsonHandler ec2MessagesJsonHandler,
-                               TransferHandler transferHandler) {
-                               CodeDeployJsonHandler codeDeployJsonHandler,
+                               TransferHandler transferHandler,
                                TextractJsonHandler textractJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;

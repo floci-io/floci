@@ -284,6 +284,7 @@ public interface EmulatorConfig {
         BackupServiceConfig backup();
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
+        TextractServiceConfig textract();
     }
 
     interface TransferServiceConfig {
@@ -314,7 +315,6 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
-        TextractServiceConfig textract();
     }
 
     interface AutoScalingServiceConfig {
