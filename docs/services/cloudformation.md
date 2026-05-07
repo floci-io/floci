@@ -31,7 +31,7 @@
 
 ## Supported Resource Types
 
-Resource types provisioned during `CreateStack` / `DeleteStack`:
+Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`:
 
 | Resource Type | Notes |
 |---|---|
@@ -73,6 +73,15 @@ Resource types provisioned during `CreateStack` / `DeleteStack`:
 | `AWS::Route53::RecordSet` | Stubbed |
 
 All other resource types are accepted without error and assigned a synthetic physical ID, so templates with unsupported types still deploy rather than fail.
+
+## Lambda Stack Updates
+
+`AWS::Lambda::Function` resources are reconciled during `UpdateStack` in the same shape as CloudFormation/CDK deployments:
+
+- A no-op redeploy keeps the existing physical function name and does not call Lambda update APIs, so warm containers can be reused.
+- Code and mutable configuration changes update the existing function in place.
+- Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
+- S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
 
 ## Examples
 

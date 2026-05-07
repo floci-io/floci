@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -47,6 +48,15 @@ import java.util.zip.ZipOutputStream;
 public class CloudFormationResourceProvisioner {
 
     private static final Logger LOG = Logger.getLogger(CloudFormationResourceProvisioner.class);
+    private static final String LAMBDA_CODE_IDENTITY_ATTR = "FlociLambdaCodeIdentity";
+    private static final String LAMBDA_NAME_MODE_ATTR = "FlociLambdaFunctionNameMode";
+    private static final String LAMBDA_PACKAGE_TYPE_ATTR = "FlociLambdaPackageType";
+    private static final String LAMBDA_NAME_MODE_EXPLICIT = "explicit";
+    private static final String LAMBDA_NAME_MODE_GENERATED = "generated";
+    private static final int LAMBDA_DEFAULT_TIMEOUT_SECONDS = 3;
+    private static final int LAMBDA_DEFAULT_MEMORY_MB = 128;
+    private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
+    private static final String LAMBDA_DEFAULT_TRACING_MODE = "PassThrough";
 
     private final S3Service s3Service;
     private final SqsService sqsService;
@@ -97,9 +107,25 @@ public class CloudFormationResourceProvisioner {
     public StackResource provision(String logicalId, String resourceType, JsonNode properties,
                                    CloudFormationTemplateEngine engine, String region, String accountId,
                                    String stackName) {
+        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName, null);
+    }
+
+    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName, String existingPhysicalId) {
+        return provision(logicalId, resourceType, properties, engine, region, accountId, stackName,
+                existingPhysicalId, Map.of());
+    }
+
+    public StackResource provision(String logicalId, String resourceType, JsonNode properties,
+                                   CloudFormationTemplateEngine engine, String region, String accountId,
+                                   String stackName, String existingPhysicalId,
+                                   Map<String, String> existingAttributes) {
         StackResource resource = new StackResource();
         resource.setLogicalId(logicalId);
         resource.setResourceType(resourceType);
+        resource.setPhysicalId(existingPhysicalId);
+        resource.setAttributes(new HashMap<>(existingAttributes != null ? existingAttributes : Map.of()));
 
         try {
             switch (resourceType) {
@@ -339,71 +365,132 @@ public class CloudFormationResourceProvisioner {
 
     private void provisionLambda(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                  String region, String accountId, String stackName) {
-        String funcName = resolveOptional(props, "FunctionName", engine);
-        if (funcName == null || funcName.isBlank()) {
-            funcName = generatePhysicalName(stackName, r.getLogicalId(), 64, false);
-        }
-        String packageType = resolveOrDefault(props, "PackageType", engine, "Zip");
+        LambdaDesiredState desired = buildLambdaDesiredState(r, props, engine, region, accountId, stackName);
+        LambdaFunction existing = getExistingLambda(region, r.getPhysicalId());
+        boolean replacement = lambdaRequiresReplacement(r, desired, existing);
 
-        Map<String, Object> req = new HashMap<>();
-        req.put("FunctionName", funcName);
-        req.put("PackageType", packageType);
-        req.put("Role", resolveOrDefault(props, "Role", engine, AwsArnUtils.Arn.of("iam", "", accountId, "role/default").toString()));
-        req.put("Code", resolveLambdaCode(props, engine));
-
-        if ("Zip".equals(packageType)) {
-            req.put("Runtime", resolveOrDefault(props, "Runtime", engine, "nodejs18.x"));
-            req.put("Handler", resolveOrDefault(props, "Handler", engine, "index.handler"));
+        LambdaFunction func;
+        if (existing == null || replacement) {
+            if (replacement && desired.functionName().equals(r.getPhysicalId())) {
+                throw new AwsException("ValidationError",
+                        "Cannot replace Lambda function " + r.getPhysicalId()
+                                + " without a new FunctionName", 400);
+            }
+            func = createLambdaFunction(region, desired, !replacement);
+            if (replacement && r.getPhysicalId() != null) {
+                deleteReplacedLambda(region, r.getPhysicalId());
+            }
         } else {
-            // Image-packaged functions: forward Runtime/Handler only if explicitly set
-            String runtime = resolveOptional(props, "Runtime", engine);
-            if (runtime != null) req.put("Runtime", runtime);
-            String handler = resolveOptional(props, "Handler", engine);
-            if (handler != null) req.put("Handler", handler);
+            func = updateLambdaFunction(region, existing, desired, r);
         }
 
-        // Forward optional configuration fields when present
-        String timeout = resolveOptional(props, "Timeout", engine);
-        if (timeout != null) {
-            try { req.put("Timeout", Integer.parseInt(timeout)); } catch (NumberFormatException ignored) {}
-        }
-        String memorySize = resolveOptional(props, "MemorySize", engine);
-        if (memorySize != null) {
-            try { req.put("MemorySize", Integer.parseInt(memorySize)); } catch (NumberFormatException ignored) {}
-        }
-        String description = resolveOptional(props, "Description", engine);
-        if (description != null) {
-            req.put("Description", description);
-        }
+        applyLambdaReservedConcurrency(region, func, desired);
 
-        if (props != null && props.has("Environment")) {
-            JsonNode envNode = engine.resolveNode(props.get("Environment"));
-            if (envNode != null && envNode.has("Variables")) {
-                JsonNode varsNode = envNode.get("Variables");
-                Map<String, String> vars = new HashMap<>();
-                varsNode.fields().forEachRemaining(e -> vars.put(e.getKey(), e.getValue().asText()));
-                req.put("Environment", Map.of("Variables", vars));
-            }
-        }
-
-        io.github.hectorvent.floci.services.lambda.model.LambdaFunction func;
-        try {
-            func = lambdaService.createFunction(region, req);
-        } catch (AwsException e) {
-            // CDK redeploys re-run CFN provisioning against the same Floci instance.
-            // If the function already exists, adopt it (CFN provisioning must be idempotent).
-            if ("ResourceConflictException".equals(e.getErrorCode())
-                    || (e.getMessage() != null && e.getMessage().contains("Function already exist"))) {
-                func = lambdaService.getFunction(region, funcName);
-            } else {
-                throw e;
-            }
-        }
-        r.setPhysicalId(funcName);
+        r.setPhysicalId(desired.functionName());
         r.getAttributes().put("Arn", func.getFunctionArn());
+        r.getAttributes().put(LAMBDA_CODE_IDENTITY_ATTR, desired.code().identity());
+        r.getAttributes().put(LAMBDA_NAME_MODE_ATTR,
+                desired.explicitFunctionName() ? LAMBDA_NAME_MODE_EXPLICIT : LAMBDA_NAME_MODE_GENERATED);
+        r.getAttributes().put(LAMBDA_PACKAGE_TYPE_ATTR, desired.packageType());
     }
 
-    private Map<String, Object> resolveLambdaCode(JsonNode props, CloudFormationTemplateEngine engine) {
+    private LambdaDesiredState buildLambdaDesiredState(StackResource r, JsonNode props,
+                                                       CloudFormationTemplateEngine engine,
+                                                       String region, String accountId,
+                                                       String stackName) {
+        String explicitName = resolveOptional(props, "FunctionName", engine);
+        boolean hasExplicitName = explicitName != null && !explicitName.isBlank();
+        String packageType = resolveOrDefault(props, "PackageType", engine, "Zip");
+        String previousNameMode = r.getAttributes().get(LAMBDA_NAME_MODE_ATTR);
+        String oldPackageType = r.getAttributes().get(LAMBDA_PACKAGE_TYPE_ATTR);
+        boolean packageTypeReplacement = r.getPhysicalId() != null
+                && oldPackageType != null
+                && !Objects.equals(oldPackageType, packageType);
+        boolean explicitRemoved = r.getPhysicalId() != null
+                && !hasExplicitName
+                && LAMBDA_NAME_MODE_EXPLICIT.equals(previousNameMode);
+
+        String functionName;
+        if (hasExplicitName) {
+            functionName = explicitName;
+        } else if (r.getPhysicalId() != null && !explicitRemoved && !packageTypeReplacement) {
+            functionName = r.getPhysicalId();
+        } else {
+            functionName = generatePhysicalName(stackName, r.getLogicalId(), 64, false);
+        }
+
+        Map<String, Object> createRequest = new HashMap<>();
+        Map<String, Object> configRequest = new HashMap<>();
+        createRequest.put("FunctionName", functionName);
+        createRequest.put("PackageType", packageType);
+
+        String role = resolveOrDefault(props, "Role", engine,
+                AwsArnUtils.Arn.of("iam", "", accountId, "role/default").toString());
+        createRequest.put("Role", role);
+        configRequest.put("Role", role);
+
+        String runtime = null;
+        String handler = null;
+        if ("Zip".equals(packageType)) {
+            runtime = resolveOrDefault(props, "Runtime", engine, "nodejs18.x");
+            handler = resolveOrDefault(props, "Handler", engine, "index.handler");
+            createRequest.put("Runtime", runtime);
+            createRequest.put("Handler", handler);
+            configRequest.put("Runtime", runtime);
+            configRequest.put("Handler", handler);
+        } else {
+            runtime = resolveOptional(props, "Runtime", engine);
+            handler = resolveOptional(props, "Handler", engine);
+            if (runtime != null) {
+                createRequest.put("Runtime", runtime);
+                configRequest.put("Runtime", runtime);
+            }
+            if (handler != null) {
+                createRequest.put("Handler", handler);
+                configRequest.put("Handler", handler);
+            }
+        }
+
+        LambdaCodeSpec code = resolveLambdaCode(props, engine, handler, runtime);
+        createRequest.put("Code", code.request());
+
+        configRequest.put("Timeout", intOrDefault(resolveOptional(props, "Timeout", engine),
+                LAMBDA_DEFAULT_TIMEOUT_SECONDS));
+        configRequest.put("MemorySize", intOrDefault(resolveOptional(props, "MemorySize", engine),
+                LAMBDA_DEFAULT_MEMORY_MB));
+        configRequest.put("Description", resolveOptional(props, "Description", engine));
+        configRequest.put("KMSKeyArn", resolveOptional(props, "KMSKeyArn", engine));
+        configRequest.put("Environment", Map.of("Variables", resolveLambdaEnvironment(props, engine)));
+        putStringListIfPresent(configRequest, props, "Architectures", "Architectures", engine);
+        configRequest.put("Layers", resolveStringListOrEmpty(props, "Layers", engine));
+        configRequest.put("EphemeralStorage", resolveMapOrDefault(props, "EphemeralStorage", engine,
+                Map.of("Size", LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB)));
+        configRequest.put("TracingConfig", resolveMapOrDefault(props, "TracingConfig", engine,
+                Map.of("Mode", LAMBDA_DEFAULT_TRACING_MODE)));
+        configRequest.put("DeadLetterConfig", resolveMapOrDefault(props, "DeadLetterConfig", engine,
+                mapWithNullValue("TargetArn")));
+        configRequest.put("VpcConfig", resolveMapOrDefault(props, "VpcConfig", engine, Map.of()));
+        putResolvedMapIfPresent(configRequest, props, "ImageConfig", "ImageConfig", engine);
+
+        createRequest.putAll(configRequest);
+        Integer reservedConcurrentExecutions = null;
+        String reserved = resolveOptional(props, "ReservedConcurrentExecutions", engine);
+        if (reserved != null) {
+            try {
+                reservedConcurrentExecutions = Integer.parseInt(reserved);
+            } catch (NumberFormatException ignored) {
+                throw new AwsException("InvalidParameterValueException",
+                        "ReservedConcurrentExecutions must be an integer", 400);
+            }
+        }
+
+        return new LambdaDesiredState(functionName, hasExplicitName, packageType,
+                createRequest, code, configRequest, props != null && props.has("ReservedConcurrentExecutions"),
+                reservedConcurrentExecutions);
+    }
+
+    private LambdaCodeSpec resolveLambdaCode(JsonNode props, CloudFormationTemplateEngine engine,
+                                             String handler, String runtime) {
         if (props != null && props.has("Code")) {
             JsonNode codeNode = engine.resolveNode(props.get("Code"));
 
@@ -411,9 +498,9 @@ public class CloudFormationResourceProvisioner {
             String s3Key = codeNode.path("S3Key").asText(null);
             if (s3Bucket != null && s3Key != null) {
                 try {
-                    S3Object obj = s3Service.getObject(s3Bucket, s3Key);
-                    String base64Zip = Base64.getEncoder().encodeToString(obj.getData());
-                    return Map.of("ZipFile", base64Zip);
+                    s3Service.getObject(s3Bucket, s3Key);
+                    return new LambdaCodeSpec(Map.of("S3Bucket", s3Bucket, "S3Key", s3Key),
+                            "s3:" + s3Bucket + "\n" + s3Key);
                 } catch (Exception e) {
                     LOG.warnv("S3 code not found for Lambda ({0}/{1}), using default handler: {2}",
                               s3Bucket, s3Key, e.getMessage());
@@ -422,18 +509,379 @@ public class CloudFormationResourceProvisioner {
 
             String zipFile = codeNode.path("ZipFile").asText(null);
             if (zipFile != null) {
-                String handler = resolveOrDefault(props, "Handler", engine, "index.handler");
-                String runtime = resolveOrDefault(props, "Runtime", engine, "nodejs18.x");
-                return Map.of("ZipFile", sourceToZipBase64(zipFile, handler, runtime));
+                String effectiveHandler = handler != null ? handler : "index.handler";
+                String effectiveRuntime = runtime != null ? runtime : "nodejs18.x";
+                return new LambdaCodeSpec(Map.of("ZipFile", sourceToZipBase64(zipFile, effectiveHandler, effectiveRuntime)),
+                        "inline:" + effectiveRuntime + "\n" + effectiveHandler + "\n" + zipFile);
             }
 
             String imageUri = codeNode.path("ImageUri").asText(null);
             if (imageUri != null) {
-                return Map.of("ImageUri", imageUri);
+                return new LambdaCodeSpec(Map.of("ImageUri", imageUri), "image:" + imageUri);
             }
         }
-        return Map.of("ZipFile", defaultHandlerZipBase64());
+        return new LambdaCodeSpec(Map.of("ZipFile", defaultHandlerZipBase64()), "default-handler");
     }
+
+    private LambdaFunction getExistingLambda(String region, String functionName) {
+        if (functionName == null || functionName.isBlank()) {
+            return null;
+        }
+        try {
+            return lambdaService.getFunction(region, functionName);
+        } catch (AwsException e) {
+            if ("ResourceNotFoundException".equals(e.getErrorCode()) || e.getHttpStatus() == 404) {
+                return null;
+            }
+            throw e;
+        }
+    }
+
+    private boolean lambdaRequiresReplacement(StackResource r, LambdaDesiredState desired,
+                                              LambdaFunction existing) {
+        if (existing == null || r.getPhysicalId() == null) {
+            return false;
+        }
+        if (!Objects.equals(r.getPhysicalId(), desired.functionName())) {
+            return true;
+        }
+        String existingPackageType = existing.getPackageType() != null ? existing.getPackageType() : "Zip";
+        return !Objects.equals(existingPackageType, desired.packageType());
+    }
+
+    private LambdaFunction createLambdaFunction(String region, LambdaDesiredState desired, boolean allowAdopt) {
+        try {
+            return lambdaService.createFunction(region, desired.createRequest());
+        } catch (AwsException e) {
+            if (allowAdopt && ("ResourceConflictException".equals(e.getErrorCode())
+                    || (e.getMessage() != null && e.getMessage().contains("Function already exist")))) {
+                return lambdaService.getFunction(region, desired.functionName());
+            }
+            throw e;
+        }
+    }
+
+    private LambdaFunction updateLambdaFunction(String region,
+                                                LambdaFunction existing,
+                                                LambdaDesiredState desired,
+                                                StackResource r) {
+        LambdaFunction current = existing;
+        if (lambdaConfigurationChanged(current, desired.configRequest())) {
+            current = lambdaService.updateFunctionConfiguration(region, current.getFunctionName(),
+                    desired.configRequest());
+        }
+        if (lambdaCodeChanged(current, desired.code(), r.getAttributes().get(LAMBDA_CODE_IDENTITY_ATTR))) {
+            current = lambdaService.updateFunctionCode(region, current.getFunctionName(), desired.code().request());
+        }
+        return current;
+    }
+
+    private void deleteReplacedLambda(String region, String functionName) {
+        try {
+            lambdaService.deleteFunction(region, functionName);
+        } catch (AwsException e) {
+            if (!"ResourceNotFoundException".equals(e.getErrorCode()) && e.getHttpStatus() != 404) {
+                throw e;
+            }
+        }
+    }
+
+    private void applyLambdaReservedConcurrency(
+            String region,
+            LambdaFunction fn,
+            LambdaDesiredState desired) {
+        if (desired.reservedConcurrentExecutionsPresent()) {
+            if (!Objects.equals(fn.getReservedConcurrentExecutions(), desired.reservedConcurrentExecutions())) {
+                lambdaService.putFunctionConcurrency(region, fn.getFunctionName(),
+                        desired.reservedConcurrentExecutions());
+            }
+        } else if (fn.getReservedConcurrentExecutions() != null) {
+            lambdaService.deleteFunctionConcurrency(region, fn.getFunctionName());
+        }
+    }
+
+    private boolean lambdaCodeChanged(LambdaFunction fn,
+                                      LambdaCodeSpec code, String previousIdentity) {
+        if (previousIdentity != null) {
+            return !previousIdentity.equals(code.identity());
+        }
+        Map<String, Object> request = code.request();
+        if (request.containsKey("ImageUri")) {
+            return !Objects.equals(fn.getImageUri(), request.get("ImageUri"));
+        }
+        if (request.containsKey("S3Bucket") && request.containsKey("S3Key")) {
+            return !Objects.equals(fn.getS3Bucket(), request.get("S3Bucket"))
+                    || !Objects.equals(fn.getS3Key(), request.get("S3Key"));
+        }
+        if (request.containsKey("ZipFile")) {
+            String desiredSha256 = sha256Base64((String) request.get("ZipFile"));
+            return !Objects.equals(fn.getCodeSha256(), desiredSha256);
+        }
+        return false;
+    }
+
+    private boolean lambdaConfigurationChanged(
+            LambdaFunction fn,
+            Map<String, Object> request) {
+        for (var entry : request.entrySet()) {
+            String key = entry.getKey();
+            Object desired = entry.getValue();
+            switch (key) {
+                case "Description" -> {
+                    if (!Objects.equals(fn.getDescription(), desired)) return true;
+                }
+                case "Handler" -> {
+                    if (!Objects.equals(fn.getHandler(), desired)) return true;
+                }
+                case "MemorySize" -> {
+                    if (fn.getMemorySize() != toIntValue(desired, fn.getMemorySize())) return true;
+                }
+                case "Role" -> {
+                    if (!Objects.equals(fn.getRole(), desired)) return true;
+                }
+                case "Runtime" -> {
+                    if (!Objects.equals(fn.getRuntime(), desired)) return true;
+                }
+                case "Timeout" -> {
+                    if (fn.getTimeout() != toIntValue(desired, fn.getTimeout())) return true;
+                }
+                case "Environment" -> {
+                    if (!Objects.equals(fn.getEnvironment(), environmentVariables(desired))) return true;
+                }
+                case "Architectures" -> {
+                    if (!Objects.equals(fn.getArchitectures(), desired)) return true;
+                }
+                case "EphemeralStorage" -> {
+                    if (fn.getEphemeralStorageSize() != mapInt(desired, "Size", fn.getEphemeralStorageSize())) {
+                        return true;
+                    }
+                }
+                case "TracingConfig" -> {
+                    if (!Objects.equals(fn.getTracingMode(), mapString(desired, "Mode"))) return true;
+                }
+                case "DeadLetterConfig" -> {
+                    if (!Objects.equals(fn.getDeadLetterTargetArn(), mapString(desired, "TargetArn"))) return true;
+                }
+                case "Layers" -> {
+                    if (!Objects.equals(fn.getLayers(), desired)) return true;
+                }
+                case "KMSKeyArn" -> {
+                    if (!Objects.equals(fn.getKmsKeyArn(), desired)) return true;
+                }
+                case "VpcConfig" -> {
+                    if (!Objects.equals(normalizeForCompare(fn.getVpcConfig()), normalizeForCompare(desired))) {
+                        return true;
+                    }
+                }
+                case "ImageConfig" -> {
+                    if (imageConfigurationChanged(fn, desired)) return true;
+                }
+                default -> {
+                    // Properties outside UpdateFunctionConfiguration are ignored here.
+                }
+            }
+        }
+        return false;
+    }
+
+    private boolean imageConfigurationChanged(
+            LambdaFunction fn,
+            Object desired) {
+        if (!(desired instanceof Map<?, ?> map)) {
+            return false;
+        }
+        if (map.containsKey("Command")
+                && !Objects.equals(fn.getImageConfigCommand(), stringList(map.get("Command")))) {
+            return true;
+        }
+        if (map.containsKey("EntryPoint")
+                && !Objects.equals(fn.getImageConfigEntryPoint(), stringList(map.get("EntryPoint")))) {
+            return true;
+        }
+        return map.containsKey("WorkingDirectory")
+                && !Objects.equals(fn.getImageConfigWorkingDirectory(), mapString(map, "WorkingDirectory"));
+    }
+
+    private static String sha256Base64(String zipFileBase64) {
+        byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256").digest(zipBytes);
+            return Base64.getEncoder().encodeToString(digest);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException(e);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private static Map<String, String> environmentVariables(Object value) {
+        if (!(value instanceof Map<?, ?> envBlock)) {
+            return Map.of();
+        }
+        Object variables = envBlock.get("Variables");
+        if (!(variables instanceof Map<?, ?> vars)) {
+            return Map.of();
+        }
+        Map<String, String> out = new HashMap<>();
+        vars.forEach((k, v) -> out.put(String.valueOf(k), v != null ? String.valueOf(v) : null));
+        return out;
+    }
+
+    private static String mapString(Object value, String key) {
+        if (!(value instanceof Map<?, ?> map)) {
+            return null;
+        }
+        Object found = map.get(key);
+        return found != null ? found.toString() : null;
+    }
+
+    private static int mapInt(Object value, String key, int defaultValue) {
+        if (!(value instanceof Map<?, ?> map)) {
+            return defaultValue;
+        }
+        return toIntValue(map.get(key), defaultValue);
+    }
+
+    private static int toIntValue(Object value, int defaultValue) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        if (value instanceof String s && !s.isBlank()) {
+            return Integer.parseInt(s);
+        }
+        return defaultValue;
+    }
+
+    private static List<String> stringList(Object value) {
+        if (!(value instanceof List<?> list)) {
+            return null;
+        }
+        return list.stream().map(Object::toString).toList();
+    }
+
+    private static Object normalizeForCompare(Object value) {
+        if (value instanceof Map<?, ?> map) {
+            Map<String, Object> normalized = new TreeMap<>();
+            map.forEach((k, v) -> normalized.put(String.valueOf(k), normalizeForCompare(v)));
+            return normalized;
+        }
+        if (value instanceof List<?> list) {
+            return list.stream().map(CloudFormationResourceProvisioner::normalizeForCompare).toList();
+        }
+        return value;
+    }
+
+    private static int intOrDefault(String value, int defaultValue) {
+        return value != null ? Integer.parseInt(value) : defaultValue;
+    }
+
+    private Map<String, String> resolveLambdaEnvironment(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has("Environment") || props.get("Environment").isNull()) {
+            return Map.of();
+        }
+        JsonNode envNode = engine.resolveNode(props.get("Environment"));
+        if (envNode == null || !envNode.has("Variables") || !envNode.get("Variables").isObject()) {
+            return Map.of();
+        }
+        Map<String, String> vars = new HashMap<>();
+        envNode.get("Variables").fields()
+                .forEachRemaining(e -> vars.put(e.getKey(), e.getValue().asText()));
+        return vars;
+    }
+
+    private List<String> resolveStringListOrEmpty(JsonNode props, String source,
+                                                  CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return List.of();
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null || !resolved.isArray()) {
+            return List.of();
+        }
+        List<String> values = new ArrayList<>();
+        resolved.forEach(v -> values.add(v.asText()));
+        return values;
+    }
+
+    private Map<String, Object> resolveMapOrDefault(JsonNode props, String source,
+                                                    CloudFormationTemplateEngine engine,
+                                                    Map<String, Object> defaultValue) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return defaultValue;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        return resolved != null && resolved.isObject() ? jsonObjectToMap(resolved) : defaultValue;
+    }
+
+    private static Map<String, Object> mapWithNullValue(String key) {
+        Map<String, Object> map = new HashMap<>();
+        map.put(key, null);
+        return map;
+    }
+
+    private void putStringListIfPresent(Map<String, Object> request, JsonNode props, String source,
+                                        String target, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved != null && resolved.isArray()) {
+            List<String> values = new ArrayList<>();
+            resolved.forEach(v -> values.add(v.asText()));
+            request.put(target, values);
+        }
+    }
+
+    private void putResolvedMapIfPresent(Map<String, Object> request, JsonNode props, String source,
+                                         String target, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved != null && resolved.isObject()) {
+            request.put(target, jsonObjectToMap(resolved));
+        }
+    }
+
+    private Map<String, Object> jsonObjectToMap(JsonNode node) {
+        Map<String, Object> out = new LinkedHashMap<>();
+        node.fields().forEachRemaining(e -> out.put(e.getKey(), jsonNodeToValue(e.getValue())));
+        return out;
+    }
+
+    private Object jsonNodeToValue(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (node.isObject()) {
+            return jsonObjectToMap(node);
+        }
+        if (node.isArray()) {
+            List<Object> values = new ArrayList<>();
+            node.forEach(v -> values.add(jsonNodeToValue(v)));
+            return values;
+        }
+        if (node.isBoolean()) {
+            return node.asBoolean();
+        }
+        if (node.isIntegralNumber()) {
+            return node.asLong();
+        }
+        if (node.isFloatingPointNumber()) {
+            return node.asDouble();
+        }
+        return node.asText();
+    }
+
+    private record LambdaDesiredState(String functionName,
+                                      boolean explicitFunctionName,
+                                      String packageType,
+                                      Map<String, Object> createRequest,
+                                      LambdaCodeSpec code,
+                                      Map<String, Object> configRequest,
+                                      boolean reservedConcurrentExecutionsPresent,
+                                      Integer reservedConcurrentExecutions) {}
+
+    private record LambdaCodeSpec(Map<String, Object> request, String identity) {}
 
     private static String sourceToZipBase64(String source, String handler, String runtime) {
         String module = handler.contains(".") ? handler.substring(0, handler.lastIndexOf('.')) : "index";

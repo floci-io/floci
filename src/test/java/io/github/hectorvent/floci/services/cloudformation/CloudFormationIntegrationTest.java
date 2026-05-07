@@ -51,6 +51,15 @@ class CloudFormationIntegrationTest {
         }
     }
 
+    private static String firstPhysicalResourceId(String xml) {
+        assertThat(xml, containsString("<PhysicalResourceId>"));
+        String startMarker = "<PhysicalResourceId>";
+        String endMarker = "</PhysicalResourceId>";
+        int start = xml.indexOf(startMarker) + startMarker.length();
+        int end = xml.indexOf(endMarker, start);
+        return xml.substring(start, end);
+    }
+
     @Test
     void createStack_withS3AndSqs() {
         String template = """
@@ -244,6 +253,270 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body("Configuration.FunctionName", equalTo("cfn-nocode-func"));
+    }
+
+    @Test
+    void updateStack_autoNamedLambdaKeepsPhysicalIdForWarmContainerReuse() {
+        String stackName = "cfn-lambda-reuse-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String createdResourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>MyFunction</LogicalResourceId>"))
+            .extract().asString();
+
+        String firstFunctionName = firstPhysicalResourceId(createdResourceXml);
+        assertThat(firstFunctionName, startsWith(stackName + "-MyFunction-"));
+
+        String firstRevisionId = given()
+        .when()
+            .get("/2015-03-31/functions/" + firstFunctionName)
+        .then()
+            .statusCode(200)
+            .extract().path("Configuration.RevisionId");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String updatedResourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<LogicalResourceId>MyFunction</LogicalResourceId>"))
+            .extract().asString();
+
+        assertThat(firstPhysicalResourceId(updatedResourceXml), equalTo(firstFunctionName));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + firstFunctionName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.FunctionName", equalTo(firstFunctionName));
+
+        String secondRevisionId = given()
+        .when()
+            .get("/2015-03-31/functions/" + firstFunctionName)
+        .then()
+            .statusCode(200)
+            .extract().path("Configuration.RevisionId");
+
+        assertThat(secondRevisionId, equalTo(firstRevisionId));
+    }
+
+    @Test
+    void updateStack_lambdaMutableConfigurationUpdatesInPlace() {
+        String stackName = "cfn-lambda-config-update-stack";
+        String functionName = "cfn-lambda-config-update-func";
+        String template = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Timeout": 3,
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                    "Environment": {
+                      "Variables": {
+                        "STAGE": "blue"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(functionName);
+        String updatedTemplate = """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Timeout": 9,
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role",
+                    "Environment": {
+                      "Variables": {
+                        "STAGE": "green"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            """.formatted(functionName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createdResourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(firstPhysicalResourceId(createdResourceXml), equalTo(functionName));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", updatedTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String updatedResourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(firstPhysicalResourceId(updatedResourceXml), equalTo(functionName));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + functionName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.FunctionName", equalTo(functionName))
+            .body("Configuration.Timeout", equalTo(9))
+            .body("Configuration.Environment.Variables.STAGE", equalTo("green"));
+    }
+
+    @Test
+    void updateStack_lambdaFunctionNameChangeReplacesPhysicalResource() {
+        String stackName = "cfn-lambda-replace-stack";
+        String oldFunctionName = "cfn-lambda-replace-old-func";
+        String newFunctionName = "cfn-lambda-replace-new-func";
+        String template = lambdaTemplateWithFunctionName(oldFunctionName);
+        String updatedTemplate = lambdaTemplateWithFunctionName(newFunctionName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", updatedTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String updatedResourceXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(firstPhysicalResourceId(updatedResourceXml), equalTo(newFunctionName));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + newFunctionName)
+        .then()
+            .statusCode(200)
+            .body("Configuration.FunctionName", equalTo(newFunctionName));
+
+        given()
+        .when()
+            .get("/2015-03-31/functions/" + oldFunctionName)
+        .then()
+            .statusCode(404);
+    }
+
+    private static String lambdaTemplateWithFunctionName(String functionName) {
+        return """
+            {
+              "Resources": {
+                "MyFunction": {
+                  "Type": "AWS::Lambda::Function",
+                  "Properties": {
+                    "FunctionName": "%s",
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "Role": "arn:aws:iam::000000000000:role/cfn-test-lambda-role"
+                  }
+                }
+              }
+            }
+            """.formatted(functionName);
     }
 
     @Test
