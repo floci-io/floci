@@ -1343,6 +1343,72 @@ class S3IntegrationTest {
 
     @Test
     @Order(94)
+    void notificationDeliveredToQueueInDifferentRegion() {
+        String sqsAuth = "Credential=AKID/20260507/ap-southeast-2/s3/aws4_request";
+
+        String queueUrl = given()
+            .header("Authorization", sqsAuth)
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "notif-test-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/xml")
+                .queryParam("notification", "")
+                .body("""
+                    <NotificationConfiguration xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                        <QueueConfiguration>
+                            <Id>sqs-notif</Id>
+                            <Queue>arn:aws:sqs:ap-southeast-2:000000000000:notif-test-queue</Queue>
+                            <Event>s3:ObjectCreated:*</Event>
+                        </QueueConfiguration>
+                    </NotificationConfiguration>
+                """)
+            .when()
+                .put("/notif-test-bucket")
+            .then()
+                .statusCode(200);
+
+            given()
+                .contentType("text/plain")
+                .body("hello")
+            .when()
+                .put("/notif-test-bucket/file.txt")
+            .then()
+                .statusCode(200);
+
+            given()
+                .header("Authorization", sqsAuth)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(
+                    "ReceiveMessageResponse.ReceiveMessageResult.Message.Body",
+                    allOf(containsString("notif-test-bucket"), containsString("file.txt"))
+                );
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .header("Authorization", sqsAuth)
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", queueUrl)
+                .post("/");
+        }
+    }
+
+    @Test
+    @Order(95)
     void cleanupNotificationBucket() {
         given().delete("/notif-test-bucket");
     }

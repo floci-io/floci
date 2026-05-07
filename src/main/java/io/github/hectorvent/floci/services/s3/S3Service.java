@@ -1626,7 +1626,7 @@ public class S3Service {
         for (QueueNotification qn : config.getQueueConfigurations()) {
             if (qn.events().stream().anyMatch(p -> matchesEvent(p, eventName)) && qn.matchesKey(key)) {
                 try {
-                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0);
+                    sqsService.sendMessage(sqsUrlFromArn(qn.queueArn()), eventJson, 0, extractRegionFromArn(qn.queueArn()));
                     LOG.debugv("Fired S3 event {0} to SQS {1}", eventName, qn.queueArn());
                 } catch (Exception e) {
                     LOG.warnv("Failed to deliver S3 event to SQS {0}: {1}", qn.queueArn(), e.getMessage());
