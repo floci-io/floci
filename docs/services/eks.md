@@ -8,12 +8,12 @@ EKS uses a standard REST API with JSON bodies — not the JSON 1.1 (`X-Amz-Targe
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateCluster` | Create a new EKS cluster |
-| `ListClusters` | List all cluster names |
-| `DescribeCluster` | Describe a cluster by name |
-| `DeleteCluster` | Delete a cluster |
+| Action |
+| --- |
+| `CreateCluster` |
+| `ListClusters` |
+| `DescribeCluster` |
+| `DeleteCluster` |
 <!-- floci:actions:end -->
 
 ## Modes

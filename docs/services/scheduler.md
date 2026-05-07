@@ -6,17 +6,17 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateScheduleGroup` | `POST` |
-| `GetScheduleGroup` | `GET` |
-| `DeleteScheduleGroup` | `DELETE` |
-| `ListScheduleGroups` | `GET` |
-| `CreateSchedule` | `POST` |
-| `GetSchedule` | `GET` |
-| `UpdateSchedule` | `PUT` |
-| `DeleteSchedule` | `DELETE` |
-| `ListSchedules` | `GET` |
+| Action |
+| --- |
+| `CreateScheduleGroup` |
+| `GetScheduleGroup` |
+| `DeleteScheduleGroup` |
+| `ListScheduleGroups` |
+| `CreateSchedule` |
+| `GetSchedule` |
+| `UpdateSchedule` |
+| `DeleteSchedule` |
+| `ListSchedules` |
 <!-- floci:actions:end -->
 
 ## Schedule Invocation

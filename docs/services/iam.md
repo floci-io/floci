@@ -5,80 +5,80 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateUser` |  |
-| `GetUser` |  |
-| `DeleteUser` |  |
-| `ListUsers` |  |
-| `UpdateUser` |  |
-| `TagUser` |  |
-| `UntagUser` |  |
-| `ListUserTags` |  |
-| `CreateGroup` |  |
-| `GetGroup` |  |
-| `DeleteGroup` |  |
-| `ListGroups` |  |
-| `AddUserToGroup` |  |
-| `RemoveUserFromGroup` |  |
-| `ListGroupsForUser` |  |
-| `CreateRole` |  |
-| `GetRole` |  |
-| `DeleteRole` |  |
-| `ListRoles` |  |
-| `UpdateRole` |  |
-| `UpdateAssumeRolePolicy` |  |
-| `TagRole` |  |
-| `UntagRole` |  |
-| `ListRoleTags` |  |
-| `CreatePolicy` |  |
-| `GetPolicy` |  |
-| `DeletePolicy` |  |
-| `ListPolicies` |  |
-| `CreatePolicyVersion` |  |
-| `GetPolicyVersion` |  |
-| `DeletePolicyVersion` |  |
-| `ListPolicyVersions` |  |
-| `SetDefaultPolicyVersion` |  |
-| `TagPolicy` |  |
-| `UntagPolicy` |  |
-| `ListPolicyTags` |  |
-| `AttachUserPolicy` |  |
-| `DetachUserPolicy` |  |
-| `ListAttachedUserPolicies` |  |
-| `AttachGroupPolicy` |  |
-| `DetachGroupPolicy` |  |
-| `ListAttachedGroupPolicies` |  |
-| `AttachRolePolicy` |  |
-| `DetachRolePolicy` |  |
-| `ListAttachedRolePolicies` |  |
-| `PutUserPolicy` |  |
-| `GetUserPolicy` |  |
-| `DeleteUserPolicy` |  |
-| `ListUserPolicies` |  |
-| `PutGroupPolicy` |  |
-| `GetGroupPolicy` |  |
-| `DeleteGroupPolicy` |  |
-| `ListGroupPolicies` |  |
-| `PutRolePolicy` |  |
-| `GetRolePolicy` |  |
-| `DeleteRolePolicy` |  |
-| `ListRolePolicies` |  |
-| `CreateAccessKey` |  |
-| `DeleteAccessKey` |  |
-| `ListAccessKeys` |  |
-| `UpdateAccessKey` |  |
-| `CreateInstanceProfile` |  |
-| `GetInstanceProfile` |  |
-| `DeleteInstanceProfile` |  |
-| `ListInstanceProfiles` |  |
-| `AddRoleToInstanceProfile` |  |
-| `RemoveRoleFromInstanceProfile` |  |
-| `ListInstanceProfilesForRole` |  |
-| `PutUserPermissionsBoundary` |  |
-| `DeleteUserPermissionsBoundary` |  |
-| `PutRolePermissionsBoundary` |  |
-| `DeleteRolePermissionsBoundary` |  |
+| Action |
+| --- |
+| `CreateUser` |
+| `GetUser` |
+| `DeleteUser` |
+| `ListUsers` |
+| `UpdateUser` |
+| `TagUser` |
+| `UntagUser` |
+| `ListUserTags` |
+| `CreateGroup` |
+| `GetGroup` |
+| `DeleteGroup` |
+| `ListGroups` |
+| `AddUserToGroup` |
+| `RemoveUserFromGroup` |
+| `ListGroupsForUser` |
+| `CreateRole` |
+| `GetRole` |
+| `DeleteRole` |
+| `ListRoles` |
+| `UpdateRole` |
+| `UpdateAssumeRolePolicy` |
+| `TagRole` |
+| `UntagRole` |
+| `ListRoleTags` |
+| `CreatePolicy` |
+| `GetPolicy` |
+| `DeletePolicy` |
+| `ListPolicies` |
+| `CreatePolicyVersion` |
+| `GetPolicyVersion` |
+| `DeletePolicyVersion` |
+| `ListPolicyVersions` |
+| `SetDefaultPolicyVersion` |
+| `TagPolicy` |
+| `UntagPolicy` |
+| `ListPolicyTags` |
+| `AttachUserPolicy` |
+| `DetachUserPolicy` |
+| `ListAttachedUserPolicies` |
+| `AttachGroupPolicy` |
+| `DetachGroupPolicy` |
+| `ListAttachedGroupPolicies` |
+| `AttachRolePolicy` |
+| `DetachRolePolicy` |
+| `ListAttachedRolePolicies` |
+| `PutUserPolicy` |
+| `GetUserPolicy` |
+| `DeleteUserPolicy` |
+| `ListUserPolicies` |
+| `PutGroupPolicy` |
+| `GetGroupPolicy` |
+| `DeleteGroupPolicy` |
+| `ListGroupPolicies` |
+| `PutRolePolicy` |
+| `GetRolePolicy` |
+| `DeleteRolePolicy` |
+| `ListRolePolicies` |
+| `CreateAccessKey` |
+| `DeleteAccessKey` |
+| `ListAccessKeys` |
+| `UpdateAccessKey` |
+| `CreateInstanceProfile` |
+| `GetInstanceProfile` |
+| `DeleteInstanceProfile` |
+| `ListInstanceProfiles` |
+| `AddRoleToInstanceProfile` |
+| `RemoveRoleFromInstanceProfile` |
+| `ListInstanceProfilesForRole` |
+| `PutUserPermissionsBoundary` |
+| `DeleteUserPermissionsBoundary` |
+| `PutRolePermissionsBoundary` |
+| `DeleteRolePermissionsBoundary` |
 <!-- floci:actions:end -->
 ## AWS Managed Policies
 

@@ -98,73 +98,73 @@ Floci seeds the following resources on first use in each region so Terraform, th
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `RunInstances` |  |
-| `DescribeInstances` |  |
-| `TerminateInstances` |  |
-| `StartInstances` |  |
-| `StopInstances` |  |
-| `RebootInstances` |  |
-| `DescribeInstanceStatus` |  |
-| `DescribeInstanceAttribute` |  |
-| `ModifyInstanceAttribute` |  |
-| `CreateVpc` |  |
-| `DescribeVpcs` |  |
-| `DeleteVpc` |  |
-| `ModifyVpcAttribute` |  |
-| `DescribeVpcAttribute` |  |
-| `DescribeVpcEndpointServices` |  |
-| `CreateDefaultVpc` |  |
-| `AssociateVpcCidrBlock` |  |
-| `DisassociateVpcCidrBlock` |  |
-| `CreateSubnet` |  |
-| `DescribeSubnets` |  |
-| `DeleteSubnet` |  |
-| `ModifySubnetAttribute` |  |
-| `CreateSecurityGroup` |  |
-| `DescribeSecurityGroups` |  |
-| `DeleteSecurityGroup` |  |
-| `AuthorizeSecurityGroupIngress` |  |
-| `AuthorizeSecurityGroupEgress` |  |
-| `RevokeSecurityGroupIngress` |  |
-| `RevokeSecurityGroupEgress` |  |
-| `DescribeSecurityGroupRules` |  |
-| `ModifySecurityGroupRules` |  |
-| `UpdateSecurityGroupRuleDescriptionsIngress` |  |
-| `UpdateSecurityGroupRuleDescriptionsEgress` |  |
-| `CreateKeyPair` |  |
-| `DescribeKeyPairs` |  |
-| `DeleteKeyPair` |  |
-| `ImportKeyPair` |  |
-| `DescribeImages` |  |
-| `CreateTags` |  |
-| `DeleteTags` |  |
-| `DescribeTags` |  |
-| `CreateInternetGateway` |  |
-| `DescribeInternetGateways` |  |
-| `DeleteInternetGateway` |  |
-| `AttachInternetGateway` |  |
-| `DetachInternetGateway` |  |
-| `CreateRouteTable` |  |
-| `DescribeRouteTables` |  |
-| `DeleteRouteTable` |  |
-| `AssociateRouteTable` |  |
-| `DisassociateRouteTable` |  |
-| `CreateRoute` |  |
-| `DeleteRoute` |  |
-| `AllocateAddress` |  |
-| `AssociateAddress` |  |
-| `DisassociateAddress` |  |
-| `ReleaseAddress` |  |
-| `DescribeAddresses` |  |
-| `DescribeAvailabilityZones` |  |
-| `DescribeRegions` |  |
-| `DescribeAccountAttributes` |  |
-| `DescribeInstanceTypes` |  |
-| `CreateVolume` |  |
-| `DescribeVolumes` |  |
-| `DeleteVolume` |  |
+| Action |
+| --- |
+| `RunInstances` |
+| `DescribeInstances` |
+| `TerminateInstances` |
+| `StartInstances` |
+| `StopInstances` |
+| `RebootInstances` |
+| `DescribeInstanceStatus` |
+| `DescribeInstanceAttribute` |
+| `ModifyInstanceAttribute` |
+| `CreateVpc` |
+| `DescribeVpcs` |
+| `DeleteVpc` |
+| `ModifyVpcAttribute` |
+| `DescribeVpcAttribute` |
+| `DescribeVpcEndpointServices` |
+| `CreateDefaultVpc` |
+| `AssociateVpcCidrBlock` |
+| `DisassociateVpcCidrBlock` |
+| `CreateSubnet` |
+| `DescribeSubnets` |
+| `DeleteSubnet` |
+| `ModifySubnetAttribute` |
+| `CreateSecurityGroup` |
+| `DescribeSecurityGroups` |
+| `DeleteSecurityGroup` |
+| `AuthorizeSecurityGroupIngress` |
+| `AuthorizeSecurityGroupEgress` |
+| `RevokeSecurityGroupIngress` |
+| `RevokeSecurityGroupEgress` |
+| `DescribeSecurityGroupRules` |
+| `ModifySecurityGroupRules` |
+| `UpdateSecurityGroupRuleDescriptionsIngress` |
+| `UpdateSecurityGroupRuleDescriptionsEgress` |
+| `CreateKeyPair` |
+| `DescribeKeyPairs` |
+| `DeleteKeyPair` |
+| `ImportKeyPair` |
+| `DescribeImages` |
+| `CreateTags` |
+| `DeleteTags` |
+| `DescribeTags` |
+| `CreateInternetGateway` |
+| `DescribeInternetGateways` |
+| `DeleteInternetGateway` |
+| `AttachInternetGateway` |
+| `DetachInternetGateway` |
+| `CreateRouteTable` |
+| `DescribeRouteTables` |
+| `DeleteRouteTable` |
+| `AssociateRouteTable` |
+| `DisassociateRouteTable` |
+| `CreateRoute` |
+| `DeleteRoute` |
+| `AllocateAddress` |
+| `AssociateAddress` |
+| `DisassociateAddress` |
+| `ReleaseAddress` |
+| `DescribeAddresses` |
+| `DescribeAvailabilityZones` |
+| `DescribeRegions` |
+| `DescribeAccountAttributes` |
+| `DescribeInstanceTypes` |
+| `CreateVolume` |
+| `DescribeVolumes` |
+| `DeleteVolume` |
 <!-- floci:actions:end -->
 ## Configuration
 

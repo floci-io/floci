@@ -8,11 +8,11 @@ The Resource Groups Tagging API provides a unified interface to query, add, and 
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `GetResources` |  |
-| `TagResources` |  |
-| `UntagResources` |  |
-| `GetTagKeys` |  |
-| `GetTagValues` |  |
+| Action |
+| --- |
+| `GetResources` |
+| `TagResources` |
+| `UntagResources` |
+| `GetTagKeys` |
+| `GetTagValues` |
 <!-- floci:actions:end -->

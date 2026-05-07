@@ -8,49 +8,49 @@ Floci Lambda runs your function code locally inside real Docker containers - clo
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateFunction` | Deploy a Lambda function |
-| `GetFunction` | Get function details and download URL |
-| `ListFunctions` | List all functions |
-| `GetFunctionConfiguration` | Get runtime configuration |
-| `UpdateFunctionConfiguration` | Update runtime, handler, memory, timeout, environment, architectures, tracing, layers, and more |
-| `UpdateFunctionCode` | Upload new code |
-| `DeleteFunction` | Remove a function |
-| `GetFunctionCodeSigningConfig` | Return code-signing config (always empty) |
-| `Invoke` | Invoke a function synchronously or asynchronously |
-| `CreateEventSourceMapping` | Connect SQS / Kinesis / DynamoDB Streams to a function |
-| `GetEventSourceMapping` | Get event source mapping details |
-| `ListEventSourceMappings` | List all event source mappings |
-| `UpdateEventSourceMapping` | Update a mapping |
-| `DeleteEventSourceMapping` | Remove a mapping |
-| `PublishVersion` | Publish an immutable version |
-| `ListVersionsByFunction` | List all published versions of a function |
-| `CreateAlias` | Create a named alias pointing to a version |
-| `GetAlias` | Get alias details |
-| `ListAliases` | List all aliases for a function |
-| `UpdateAlias` | Update an alias |
-| `DeleteAlias` | Delete an alias |
-| `AddPermission` | Add a resource-policy statement |
-| `GetPolicy` | Get the function resource policy |
-| `RemovePermission` | Remove a resource-policy statement |
-| `ListTags` | List tags on a function |
-| `TagResource` | Tag a function |
-| `UntagResource` | Untag a function |
-| `ListLayers` |  |
-| `ListLayerVersions` |  |
-| `PutFunctionConcurrency` | Set reserved concurrent executions |
-| `GetFunctionConcurrency` | Get reserved concurrent executions |
-| `DeleteFunctionConcurrency` | Clear reserved concurrent executions |
-| `CreateFunctionUrlConfig` | Provision a function URL |
-| `GetFunctionUrlConfig` | Read function URL config |
-| `UpdateFunctionUrlConfig` | Update function URL config |
-| `DeleteFunctionUrlConfig` | Delete function URL config |
-| `PutFunctionEventInvokeConfig` |  |
-| `UpdateFunctionEventInvokeConfig` |  |
-| `GetFunctionEventInvokeConfig` |  |
-| `DeleteFunctionEventInvokeConfig` |  |
-| `ListFunctionEventInvokeConfigs` |  |
+| Action |
+| --- |
+| `CreateFunction` |
+| `GetFunction` |
+| `ListFunctions` |
+| `GetFunctionConfiguration` |
+| `UpdateFunctionConfiguration` |
+| `UpdateFunctionCode` |
+| `DeleteFunction` |
+| `GetFunctionCodeSigningConfig` |
+| `Invoke` |
+| `CreateEventSourceMapping` |
+| `GetEventSourceMapping` |
+| `ListEventSourceMappings` |
+| `UpdateEventSourceMapping` |
+| `DeleteEventSourceMapping` |
+| `PublishVersion` |
+| `ListVersionsByFunction` |
+| `CreateAlias` |
+| `GetAlias` |
+| `ListAliases` |
+| `UpdateAlias` |
+| `DeleteAlias` |
+| `AddPermission` |
+| `GetPolicy` |
+| `RemovePermission` |
+| `ListTags` |
+| `TagResource` |
+| `UntagResource` |
+| `ListLayers` |
+| `ListLayerVersions` |
+| `PutFunctionConcurrency` |
+| `GetFunctionConcurrency` |
+| `DeleteFunctionConcurrency` |
+| `CreateFunctionUrlConfig` |
+| `GetFunctionUrlConfig` |
+| `UpdateFunctionUrlConfig` |
+| `DeleteFunctionUrlConfig` |
+| `PutFunctionEventInvokeConfig` |
+| `UpdateFunctionEventInvokeConfig` |
+| `GetFunctionEventInvokeConfig` |
+| `DeleteFunctionEventInvokeConfig` |
+| `ListFunctionEventInvokeConfigs` |
 <!-- floci:actions:end -->
 
 ## Hot-Reloading via Reactive S3 Sync
@@ -194,7 +194,7 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 
 - Layers (`PublishLayerVersion`, `DeleteLayerVersion`, `GetLayerVersion`, `GetLayerVersionByArn`, `AddLayerVersionPermission`, `RemoveLayerVersionPermission`, `GetLayerVersionPolicy`)
 - Provisioned concurrency (`PutProvisionedConcurrencyConfig`, `GetProvisionedConcurrencyConfig`, `ListProvisionedConcurrencyConfigs`, `DeleteProvisionedConcurrencyConfig`)
-- Dead-letter, async invoke config, and event invoke config operations
+- Dead-letter and async invoke config
 - `InvokeWithResponseStream`
 - Code signing management (only `GetFunctionCodeSigningConfig` is wired; there is no `PutFunctionCodeSigningConfig` or `CreateCodeSigningConfig`)
 - Account and regional settings (`GetAccountSettings`)

@@ -7,32 +7,32 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateDomain` | Create a new domain |
-| `DescribeDomain` | Get domain details |
-| `DescribeDomains` | Batch describe domains |
-| `ListDomainNames` | List all domains (supports `?engineType=` filter) |
-| `DescribeDomainConfig` | Get domain configuration |
-| `UpdateDomainConfig` | Update cluster config, EBS options, engine version |
-| `DeleteDomain` | Delete a domain |
-| `AddTags` | Add tags to a domain by ARN |
-| `ListTags` | List tags for a domain |
-| `RemoveTags` | Remove tag keys from a domain |
-| `ListVersions` | List supported engine versions |
-| `GetCompatibleVersions` | List valid upgrade paths |
-| `ListInstanceTypeDetails` | List available instance types |
-| `DescribeInstanceTypeLimits` | Get limits for an instance type |
-| `DescribeDomainChangeProgress` | Returns empty `ChangeProgressStatus` |
-| `DescribeDomainAutoTunes` | Returns empty `AutoTunes` list |
-| `DescribeDryRunProgress` | Returns empty `DryRunProgressStatus` |
-| `DescribeDomainHealth` | Returns `ClusterHealth: Green` |
-| `GetUpgradeHistory` | Returns empty list |
-| `GetUpgradeStatus` | Returns `StepStatus: SUCCEEDED` |
-| `UpgradeDomain` | Stores new engine version, returns immediately with a generated `UpgradeId` |
-| `CancelDomainConfigChange` | Returns empty `CancelledChangeIds` |
-| `StartServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
-| `CancelServiceSoftwareUpdate` | Returns no-op `ServiceSoftwareOptions` |
+| Action |
+| --- |
+| `CreateDomain` |
+| `DescribeDomain` |
+| `DescribeDomains` |
+| `ListDomainNames` |
+| `DescribeDomainConfig` |
+| `UpdateDomainConfig` |
+| `DeleteDomain` |
+| `AddTags` |
+| `ListTags` |
+| `RemoveTags` |
+| `ListVersions` |
+| `GetCompatibleVersions` |
+| `ListInstanceTypeDetails` |
+| `DescribeInstanceTypeLimits` |
+| `DescribeDomainChangeProgress` |
+| `DescribeDomainAutoTunes` |
+| `DescribeDryRunProgress` |
+| `DescribeDomainHealth` |
+| `GetUpgradeHistory` |
+| `GetUpgradeStatus` |
+| `UpgradeDomain` |
+| `CancelDomainConfigChange` |
+| `StartServiceSoftwareUpdate` |
+| `CancelServiceSoftwareUpdate` |
 <!-- floci:actions:end -->
 
 ## Implementation Modes

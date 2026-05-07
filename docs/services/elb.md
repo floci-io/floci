@@ -7,42 +7,42 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateLoadBalancer` |  |
-| `DescribeLoadBalancers` |  |
-| `DeleteLoadBalancer` |  |
-| `ModifyLoadBalancerAttributes` |  |
-| `DescribeLoadBalancerAttributes` |  |
-| `SetSecurityGroups` |  |
-| `SetSubnets` |  |
-| `SetIpAddressType` |  |
-| `CreateTargetGroup` |  |
-| `DescribeTargetGroups` |  |
-| `DeleteTargetGroup` |  |
-| `ModifyTargetGroup` |  |
-| `ModifyTargetGroupAttributes` |  |
-| `DescribeTargetGroupAttributes` |  |
-| `CreateListener` |  |
-| `DescribeListeners` |  |
-| `DeleteListener` |  |
-| `ModifyListener` |  |
-| `CreateRule` |  |
-| `DescribeRules` |  |
-| `DeleteRule` |  |
-| `ModifyRule` |  |
-| `SetRulePriorities` |  |
-| `RegisterTargets` |  |
-| `DeregisterTargets` |  |
-| `DescribeTargetHealth` |  |
-| `AddTags` |  |
-| `RemoveTags` |  |
-| `DescribeTags` |  |
-| `DescribeAccountLimits` |  |
-| `DescribeSSLPolicies` |  |
-| `AddListenerCertificates` |  |
-| `RemoveListenerCertificates` |  |
-| `DescribeListenerCertificates` |  |
+| Action |
+| --- |
+| `CreateLoadBalancer` |
+| `DescribeLoadBalancers` |
+| `DeleteLoadBalancer` |
+| `ModifyLoadBalancerAttributes` |
+| `DescribeLoadBalancerAttributes` |
+| `SetSecurityGroups` |
+| `SetSubnets` |
+| `SetIpAddressType` |
+| `CreateTargetGroup` |
+| `DescribeTargetGroups` |
+| `DeleteTargetGroup` |
+| `ModifyTargetGroup` |
+| `ModifyTargetGroupAttributes` |
+| `DescribeTargetGroupAttributes` |
+| `CreateListener` |
+| `DescribeListeners` |
+| `DeleteListener` |
+| `ModifyListener` |
+| `CreateRule` |
+| `DescribeRules` |
+| `DeleteRule` |
+| `ModifyRule` |
+| `SetRulePriorities` |
+| `RegisterTargets` |
+| `DeregisterTargets` |
+| `DescribeTargetHealth` |
+| `AddTags` |
+| `RemoveTags` |
+| `DescribeTags` |
+| `DescribeAccountLimits` |
+| `DescribeSSLPolicies` |
+| `AddListenerCertificates` |
+| `RemoveListenerCertificates` |
+| `DescribeListenerCertificates` |
 <!-- floci:actions:end -->
 ## Behavior Notes
 

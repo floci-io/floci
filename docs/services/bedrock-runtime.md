@@ -10,12 +10,12 @@ The Bedrock management plane (`aws bedrock ...`: `ListFoundationModels`, `GetFou
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `Converse` | `POST /model/{modelId}/converse` |
-| `InvokeModel` | `POST /model/{modelId}/invoke` |
-| `InvokeModelWithResponseStream` | `POST /model/{modelId}/invoke-with-response-stream` |
-| `ConverseStream` | `POST /model/{modelId}/converse-stream` |
+| Action |
+| --- |
+| `Converse` |
+| `InvokeModel` |
+| `InvokeModelWithResponseStream` |
+| `ConverseStream` |
 <!-- floci:actions:end -->
 
 ## Configuration

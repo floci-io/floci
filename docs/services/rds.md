@@ -9,22 +9,22 @@ Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies 
 ## Supported Management Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateDBInstance` | Start a new database instance |
-| `DescribeDBInstances` | List instances and their connection info |
-| `DeleteDBInstance` | Stop and remove an instance |
-| `ModifyDBInstance` | Update instance settings |
-| `RebootDBInstance` | Restart a database instance |
-| `CreateDBCluster` | Create an Aurora-compatible cluster |
-| `DescribeDBClusters` | List clusters |
-| `DeleteDBCluster` | Delete a cluster |
-| `ModifyDBCluster` | Update cluster settings |
-| `CreateDBParameterGroup` | Create a parameter group |
-| `DescribeDBParameterGroups` | List parameter groups |
-| `DeleteDBParameterGroup` | Delete a parameter group |
-| `ModifyDBParameterGroup` | Update parameter group settings |
-| `DescribeDBParameters` | List parameters in a group |
+| Action |
+| --- |
+| `CreateDBInstance` |
+| `DescribeDBInstances` |
+| `DeleteDBInstance` |
+| `ModifyDBInstance` |
+| `RebootDBInstance` |
+| `CreateDBCluster` |
+| `DescribeDBClusters` |
+| `DeleteDBCluster` |
+| `ModifyDBCluster` |
+| `CreateDBParameterGroup` |
+| `DescribeDBParameterGroups` |
+| `DeleteDBParameterGroup` |
+| `ModifyDBParameterGroup` |
+| `DescribeDBParameters` |
 <!-- floci:actions:end -->
 
 ## Configuration

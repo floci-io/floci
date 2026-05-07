@@ -99,10 +99,10 @@ def extract_actions_from_sources(sources: Iterable[tuple[str, str]]) -> list[str
     return out
 
 
-def parse_marker_block(md: str) -> tuple[str, dict[str, str], str]:
+def parse_marker_block(md: str) -> tuple[str, list[str], str]:
     """Split a markdown document around the action-marker block.
 
-    Returns (prefix_through_start_marker_line, prior_descriptions, suffix_from_end_marker_line).
+    Returns (prefix_through_start_marker_line, prior_actions, suffix_from_end_marker_line).
     Raises ValueError if markers are missing or in the wrong order.
     """
     if md.count(MARKER_START) != 1 or md.count(MARKER_END) != 1:
@@ -128,9 +128,9 @@ _TABLE_ROW_RE = re.compile(r"^`([A-Z][a-z][A-Za-z0-9]*)`$")
 _SEPARATOR_ROW_RE = re.compile(r"^\|\s*[-:|\s]+\|\s*$")
 
 
-def _parse_table(body: str) -> dict[str, str]:
-    """Parse the action-name | description table inside the marker block."""
-    out: dict[str, str] = {}
+def _parse_table(body: str) -> list[str]:
+    """Parse action names from the table inside the marker block."""
+    out: list[str] = []
     for line in body.splitlines():
         stripped = line.strip()
         if not stripped.startswith("|"):
@@ -138,21 +138,17 @@ def _parse_table(body: str) -> dict[str, str]:
         if _SEPARATOR_ROW_RE.match(stripped):
             continue
         cells = [c.strip() for c in stripped.strip("|").split("|")]
-        if len(cells) < 2:
-            continue
         m = _TABLE_ROW_RE.match(cells[0])
-        if not m:
-            continue
-        out[m.group(1)] = cells[1]
+        if m:
+            out.append(m.group(1))
     return out
 
 
-def render_marker_block(actions: list[str], descriptions: dict[str, str]) -> str:
+def render_marker_block(actions: list[str]) -> str:
     """Render the table contents that go between the marker lines."""
-    lines = ["| Action | Description |", "| --- | --- |"]
+    lines = ["| Action |", "| --- |"]
     for a in actions:
-        desc = descriptions.get(a, "")
-        lines.append(f"| `{a}` | {desc} |")
+        lines.append(f"| `{a}` |")
     return "\n".join(lines) + "\n"
 
 
@@ -161,12 +157,12 @@ def regenerate_doc_content(
 ) -> tuple[str, list[str]]:
     """Pure function. Given the new action list and the current doc, return the new doc.
 
-    Also returns orphan action names — actions that were described in the doc's old
-    marker block but are no longer in `actions`.
+    Also returns orphan action names — actions present in the doc's old marker block
+    but no longer in `actions`.
     """
-    prefix, prior_descriptions, suffix = parse_marker_block(doc_content)
-    orphans = [a for a in prior_descriptions if a not in actions]
-    body = render_marker_block(actions, prior_descriptions)
+    prefix, prior_actions, suffix = parse_marker_block(doc_content)
+    orphans = [a for a in prior_actions if a not in set(actions)]
+    body = render_marker_block(actions)
     return prefix + body + suffix, orphans
 
 

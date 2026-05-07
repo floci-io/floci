@@ -111,9 +111,9 @@ The "Supported Actions" table on every `docs/services/*.md` page is auto-generat
 
 ```markdown
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateThing` | ...hand-written description... |
+| Action |
+| --- |
+| `CreateThing` |
 <!-- floci:actions:end -->
 ```
 
@@ -128,7 +128,7 @@ CI runs `make docs-check` and fails any PR where the regenerated tables differ f
 **Rules of the road:**
 
 - Don't hand-edit content between the `<!-- floci:actions:start -->` and `<!-- floci:actions:end -->` markers — the next regen will overwrite it.
-- The Action column is auto-derived. The Description column is hand-editable; new actions render with empty cells, fill them in over time.
+- The table is action names only — no description column. AWS action names are self-documenting (`CreateSecret`, `ListFunctions`), and maintaining descriptions alongside auto-generated names created drift and typo bugs with no meaningful payoff.
 - New services must be registered in `tools/docs/services.yaml` before `docs-sync` will populate them. Adding a new top-level `*Handler.java` without registering its service triggers a CI warning.
 - Run `make docs-test` to exercise the regen logic against fixtures in `tools/docs/fixtures/`.
 

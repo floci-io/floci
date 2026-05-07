@@ -7,33 +7,33 @@ Floci supports both CloudWatch Logs and CloudWatch Metrics.
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateLogGroup` | Create a log group |
-| `DeleteLogGroup` | Delete a log group |
-| `DescribeLogGroups` | List log groups |
-| `CreateLogStream` | Create a log stream inside a log group |
-| `DeleteLogStream` | Delete a log stream |
-| `DescribeLogStreams` | List log streams in a group |
-| `PutLogEvents` | Write log events to a stream |
-| `GetLogEvents` | Read log events from a stream |
-| `FilterLogEvents` | Search log events with a filter pattern |
-| `PutRetentionPolicy` | Set log retention (days) |
-| `DeleteRetentionPolicy` | Remove log retention policy |
-| `TagLogGroup` | Tag a log group |
-| `UntagLogGroup` | Remove tags |
-| `ListTagsLogGroup` | List tags |
-| `ListTagsForResource` |  |
-| `TagResource` |  |
-| `UntagResource` |  |
-| `PutMetricData` | Publish custom metrics |
-| `ListMetrics` | List available metrics |
-| `GetMetricStatistics` | Get metric statistics (Average, Sum, etc.) |
-| `PutMetricAlarm` | Create a metric alarm |
-| `DescribeAlarms` | List alarms |
-| `DeleteAlarms` | Delete alarms |
-| `SetAlarmState` | Manually set alarm state |
-| `GetMetricData` | Query metrics with math expressions |
+| Action |
+| --- |
+| `CreateLogGroup` |
+| `DeleteLogGroup` |
+| `DescribeLogGroups` |
+| `CreateLogStream` |
+| `DeleteLogStream` |
+| `DescribeLogStreams` |
+| `PutLogEvents` |
+| `GetLogEvents` |
+| `FilterLogEvents` |
+| `PutRetentionPolicy` |
+| `DeleteRetentionPolicy` |
+| `TagLogGroup` |
+| `UntagLogGroup` |
+| `ListTagsLogGroup` |
+| `ListTagsForResource` |
+| `TagResource` |
+| `UntagResource` |
+| `PutMetricData` |
+| `ListMetrics` |
+| `GetMetricStatistics` |
+| `PutMetricAlarm` |
+| `DescribeAlarms` |
+| `DeleteAlarms` |
+| `SetAlarmState` |
+| `GetMetricData` |
 <!-- floci:actions:end -->
 
 ## CloudWatch Logs

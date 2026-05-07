@@ -15,6 +15,6 @@ docs-check:
 	  echo "ERROR: docs/services/*.md is out of sync with handler source."; \
 	  echo "Run 'make docs-sync' locally and commit the result."; \
 	  echo ""; \
-	  git diff --stat -- docs/; \
+	  git --no-pager diff --stat -- docs/; \
 	  exit 1; \
 	fi

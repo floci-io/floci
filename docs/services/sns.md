@@ -6,25 +6,25 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateTopic` | Create a topic |
-| `DeleteTopic` | Delete a topic |
-| `ListTopics` | List all topics |
-| `GetTopicAttributes` | Get topic configuration |
-| `SetTopicAttributes` | Update topic configuration |
-| `Subscribe` | Subscribe an endpoint (SQS, HTTP, Lambda, email) |
-| `Unsubscribe` | Remove a subscription |
-| `ListSubscriptions` | List all subscriptions |
-| `ListSubscriptionsByTopic` | List subscriptions for a specific topic |
-| `Publish` | Publish a message to a topic |
-| `PublishBatch` | Publish up to 10 messages in one call |
-| `GetSubscriptionAttributes` | Get subscription settings |
-| `SetSubscriptionAttributes` | Update subscription settings |
-| `ConfirmSubscription` | Confirm a pending subscription |
-| `TagResource` | Tag a topic |
-| `UntagResource` | Remove tags from a topic |
-| `ListTagsForResource` | List tags on a topic |
+| Action |
+| --- |
+| `CreateTopic` |
+| `DeleteTopic` |
+| `ListTopics` |
+| `GetTopicAttributes` |
+| `SetTopicAttributes` |
+| `Subscribe` |
+| `Unsubscribe` |
+| `ListSubscriptions` |
+| `ListSubscriptionsByTopic` |
+| `Publish` |
+| `PublishBatch` |
+| `GetSubscriptionAttributes` |
+| `SetSubscriptionAttributes` |
+| `ConfirmSubscription` |
+| `TagResource` |
+| `UntagResource` |
+| `ListTagsForResource` |
 <!-- floci:actions:end -->
 
 ## Examples

@@ -8,40 +8,40 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateDatabase` |  |
-| `GetDatabase` |  |
-| `GetDatabases` |  |
-| `CreateTable` |  |
-| `GetTable` |  |
-| `GetTables` |  |
-| `DeleteTable` |  |
-| `CreatePartition` |  |
-| `GetPartitions` |  |
-| `CreateRegistry` |  |
-| `GetRegistry` |  |
-| `ListRegistries` |  |
-| `UpdateRegistry` |  |
-| `DeleteRegistry` |  |
-| `CreateSchema` |  |
-| `RegisterSchemaVersion` |  |
-| `GetSchemaByDefinition` |  |
-| `GetSchemaVersion` |  |
-| `GetSchema` |  |
-| `UpdateSchema` |  |
-| `ListSchemas` |  |
-| `ListSchemaVersions` |  |
-| `DeleteSchema` |  |
-| `DeleteSchemaVersions` |  |
-| `GetSchemaVersionsDiff` |  |
-| `CheckSchemaVersionValidity` |  |
-| `PutSchemaVersionMetadata` |  |
-| `RemoveSchemaVersionMetadata` |  |
-| `QuerySchemaVersionMetadata` |  |
-| `TagResource` |  |
-| `UntagResource` |  |
-| `GetTags` |  |
+| Action |
+| --- |
+| `CreateDatabase` |
+| `GetDatabase` |
+| `GetDatabases` |
+| `CreateTable` |
+| `GetTable` |
+| `GetTables` |
+| `DeleteTable` |
+| `CreatePartition` |
+| `GetPartitions` |
+| `CreateRegistry` |
+| `GetRegistry` |
+| `ListRegistries` |
+| `UpdateRegistry` |
+| `DeleteRegistry` |
+| `CreateSchema` |
+| `RegisterSchemaVersion` |
+| `GetSchemaByDefinition` |
+| `GetSchemaVersion` |
+| `GetSchema` |
+| `UpdateSchema` |
+| `ListSchemas` |
+| `ListSchemaVersions` |
+| `DeleteSchema` |
+| `DeleteSchemaVersions` |
+| `GetSchemaVersionsDiff` |
+| `CheckSchemaVersionValidity` |
+| `PutSchemaVersionMetadata` |
+| `RemoveSchemaVersionMetadata` |
+| `QuerySchemaVersionMetadata` |
+| `TagResource` |
+| `UntagResource` |
+| `GetTags` |
 <!-- floci:actions:end -->
 ## Integration with Athena
 

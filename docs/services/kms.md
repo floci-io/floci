@@ -6,32 +6,32 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateKey` | Create a new KMS key |
-| `GetPublicKey` |  |
-| `DescribeKey` | Get key metadata |
-| `ListKeys` | List all keys |
-| `Encrypt` | Encrypt plaintext with a key |
-| `Decrypt` | Decrypt ciphertext |
-| `ReEncrypt` | Re-encrypt under a different key |
-| `GenerateDataKey` | Generate a data key (plaintext + encrypted) |
-| `GenerateDataKeyWithoutPlaintext` | Generate only the encrypted data key |
-| `Sign` | Sign a message with an asymmetric key |
-| `Verify` | Verify a signature |
-| `CreateAlias` | Create a friendly name for a key |
-| `DeleteAlias` | Remove an alias |
-| `ListAliases` | List all aliases |
-| `ScheduleKeyDeletion` | Mark a key for deletion |
-| `CancelKeyDeletion` | Cancel pending deletion |
-| `TagResource` | Tag a key |
-| `UntagResource` | Remove tags |
-| `ListResourceTags` | List tags |
-| `GetKeyPolicy` | Get a key's resource policy |
-| `PutKeyPolicy` | Update a key's resource policy |
-| `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
-| `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
-| `DisableKeyRotation` | Disable automatic key rotation |
+| Action |
+| --- |
+| `CreateKey` |
+| `GetPublicKey` |
+| `DescribeKey` |
+| `ListKeys` |
+| `Encrypt` |
+| `Decrypt` |
+| `ReEncrypt` |
+| `GenerateDataKey` |
+| `GenerateDataKeyWithoutPlaintext` |
+| `Sign` |
+| `Verify` |
+| `CreateAlias` |
+| `DeleteAlias` |
+| `ListAliases` |
+| `ScheduleKeyDeletion` |
+| `CancelKeyDeletion` |
+| `TagResource` |
+| `UntagResource` |
+| `ListResourceTags` |
+| `GetKeyPolicy` |
+| `PutKeyPolicy` |
+| `GetKeyRotationStatus` |
+| `EnableKeyRotation` |
+| `DisableKeyRotation` |
 <!-- floci:actions:end -->
 
 ## Examples

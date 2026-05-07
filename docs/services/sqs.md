@@ -6,28 +6,28 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateQueue` | Create a standard or FIFO queue |
-| `DeleteQueue` | Delete a queue |
-| `ListQueues` | List all queues |
-| `GetQueueUrl` | Look up a queue URL by name |
-| `GetQueueAttributes` | Get queue configuration attributes |
-| `SendMessage` | Send a message to a queue |
-| `ReceiveMessage` | Poll for messages |
-| `DeleteMessage` | Acknowledge and delete a message |
-| `DeleteMessageBatch` | Delete multiple messages at once |
-| `SendMessageBatch` | Send up to 10 messages in one call |
-| `ChangeMessageVisibility` | Extend or reset a message's visibility timeout |
-| `ChangeMessageVisibilityBatch` | Change visibility for multiple messages |
-| `SetQueueAttributes` | Update queue configuration |
-| `TagQueue` | Add tags to a queue |
-| `UntagQueue` | Remove tags from a queue |
-| `ListQueueTags` | List tags on a queue |
-| `PurgeQueue` | Delete all messages in a queue |
-| `ListDeadLetterSourceQueues` | Find queues that use this queue as DLQ |
-| `StartMessageMoveTask` | Start a DLQ redrive task |
-| `ListMessageMoveTasks` | List DLQ redrive tasks |
+| Action |
+| --- |
+| `CreateQueue` |
+| `DeleteQueue` |
+| `ListQueues` |
+| `GetQueueUrl` |
+| `GetQueueAttributes` |
+| `SendMessage` |
+| `ReceiveMessage` |
+| `DeleteMessage` |
+| `DeleteMessageBatch` |
+| `SendMessageBatch` |
+| `ChangeMessageVisibility` |
+| `ChangeMessageVisibilityBatch` |
+| `SetQueueAttributes` |
+| `TagQueue` |
+| `UntagQueue` |
+| `ListQueueTags` |
+| `PurgeQueue` |
+| `ListDeadLetterSourceQueues` |
+| `StartMessageMoveTask` |
+| `ListMessageMoveTasks` |
 <!-- floci:actions:end -->
 
 ## Local Inspection Endpoint

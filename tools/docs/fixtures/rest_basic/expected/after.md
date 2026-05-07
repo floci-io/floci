@@ -3,14 +3,14 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateFunction` | Create a new function |
-| `GetFunction` | Get a function |
-| `ListFunctions` |  |
-| `UpdateFunctionConfiguration` |  |
-| `DeleteFunction` |  |
-| `UpdateFunctionUrlConfig` |  |
+| Action |
+| --- |
+| `CreateFunction` |
+| `GetFunction` |
+| `ListFunctions` |
+| `UpdateFunctionConfiguration` |
+| `DeleteFunction` |
+| `UpdateFunctionUrlConfig` |
 <!-- floci:actions:end -->
 
 End of doc.

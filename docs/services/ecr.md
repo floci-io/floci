@@ -13,26 +13,26 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateRepository` | Create a new repository (lazy-starts the backing registry on first call) |
-| `DescribeRepositories` | List repositories or fetch by name |
-| `DeleteRepository` | Delete a repository (with `force=true` semantics for non-empty repos) |
-| `GetAuthorizationToken` | Returns a docker-login token + proxy endpoint |
-| `ListImages` | Enumerate tags and digests in a repository |
-| `DescribeImages` | Image metadata: digest, size, push timestamp, manifest media type |
-| `BatchGetImage` | Fetch image manifests, honoring `acceptedMediaTypes` |
-| `BatchDeleteImage` | Delete images by tag or digest |
-| `PutImageTagMutability` | Set tag mutability (round-trip; not enforced on push) |
-| `TagResource` |  |
-| `UntagResource` |  |
-| `ListTagsForResource` |  |
-| `PutLifecyclePolicy` |  |
-| `GetLifecyclePolicy` |  |
-| `DeleteLifecyclePolicy` |  |
-| `SetRepositoryPolicy` |  |
-| `GetRepositoryPolicy` |  |
-| `DeleteRepositoryPolicy` |  |
+| Action |
+| --- |
+| `CreateRepository` |
+| `DescribeRepositories` |
+| `DeleteRepository` |
+| `GetAuthorizationToken` |
+| `ListImages` |
+| `DescribeImages` |
+| `BatchGetImage` |
+| `BatchDeleteImage` |
+| `PutImageTagMutability` |
+| `TagResource` |
+| `UntagResource` |
+| `ListTagsForResource` |
+| `PutLifecyclePolicy` |
+| `GetLifecyclePolicy` |
+| `DeleteLifecyclePolicy` |
+| `SetRepositoryPolicy` |
+| `GetRepositoryPolicy` |
+| `DeleteRepositoryPolicy` |
 <!-- floci:actions:end -->
 
 ## Emulation Behavior

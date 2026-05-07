@@ -8,12 +8,12 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `StartQueryExecution` | Submits a SQL query; executed asynchronously via DuckDB |
-| `GetQueryExecution` | Returns query status (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`) |
-| `GetQueryResults` | Returns the result set for a completed query |
-| `ListQueryExecutions` | Returns a list of past query executions |
+| Action |
+| --- |
+| `StartQueryExecution` |
+| `GetQueryExecution` |
+| `GetQueryResults` |
+| `ListQueryExecutions` |
 <!-- floci:actions:end -->
 
 ## How it works

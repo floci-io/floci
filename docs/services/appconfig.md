@@ -5,26 +5,26 @@ Floci supports AWS AppConfig and AppConfigData for local configuration managemen
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateApplication` |  |
-| `GetApplication` |  |
-| `ListApplications` |  |
-| `DeleteApplication` |  |
-| `CreateEnvironment` |  |
-| `GetEnvironment` |  |
-| `ListEnvironments` |  |
-| `CreateConfigurationProfile` |  |
-| `GetConfigurationProfile` |  |
-| `ListConfigurationProfiles` |  |
-| `CreateHostedConfigurationVersion` |  |
-| `GetHostedConfigurationVersion` |  |
-| `CreateDeploymentStrategy` |  |
-| `GetDeploymentStrategy` |  |
-| `StartDeployment` |  |
-| `GetDeployment` |  |
-| `StartConfigurationSession` |  |
-| `GetLatestConfiguration` |  |
+| Action |
+| --- |
+| `CreateApplication` |
+| `GetApplication` |
+| `ListApplications` |
+| `DeleteApplication` |
+| `CreateEnvironment` |
+| `GetEnvironment` |
+| `ListEnvironments` |
+| `CreateConfigurationProfile` |
+| `GetConfigurationProfile` |
+| `ListConfigurationProfiles` |
+| `CreateHostedConfigurationVersion` |
+| `GetHostedConfigurationVersion` |
+| `CreateDeploymentStrategy` |
+| `GetDeploymentStrategy` |
+| `StartDeployment` |
+| `GetDeployment` |
+| `StartConfigurationSession` |
+| `GetLatestConfiguration` |
 <!-- floci:actions:end -->
 
 ## Management Plane (AppConfig)

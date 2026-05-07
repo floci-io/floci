@@ -8,57 +8,52 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `VerifyEmailIdentity` | Mark an email address as verified |
-| `VerifyEmailAddress` | Legacy alias for email verification |
-| `VerifyDomainIdentity` | Mark a domain as verified and return a verification token |
-| `DeleteIdentity` | Delete an email or domain identity |
-| `ListIdentities` | List verified identities |
-| `GetIdentityVerificationAttributes` | Get verification status for one or more identities |
-| `SendEmail` | Send a structured email with text or HTML body |
-| `SendRawEmail` | Send a raw MIME payload |
-| `GetSendQuota` | Return local send quota counters |
-| `GetSendStatistics` | Return aggregate delivery stats for sent messages |
-| `GetAccountSendingEnabled` | Report whether sending is enabled |
-| `ListVerifiedEmailAddresses` | List verified email identities |
-| `DeleteVerifiedEmailAddress` | Delete a verified email identity |
-| `SetIdentityNotificationTopic` | Store SNS notification topic ARNs for an identity |
-| `GetIdentityNotificationAttributes` | Read stored notification topic settings |
-| `SetIdentityFeedbackForwardingEnabled` |  |
-| `SetIdentityHeadersInNotificationsEnabled` |  |
-| `SetIdentityMailFromDomain` |  |
-| `GetIdentityMailFromDomainAttributes` |  |
-| `GetIdentityDkimAttributes` | Return DKIM status for identities |
-| `CreateTemplate` | Create an email template with subject / text / html parts |
-| `UpdateTemplate` | Replace the content of a stored template |
-| `GetTemplate` | Read a stored template |
-| `DeleteTemplate` | Remove a stored template |
-| `ListTemplates` | List stored templates |
-| `SendTemplatedEmail` | Send an email by resolving a stored template |
-| `SendBulkTemplatedEmail` | Send a templated email to multiple destinations |
-| `TestRenderTemplate` | Render a stored template against supplied data, returning the MIME message |
-| `CreateConfigurationSet` | Create a configuration set |
-| `DescribeConfigurationSet` | Read a configuration set |
-| `ListConfigurationSets` | List configuration sets |
-| `DeleteConfigurationSet` | Delete a configuration set |
-| `CreateEmailIdentity` |  |
-| `ListEmailIdentities` |  |
-| `GetEmailIdentity` |  |
-| `DeleteEmailIdentity` |  |
-| `PutEmailIdentityDkimAttributes` |  |
-| `PutEmailIdentityMailFromAttributes` |  |
-| `PutEmailIdentityFeedbackAttributes` |  |
-| `SendBulkEmail` |  |
-| `CreateEmailTemplate` |  |
-| `ListEmailTemplates` |  |
-| `GetEmailTemplate` |  |
-| `UpdateEmailTemplate` |  |
-| `DeleteEmailTemplate` |  |
-| `TestRenderEmailTemplate` |  |
-| `GetConfigurationSet` |  |
-| `GetAccount` |  |
-| `PutAccountSendingAttributes` |  |
+| Action |
+| --- |
+| `VerifyEmailIdentity` |
+| `VerifyEmailAddress` |
+| `VerifyDomainIdentity` |
+| `DeleteIdentity` |
+| `ListIdentities` |
+| `GetIdentityVerificationAttributes` |
+| `SendEmail` |
+| `SendRawEmail` |
+| `GetSendQuota` |
+| `GetSendStatistics` |
+| `GetAccountSendingEnabled` |
+| `ListVerifiedEmailAddresses` |
+| `DeleteVerifiedEmailAddress` |
+| `SetIdentityNotificationTopic` |
+| `GetIdentityNotificationAttributes` |
+| `GetIdentityDkimAttributes` |
+| `CreateTemplate` |
+| `UpdateTemplate` |
+| `GetTemplate` |
+| `DeleteTemplate` |
+| `ListTemplates` |
+| `SendTemplatedEmail` |
+| `SendBulkTemplatedEmail` |
+| `TestRenderTemplate` |
+| `CreateConfigurationSet` |
+| `DescribeConfigurationSet` |
+| `ListConfigurationSets` |
+| `DeleteConfigurationSet` |
+| `CreateEmailIdentity` |
+| `ListEmailIdentities` |
+| `GetEmailIdentity` |
+| `DeleteEmailIdentity` |
+| `PutEmailIdentityDkimAttributes` |
+| `PutEmailIdentityFeedbackAttributes` |
+| `SendBulkEmail` |
+| `CreateEmailTemplate` |
+| `ListEmailTemplates` |
+| `GetEmailTemplate` |
+| `UpdateEmailTemplate` |
+| `DeleteEmailTemplate` |
+| `TestRenderEmailTemplate` |
+| `GetConfigurationSet` |
+| `GetAccount` |
+| `PutAccountSendingAttributes` |
 <!-- floci:actions:end -->
 
 ## Configuration

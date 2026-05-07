@@ -6,36 +6,27 @@
 ## Supported Actions
 
 <!-- floci:actions:start -->
-| Action | Description |
-| --- | --- |
-| `CreateEventBus` | Create a custom event bus |
-| `DeleteEventBus` | Delete an event bus |
-| `DescribeEventBus` | Get event bus details |
-| `ListEventBuses` | List all event buses |
-| `PutRule` | Create or update a rule with a schedule or event pattern |
-| `DeleteRule` | Delete a rule |
-| `DescribeRule` | Get rule details |
-| `ListRules` | List rules |
-| `EnableRule` | Enable a disabled rule |
-| `DisableRule` | Disable a rule |
-| `PutTargets` | Add targets to a rule |
-| `RemoveTargets` | Remove targets from a rule |
-| `ListTargetsByRule` | List targets for a rule |
-| `PutEvents` | Publish custom events to an event bus |
-| `ListTagsForResource` |  |
-| `TagResource` |  |
-| `UntagResource` |  |
-| `PutPermission` |  |
-| `RemovePermission` |  |
-| `CreateArchive` |  |
-| `DescribeArchive` |  |
-| `UpdateArchive` |  |
-| `DeleteArchive` |  |
-| `ListArchives` |  |
-| `StartReplay` |  |
-| `DescribeReplay` |  |
-| `CancelReplay` |  |
-| `ListReplays` |  |
+| Action |
+| --- |
+| `CreateEventBus` |
+| `DeleteEventBus` |
+| `DescribeEventBus` |
+| `ListEventBuses` |
+| `PutRule` |
+| `DeleteRule` |
+| `DescribeRule` |
+| `ListRules` |
+| `EnableRule` |
+| `DisableRule` |
+| `PutTargets` |
+| `RemoveTargets` |
+| `ListTargetsByRule` |
+| `PutEvents` |
+| `ListTagsForResource` |
+| `TagResource` |
+| `UntagResource` |
+| `PutPermission` |
+| `RemovePermission` |
 <!-- floci:actions:end -->
 
 ## Examples
