@@ -58,7 +58,9 @@ class EmulatorInfoControllerIntegrationTest {
               "codebuild": "running",
               "codedeploy": "running",
               "autoscaling": "running",
-              "route53": "running"
+              "backup": "running",
+              "route53": "running",
+              "transfer": "running"
             }
             """;
 

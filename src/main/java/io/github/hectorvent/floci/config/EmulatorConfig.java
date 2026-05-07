@@ -116,6 +116,7 @@ public interface EmulatorConfig {
         AppConfigDataStorageConfig appconfigdata();
         ElastiCacheStorageConfig elasticache();
         RdsStorageConfig rds();
+        BackupStorageConfig backup();
     }
 
     interface SsmStorageConfig {
@@ -214,6 +215,13 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface BackupStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -273,7 +281,17 @@ public interface EmulatorConfig {
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
         AutoScalingServiceConfig autoscaling();
+        BackupServiceConfig backup();
         Route53ServiceConfig route53();
+        TransferServiceConfig transfer();
+    }
+
+    interface BackupServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("3")
+        int jobCompletionDelaySeconds();
     }
 
     interface Route53ServiceConfig {
@@ -291,6 +309,11 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
+    }
+
+    interface TransferServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AutoScalingServiceConfig {

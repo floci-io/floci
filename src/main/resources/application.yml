@@ -241,5 +241,10 @@ floci:
       enabled: true
     autoscaling:
       enabled: true
+    backup:
+      enabled: true
+      job-completion-delay-seconds: 3
     route53:
+      enabled: true
+    transfer:
       enabled: true
