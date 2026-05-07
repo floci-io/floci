@@ -10,6 +10,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **ssm:** Run Command — `SendCommand`, `GetCommandInvocation`, `ListCommands`, `ListCommandInvocations`, `CancelCommand`, `DescribeInstanceInformation`; `UpdateInstanceInformation` (agent registration); `ec2messages` polling protocol (`GetMessages`, `AcknowledgeMessage`, `SendReply`, `FailMessage`, `DeleteMessage`, `GetEndpoint`) so the real `amazon-ssm-agent` running inside EC2 containers can register, receive commands, and report output
+- **codedeploy:** Server platform (Phase 4) — on-premises instance management (`RegisterOnPremisesInstance`, `DeregisterOnPremisesInstance`, `GetOnPremisesInstance`, `BatchGetOnPremisesInstances`, `ListOnPremisesInstances`, `AddTagsToOnPremisesInstances`, `RemoveTagsFromOnPremisesInstances`); Server AppSpec YAML parsing; EC2 and on-premises instance resolution by tag filters; full lifecycle event execution (`ApplicationStop` → `DownloadBundle` → `BeforeInstall` → `Install` → `AfterInstall` → `ApplicationStart` → `ValidateService`); SSM Run Command integration for hook script execution with graceful degradation when SSM is unavailable; per-instance `InstanceTarget` tracking in `ListDeploymentTargets`/`BatchGetDeploymentTargets`
+- **elbv2:** Lambda targets — ALB listeners can forward to Lambda functions; ALB event format with `queryStringParameters`, `multiValueQueryStringParameters`, `headers`, `multiValueHeaders`, `body`, `isBase64Encoded`; Lambda→ALB response mapping; Lambda target groups always return healthy without HTTP probing
 
 ## [1.5.12] - 2026-05-04
 

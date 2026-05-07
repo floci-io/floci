@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.codedeploy.model.Application;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.codedeploy.model.DeploymentConfig;
 import io.github.hectorvent.floci.services.codedeploy.model.DeploymentGroup;
+import io.github.hectorvent.floci.services.codedeploy.model.OnPremisesInstance;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -58,8 +59,13 @@ public class CodeDeployJsonHandler {
             case "ListDeploymentTargets" -> listDeploymentTargets(request, region);
             case "BatchGetDeploymentTargets" -> batchGetDeploymentTargets(request, region);
             case "PutLifecycleEventHookExecutionStatus" -> putLifecycleEventHookExecutionStatus(request);
-            case "AddTagsToOnPremisesInstances", "RemoveTagsFromOnPremisesInstances" ->
-                    Response.ok(Map.of()).build();
+            case "RegisterOnPremisesInstance" -> registerOnPremisesInstance(request, region);
+            case "DeregisterOnPremisesInstance" -> deregisterOnPremisesInstance(request, region);
+            case "GetOnPremisesInstance" -> getOnPremisesInstance(request, region);
+            case "BatchGetOnPremisesInstances" -> batchGetOnPremisesInstances(request, region);
+            case "ListOnPremisesInstances" -> listOnPremisesInstances(request, region);
+            case "AddTagsToOnPremisesInstances" -> addTagsToOnPremisesInstances(request, region);
+            case "RemoveTagsFromOnPremisesInstances" -> removeTagsFromOnPremisesInstances(request, region);
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
     }
@@ -265,6 +271,58 @@ public class CodeDeployJsonHandler {
         String status = req.path("status").asText("Succeeded");
         String id = service.putLifecycleEventHookExecutionStatus(deploymentId, executionId, status);
         return Response.ok(Map.of("lifecycleEventHookExecutionId", id)).build();
+    }
+
+    private Response registerOnPremisesInstance(JsonNode req, String region) {
+        String instanceName = req.path("instanceName").asText(null);
+        String iamSessionArn = req.has("iamSessionArn") ? req.path("iamSessionArn").asText() : null;
+        String iamUserArn = req.has("iamUserArn") ? req.path("iamUserArn").asText() : null;
+        service.registerOnPremisesInstance(region, instanceName, iamSessionArn, iamUserArn);
+        return Response.ok(Map.of()).build();
+    }
+
+    private Response deregisterOnPremisesInstance(JsonNode req, String region) {
+        String instanceName = req.path("instanceName").asText(null);
+        service.deregisterOnPremisesInstance(region, instanceName);
+        return Response.ok(Map.of()).build();
+    }
+
+    private Response getOnPremisesInstance(JsonNode req, String region) {
+        String instanceName = req.path("instanceName").asText(null);
+        OnPremisesInstance inst = service.getOnPremisesInstance(region, instanceName);
+        return Response.ok(Map.of("instanceInfo", inst)).build();
+    }
+
+    private Response batchGetOnPremisesInstances(JsonNode req, String region) {
+        List<String> names = new ArrayList<>();
+        req.path("instanceNames").forEach(n -> names.add(n.asText()));
+        List<OnPremisesInstance> found = service.batchGetOnPremisesInstances(region, names);
+        List<String> foundNames = found.stream().map(OnPremisesInstance::getInstanceName).toList();
+        List<String> missing = names.stream().filter(n -> !foundNames.contains(n)).toList();
+        return Response.ok(Map.of("instanceInfos", found, "instanceNames", missing)).build();
+    }
+
+    private Response listOnPremisesInstances(JsonNode req, String region) {
+        String registrationStatus = req.has("registrationStatus") ? req.path("registrationStatus").asText() : null;
+        List<Map<String, String>> tagFilters = parseTags(req, "tagFilters");
+        List<String> names = service.listOnPremisesInstances(region, registrationStatus, tagFilters);
+        return Response.ok(Map.of("instanceNames", names)).build();
+    }
+
+    private Response addTagsToOnPremisesInstances(JsonNode req, String region) {
+        List<Map<String, String>> tags = parseTags(req, "tags");
+        List<String> names = new ArrayList<>();
+        req.path("instanceNames").forEach(n -> names.add(n.asText()));
+        service.addTagsToOnPremisesInstances(region, names, tags);
+        return Response.ok(Map.of()).build();
+    }
+
+    private Response removeTagsFromOnPremisesInstances(JsonNode req, String region) {
+        List<Map<String, String>> tags = parseTags(req, "tags");
+        List<String> names = new ArrayList<>();
+        req.path("instanceNames").forEach(n -> names.add(n.asText()));
+        service.removeTagsFromOnPremisesInstances(region, names, tags);
+        return Response.ok(Map.of()).build();
     }
 
     @SuppressWarnings("unchecked")
