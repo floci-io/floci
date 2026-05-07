@@ -222,9 +222,20 @@ public class SesService {
 
     public void setDkimAttributes(String identityValue, boolean signingEnabled, String region) {
         String key = identityKey(region, identityValue);
-        Identity identity = identityStore.get(key)
-                .orElseThrow(() -> new AwsException("NotFoundException",
-                        "Identity does not exist: " + identityValue, 404));
+        Identity identity = identityStore.get(key).orElse(null);
+
+        if (identity == null) {
+            String domain = identityValue != null && identityValue.contains("@")
+                    ? identityValue.substring(identityValue.indexOf('@') + 1)
+                    : identityValue;
+            if (identityValue != null && identityValue.contains("@")
+                    && identityStore.get(identityKey(region, domain)).isPresent()) {
+                return;
+            }
+            throw new AwsException("BadRequestException",
+                    "Domain " + domain + " is not verified for DKIM signing.", 400);
+        }
+
         identity.setDkimEnabled(signingEnabled);
         if (signingEnabled) {
             identity.setDkimVerificationStatus("Success");

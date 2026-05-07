@@ -72,6 +72,7 @@
 | CodeBuild (real Docker build execution, S3 artifacts, CloudWatch logs) | ✅ | ❌ |
 | CodeDeploy (Lambda traffic shifting, lifecycle hooks, auto-rollback) | ✅ | ❌ |
 | Auto Scaling (groups, launch configs, reconciler, ELB v2 integration) | ✅ | ❌ |
+| SSM Run Command (SendCommand + real agent polling via ec2messages) | ✅ | ❌ |
 | Transfer Family (SFTP server management, users, SSH keys) | ✅ | ❌ |
 | Native binary | ✅ ~40 MB | ❌ |
 
@@ -256,7 +257,7 @@ All default images are configurable via environment variables, useful for pinnin
 >
 > For per-service operation counts and endpoint protocols, see the [Services Overview](https://floci.io/floci/services/) in the documentation site.
 
-**43 AWS services supported.**
+**44 AWS services supported.**
 
 ## Persistence & Storage Modes
 

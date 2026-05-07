@@ -1894,7 +1894,19 @@ public class S3Controller {
             objectContentType = "application/octet-stream";
         }
 
-        S3Object obj = s3Service.putObject(bucket, key, fileData, objectContentType, null);
+        Map<String, String> metadata = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : fields.entrySet()) {
+            String fieldName = entry.getKey().toLowerCase(Locale.ROOT);
+            if (fieldName.startsWith("x-amz-meta-")) {
+                String metaKey = fieldName.substring("x-amz-meta-".length());
+                if (!metaKey.isBlank()) {
+                    metadata.put(metaKey, entry.getValue());
+                }
+            }
+        }
+
+        S3Object obj = s3Service.putObject(bucket, key, fileData, objectContentType,
+                metadata.isEmpty() ? null : metadata);
         LOG.infov("Presigned POST upload: {0}/{1} ({2} bytes)", bucket, key, fileData.length);
 
         String xml = new XmlBuilder()

@@ -639,6 +639,20 @@ public class EventBridgeService {
                     return false;
                 }
             }
+            JsonNode accountField = pattern.get("account");
+            if (accountField != null && accountField.isArray()) {
+                String eventAccount = regionResolver.getAccountId();
+                if (!matchesArrayField(accountField, eventAccount)) {
+                    return false;
+                }
+            }
+            JsonNode regionField = pattern.get("region");
+            if (regionField != null && regionField.isArray()) {
+                String eventRegion = regionResolver.getDefaultRegion();
+                if (!matchesArrayField(regionField, eventRegion)) {
+                    return false;
+                }
+            }
             JsonNode detailPattern = pattern.get("detail");
             if (detailPattern != null && detailPattern.isObject()) {
                 Object eventDetail = event.get("Detail");
@@ -647,15 +661,8 @@ public class EventBridgeService {
                     return false;
                 }
                 JsonNode detailNode = objectMapper.readTree(detailStr);
-                var fields = detailPattern.fields();
-                while (fields.hasNext()) {
-                    var field = fields.next();
-                    JsonNode expected = field.getValue();
-                    JsonNode actual = detailNode.get(field.getKey());
-                    String actualStr = actual != null ? actual.asText(null) : null;
-                    if (expected.isArray() && !matchesArrayField(expected, actualStr)) {
-                        return false;
-                    }
+                if (!matchesDetailNode(detailNode, detailPattern)) {
+                    return false;
                 }
             }
             JsonNode resourcesPattern = pattern.get("resources");
@@ -674,6 +681,37 @@ public class EventBridgeService {
             LOG.warnv("Failed to parse event pattern: {0}", e.getMessage());
             return false;
         }
+    }
+
+    private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
+        var fields = pattern.fields();
+        while (fields.hasNext()) {
+            var field = fields.next();
+            JsonNode expected = field.getValue();
+            JsonNode actualField = actual.get(field.getKey());
+            if (expected.isArray()) {
+                String actualStr = actualField != null ? actualField.asText(null) : null;
+                if (!matchesArrayField(expected, actualStr)) {
+                    return false;
+                }
+            } else if (expected.isObject()) {
+                if (actualField == null || actualField.isNull()) {
+                    return false;
+                }
+                JsonNode nestedActual = actualField;
+                if (actualField.isTextual()) {
+                    try {
+                        nestedActual = objectMapper.readTree(actualField.asText());
+                    } catch (Exception e) {
+                        return false;
+                    }
+                }
+                if (!matchesDetailNode(nestedActual, expected)) {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private boolean matchesArrayField(JsonNode arrayNode, String value) {

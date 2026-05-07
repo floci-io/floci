@@ -395,22 +395,6 @@ class SesV2IntegrationTest {
             .body("DkimAttributes.Status", equalTo("NOT_STARTED"));
     }
 
-    @Test
-    @Order(22)
-    void putDkimAttributes_notFound() {
-        given()
-            .contentType("application/json")
-            .header("Authorization", AUTH_HEADER)
-            .body("""
-                {"SigningEnabled": true}
-                """)
-        .when()
-            .put("/v2/email/identities/nonexistent@example.com/dkim")
-        .then()
-            .statusCode(404)
-            .body("__type", equalTo("NotFoundException"));
-    }
-
     // ──────────────── Feedback Attributes ────────────────
 
     @Test

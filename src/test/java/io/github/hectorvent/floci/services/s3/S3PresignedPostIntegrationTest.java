@@ -477,6 +477,40 @@ class S3PresignedPostIntegrationTest {
     }
 
     @Test
+    @Order(97)
+    void presignedPostPersistsUserMetadata() {
+        String key = "uploads/with-metadata.txt";
+        String fileContent = "metadata test";
+
+        String policy = buildPolicy(BUCKET, key, "text/plain", 0, 10485760);
+        String policyBase64 = Base64.getEncoder().encodeToString(policy.getBytes(StandardCharsets.UTF_8));
+
+        given()
+            .multiPart("key", key)
+            .multiPart("Content-Type", "text/plain")
+            .multiPart("policy", policyBase64)
+            .multiPart("x-amz-algorithm", "AWS4-HMAC-SHA256")
+            .multiPart("x-amz-credential", "AKIAIOSFODNN7EXAMPLE/20260330/us-east-1/s3/aws4_request")
+            .multiPart("x-amz-date", AMZ_DATE_FORMAT.format(Instant.now()))
+            .multiPart("x-amz-signature", "dummysignature")
+            .multiPart("x-amz-meta-source", "camera")
+            .multiPart("x-amz-meta-owner", "test-user")
+            .multiPart("file", "with-metadata.txt", fileContent.getBytes(StandardCharsets.UTF_8), "text/plain")
+        .when()
+            .post("/" + BUCKET)
+        .then()
+            .statusCode(204);
+
+        given()
+        .when()
+            .head("/" + BUCKET + "/" + key)
+        .then()
+            .statusCode(200)
+            .header("x-amz-meta-source", equalTo("camera"))
+            .header("x-amz-meta-owner", equalTo("test-user"));
+    }
+
+    @Test
     @Order(100)
     void cleanupBucket() {
         // Delete all objects
@@ -487,6 +521,7 @@ class S3PresignedPostIntegrationTest {
         given().delete("/" + BUCKET + "/uploads/within-range.txt");
         given().delete("/" + BUCKET + "/uploads/prefix-test.txt");
         given().delete("/" + BUCKET + "/uploads/capital-p-ok.txt");
+        given().delete("/" + BUCKET + "/uploads/with-metadata.txt");
 
         given()
         .when()

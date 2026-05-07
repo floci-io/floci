@@ -72,6 +72,11 @@ public class SesController {
                 throw new AwsException("BadRequestException", "EmailIdentity is required.", 400);
             }
 
+            if (sesService.getIdentityVerificationAttributes(emailIdentity, region) != null) {
+                throw new AwsException("AlreadyExistsException",
+                        "Email identity " + emailIdentity + " already exist.", 400);
+            }
+
             Identity identity = emailIdentity.contains("@")
                     ? sesService.verifyEmailIdentity(emailIdentity, region)
                     : sesService.verifyDomainIdentity(emailIdentity, region);
@@ -126,6 +131,10 @@ public class SesController {
     public Response deleteEmailIdentity(@Context HttpHeaders headers,
                                         @PathParam("emailIdentity") String emailIdentity) {
         String region = regionResolver.resolveRegion(headers);
+        if (sesService.getIdentityVerificationAttributes(emailIdentity, region) == null) {
+            throw new AwsException("NotFoundException",
+                    "Email identity " + emailIdentity + " does not exist.", 404);
+        }
         sesService.deleteIdentity(emailIdentity, region);
         LOG.infov("SES V2 DeleteEmailIdentity: {0}", emailIdentity);
         return Response.ok(objectMapper.createObjectNode()).build();

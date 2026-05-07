@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
+import io.github.hectorvent.floci.services.ssm.Ec2MessagesJsonHandler;
 import io.github.hectorvent.floci.services.ssm.SsmJsonHandler;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -61,6 +62,7 @@ public class AwsJson11Controller {
     private final ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler;
     private final CodeBuildJsonHandler codeBuildJsonHandler;
     private final CodeDeployJsonHandler codeDeployJsonHandler;
+    private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
     private final TransferHandler transferHandler;
 
     @Inject
@@ -79,6 +81,7 @@ public class AwsJson11Controller {
                                ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler,
                                CodeBuildJsonHandler codeBuildJsonHandler,
                                CodeDeployJsonHandler codeDeployJsonHandler,
+                               Ec2MessagesJsonHandler ec2MessagesJsonHandler,
                                TransferHandler transferHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
@@ -100,6 +103,7 @@ public class AwsJson11Controller {
         this.resourceGroupsTaggingJsonHandler = resourceGroupsTaggingJsonHandler;
         this.codeBuildJsonHandler = codeBuildJsonHandler;
         this.codeDeployJsonHandler = codeDeployJsonHandler;
+        this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
         this.transferHandler = transferHandler;
     }
 
@@ -146,6 +150,7 @@ public class AwsJson11Controller {
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
                 case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
                 case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
+                case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
                 case "transfer" -> transferHandler.handle(action, request, region);
                 default -> null;
             };

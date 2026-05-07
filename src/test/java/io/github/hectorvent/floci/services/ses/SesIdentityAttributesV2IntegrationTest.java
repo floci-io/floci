@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -196,9 +197,125 @@ class SesIdentityAttributesV2IntegrationTest {
         .when()
             .put("/v2/email/identities/v2-attrs.floci.test/mail-from")
         .then()
-            .body("message", org.hamcrest.Matchers.containsString(
+            .body("message", containsString(
                     "Member must satisfy enum value set: [REJECT_MESSAGE, USE_DEFAULT_VALUE]"))
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(20)
+    void putEmailIdentityDkimAttributes_unknownIdentity_returnsBadRequest() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SigningEnabled": true}
+                """)
+        .when()
+            .put("/v2/email/identities/ghost-dkim.floci.test/dkim")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(
+                    "Domain ghost-dkim.floci.test is not verified for DKIM signing."));
+    }
+
+    @Test
+    @Order(21)
+    void putEmailIdentityDkimAttributes_emailFormatWithUnregisteredParent_returnsBadRequest() {
+        // Real SES v2 reports the parent domain (not the full email identity)
+        // in the error message even when the input is email-formatted.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SigningEnabled": true}
+                """)
+        .when()
+            .put("/v2/email/identities/orphan@no-such-parent.floci.test/dkim")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo(
+                    "Domain no-such-parent.floci.test is not verified for DKIM signing."));
+    }
+
+    @Test
+    @Order(22)
+    void putEmailIdentityDkimAttributes_emailWithRegisteredParentDomain_returnsNoOp() {
+        // Real SES v2 accepts the call (200 OK) for an email-format identity
+        // whose parent domain is registered, but persists nothing — DKIM is a
+        // domain-level concept. The parent domain's DkimAttributes must remain
+        // untouched, and no email identity is auto-created.
+        Object parentDkimBefore = given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2-attrs.floci.test")
+        .then()
+            .statusCode(200)
+            .extract().path("DkimAttributes");
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SigningEnabled": true}
+                """)
+        .when()
+            .put("/v2/email/identities/orphan@v2-attrs.floci.test/dkim")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2-attrs.floci.test")
+        .then()
+            .statusCode(200)
+            .body("DkimAttributes", equalTo(parentDkimBefore));
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/orphan@v2-attrs.floci.test")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(23)
+    void createEmailIdentity_duplicate_returnsAlreadyExists() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailIdentity": "v2-attrs.floci.test"}
+                """)
+        .when()
+            .post("/v2/email/identities")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("AlreadyExistsException"))
+            .body("message", equalTo(
+                    "Email identity v2-attrs.floci.test already exist."));
+    }
+
+    @Test
+    @Order(24)
+    void deleteEmailIdentity_unknownIdentity_returnsNotFound() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .delete("/v2/email/identities/ghost-delete.floci.test")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", equalTo(
+                    "Email identity ghost-delete.floci.test does not exist."));
     }
 }
