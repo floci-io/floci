@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **elbv2:** Lambda target type support — ALB listeners forward requests to Lambda functions using the full ALB→Lambda event format (`httpMethod`, `path`, `queryStringParameters`, `headers`, `body`, `isBase64Encoded`); Lambda response fields (`statusCode`, `headers`, `multiValueHeaders`, `body`, `isBase64Encoded`) are mapped back to HTTP; Lambda targets always report as healthy in `DescribeTargetHealth`
+
 ## [1.5.12] - 2026-05-04
 
 ### Added

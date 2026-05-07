@@ -562,9 +562,15 @@ public class ElbV2Service {
         List<TargetDescription> candidates = filterTargets != null && !filterTargets.isEmpty()
                 ? filterTargets : tg.getTargets();
 
+        boolean isLambdaTg = "lambda".equals(tg.getTargetType());
         return candidates.stream().map(t -> {
             TargetHealth th = new TargetHealth();
             th.setTarget(t);
+            if (isLambdaTg) {
+                th.setHealthCheckPort("N/A");
+                th.setState("healthy");
+                return th;
+            }
             int port = ElbV2HealthChecker.effectivePort(t, tg);
             th.setHealthCheckPort(String.valueOf(port));
             String state = healthChecker.getState(tgArn, t.getId(), port);
