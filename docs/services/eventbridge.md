@@ -27,6 +27,7 @@
 | `UntagResource` |
 | `PutPermission` |
 | `RemovePermission` |
+| `CreateArchive` |
 | `DescribeArchive` |
 | `UpdateArchive` |
 | `DeleteArchive` |
