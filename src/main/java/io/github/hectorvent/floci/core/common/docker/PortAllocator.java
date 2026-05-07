@@ -5,6 +5,8 @@ import org.jboss.logging.Logger;
 
 import java.io.IOException;
 import java.net.ServerSocket;
+import java.util.Set;
+import java.util.concurrent.ConcurrentSkipListSet;
 
 /**
  * Utility for allocating free TCP ports for Docker container port bindings.
@@ -16,22 +18,39 @@ public class PortAllocator {
 
     private static final Logger LOG = Logger.getLogger(PortAllocator.class);
 
+    // Ports reserved by this process but not yet bound by Docker.
+    // Prevents TOCTOU races when multiple containers are launched concurrently.
+    private final Set<Integer> reserved = new ConcurrentSkipListSet<>();
+
     /**
-     * Finds a free TCP port within the specified range.
+     * Atomically finds and reserves a free TCP port within the specified range.
+     * The port is held in-memory until {@link #release(int)} is called, preventing
+     * concurrent callers from picking the same port before Docker binds it.
      *
      * @param basePort the lowest port number to try (inclusive)
-     * @param maxPort the highest port number to try (inclusive)
-     * @return a free port within the range
+     * @param maxPort  the highest port number to try (inclusive)
+     * @return a reserved free port within the range
      * @throws RuntimeException if no free port is available in the range
      */
-    public int allocate(int basePort, int maxPort) {
+    public synchronized int allocate(int basePort, int maxPort) {
         for (int port = basePort; port <= maxPort; port++) {
-            if (isPortFree(port)) {
+            if (!reserved.contains(port) && isPortFree(port)) {
+                reserved.add(port);
                 LOG.debugv("Allocated port {0} from range {1}-{2}", port, basePort, maxPort);
                 return port;
             }
         }
         throw new RuntimeException("No free port available in range " + basePort + "-" + maxPort);
+    }
+
+    /**
+     * Releases a previously allocated port back to the pool.
+     * Should be called when the Docker container that was using the port is removed.
+     */
+    public void release(int port) {
+        if (reserved.remove(port)) {
+            LOG.debugv("Released port {0}", port);
+        }
     }
 
     /**

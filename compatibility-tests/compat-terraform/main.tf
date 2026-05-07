@@ -296,3 +296,42 @@ output "route_table_id" {
 output "security_group_id" {
   value = aws_security_group.compat.id
 }
+
+# -- Route53 -------------------------------------------------------------------
+resource "aws_route53_zone" "compat" {
+  name          = "floci-compat.internal"
+  force_destroy = true
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+resource "aws_route53_record" "app" {
+  zone_id = aws_route53_zone.compat.zone_id
+  name    = "app.floci-compat.internal"
+  type    = "A"
+  ttl     = 300
+  records = ["10.0.1.10"]
+}
+
+resource "aws_route53_health_check" "app" {
+  fqdn              = "app.floci-compat.internal"
+  port              = 80
+  type              = "HTTP"
+  resource_path     = "/health"
+  failure_threshold = 3
+  request_interval  = 30
+
+  tags = {
+    Environment = "compat-test"
+  }
+}
+
+output "zone_id" {
+  value = aws_route53_zone.compat.zone_id
+}
+
+output "health_check_id" {
+  value = aws_route53_health_check.app.id
+}

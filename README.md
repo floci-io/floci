@@ -117,7 +117,7 @@ flowchart LR
         Router["HTTP Router\n(JAX-RS / Vert.x)"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM\nAPI Gateway · ELB v2 · Auto Scaling\nCodeDeploy · Bedrock Runtime"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM\nAPI Gateway · ELB v2 · Auto Scaling\nCodeDeploy · Backup · Bedrock Runtime · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -210,6 +210,7 @@ All default images are configurable via environment variables, useful for pinnin
 | Service | How it works | Notable features |
 |---|---|---|
 | **SSM Parameter Store** | In-process | Version history, labels, SecureString, tagging |
+| **SSM Run Command** | In-process | `SendCommand`, `GetCommandInvocation`, `ListCommands`, `CancelCommand`; `DescribeInstanceInformation`; `ec2messages` polling protocol so the real `amazon-ssm-agent` running inside EC2 containers can register, receive commands, and report output |
 | **SQS** | In-process | Standard & FIFO, DLQ, visibility timeout, batch, tagging |
 | **SNS** | In-process | Topics, subscriptions, SQS / Lambda / HTTP delivery, tagging |
 | **S3** | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |
@@ -247,17 +248,19 @@ All default images are configurable via environment variables, useful for pinnin
 | **AppConfigData** | In-process | Configuration sessions, dynamic configuration retrieval |
 | **Bedrock Runtime** | In-process (stub) | Dummy Converse and InvokeModel responses for local development; streaming returns 501 |
 | **EKS** | **Real Docker containers** (mock mode available) | Clusters, tagging; real mode starts k3s per cluster with a live Kubernetes API server |
-| **ELB v2** | In-process | Application and Network Load Balancers, target groups, listeners, path/host-based routing rules, tags |
+| **ELB v2** | In-process | Application and Network Load Balancers, target groups, listeners, path/host-based routing rules, Lambda targets (ALB→Lambda event format), tags |
 | **CodeBuild** | In-process + **real Docker containers** | Projects, report groups, source credentials; `StartBuild` runs real Docker containers, streams logs to CloudWatch, uploads artifacts to S3 via `docker cp` (works in Docker-in-Docker) |
 | **CodeDeploy** | In-process + **Lambda traffic shifting** | Applications, deployment groups, deployment configs; 17 `CodeDeployDefault.*` built-ins pre-seeded; `CreateDeployment` shifts Lambda alias `RoutingConfig` weights, invokes lifecycle hooks, auto-rolls back on failure |
 | **Auto Scaling** | In-process + **background reconciler** | Launch configurations, auto scaling groups with min/max/desired capacity; background loop (10 s) calls `RunInstances` / `TerminateInstances` to meet desired capacity; lifecycle hooks, scaling policies, ELB v2 target group auto-registration |
+| **AWS Backup** | In-process | Vaults, backup plans with rules, resource selections, on-demand jobs with simulated lifecycle (CREATED → RUNNING → COMPLETED), recovery points, tagging |
+| **Route53** | In-process | Hosted zones with auto-created SOA + NS records, resource record sets (CREATE/UPSERT/DELETE with atomic validation), change tracking (always INSYNC), health checks, and per-resource tagging |
 | **Transfer Family** | In-process | Managed SFTP server lifecycle (create, start, stop, delete), user management, SSH public key import, tagging; server state simulated in-process |
 
 > **Lambda, ElastiCache, RDS, MSK, ECS, EC2, EKS, OpenSearch, and CodeBuild** spin up real Docker containers and support IAM authentication and SigV4 request signing — the same auth flow as production AWS. **ECR** runs a shared `registry:2` container so the stock `docker` client can push and pull image bytes against repositories returned by the AWS-shaped control plane.
 >
 > For per-service operation counts and endpoint protocols, see the [Services Overview](https://floci.io/floci/services/) in the documentation site.
 
-**44 AWS services supported.**
+**45 AWS services supported.**
 
 ## Persistence & Storage Modes
 

@@ -142,3 +142,54 @@ setup() {
     assert_success
     assert_output --partial '"Value": false'
 }
+
+@test "Terraform: Route53 hosted zone created" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    [ -n "$ZONE_ID" ]
+    run aws_cmd route53 get-hosted-zone --id "$ZONE_ID"
+    assert_success
+    assert_output --partial "floci-compat.internal"
+}
+
+@test "Terraform: Route53 A record created" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    run aws_cmd route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID"
+    assert_success
+    assert_output --partial "app.floci-compat.internal"
+    assert_output --partial "10.0.1.10"
+}
+
+@test "Terraform: Route53 zone has auto-created SOA and NS records" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    run aws_cmd route53 list-resource-record-sets --hosted-zone-id "$ZONE_ID"
+    assert_success
+    assert_output --partial '"SOA"'
+    assert_output --partial '"NS"'
+}
+
+@test "Terraform: Route53 health check created" {
+    HEALTH_CHECK_ID=$(aws_cmd route53 list-health-checks \
+        --query "HealthChecks[?HealthCheckConfig.FullyQualifiedDomainName=='app.floci-compat.internal'].Id | [0]" \
+        --output text)
+    [ -n "$HEALTH_CHECK_ID" ]
+    run aws_cmd route53 get-health-check --health-check-id "$HEALTH_CHECK_ID"
+    assert_success
+    assert_output --partial "app.floci-compat.internal"
+    assert_output --partial "HTTP"
+}
+
+@test "Terraform: Route53 zone tags persisted" {
+    ZONE_ID=$(aws_cmd route53 list-hosted-zones \
+        --query "HostedZones[?Name=='floci-compat.internal.'].Id | [0]" \
+        --output text | sed 's|/hostedzone/||')
+    run aws_cmd route53 list-tags-for-resource \
+        --resource-type hostedzone --resource-id "$ZONE_ID"
+    assert_success
+    assert_output --partial "compat-test"
+}

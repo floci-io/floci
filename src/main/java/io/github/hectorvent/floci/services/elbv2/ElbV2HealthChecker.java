@@ -49,6 +49,9 @@ public class ElbV2HealthChecker {
         if (config.services().elbv2().mock()) {
             return;
         }
+        if ("lambda".equals(tg.getTargetType())) {
+            return;
+        }
         String tgArn = tg.getTargetGroupArn();
         states.computeIfAbsent(tgArn, k -> new ConcurrentHashMap<>());
 

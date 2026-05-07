@@ -240,6 +240,7 @@ public class Ec2ContainerManager {
     public void terminate(Instance instance) {
         String containerId = instance.getDockerContainerId();
         String containerIp = instance.getContainerBridgeIp();
+        int sshHostPort = instance.getSshHostPort();
         instance.setState(InstanceState.shuttingDown());
         executor.submit(() -> {
             if (containerId != null) {
@@ -250,6 +251,9 @@ public class Ec2ContainerManager {
                 } catch (Exception e) {
                     LOG.warnv("Error removing EC2 container {0}: {1}", containerId, e.getMessage());
                 }
+            }
+            if (sshHostPort > 0) {
+                portAllocator.release(sshHostPort);
             }
             metadataServer.unregisterContainer(containerIp);
             instance.setState(InstanceState.terminated());

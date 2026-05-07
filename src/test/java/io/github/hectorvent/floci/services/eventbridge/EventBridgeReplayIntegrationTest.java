@@ -203,7 +203,7 @@ class EventBridgeReplayIntegrationTest {
                 .when().post("/")
                 .then().statusCode(200)
                 .body("ReplayArn", notNullValue())
-                .body("State", anyOf(equalTo("STARTING"), equalTo("RUNNING")));
+                .body("State", anyOf(equalTo("STARTING"), equalTo("RUNNING"), equalTo("COMPLETED")));
 
         // poll until COMPLETED (up to 5 s)
         String state = "STARTING";

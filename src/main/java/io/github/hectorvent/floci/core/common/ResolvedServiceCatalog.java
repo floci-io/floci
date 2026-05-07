@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.appconfig.AppConfigController;
+import io.github.hectorvent.floci.services.backup.BackupController;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
@@ -10,6 +11,7 @@ import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
+import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -221,6 +223,11 @@ public class ResolvedServiceCatalog {
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("autoscaling"), Set.of(), Set.of()),
+                descriptor("backup", "backup", config.services().backup().enabled(), true,
+                        "backup", storageMode(config.storage().services().backup().mode(), config.storage().mode()),
+                        config.storage().services().backup().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("backup"), Set.of(), Set.of(BackupController.class)),
                 descriptor("ec2messages", "ec2messages", config.services().ssm().enabled(), false,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -228,7 +235,11 @@ public class ResolvedServiceCatalog {
                 descriptor("transfer", "transfer", config.services().transfer().enabled(), true,
                         "transfer", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("TransferService."), Set.of("transfer"), Set.of(), Set.of())
+                        Set.of("TransferService."), Set.of("transfer"), Set.of(), Set.of()),
+                descriptor("route53", "route53", config.services().route53().enabled(), true,
+                        "route53", config.storage().mode(), 5000L, null, ServiceProtocol.REST_XML,
+                        protocols(ServiceProtocol.REST_XML),
+                        Set.of(), Set.of("route53"), Set.of(), Set.of(Route53Controller.class))
         ));
     }
 

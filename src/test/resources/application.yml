@@ -164,3 +164,8 @@ floci:
       enabled: true
     transfer:
       enabled: true
+    backup:
+      enabled: true
+      job-completion-delay-seconds: 1
+    route53:
+      enabled: true

@@ -36,6 +36,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ses.SesService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
 
 
 floci:
@@ -239,6 +240,11 @@ floci:
     codedeploy:
       enabled: true
     autoscaling:
+      enabled: true
+    backup:
+      enabled: true
+      job-completion-delay-seconds: 3
+    route53:
       enabled: true
     transfer:
       enabled: true

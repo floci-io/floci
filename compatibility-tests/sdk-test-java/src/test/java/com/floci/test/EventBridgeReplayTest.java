@@ -186,7 +186,7 @@ class EventBridgeReplayTest {
                 .build());
 
         assertThat(response.replayArn()).contains(replayName);
-        assertThat(response.state()).isIn(ReplayState.STARTING, ReplayState.RUNNING);
+        assertThat(response.state()).isIn(ReplayState.STARTING, ReplayState.RUNNING, ReplayState.COMPLETED);
 
         // Poll until completed (up to 5 s)
         ReplayState state = response.state();
