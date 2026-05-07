@@ -25,6 +25,10 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `DeleteVerifiedEmailAddress` |
 | `SetIdentityNotificationTopic` |
 | `GetIdentityNotificationAttributes` |
+| `SetIdentityFeedbackForwardingEnabled` |
+| `SetIdentityHeadersInNotificationsEnabled` |
+| `SetIdentityMailFromDomain` |
+| `GetIdentityMailFromDomainAttributes` |
 | `GetIdentityDkimAttributes` |
 | `CreateTemplate` |
 | `UpdateTemplate` |
@@ -43,6 +47,7 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `GetEmailIdentity` |
 | `DeleteEmailIdentity` |
 | `PutEmailIdentityDkimAttributes` |
+| `PutEmailIdentityMailFromAttributes` |
 | `PutEmailIdentityFeedbackAttributes` |
 | `SendBulkEmail` |
 | `CreateEmailTemplate` |

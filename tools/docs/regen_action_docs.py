@@ -42,6 +42,7 @@ class ServiceEntry:
     service: str
     doc: Path
     sources: list[Source]
+    handler: Path | None = None  # optional explicit handler path for excluded services
 
 
 def extract_switch_actions(java_source: str) -> list[str]:
@@ -179,11 +180,13 @@ def _load_registry(repo_root: Path) -> list[ServiceEntry]:
             Source(path=repo_root / s["path"], mode=s["mode"])
             for s in item.get("sources") or []
         ]
+        handler_path = item.get("handler")
         entries.append(
             ServiceEntry(
                 service=item["service"],
                 doc=repo_root / item["doc"],
                 sources=sources,
+                handler=repo_root / handler_path if handler_path else None,
             )
         )
     return entries
@@ -208,6 +211,7 @@ def _find_unregistered_handlers(repo_root: Path, entries: list[ServiceEntry]) ->
     but do produce actions (so they're a real handler, not a helper)."""
     services_root = repo_root / "src/main/java/io/github/hectorvent/floci/services"
     registered = {s.path.resolve() for entry in entries for s in entry.sources}
+    registered |= {entry.handler.resolve() for entry in entries if entry.handler}
     unregistered: list[str] = []
     for path in sorted(services_root.glob("*/[A-Z]*Handler.java")):
         if path.resolve() in registered:

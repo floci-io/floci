@@ -27,6 +27,14 @@
 | `UntagResource` |
 | `PutPermission` |
 | `RemovePermission` |
+| `DescribeArchive` |
+| `UpdateArchive` |
+| `DeleteArchive` |
+| `ListArchives` |
+| `StartReplay` |
+| `DescribeReplay` |
+| `CancelReplay` |
+| `ListReplays` |
 <!-- floci:actions:end -->
 
 ## Examples

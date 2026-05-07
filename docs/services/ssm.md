@@ -20,6 +20,13 @@
 | `AddTagsToResource` |
 | `ListTagsForResource` |
 | `RemoveTagsFromResource` |
+| `SendCommand` |
+| `GetCommandInvocation` |
+| `ListCommands` |
+| `ListCommandInvocations` |
+| `CancelCommand` |
+| `DescribeInstanceInformation` |
+| `UpdateInstanceInformation` |
 <!-- floci:actions:end -->
 
 ## Configuration

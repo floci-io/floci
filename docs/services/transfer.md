@@ -8,42 +8,27 @@ AWS Transfer Family managed file transfer server management. This implementation
 
 ## Supported Actions
 
-### Servers
-
-| Action | Description |
-|---|---|
-| `CreateServer` | Create a managed file transfer server |
-| `DescribeServer` | Get server metadata and configuration |
-| `UpdateServer` | Update protocols, endpoint type, logging role, security policy |
-| `DeleteServer` | Delete a server (must be in `OFFLINE` state) |
-| `ListServers` | Paginated list of servers |
-| `StartServer` | Transition server from `OFFLINE` to `ONLINE` |
-| `StopServer` | Transition server from `ONLINE` to `OFFLINE` |
-
-### Users
-
-| Action | Description |
-|---|---|
-| `CreateUser` | Associate a user with a server |
-| `DescribeUser` | Get user configuration and SSH keys |
-| `UpdateUser` | Update role, home directory, or home directory mappings |
-| `DeleteUser` | Remove a user from a server |
-| `ListUsers` | Paginated list of users on a server |
-
-### SSH Public Keys
-
-| Action | Description |
-|---|---|
-| `ImportSshPublicKey` | Attach an SSH public key to a user |
-| `DeleteSshPublicKey` | Remove an SSH public key from a user |
-
-### Tagging
-
-| Action | Description |
-|---|---|
-| `TagResource` | Add or update tags on a server or user |
-| `UntagResource` | Remove tags from a server or user |
-| `ListTagsForResource` | List tags for a server or user |
+<!-- floci:actions:start -->
+| Action |
+| --- |
+| `CreateServer` |
+| `DescribeServer` |
+| `DeleteServer` |
+| `ListServers` |
+| `StartServer` |
+| `StopServer` |
+| `UpdateServer` |
+| `CreateUser` |
+| `DescribeUser` |
+| `DeleteUser` |
+| `ListUsers` |
+| `UpdateUser` |
+| `ImportSshPublicKey` |
+| `DeleteSshPublicKey` |
+| `TagResource` |
+| `UntagResource` |
+| `ListTagsForResource` |
+<!-- floci:actions:end -->
 
 ## Configuration
 

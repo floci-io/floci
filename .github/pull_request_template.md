@@ -17,5 +17,6 @@
 ## Checklist
 
 - [ ] `./mvnw test` passes locally
+- [ ] `make docs-sync` to refresh documentation for new handlers
 - [ ] New or updated integration test added
 - [ ] Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/)

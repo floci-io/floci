@@ -96,6 +96,16 @@
   sources:
     - { path: src/main/java/io/github/hectorvent/floci/services/ssm/SsmJsonHandler.java, mode: switch }
 
+- service: ec2messages
+  doc: docs/services/ssm.md
+  handler: src/main/java/io/github/hectorvent/floci/services/ssm/Ec2MessagesJsonHandler.java
+  sources: []  # Internal SSM agent protocol (AmazonEC2MessageDeliveryService / ssmmessages) — not a user-facing management API.
+
+- service: transfer
+  doc: docs/services/transfer.md
+  sources:
+    - { path: src/main/java/io/github/hectorvent/floci/services/transfer/TransferHandler.java, mode: switch }
+
 - service: stepfunctions
   doc: docs/services/step-functions.md
   sources:

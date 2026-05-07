@@ -44,6 +44,13 @@ Floci implements the CodeDeploy API — stored-state management for applications
 | `ListDeploymentTargets` |
 | `BatchGetDeploymentTargets` |
 | `PutLifecycleEventHookExecutionStatus` |
+| `RegisterOnPremisesInstance` |
+| `DeregisterOnPremisesInstance` |
+| `GetOnPremisesInstance` |
+| `BatchGetOnPremisesInstances` |
+| `ListOnPremisesInstances` |
+| `AddTagsToOnPremisesInstances` |
+| `RemoveTagsFromOnPremisesInstances` |
 <!-- floci:actions:end -->
 ## Pre-seeded Built-in Deployment Configs
 
