@@ -216,9 +216,9 @@ public class Route53Controller {
                                             @QueryParam("type") String startType,
                                             @QueryParam("maxitems") @DefaultValue("300") int maxItems) {
         try {
-            List<ResourceRecordSet> records = service.listResourceRecordSets(id, startName, startType, maxItems);
-            List<ResourceRecordSet> all = service.listResourceRecordSets(id, null, null, 0);
-            boolean truncated = records.size() < all.size();
+            List<ResourceRecordSet> fetched = service.listResourceRecordSets(id, startName, startType, maxItems + 1);
+            boolean truncated = fetched.size() > maxItems;
+            List<ResourceRecordSet> records = truncated ? fetched.subList(0, maxItems) : fetched;
 
             XmlBuilder xml = new XmlBuilder()
                     .start("ListResourceRecordSetsResponse", NS)
@@ -228,10 +228,10 @@ public class Route53Controller {
             }
             xml.end("ResourceRecordSets")
                .elem("IsTruncated", String.valueOf(truncated));
-            if (truncated && !records.isEmpty()) {
-                ResourceRecordSet last = records.get(records.size() - 1);
-                xml.elem("NextRecordName", last.getName())
-                   .elem("NextRecordType", last.getType());
+            if (truncated) {
+                ResourceRecordSet next = fetched.get(maxItems);
+                xml.elem("NextRecordName", next.getName())
+                   .elem("NextRecordType", next.getType());
             }
             xml.elem("MaxItems", String.valueOf(maxItems))
                .end("ListResourceRecordSetsResponse");
