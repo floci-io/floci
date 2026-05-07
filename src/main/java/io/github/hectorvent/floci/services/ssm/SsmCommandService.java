@@ -363,6 +363,54 @@ public class SsmCommandService {
         messageIndex.remove(messageId);
     }
 
+    // ── CodeDeploy integration helpers ─────────────────────────────────────
+
+    public boolean isInstanceRegistered(String instanceId, String region) {
+        return instanceStore.get(instanceKey(region, instanceId)).isPresent();
+    }
+
+    public String sendCommandToInstance(String instanceId, String documentName,
+                                        Map<String, List<String>> parameters,
+                                        int timeoutSeconds, String region) {
+        String commandId = UUID.randomUUID().toString();
+        Instant now = Instant.now();
+
+        Command command = new Command();
+        command.setCommandId(commandId);
+        command.setDocumentName(documentName);
+        command.setDocumentVersion("$DEFAULT");
+        command.setParameters(parameters);
+        command.setInstanceIds(List.of(instanceId));
+        command.setRequestedDateTime(now);
+        command.setStatus("InProgress");
+        command.setStatusDetails("InProgress");
+        command.setTimeoutSeconds(timeoutSeconds);
+        command.setTargetCount(1);
+        command.setRegion(region);
+        command.setExpiresAfter(now.plusSeconds(timeoutSeconds));
+        commandStore.put(commandKey(region, commandId), command);
+
+        CommandInvocation inv = new CommandInvocation();
+        inv.setCommandId(commandId);
+        inv.setInstanceId(instanceId);
+        inv.setDocumentName(documentName);
+        inv.setDocumentVersion("$DEFAULT");
+        inv.setRequestedDateTime(now);
+        inv.setStatus("Pending");
+        inv.setStatusDetails("Pending");
+        inv.setRegion(region);
+        invocationStore.put(invocationKey(region, commandId, instanceId), inv);
+
+        queueMessage(commandId, instanceId, documentName, parameters, timeoutSeconds, region);
+        return commandId;
+    }
+
+    public String getCommandInvocationStatus(String commandId, String instanceId, String region) {
+        return invocationStore.get(invocationKey(region, commandId, instanceId))
+                .map(CommandInvocation::getStatus)
+                .orElse("Failed");
+    }
+
     // ── Internal helpers ────────────────────────────────────────────────────
 
     private void queueMessage(String commandId, String instanceId, String documentName,

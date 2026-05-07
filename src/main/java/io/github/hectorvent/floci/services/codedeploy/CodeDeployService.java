@@ -2,17 +2,21 @@ package io.github.hectorvent.floci.services.codedeploy;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.codedeploy.model.Application;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.codedeploy.model.DeploymentConfig;
 import io.github.hectorvent.floci.services.codedeploy.model.DeploymentGroup;
+import io.github.hectorvent.floci.services.codedeploy.model.OnPremisesInstance;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.ssm.SsmCommandService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -40,15 +44,22 @@ public class CodeDeployService {
     private final LambdaService lambdaService;
     private final EcsService ecsService;
     private final ElbV2Service elbV2Service;
+    private final SsmCommandService ssmCommandService;
+    private final Ec2Service ec2Service;
     private final ObjectMapper mapper;
+    private final ObjectMapper yamlMapper;
 
     @Inject
     public CodeDeployService(LambdaService lambdaService, EcsService ecsService,
-                             ElbV2Service elbV2Service, ObjectMapper mapper) {
+                             ElbV2Service elbV2Service, SsmCommandService ssmCommandService,
+                             Ec2Service ec2Service, ObjectMapper mapper) {
         this.lambdaService = lambdaService;
         this.ecsService = ecsService;
         this.elbV2Service = elbV2Service;
+        this.ssmCommandService = ssmCommandService;
+        this.ec2Service = ec2Service;
         this.mapper = mapper;
+        this.yamlMapper = new ObjectMapper(new YAMLFactory());
     }
 
     // key: region -> name -> application
@@ -61,8 +72,10 @@ public class CodeDeployService {
     private final ConcurrentHashMap<String, Map<String, String>> tags = new ConcurrentHashMap<>();
     // key: region -> deploymentId -> Deployment
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Deployment>> deployments = new ConcurrentHashMap<>();
-    // key: region -> deploymentId -> target map (lambdaTarget data)
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Map<String, Object>>> deploymentTargets = new ConcurrentHashMap<>();
+    // key: region -> deploymentId -> targetId -> DeploymentTarget wrapper
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<String, Map<String, Object>>>> deploymentTargets = new ConcurrentHashMap<>();
+    // key: region -> instanceName -> OnPremisesInstance
+    private final ConcurrentHashMap<String, ConcurrentHashMap<String, OnPremisesInstance>> onPremisesInstances = new ConcurrentHashMap<>();
     // key: lifecycleEventHookExecutionId -> CompletableFuture<status>
     private final ConcurrentHashMap<String, CompletableFuture<String>> hookFutures = new ConcurrentHashMap<>();
     // key: deploymentId -> stop flag
@@ -75,6 +88,11 @@ public class CodeDeployService {
         String targetVersion;
         String beforeAllowTraffic;
         String afterAllowTraffic;
+    }
+
+    private static final class ServerAppSpecInfo {
+        String os;
+        Map<String, List<Map<String, Object>>> hooks; // hookName → [{location, timeout, runas}]
     }
 
     private static final class EcsAppSpecInfo {
@@ -413,8 +431,12 @@ public class CodeDeployService {
         return deployments.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
-    private Map<String, Map<String, Object>> deploymentTargetsFor(String region) {
+    private Map<String, ConcurrentHashMap<String, Map<String, Object>>> deploymentTargetsFor(String region) {
         return deploymentTargets.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
+    }
+
+    private Map<String, OnPremisesInstance> onPremisesFor(String region) {
+        return onPremisesInstances.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
     public String createDeployment(String region, String appName, String groupName,
@@ -429,6 +451,10 @@ public class CodeDeployService {
 
         if ("ECS".equals(computePlatform)) {
             return createEcsDeployment(region, appName, groupName, group, configName, revision, description);
+        }
+
+        if ("Server".equals(computePlatform)) {
+            return createServerDeployment(region, appName, groupName, group, configName, revision, description);
         }
 
         AppSpecInfo appSpec = parseAppSpec(revision);
@@ -464,7 +490,9 @@ public class CodeDeployService {
         Map<String, Object> targetMap = new ConcurrentHashMap<>();
         targetMap.put("deploymentTargetType", "LambdaFunction");
         targetMap.put("lambdaTarget", lambdaTargetMap);
-        deploymentTargetsFor(region).put(deploymentId, targetMap);
+        ConcurrentHashMap<String, Map<String, Object>> targets = new ConcurrentHashMap<>();
+        targets.put(targetId, targetMap);
+        deploymentTargetsFor(region).put(deploymentId, targets);
 
         AtomicBoolean stopFlag = new AtomicBoolean(false);
         stopFlags.put(deploymentId, stopFlag);
@@ -523,36 +551,26 @@ public class CodeDeployService {
 
     public List<String> listDeploymentTargets(String region, String deploymentId) {
         getDeployment(region, deploymentId);
-        Map<String, Object> target = deploymentTargetsFor(region).get(deploymentId);
-        if (target == null) {
+        Map<String, Map<String, Object>> targets = deploymentTargetsFor(region).get(deploymentId);
+        if (targets == null) {
             return List.of();
         }
-        String targetId = extractTargetId(target);
-        return targetId != null ? List.of(targetId) : List.of();
+        return new ArrayList<>(targets.keySet());
     }
 
     public List<Map<String, Object>> batchGetDeploymentTargets(String region, String deploymentId, List<String> targetIds) {
         getDeployment(region, deploymentId);
-        Map<String, Object> target = deploymentTargetsFor(region).get(deploymentId);
-        if (target == null) {
+        Map<String, Map<String, Object>> targets = deploymentTargetsFor(region).get(deploymentId);
+        if (targets == null) {
             return List.of();
         }
-        String targetId = extractTargetId(target);
-        if (targetId == null || (!targetIds.isEmpty() && !targetIds.contains(targetId))) {
-            return List.of();
+        if (targetIds.isEmpty()) {
+            return new ArrayList<>(targets.values());
         }
-        return List.of(target);
-    }
-
-    @SuppressWarnings("unchecked")
-    private String extractTargetId(Map<String, Object> target) {
-        String type = (String) target.get("deploymentTargetType");
-        if ("ECSTarget".equals(type)) {
-            Map<String, Object> ecsTarget = (Map<String, Object>) target.get("ecsTarget");
-            return ecsTarget != null ? (String) ecsTarget.get("targetId") : null;
-        }
-        Map<String, Object> lambdaTarget = (Map<String, Object>) target.get("lambdaTarget");
-        return lambdaTarget != null ? (String) lambdaTarget.get("targetId") : null;
+        return targetIds.stream()
+                .map(targets::get)
+                .filter(t -> t != null)
+                .collect(Collectors.toList());
     }
 
     public String putLifecycleEventHookExecutionStatus(String deploymentId, String executionId, String status) {
@@ -566,6 +584,392 @@ public class CodeDeployService {
     // ---- Deployment state machine ----
 
     @SuppressWarnings("unchecked")
+    // ---- On-Premises Instances ----
+
+    public OnPremisesInstance registerOnPremisesInstance(String region, String instanceName,
+                                                          String iamSessionArn, String iamUserArn) {
+        Map<String, OnPremisesInstance> store = onPremisesFor(region);
+        OnPremisesInstance inst = new OnPremisesInstance();
+        inst.setInstanceName(instanceName);
+        inst.setInstanceArn(AwsArnUtils.Arn.of("codedeploy", region, "000000000000",
+                "instance/" + instanceName).toString());
+        inst.setIamSessionArn(iamSessionArn);
+        inst.setIamUserArn(iamUserArn);
+        inst.setRegisterTime(Instant.now().toEpochMilli() / 1000.0);
+        inst.setRegistrationStatus("Registered");
+        store.put(instanceName, inst);
+        return inst;
+    }
+
+    public void deregisterOnPremisesInstance(String region, String instanceName) {
+        OnPremisesInstance inst = requireOnPremisesInstance(region, instanceName);
+        inst.setDeregisterTime(Instant.now().toEpochMilli() / 1000.0);
+        inst.setRegistrationStatus("Deregistered");
+    }
+
+    public OnPremisesInstance getOnPremisesInstance(String region, String instanceName) {
+        return requireOnPremisesInstance(region, instanceName);
+    }
+
+    public List<OnPremisesInstance> batchGetOnPremisesInstances(String region, List<String> names) {
+        return names.stream().map(n -> requireOnPremisesInstance(region, n)).collect(Collectors.toList());
+    }
+
+    public List<String> listOnPremisesInstances(String region, String registrationStatus,
+                                                 List<Map<String, String>> tagFilters) {
+        return onPremisesFor(region).values().stream()
+                .filter(i -> registrationStatus == null || registrationStatus.equals(i.getRegistrationStatus()))
+                .filter(i -> tagFilters == null || tagFilters.isEmpty() || matchesTagFilters(i.getTags(), tagFilters))
+                .map(OnPremisesInstance::getInstanceName)
+                .collect(Collectors.toList());
+    }
+
+    public void addTagsToOnPremisesInstances(String region, List<String> instanceNames, List<Map<String, String>> newTags) {
+        for (String name : instanceNames) {
+            OnPremisesInstance inst = requireOnPremisesInstance(region, name);
+            for (Map<String, String> t : newTags) {
+                inst.getTags().removeIf(e -> e.get("Key").equals(t.get("Key")));
+                inst.getTags().add(t);
+            }
+        }
+    }
+
+    public void removeTagsFromOnPremisesInstances(String region, List<String> instanceNames, List<Map<String, String>> tagsToRemove) {
+        for (String name : instanceNames) {
+            OnPremisesInstance inst = requireOnPremisesInstance(region, name);
+            for (Map<String, String> t : tagsToRemove) {
+                inst.getTags().removeIf(e -> e.get("Key").equals(t.get("Key")));
+            }
+        }
+    }
+
+    private OnPremisesInstance requireOnPremisesInstance(String region, String instanceName) {
+        OnPremisesInstance inst = onPremisesFor(region).get(instanceName);
+        if (inst == null) {
+            throw new AwsException("InstanceNameRequiredException",
+                    "On-premises instance not found: " + instanceName, 400);
+        }
+        return inst;
+    }
+
+    // ---- Server Platform Deployment ----
+
+    @SuppressWarnings("unchecked")
+    private String createServerDeployment(String region, String appName, String groupName,
+                                          DeploymentGroup group, String configName,
+                                          Map<String, Object> revision, String description) {
+        ServerAppSpecInfo appSpec = parseServerAppSpec(revision);
+        String effectiveConfig = configName != null ? configName : group.getDeploymentConfigName();
+
+        String deploymentId = generateDeploymentId();
+        double now = Instant.now().toEpochMilli() / 1000.0;
+
+        Deployment deployment = new Deployment();
+        deployment.setDeploymentId(deploymentId);
+        deployment.setApplicationName(appName);
+        deployment.setDeploymentGroupName(groupName);
+        deployment.setDeploymentConfigName(effectiveConfig);
+        deployment.setStatus("Queued");
+        deployment.setRevision(revision);
+        deployment.setCreateTime(now);
+        deployment.setDescription(description);
+        deployment.setCreator("user");
+        deployment.setComputePlatform("Server");
+        deploymentsFor(region).put(deploymentId, deployment);
+
+        // Resolve target instances
+        List<String> instanceIds = resolveServerTargets(region, group);
+        if (instanceIds.isEmpty()) {
+            deployment.setStatus("Failed");
+            deployment.setCompleteTime(now);
+            deployment.setErrorInformation(Map.of("code", "NoInstancesReachable",
+                    "message", "No instances found for deployment group"));
+            return deploymentId;
+        }
+
+        ConcurrentHashMap<String, Map<String, Object>> allTargets = new ConcurrentHashMap<>();
+        List<Map<String, Object>> instanceTargetMaps = new ArrayList<>();
+        for (String instanceId : instanceIds) {
+            Map<String, Object> instanceTargetMap = new ConcurrentHashMap<>();
+            instanceTargetMap.put("deploymentId", deploymentId);
+            instanceTargetMap.put("targetId", instanceId);
+            instanceTargetMap.put("targetArn", instanceId);
+            instanceTargetMap.put("status", "Pending");
+            instanceTargetMap.put("lastUpdatedAt", now);
+            instanceTargetMap.put("lifecycleEvents", new CopyOnWriteArrayList<>());
+
+            Map<String, Object> targetWrapper = new ConcurrentHashMap<>();
+            targetWrapper.put("deploymentTargetType", "InstanceTarget");
+            targetWrapper.put("instanceTarget", instanceTargetMap);
+            allTargets.put(instanceId, targetWrapper);
+            instanceTargetMaps.add(instanceTargetMap);
+        }
+        deploymentTargetsFor(region).put(deploymentId, allTargets);
+
+        AtomicBoolean stopFlag = new AtomicBoolean(false);
+        stopFlags.put(deploymentId, stopFlag);
+
+        Thread.ofVirtual().name("codedeploy-server-" + deploymentId).start(
+                () -> runServerStateMachine(region, deployment, appSpec, instanceIds,
+                        instanceTargetMaps, stopFlag));
+        return deploymentId;
+    }
+
+    private void runServerStateMachine(String region, Deployment deployment,
+                                       ServerAppSpecInfo appSpec, List<String> instanceIds,
+                                       List<Map<String, Object>> instanceTargetMaps,
+                                       AtomicBoolean stopFlag) {
+        String deploymentId = deployment.getDeploymentId();
+        try {
+            deployment.setStatus("InProgress");
+            deployment.setStartTime(Instant.now().toEpochMilli() / 1000.0);
+            instanceTargetMaps.forEach(m -> updateTargetStatus(m, "InProgress"));
+
+            boolean anyFailed = false;
+            for (int i = 0; i < instanceIds.size(); i++) {
+                if (stopFlag.get()) {
+                    instanceTargetMaps.forEach(m -> updateTargetStatus(m, "Skipped"));
+                    deployment.setStatus("Stopped");
+                    deployment.setCompleteTime(Instant.now().toEpochMilli() / 1000.0);
+                    return;
+                }
+                String instanceId = instanceIds.get(i);
+                Map<String, Object> targetMap = instanceTargetMaps.get(i);
+                boolean ok = runInstanceDeployment(region, deployment, appSpec, instanceId, targetMap, stopFlag);
+                if (!ok) {
+                    anyFailed = true;
+                }
+            }
+
+            if (anyFailed) {
+                deployment.setStatus("Failed");
+                deployment.setErrorInformation(Map.of("code", "DeploymentFailed",
+                        "message", "One or more instances failed deployment"));
+            } else {
+                deployment.setStatus("Succeeded");
+            }
+            deployment.setCompleteTime(Instant.now().toEpochMilli() / 1000.0);
+
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            instanceTargetMaps.forEach(m -> updateTargetStatus(m, "Skipped"));
+            deployment.setStatus("Stopped");
+            deployment.setCompleteTime(Instant.now().toEpochMilli() / 1000.0);
+        } catch (Exception e) {
+            LOG.warnv("Server deployment {0} failed: {1}", deploymentId, e.getMessage());
+            instanceTargetMaps.forEach(m -> updateTargetStatus(m, "Failed"));
+            deployment.setStatus("Failed");
+            deployment.setCompleteTime(Instant.now().toEpochMilli() / 1000.0);
+            deployment.setErrorInformation(Map.of("code", "DeploymentFailed",
+                    "message", e.getMessage() != null ? e.getMessage() : "Unknown error"));
+        } finally {
+            stopFlags.remove(deploymentId);
+        }
+    }
+
+    private boolean runInstanceDeployment(String region, Deployment deployment,
+                                           ServerAppSpecInfo appSpec, String instanceId,
+                                           Map<String, Object> targetMap,
+                                           AtomicBoolean stopFlag) throws InterruptedException {
+        List<String> lifecycleOrder = List.of(
+                "ApplicationStop", "DownloadBundle", "BeforeInstall",
+                "Install", "AfterInstall", "ApplicationStart", "ValidateService");
+
+        for (String eventName : lifecycleOrder) {
+            if (stopFlag.get()) {
+                updateTargetStatus(targetMap, "Skipped");
+                return false;
+            }
+
+            List<Map<String, Object>> hookSteps = appSpec.hooks != null
+                    ? appSpec.hooks.get(eventName) : null;
+
+            Map<String, Object> event = addLifecycleEvent(targetMap, eventName);
+
+            // DownloadBundle and Install are infrastructure steps — always succeed
+            if ("DownloadBundle".equals(eventName) || "Install".equals(eventName)) {
+                finishLifecycleEvent(event, "Succeeded");
+                continue;
+            }
+
+            if (hookSteps == null || hookSteps.isEmpty()) {
+                finishLifecycleEvent(event, "Skipped");
+                continue;
+            }
+
+            boolean stepOk = executeHookStepsOnInstance(region, instanceId, hookSteps, event);
+            if (!stepOk) {
+                updateTargetStatus(targetMap, "Failed");
+                return false;
+            }
+        }
+
+        updateTargetStatus(targetMap, "Succeeded");
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private boolean executeHookStepsOnInstance(String region, String instanceId,
+                                               List<Map<String, Object>> hookSteps,
+                                               Map<String, Object> event) throws InterruptedException {
+        for (Map<String, Object> step : hookSteps) {
+            String location = (String) step.get("location");
+            int timeout = toInt(step.get("timeout"), 300);
+            String runas = (String) step.getOrDefault("runas", "root");
+
+            if (location == null) {
+                continue;
+            }
+
+            // Check if instance is registered with SSM
+            boolean hasSsm = ssmCommandService.isInstanceRegistered(instanceId, region);
+            if (!hasSsm) {
+                LOG.debugv("Instance {0} not in SSM, marking hook {1} as Succeeded", instanceId, location);
+                continue;
+            }
+
+            try {
+                String script = "sh " + location;
+                if (!"root".equals(runas)) {
+                    script = "sudo -u " + runas + " sh " + location;
+                }
+                String commandId = ssmCommandService.sendCommandToInstance(
+                        instanceId, "AWS-RunShellScript", Map.of("commands", List.of(script)),
+                        timeout, region);
+
+                // Poll until done (max timeout seconds, capped at 30s for emulator)
+                long deadline = System.currentTimeMillis() + Math.min(timeout * 1000L, 30_000L);
+                String invocationStatus = "InProgress";
+                while (System.currentTimeMillis() < deadline && "InProgress".equals(invocationStatus)) {
+                    Thread.sleep(500);
+                    invocationStatus = ssmCommandService.getCommandInvocationStatus(commandId, instanceId, region);
+                }
+
+                if (!"Success".equals(invocationStatus) && !"InProgress".equals(invocationStatus)) {
+                    finishLifecycleEvent(event, "Failed");
+                    return false;
+                }
+            } catch (Exception e) {
+                LOG.debugv("SSM execution failed for {0} on {1}: {2}", location, instanceId, e.getMessage());
+                // Graceful degradation: if SSM fails, treat as succeeded
+            }
+        }
+        finishLifecycleEvent(event, "Succeeded");
+        return true;
+    }
+
+    @SuppressWarnings("unchecked")
+    private ServerAppSpecInfo parseServerAppSpec(Map<String, Object> revision) {
+        if (revision == null) {
+            throw new AwsException("InvalidRevisionException", "Revision is required", 400);
+        }
+
+        String content = null;
+        Object appSpecContent = revision.get("appSpecContent");
+        if (appSpecContent instanceof Map<?, ?> asc) {
+            content = (String) ((Map<String, Object>) asc).get("content");
+        }
+
+        ServerAppSpecInfo info = new ServerAppSpecInfo();
+        info.os = "linux";
+        info.hooks = new java.util.LinkedHashMap<>();
+
+        if (content == null || content.isBlank()) {
+            return info;
+        }
+
+        try {
+            JsonNode root = yamlMapper.readTree(content);
+            if (root.has("os")) {
+                info.os = root.get("os").asText("linux");
+            }
+            JsonNode hooksNode = root.get("hooks");
+            if (hooksNode != null && hooksNode.isObject()) {
+                hooksNode.fields().forEachRemaining(entry -> {
+                    String hookName = entry.getKey();
+                    JsonNode steps = entry.getValue();
+                    List<Map<String, Object>> stepList = new ArrayList<>();
+                    if (steps.isArray()) {
+                        steps.forEach(s -> {
+                            Map<String, Object> step = new java.util.LinkedHashMap<>();
+                            if (s.has("location")) { step.put("location", s.get("location").asText()); }
+                            if (s.has("timeout")) { step.put("timeout", s.get("timeout").asInt(300)); }
+                            if (s.has("runas")) { step.put("runas", s.get("runas").asText("root")); }
+                            stepList.add(step);
+                        });
+                    }
+                    info.hooks.put(hookName, stepList);
+                });
+            }
+        } catch (Exception e) {
+            throw new AwsException("InvalidRevisionException",
+                    "Failed to parse Server AppSpec: " + e.getMessage(), 400);
+        }
+        return info;
+    }
+
+    @SuppressWarnings("unchecked")
+    private List<String> resolveServerTargets(String region, DeploymentGroup group) {
+        List<String> instanceIds = new ArrayList<>();
+
+        // EC2 instances by tag filters
+        List<Map<String, String>> ec2TagFilters = group.getEc2TagFilters();
+        if (ec2TagFilters != null && !ec2TagFilters.isEmpty()) {
+            Map<String, List<String>> filters = new java.util.LinkedHashMap<>();
+            for (Map<String, String> filter : ec2TagFilters) {
+                String key = filter.get("Key");
+                String value = filter.get("Value");
+                if (key != null && value != null) {
+                    filters.computeIfAbsent("tag:" + key, k -> new ArrayList<>()).add(value);
+                }
+            }
+            try {
+                ec2Service.describeInstances(region, null, filters).stream()
+                        .flatMap(r -> r.getInstances().stream())
+                        .map(inst -> inst.getInstanceId())
+                        .filter(id -> id != null)
+                        .forEach(instanceIds::add);
+            } catch (Exception e) {
+                LOG.debugv("EC2 tag filter lookup failed: {0}", e.getMessage());
+            }
+        }
+
+        // On-premises instances by tag filters
+        List<Map<String, String>> onPremFilters = group.getOnPremisesInstanceTagFilters();
+        if (onPremFilters != null && !onPremFilters.isEmpty()) {
+            onPremisesFor(region).values().stream()
+                    .filter(inst -> "Registered".equals(inst.getRegistrationStatus()))
+                    .filter(inst -> matchesTagFilters(inst.getTags(), onPremFilters))
+                    .map(OnPremisesInstance::getInstanceName)
+                    .forEach(instanceIds::add);
+        }
+
+        // If no filters specified, include all registered on-premises instances
+        if ((ec2TagFilters == null || ec2TagFilters.isEmpty())
+                && (onPremFilters == null || onPremFilters.isEmpty())) {
+            onPremisesFor(region).values().stream()
+                    .filter(inst -> "Registered".equals(inst.getRegistrationStatus()))
+                    .map(OnPremisesInstance::getInstanceName)
+                    .forEach(instanceIds::add);
+        }
+
+        return instanceIds;
+    }
+
+    private boolean matchesTagFilters(List<Map<String, String>> instanceTags,
+                                       List<Map<String, String>> filters) {
+        for (Map<String, String> filter : filters) {
+            String key = filter.get("Key");
+            String value = filter.get("Value");
+            if (key == null) { continue; }
+            boolean found = instanceTags.stream()
+                    .anyMatch(t -> key.equals(t.get("Key"))
+                            && (value == null || value.equals(t.get("Value"))));
+            if (!found) { return false; }
+        }
+        return true;
+    }
+
     private AppSpecInfo parseAppSpec(Map<String, Object> revision) {
         if (revision == null) {
             throw new AwsException("InvalidRevisionException", "Revision is required", 400);
@@ -752,7 +1156,9 @@ public class CodeDeployService {
         Map<String, Object> targetMap = new ConcurrentHashMap<>();
         targetMap.put("deploymentTargetType", "ECSTarget");
         targetMap.put("ecsTarget", ecsTargetMap);
-        deploymentTargetsFor(region).put(deploymentId, targetMap);
+        ConcurrentHashMap<String, Map<String, Object>> ecsTargets = new ConcurrentHashMap<>();
+        ecsTargets.put(targetId, targetMap);
+        deploymentTargetsFor(region).put(deploymentId, ecsTargets);
 
         AtomicBoolean stopFlag = new AtomicBoolean(false);
         stopFlags.put(deploymentId, stopFlag);
