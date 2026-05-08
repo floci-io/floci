@@ -12,6 +12,7 @@ public class Target {
     private String input;
     private String inputPath;
     private InputTransformer inputTransformer;
+    private SqsParameters sqsParameters;
 
     public Target() {}
 
@@ -36,4 +37,7 @@ public class Target {
 
     public InputTransformer getInputTransformer() { return inputTransformer; }
     public void setInputTransformer(InputTransformer inputTransformer) { this.inputTransformer = inputTransformer; }
+
+    public SqsParameters getSqsParameters() { return sqsParameters; }
+    public void setSqsParameters(SqsParameters sqsParameters) { this.sqsParameters = sqsParameters; }
 }

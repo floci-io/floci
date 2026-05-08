@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.eventbridge.model.Replay;
 import io.github.hectorvent.floci.services.eventbridge.model.ReplayState;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
+import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -207,6 +208,15 @@ public class EventBridgeHandler {
                     String template = transformerNode.path("InputTemplate").asText(null);
                     target.setInputTransformer(new InputTransformer(pathsMap, template));
                 }
+                JsonNode sqsParamsNode = t.path("SqsParameters");
+                if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
+                    String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
+                    if (messageGroupId != null) {
+                        SqsParameters sqsParameters = new SqsParameters();
+                        sqsParameters.setMessageGroupId(messageGroupId);
+                        target.setSqsParameters(sqsParameters);
+                    }
+                }
                 targets.add(target);
             }
         }
@@ -260,6 +270,9 @@ public class EventBridgeHandler {
                 if (t.getInputTransformer().getInputTemplate() != null) {
                     transformerNode.put("InputTemplate", t.getInputTransformer().getInputTemplate());
                 }
+            }
+            if (t.getSqsParameters() != null && t.getSqsParameters().getMessageGroupId() != null) {
+                node.putObject("SqsParameters").put("MessageGroupId", t.getSqsParameters().getMessageGroupId());
             }
             targetsArray.add(node);
         }
