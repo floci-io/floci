@@ -13,4 +13,7 @@ RUN microdnf install -y --nodocs python3 python3-pip \
     && microdnf clean all \
     && rm -rf /root/.cache/pip
 
+COPY bin/awslocal /usr/local/bin/awslocal
+RUN chmod +x /usr/local/bin/awslocal
+
 USER 1001
