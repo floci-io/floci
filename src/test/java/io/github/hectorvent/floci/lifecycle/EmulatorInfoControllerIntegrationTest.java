@@ -1,68 +1,37 @@
 package io.github.hectorvent.floci.lifecycle;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.Test;
 
+import java.util.List;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
-import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 class EmulatorInfoControllerIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
-    private static final String EXPECTED_SERVICES_JSON = """
-            {
-              "ssm": "running",
-              "sqs": "running",
-              "s3": "running",
-              "dynamodb": "running",
-              "sns": "running",
-              "lambda": "running",
-              "apigateway": "running",
-              "iam": "running",
-              "kafka": "running",
-              "elasticache": "running",
-              "rds": "running",
-              "events": "running",
-              "scheduler": "running",
-              "logs": "running",
-              "monitoring": "running",
-              "secretsmanager": "running",
-              "apigatewayv2": "running",
-              "kinesis": "running",
-              "kms": "running",
-              "cognito-idp": "running",
-              "states": "running",
-              "cloudformation": "running",
-              "acm": "running",
-              "athena": "running",
-              "glue": "running",
-              "firehose": "running",
-              "email": "running",
-              "es": "running",
-              "ec2": "running",
-              "ecs": "running",
-              "appconfig": "running",
-              "appconfigdata": "running",
-              "ecr": "running",
-              "tagging": "running",
-              "bedrock-runtime": "running",
-              "eks": "running",
-              "pipes": "running",
-              "elasticloadbalancing": "running",
-              "codebuild": "running",
-              "codedeploy": "running",
-              "autoscaling": "running",
-              "backup": "running",
-              "route53": "running",
-              "transfer": "running"
-            }
-            """;
+    // Core services that must always be present and running.
+    // New services can be added to Floci without updating this list —
+    // the test verifies all known services are present, not an exact set.
+    private static final List<String> CORE_SERVICES = List.of(
+            "ssm", "sqs", "s3", "dynamodb", "sns", "lambda",
+            "apigateway", "iam", "kafka", "elasticache", "rds",
+            "events", "scheduler", "logs", "monitoring", "secretsmanager",
+            "apigatewayv2", "kinesis", "kms", "cognito-idp", "states",
+            "cloudformation", "acm", "athena", "glue", "firehose",
+            "email", "es", "ec2", "ecs", "appconfig", "appconfigdata",
+            "ecr", "tagging", "bedrock-runtime", "eks", "pipes",
+            "elasticloadbalancing", "codebuild", "codedeploy", "autoscaling",
+            "backup", "route53", "transfer"
+    );
 
     @ParameterizedTest
     @ValueSource(strings = {"/_floci/health", "/_localstack/health"})
@@ -74,11 +43,17 @@ class EmulatorInfoControllerIntegrationTest {
                 .contentType("application/json")
                 .extract().body().asString();
 
-        var tree = MAPPER.readTree(body);
+        JsonNode tree = MAPPER.readTree(body);
         assertEquals("community", tree.get("edition").asText());
         assertEquals("floci-always-free", tree.get("original_edition").asText());
         assertEquals("dev", tree.get("version").asText());
-        assertEquals(MAPPER.readTree(EXPECTED_SERVICES_JSON), tree.get("services"));
+
+        JsonNode services = tree.get("services");
+        assertNotNull(services, "services field must be present");
+        for (String service : CORE_SERVICES) {
+            assertEquals("running", services.path(service).asText(),
+                    "Service '" + service + "' must be running");
+        }
     }
 
     @ParameterizedTest
