@@ -153,10 +153,14 @@ public class SqsService {
     }
 
     public Queue createQueue(String queueName, Map<String, String> attributes) {
-        return createQueue(queueName, attributes, regionResolver.getDefaultRegion());
+        return createQueue(queueName, attributes, null, regionResolver.getDefaultRegion());
     }
 
     public Queue createQueue(String queueName, Map<String, String> attributes, String region) {
+        return createQueue(queueName, attributes, null, region);
+    }
+
+    public Queue createQueue(String queueName, Map<String, String> attributes, Map<String, String> tags, String region) {
 
         boolean fifoRequested = attributes != null && "true".equalsIgnoreCase(attributes.get("FifoQueue"));
         boolean hasFifoSuffix = queueName != null && queueName.endsWith(".fifo");
@@ -198,6 +202,9 @@ public class SqsService {
         Queue queue = new Queue(queueName, queueUrl);
         if (attributes != null) {
             queue.getAttributes().putAll(attributes);
+        }
+        if (tags != null) {
+            queue.getTags().putAll(tags);
         }
         // Set default attributes
         queue.getAttributes().putIfAbsent("VisibilityTimeout", String.valueOf(defaultVisibilityTimeout));

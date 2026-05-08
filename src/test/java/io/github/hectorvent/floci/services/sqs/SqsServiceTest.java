@@ -49,6 +49,20 @@ class SqsServiceTest {
     }
 
     @Test
+    void createQueueWithTags_tagsReturnedByListQueueTags() {
+        // Regression test for https://github.com/floci-io/floci/issues/699
+        // Tags supplied at CreateQueue time must be visible via ListQueueTags.
+        Map<String, String> tags = Map.of("k1", "v1", "k2", "v2");
+        Queue queue = sqsService.createQueue("tagged-queue", null, tags, "us-east-1");
+        String queueUrl = queue.getQueueUrl();
+
+        Map<String, String> returned = sqsService.listQueueTags(queueUrl, "us-east-1");
+        assertEquals(2, returned.size(), "ListQueueTags must return all tags set during CreateQueue");
+        assertEquals("v1", returned.get("k1"));
+        assertEquals("v2", returned.get("k2"));
+    }
+
+    @Test
     void deleteQueue() {
         Queue queue = sqsService.createQueue("test-queue", null);
         sqsService.deleteQueue(queue.getQueueUrl());

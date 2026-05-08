@@ -64,7 +64,8 @@ public class SqsQueryHandler {
     private Response handleCreateQueue(MultivaluedMap<String, String> params, String region) {
         String queueName = getParam(params, "QueueName");
         Map<String, String> attributes = extractAttributes(params);
-        Queue queue = sqsService.createQueue(queueName, attributes, region);
+        Map<String, String> tags = extractTags(params);
+        Queue queue = sqsService.createQueue(queueName, attributes, tags, region);
 
         String result = new XmlBuilder().elem("QueueUrl", queue.getQueueUrl()).build();
         return Response.ok(AwsQueryResponse.envelope("CreateQueue", null, result)).build();
@@ -437,6 +438,17 @@ public class SqsQueryHandler {
             attributes.put(name, value);
         }
         return attributes;
+    }
+
+    private Map<String, String> extractTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String key = getParam(params, "Tag." + i + ".Key");
+            String value = getParam(params, "Tag." + i + ".Value");
+            if (key == null) break;
+            tags.put(key, value);
+        }
+        return tags;
     }
 
     Response xmlErrorResponse(String code, String message, int status) {

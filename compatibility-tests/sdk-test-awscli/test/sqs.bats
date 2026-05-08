@@ -84,3 +84,18 @@ teardown() {
     assert_success
     QUEUE_URL=""
 }
+
+@test "SQS: tags set at CreateQueue are returned by ListQueueTags" {
+    # Regression test for https://github.com/floci-io/floci/issues/699
+    run aws_cmd sqs create-queue --queue-name "$QUEUE_NAME" --tags "k1=v1,k2=v2"
+    assert_success
+    QUEUE_URL=$(json_get "$output" '.QueueUrl')
+    [ -n "$QUEUE_URL" ]
+
+    run aws_cmd sqs list-queue-tags --queue-url "$QUEUE_URL"
+    assert_success
+    v1=$(json_get "$output" '.Tags.k1')
+    v2=$(json_get "$output" '.Tags.k2')
+    [ "$v1" = "v1" ]
+    [ "$v2" = "v2" ]
+}
