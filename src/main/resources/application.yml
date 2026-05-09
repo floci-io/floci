@@ -34,6 +34,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.core.common.BouncyCastleInitializer
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.AcmService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.acm.CertificateGenerator
+      - --initialize-at-run-time=io.github.hectorvent.floci.config.TlsConfigSource
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ses.SesService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
@@ -89,6 +90,12 @@ floci:
   auth:
     validate-signatures: false
     presign-secret: local-emulator-secret
+
+  tls:
+    enabled: false                     # FLOCI_TLS_ENABLED (default: false)
+    # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)
+    # key-path: ""                     # FLOCI_TLS_KEY_PATH (PEM private key file)
+    self-signed: true                  # FLOCI_TLS_SELF_SIGNED — auto-generate a self-signed cert if no cert-path provided
 
   docker:
     log-max-size: "10m"

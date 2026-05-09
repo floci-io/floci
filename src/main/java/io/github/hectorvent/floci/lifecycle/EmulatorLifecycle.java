@@ -82,6 +82,7 @@ public class EmulatorLifecycle {
         LOG.info("=== AWS Local Emulator Starting ===");
         LOG.infov("Storage mode: {0}", config.storage().mode());
         LOG.infov("Persistent path: {0}", config.storage().persistentPath());
+        LOG.infov("TLS: {0}", config.tls().enabled() ? "enabled (HTTPS + HTTP dual mode)" : "disabled (HTTP only)");
 
         // BOOT hooks run before service initialization — scripts cannot use AWS APIs yet.
         try {

@@ -53,6 +53,7 @@ class EmulatorLifecycleTest {
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
     @Mock private InitLifecycleState initLifecycleState;
+    @Mock private EmulatorConfig.TlsConfig tlsConfig;
 
     private EmulatorLifecycle emulatorLifecycle;
 
@@ -61,6 +62,8 @@ class EmulatorLifecycleTest {
         Mockito.lenient().when(config.services()).thenReturn(servicesConfig);
         Mockito.lenient().when(servicesConfig.ec2()).thenReturn(ec2ServiceConfig);
         Mockito.lenient().when(ec2ServiceConfig.enabled()).thenReturn(false);
+        Mockito.lenient().when(config.tls()).thenReturn(tlsConfig);
+        Mockito.lenient().when(tlsConfig.enabled()).thenReturn(false);
 
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,

@@ -30,6 +30,7 @@ import org.jboss.logging.Logger;
 import java.io.StringReader;
 import java.io.StringWriter;
 import java.math.BigInteger;
+import java.net.InetAddress;
 import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.PrivateKey;
@@ -43,6 +44,7 @@ import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Date;
 import java.util.List;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class CertificateGenerator {
@@ -50,6 +52,14 @@ public class CertificateGenerator {
     private static final Logger LOG = Logger.getLogger(CertificateGenerator.class);
     private static final String ISSUER_DN = "CN=Amazon,OU=Server CA 1B,O=Amazon,C=US";
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
+    /**
+     * Pattern matching IPv4 addresses (e.g. 192.168.1.100) and IPv6 addresses
+     * (bracketed like [::1] or raw like ::1, fe80::1).
+     */
+    private static final Pattern IP_ADDRESS_PATTERN = Pattern.compile(
+            "^\\[?([0-9a-fA-F:]+)]?$|^(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})$"
+    );
 
     public record GeneratedCertificate(
         String certificatePem,
@@ -98,11 +108,11 @@ public class CertificateGenerator {
 
             // Add Subject Alternative Names
             List<GeneralName> sanList = new ArrayList<>();
-            sanList.add(new GeneralName(GeneralName.dNSName, domainName));
+            sanList.add(toGeneralName(domainName));
             if (sans != null) {
                 for (String san : sans) {
                     if (!san.equals(domainName)) {
-                        sanList.add(new GeneralName(GeneralName.dNSName, san));
+                        sanList.add(toGeneralName(san));
                     }
                 }
             }
@@ -164,6 +174,41 @@ public class CertificateGenerator {
             keyGen.initialize(keyAlgorithm.getKeySize(), SECURE_RANDOM);
         }
         return keyGen.generateKeyPair();
+    }
+
+    /**
+     * Creates the appropriate {@link GeneralName} for a SAN entry.
+     * IP addresses (IPv4 and IPv6) use {@code GeneralName.iPAddress},
+     * all other values use {@code GeneralName.dNSName}.
+     */
+    private static GeneralName toGeneralName(String san) {
+        if (isIpAddress(san)) {
+            try {
+                // Strip brackets from IPv6 if present (e.g. [::1] → ::1)
+                String raw = san.startsWith("[") && san.endsWith("]")
+                        ? san.substring(1, san.length() - 1)
+                        : san;
+                byte[] addr = InetAddress.getByName(raw).getAddress();
+                return new GeneralName(GeneralName.iPAddress,
+                        new org.bouncycastle.asn1.DEROctetString(addr));
+            } catch (Exception e) {
+                // Fallback to DNS name if IP parsing fails
+                LOG.debugv("Could not parse '{0}' as IP address, treating as DNS name", san);
+                return new GeneralName(GeneralName.dNSName, san);
+            }
+        }
+        return new GeneralName(GeneralName.dNSName, san);
+    }
+
+    /**
+     * Checks whether a SAN value looks like an IP address (IPv4 or IPv6).
+     * Wildcard entries (e.g. *.localhost) are never IP addresses.
+     */
+    static boolean isIpAddress(String value) {
+        if (value == null || value.isBlank() || value.startsWith("*")) {
+            return false;
+        }
+        return IP_ADDRESS_PATTERN.matcher(value).matches();
     }
 
     private String toPem(Object obj) throws Exception {

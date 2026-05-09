@@ -44,6 +44,10 @@ floci:
     timeout-seconds: 5
     shutdown-grace-period-seconds: 2
 
+  tls:
+    enabled: false
+    self-signed: true
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"

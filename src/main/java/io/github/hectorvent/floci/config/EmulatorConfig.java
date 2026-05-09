@@ -27,13 +27,18 @@ public interface EmulatorConfig {
     Optional<String> hostname();
 
     /**
-     * Returns the effective base URL, taking hostname into account.
+     * Returns the effective base URL, taking hostname and TLS into account.
      * If hostname is set, replaces the host in baseUrl with it.
+     * If TLS is enabled, switches the scheme from http:// to https://.
      */
     default String effectiveBaseUrl() {
-        return hostname()
+        String url = hostname()
                 .map(h -> baseUrl().replaceFirst("://[^:/]+(:\\d+)?", "://" + h + "$1"))
                 .orElse(baseUrl());
+        if (tls().enabled() && url.startsWith("http://")) {
+            url = "https://" + url.substring(7);
+        }
+        return url;
     }
 
     @WithDefault("us-east-1")
@@ -62,6 +67,8 @@ public interface EmulatorConfig {
     DockerConfig docker();
 
     InitHooksConfig initHooks();
+
+    TlsConfig tls();
 
     interface DnsConfig {
         /**
@@ -836,6 +843,33 @@ public interface EmulatorConfig {
 
         @WithDefault("30")
         long timeoutSeconds();
+    }
+
+    /**
+     * Optional TLS configuration for enabling HTTPS on the Floci server.
+     * When enabled, all endpoints are reachable via {@code https://} and
+     * WebSocket connections work via {@code wss://}.
+     *
+     * <p>Both HTTP and HTTPS are served simultaneously (LocalStack parity).
+     */
+    interface TlsConfig {
+        /** Enable TLS/HTTPS on the server. Env: FLOCI_TLS_ENABLED */
+        @WithDefault("false")
+        boolean enabled();
+
+        /** Path to PEM certificate file. Env: FLOCI_TLS_CERT_PATH */
+        Optional<String> certPath();
+
+        /** Path to PEM private key file. Env: FLOCI_TLS_KEY_PATH */
+        Optional<String> keyPath();
+
+        /**
+         * Auto-generate a self-signed certificate when no cert-path/key-path provided.
+         * The generated files are persisted to {@code {storage.persistent-path}/tls/}
+         * and reused across restarts. Env: FLOCI_TLS_SELF_SIGNED
+         */
+        @WithDefault("true")
+        boolean selfSigned();
     }
 
     /**

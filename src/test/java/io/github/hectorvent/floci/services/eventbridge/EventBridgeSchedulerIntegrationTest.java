@@ -308,6 +308,15 @@ class EventBridgeSchedulerIntegrationTest {
             public DockerConfig docker() { return null; }
             @Override
             public EmulatorConfig.InitHooksConfig initHooks() { return null; }
+            @Override
+            public TlsConfig tls() {
+                return new TlsConfig() {
+                    @Override public boolean enabled() { return false; }
+                    @Override public Optional<String> certPath() { return Optional.empty(); }
+                    @Override public Optional<String> keyPath() { return Optional.empty(); }
+                    @Override public boolean selfSigned() { return true; }
+                };
+            }
         };
     }
 }
