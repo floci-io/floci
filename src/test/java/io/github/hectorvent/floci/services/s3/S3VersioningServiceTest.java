@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.s3.model.CopyObjectOptions;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -166,6 +167,22 @@ class S3VersioningServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 s3Service.getObject("versioned-bucket", "test.txt", "fake-version-id"));
         assertEquals("NoSuchVersion", ex.getErrorCode());
+    }
+
+    @Test
+    void copyObjectFromOlderVersionRestoresThatContentAsLatest() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "key",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObject("versioned-bucket", "key",
+                "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        assertEquals("v2", new String(s3Service.getObject("versioned-bucket", "key").getData()));
+
+        s3Service.copyObject("versioned-bucket", "key", "versioned-bucket", "key",
+                v1.getVersionId(), new CopyObjectOptions());
+
+        assertEquals("v1", new String(s3Service.getObject("versioned-bucket", "key").getData()));
     }
 
     @Test

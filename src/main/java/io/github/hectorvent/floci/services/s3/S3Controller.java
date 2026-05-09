@@ -1511,14 +1511,15 @@ public class S3Controller {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
         String sourceBucket = decodedSource.substring(0, slashIndex);
-        String sourceKey = decodedSource.substring(slashIndex + 1);
-
+        String pathAfterBucket = decodedSource.substring(slashIndex + 1);
+        ParsedCopySource sourceObject = parseCopySourceObject(pathAfterBucket);
         String copyContentEncoding = toPersistedContentEncoding(httpHeaders.getHeaderString("Content-Encoding"));
         String copyContentDisposition = httpHeaders.getHeaderString("Content-Disposition");
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
         String copyServerSideEncryption = httpHeaders.getHeaderString("x-amz-server-side-encryption");
         String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
-        S3Object copy = s3Service.copyObject(sourceBucket, sourceKey, destBucket, destKey,
+        S3Object copy = s3Service.copyObject(sourceBucket, sourceObject.objectKey(), destBucket, destKey,
+                sourceObject.versionId(),
                 new CopyObjectOptions()
                         .withMetadataDirective(httpHeaders.getHeaderString("x-amz-metadata-directive"))
                         .withReplacementMetadata(extractUserMetadata(httpHeaders))
@@ -1556,10 +1557,11 @@ public class S3Controller {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
         String sourceBucket = decodedSource.substring(0, slashIndex);
-        String sourceKey = decodedSource.substring(slashIndex + 1);
+        String pathAfterBucket = decodedSource.substring(slashIndex + 1);
+        ParsedCopySource sourceObject = parseCopySourceObject(pathAfterBucket);
         String copySourceRange = httpHeaders.getHeaderString("x-amz-copy-source-range");
         String eTag = s3Service.uploadPartCopy(destBucket, destKey, uploadId, partNumber,
-                sourceBucket, sourceKey, copySourceRange);
+                sourceBucket, sourceObject.objectKey(), sourceObject.versionId(), copySourceRange);
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("CopyPartResult", AwsNamespaces.S3)
@@ -2208,5 +2210,39 @@ public class S3Controller {
         }
         s3Service.putBucketWebsite(bucket, new WebsiteConfiguration(indexDoc, errorDoc));
         return Response.ok().build();
+    }
+
+    /**
+     * Object key and optional source versionId from the segment after {@code bucket/} in
+     * {@code x-amz-copy-source} (already UTF-8 URL-decoded as a whole; query values may still be encoded).
+     */
+    private ParsedCopySource parseCopySourceObject(String pathAfterBucket) {
+        int queryStart = pathAfterBucket.indexOf('?');
+        if (queryStart < 0) {
+            return new ParsedCopySource(pathAfterBucket, null);
+        }
+        String objectKey = pathAfterBucket.substring(0, queryStart);
+        String query = pathAfterBucket.substring(queryStart + 1);
+        String versionId = null;
+        for (String pair : query.split("&")) {
+            int eq = pair.indexOf('=');
+            if (eq <= 0) {
+                continue;
+            }
+            String name = pair.substring(0, eq);
+            String value = pair.substring(eq + 1);
+            if ("versionId".equals(name)) {
+                try {
+                    versionId = URLDecoder.decode(value, StandardCharsets.UTF_8);
+                } catch (IllegalArgumentException e) {
+                    versionId = value;
+                }
+                break;
+            }
+        }
+        return new ParsedCopySource(objectKey, versionId);
+    }
+
+    private record ParsedCopySource(String objectKey, String versionId) {
     }
 }
