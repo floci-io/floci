@@ -86,7 +86,6 @@ public class SesController {
             List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
             if (parsedTags != null) {
                 sesService.setIdentityTags(emailIdentity, region, parsedTags);
-                identity.setTags(parsedTags);
             }
 
             ObjectNode result = objectMapper.createObjectNode();
