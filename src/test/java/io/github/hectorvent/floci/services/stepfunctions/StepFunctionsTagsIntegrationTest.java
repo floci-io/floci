@@ -116,7 +116,6 @@ class StepFunctionsTagsIntegrationTest {
     @Test
     @Order(8)
     void json_listTagsForResourceReturnsCurrentTags() {
-        // env=test was set by rest_tagStateMachine, team was removed by rest_untagStateMachine
         given()
                 .header("X-Amz-Target", "AWSStepFunctions.ListTagsForResource")
                 .contentType(SFN_CONTENT_TYPE)
