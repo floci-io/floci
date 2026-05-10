@@ -17,6 +17,7 @@ public class Message {
     private String body;
     private Map<String, MessageAttributeValue> messageAttributes;
     private Instant sentTimestamp;
+    private Instant firstReceiveTimestamp;
     private int receiveCount;
     private String md5OfBody;
     private String md5OfMessageAttributes;
@@ -56,6 +57,9 @@ public class Message {
 
     public Instant getSentTimestamp() { return sentTimestamp; }
     public void setSentTimestamp(Instant sentTimestamp) { this.sentTimestamp = sentTimestamp; }
+
+    public Instant getFirstReceiveTimestamp() { return firstReceiveTimestamp; }
+    public void setFirstReceiveTimestamp(Instant firstReceiveTimestamp) { this.firstReceiveTimestamp = firstReceiveTimestamp; }
 
     public int getReceiveCount() { return receiveCount; }
     public void setReceiveCount(int receiveCount) { this.receiveCount = receiveCount; }

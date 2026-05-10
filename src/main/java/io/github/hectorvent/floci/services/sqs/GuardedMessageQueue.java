@@ -86,6 +86,9 @@ class GuardedMessageQueue {
                              String deadLetterTargetArn, List<Message> claimed,
                              List<Message> dlqCandidates) {
         msg.setReceiveCount(msg.getReceiveCount() + 1);
+        if (msg.getFirstReceiveTimestamp() == null) {
+            msg.setFirstReceiveTimestamp(Instant.now());
+        }
 
         if (maxReceiveCount > 0 && deadLetterTargetArn != null
                 && msg.getReceiveCount() > maxReceiveCount) {

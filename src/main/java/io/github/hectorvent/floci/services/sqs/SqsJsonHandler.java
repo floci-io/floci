@@ -81,6 +81,42 @@ public class SqsJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private void writeSystemAttributesJson(ObjectNode msgNode, Message msg,
+                                           java.util.Set<String> requested, String senderId) {
+        if (requested.isEmpty()) {
+            return;
+        }
+        boolean all = requested.contains("All");
+        ObjectNode attrs = objectMapper.createObjectNode();
+        if ((all || requested.contains("SenderId")) && senderId != null) {
+            attrs.put("SenderId", senderId);
+        }
+        if (all || requested.contains("SentTimestamp")) {
+            attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
+        }
+        if (all || requested.contains("ApproximateReceiveCount")) {
+            attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
+        }
+        if ((all || requested.contains("ApproximateFirstReceiveTimestamp"))
+                && msg.getFirstReceiveTimestamp() != null) {
+            attrs.put("ApproximateFirstReceiveTimestamp",
+                    String.valueOf(msg.getFirstReceiveTimestamp().toEpochMilli()));
+        }
+        if (msg.getMessageGroupId() != null && (all || requested.contains("MessageGroupId"))) {
+            attrs.put("MessageGroupId", msg.getMessageGroupId());
+        }
+        if (msg.getSequenceNumber() > 0 && (all || requested.contains("SequenceNumber"))) {
+            attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
+        }
+        if (msg.getMessageDeduplicationId() != null
+                && (all || requested.contains("MessageDeduplicationId"))) {
+            attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
+        }
+        if (!attrs.isEmpty()) {
+            msgNode.set("Attributes", attrs);
+        }
+    }
+
     private List<String> jsonNodeToList(JsonNode node) {
         List<String> values = new ArrayList<>();
         if (node != null && node.isArray()) {
@@ -199,8 +235,13 @@ public class SqsJsonHandler {
         int visibilityTimeout = request.path("VisibilityTimeout").asInt(-1);
         int waitTimeSeconds = request.path("WaitTimeSeconds").asInt(0);
 
+        java.util.Set<String> requestedAttrs = new java.util.LinkedHashSet<>();
+        requestedAttrs.addAll(jsonNodeToList(request.path("AttributeNames")));
+        requestedAttrs.addAll(jsonNodeToList(request.path("MessageSystemAttributeNames")));
+
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages,
                 visibilityTimeout, waitTimeSeconds, region);
+        String senderId = sqsService.senderIdFor(queueUrl);
 
         ObjectNode response = objectMapper.createObjectNode();
         // Match AWS: omit the Messages field entirely when no messages are
@@ -220,18 +261,7 @@ public class SqsJsonHandler {
             }
             msgNode.put("Body", msg.getBody());
 
-            ObjectNode attrs = msgNode.putObject("Attributes");
-            attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
-            attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
-            if (msg.getMessageGroupId() != null) {
-                attrs.put("MessageGroupId", msg.getMessageGroupId());
-            }
-            if (msg.getSequenceNumber() > 0) {
-                attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
-            }
-            if (msg.getMessageDeduplicationId() != null) {
-                attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
-            }
+            writeSystemAttributesJson(msgNode, msg, requestedAttrs, senderId);
 
             if (msg.getMessageAttributes() != null && !msg.getMessageAttributes().isEmpty()) {
                 ObjectNode msgAttrs = msgNode.putObject("MessageAttributes");
