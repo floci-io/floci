@@ -174,6 +174,38 @@ class SqsJsonProtocolTest {
 
     @Test
     @Order(7)
+    void receiveMessageOnEmptyQueueOmitsMessagesField() {
+        // AWS omits the Messages field entirely when no messages are available.
+        // The .NET SDK with InitializeCollections=false then leaves the
+        // response collection as null. Floci previously returned "Messages": []
+        // which broke parity tests asserting null.
+        String emptyQueueName = QUEUE_NAME + "-empty";
+        String createBody = "{\"QueueName\":\"" + emptyQueueName + "\"}";
+        String emptyQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body(createBody)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        String body = "{\"QueueUrl\":\"" + emptyQueueUrl + "\",\"MaxNumberOfMessages\":1}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body(body)
+        .when()
+            .post("/" + ACCOUNT_ID + "/" + emptyQueueName)
+        .then()
+            .statusCode(200)
+            .body("$", not(hasKey("Messages")));
+    }
+
+    @Test
+    @Order(8)
     void deleteQueueViaQueueUrlPath() {
         String body = "{\"QueueUrl\":\"" + queueUrl + "\"}";
 
