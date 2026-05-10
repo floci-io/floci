@@ -3,6 +3,9 @@ package io.github.hectorvent.floci.services.stepfunctions.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.HashMap;
+import java.util.Map;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class StateMachine {
@@ -13,6 +16,7 @@ public class StateMachine {
     private String type = "STANDARD";
     private String status = "ACTIVE";
     private double creationDate;
+    private Map<String, String> tags = new HashMap<>();
 
     public StateMachine() {
         this.creationDate = System.currentTimeMillis() / 1000.0;
@@ -38,4 +42,7 @@ public class StateMachine {
 
     public double getCreationDate() { return creationDate; }
     public void setCreationDate(double creationDate) { this.creationDate = creationDate; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags; }
 }
