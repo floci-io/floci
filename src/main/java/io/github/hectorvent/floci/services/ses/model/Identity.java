@@ -5,7 +5,9 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -50,6 +52,9 @@ public class Identity {
 
     @JsonProperty("CreatedAt")
     private Instant createdAt;
+
+    @JsonProperty("Tags")
+    private List<Tag> tags = new ArrayList<>();
 
     public Identity() {}
 
@@ -101,4 +106,7 @@ public class Identity {
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+
+    public List<Tag> getTags() { return tags; }
+    public void setTags(List<Tag> tags) { this.tags = tags != null ? tags : new ArrayList<>(); }
 }

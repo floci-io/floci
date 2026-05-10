@@ -490,10 +490,11 @@ public class SesService {
         ResourceRef ref = parseSesArn(arn);
         return switch (ref.type()) {
             case "configuration-set" -> listConfigurationSetTags(ref.name(), ref.region());
-            // AWS ListTagsForResource on template ARNs uses the signing region for lookup
-            // (the ARN region is effectively ignored), unlike configuration-set which routes
-            // by the ARN's region.
+            // AWS ListTagsForResource on template / identity ARNs uses the signing region
+            // for lookup (the ARN region is effectively ignored), unlike configuration-set
+            // which routes by the ARN's region.
             case "template" -> listEmailTemplateTags(ref.name(), region);
+            case "identity" -> listIdentityTags(ref.name(), region);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         };
@@ -515,6 +516,7 @@ public class SesService {
         switch (ref.type()) {
             case "configuration-set" -> tagConfigurationSet(ref.name(), ref.region(), newTags);
             case "template" -> tagEmailTemplate(ref.name(), ref.region(), newTags);
+            case "identity" -> tagIdentity(ref.name(), ref.region(), newTags);
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
         }
@@ -530,13 +532,20 @@ public class SesService {
         switch (ref.type()) {
             case "configuration-set" -> untagConfigurationSet(ref.name(), ref.region(), tagKeys);
             case "template" -> {
-                // AWS UntagResource on template ARNs strictly requires the ARN region to match
-                // the signing region (rejects mismatch with BadRequestException), unlike
-                // configuration-set which routes the lookup to the ARN's region.
+                // AWS UntagResource on template / identity ARNs strictly requires the ARN
+                // region to match the signing region (rejects mismatch with
+                // BadRequestException), unlike configuration-set which routes the lookup
+                // to the ARN's region.
                 if (!ref.region().equals(region)) {
                     throw new AwsException("BadRequestException", "Failed to untag resource", 400);
                 }
                 untagEmailTemplate(ref.name(), region, tagKeys);
+            }
+            case "identity" -> {
+                if (!ref.region().equals(region)) {
+                    throw new AwsException("BadRequestException", "Failed to untag resource", 400);
+                }
+                untagIdentity(ref.name(), region, tagKeys);
             }
             default -> throw new AwsException("NotFoundException",
                     "Resource " + arn + " was not found.", 404);
@@ -600,6 +609,48 @@ public class SesService {
         List<Tag> out = new ArrayList<>();
         merged.forEach((k, v) -> out.add(new Tag(k, v)));
         return out;
+    }
+
+    private List<Tag> listIdentityTags(String identityValue, String region) {
+        Identity identity = identityStore.get(identityKey(region, identityValue))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "No EmailIdentity present with name: " + identityValue, 404));
+        return new ArrayList<>(identity.getTags());
+    }
+
+    private void tagIdentity(String identityValue, String region, List<Tag> newTags) {
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "No EmailIdentity present with name: " + identityValue, 404));
+        identity.setTags(mergeTags(identity.getTags(), newTags));
+        identityStore.put(key, identity);
+        LOG.infov("Tagged SES identity: {0} (region {1}, +{2} tags)", identityValue, region, newTags.size());
+    }
+
+    private void untagIdentity(String identityValue, String region, List<String> tagKeys) {
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "No EmailIdentity present with name: " + identityValue, 404));
+        Set<String> toRemove = new HashSet<>(tagKeys);
+        identity.getTags().removeIf(t -> toRemove.contains(t.key()));
+        identityStore.put(key, identity);
+        LOG.infov("Untagged SES identity: {0} (region {1}, -{2} keys)", identityValue, region, tagKeys.size());
+    }
+
+    public void setIdentityTags(String identityValue, String region, List<Tag> tags) {
+        if (tags != null) {
+            for (Tag tag : tags) {
+                validateTag(tag);
+            }
+        }
+        String key = identityKey(region, identityValue);
+        Identity identity = identityStore.get(key)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "No EmailIdentity present with name: " + identityValue, 404));
+        identity.setTags(tags);
+        identityStore.put(key, identity);
     }
 
     private void untagEmailTemplate(String name, String region, List<String> tagKeys) {

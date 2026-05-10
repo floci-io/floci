@@ -200,6 +200,6 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `DELETE` | `/v2/email/tags?ResourceArn=...&TagKeys=...` | `UntagResource` |
 | `GET` | `/v2/email/tags?ResourceArn=...` | `ListTagsForResource` |
 
-Tag operations currently support `arn:aws:ses:<region>:<account>:configuration-set/<name>` and `arn:aws:ses:<region>:<account>:template/<name>` ARNs. Tags supplied to `CreateConfigurationSet` and `CreateEmailTemplate` are reachable through `ListTagsForResource`; `UpdateEmailTemplate` does not modify tags. Other resource types return `NotFoundException`.
+Tag operations support these ARN forms: `arn:aws:ses:<region>:<account>:configuration-set/<name>`, `arn:aws:ses:<region>:<account>:template/<name>`, and `arn:aws:ses:<region>:<account>:identity/<email-or-domain>`. Tags supplied to `CreateConfigurationSet`, `CreateEmailTemplate`, and `CreateEmailIdentity` are reachable through `ListTagsForResource`; `UpdateEmailTemplate` does not modify tags. Other resource types return `NotFoundException`.
 
 Identity, template, configuration-set, and sent-message state is shared between the v1 Query API and the v2 REST JSON API, so a template created with `CreateTemplate` resolves through `SendEmail` on v2 (and vice versa), a configuration set created with `CreateConfigurationSet` is visible to both `DescribeConfigurationSet` (v1) and `GetConfigurationSet` (v2), and every send appears in the same `GET /_aws/ses` inspection mailbox.

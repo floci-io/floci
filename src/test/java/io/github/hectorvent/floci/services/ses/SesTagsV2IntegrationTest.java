@@ -407,4 +407,127 @@ class SesTagsV2IntegrationTest {
             .body("Tags[0].Key", equalTo("owner"))
             .body("Tags[0].Value", equalTo("alice"));
     }
+
+    @Test
+    @Order(16)
+    void tags_lifecycle_onEmailIdentity() {
+        // Seed: create an email identity we can tag against
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailIdentity": "tag-id-1@example.com"}
+                """)
+        .when()
+            .post("/v2/email/identities")
+        .then()
+            .statusCode(200);
+
+        String arn = "arn:aws:ses:us-east-1:000000000000:identity/tag-id-1@example.com";
+
+        // Initially empty
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn", arn)
+        .when()
+            .get("/v2/email/tags")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(0));
+
+        // Tag it
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"ResourceArn": "%s", "Tags": [
+                  {"Key": "env", "Value": "stg"},
+                  {"Key": "owner", "Value": "alice"}
+                ]}
+                """.formatted(arn))
+        .when()
+            .post("/v2/email/tags")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn", arn)
+        .when()
+            .get("/v2/email/tags")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(2));
+
+        // Untag a key
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn", arn)
+            .queryParam("TagKeys", "env")
+        .when()
+            .delete("/v2/email/tags")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn", arn)
+        .when()
+            .get("/v2/email/tags")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("owner"));
+    }
+
+    @Test
+    @Order(17)
+    void tagResource_unknownEmailIdentity_returns404() {
+        String arn = "arn:aws:ses:us-east-1:000000000000:identity/missing-id@example.com";
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"ResourceArn": "%s", "Tags": [{"Key": "env", "Value": "dev"}]}
+                """.formatted(arn))
+        .when()
+            .post("/v2/email/tags")
+        .then()
+            .statusCode(404)
+            .body(containsString("No EmailIdentity present with name: missing-id@example.com"));
+    }
+
+    @Test
+    @Order(18)
+    void untagResource_identity_arnRegionMismatch_returns400() {
+        // Identity follows the same strict region check as templates for UntagResource.
+        String arn = "arn:aws:ses:eu-west-1:000000000000:identity/tag-id-1@example.com";
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn", arn)
+            .queryParam("TagKeys", "k")
+        .when()
+            .delete("/v2/email/tags")
+        .then()
+            .statusCode(400)
+            .body(containsString("Failed to untag resource"));
+    }
+
+    @Test
+    @Order(19)
+    void listTagsForResource_identity_arnRegionIgnored_usesSigningRegion() {
+        // tag-id-1 lives in us-east-1 and was left with a single "owner=alice" tag by
+        // the lifecycle case at @Order(16); an eu-west-1 ARN must still surface it.
+        String arn = "arn:aws:ses:eu-west-1:000000000000:identity/tag-id-1@example.com";
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("ResourceArn", arn)
+        .when()
+            .get("/v2/email/tags")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("owner"))
+            .body("Tags[0].Value", equalTo("alice"));
+    }
 }

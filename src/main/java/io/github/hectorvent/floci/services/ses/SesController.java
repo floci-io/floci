@@ -83,6 +83,12 @@ public class SesController {
                     ? sesService.verifyEmailIdentity(emailIdentity, region)
                     : sesService.verifyDomainIdentity(emailIdentity, region);
 
+            List<Tag> parsedTags = parseTagsArray(request.path("Tags"));
+            if (parsedTags != null) {
+                sesService.setIdentityTags(emailIdentity, region, parsedTags);
+                identity.setTags(parsedTags);
+            }
+
             ObjectNode result = objectMapper.createObjectNode();
             result.put("IdentityType", toV2IdentityType(identity.getIdentityType()));
             result.put("VerifiedForSendingStatus", true);
@@ -773,7 +779,13 @@ public class SesController {
                 v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
 
         result.putObject("Policies");
-        result.putArray("Tags");
+        ArrayNode tags = result.putArray("Tags");
+        for (Tag t : identity.getTags()) {
+            ObjectNode tagNode = objectMapper.createObjectNode();
+            tagNode.put("Key", t.key());
+            tagNode.put("Value", t.value());
+            tags.add(tagNode);
+        }
 
         return result;
     }

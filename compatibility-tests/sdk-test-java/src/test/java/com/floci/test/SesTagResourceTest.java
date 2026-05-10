@@ -10,10 +10,14 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailTemplateRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
+import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailTemplateRequest;
 import software.amazon.awssdk.services.sesv2.model.EmailTemplateContent;
+import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityRequest;
+import software.amazon.awssdk.services.sesv2.model.GetEmailIdentityResponse;
 import software.amazon.awssdk.services.sesv2.model.GetEmailTemplateRequest;
 import software.amazon.awssdk.services.sesv2.model.GetEmailTemplateResponse;
 import software.amazon.awssdk.services.sesv2.model.ListTagsForResourceRequest;
@@ -37,6 +41,8 @@ class SesTagResourceTest {
     private static String configSetArn;
     private static String templateName;
     private static String templateArn;
+    private static String identityValue;
+    private static String identityArn;
 
     @BeforeAll
     static void setup() {
@@ -46,6 +52,8 @@ class SesTagResourceTest {
         configSetArn = "arn:aws:ses:us-east-1:000000000000:configuration-set/" + configSetName;
         templateName = "sdk-tag-tpl-" + suffix;
         templateArn = "arn:aws:ses:us-east-1:000000000000:template/" + templateName;
+        identityValue = "sdk-tag-id-" + suffix + "@example.com";
+        identityArn = "arn:aws:ses:us-east-1:000000000000:identity/" + identityValue;
 
         sesV2.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSetName(configSetName)
@@ -62,6 +70,10 @@ class SesTagResourceTest {
             try {
                 sesV2.deleteEmailTemplate(DeleteEmailTemplateRequest.builder()
                         .templateName(templateName).build());
+            } catch (Exception ignored) {}
+            try {
+                sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
+                        .emailIdentity(identityValue).build());
             } catch (Exception ignored) {}
             sesV2.close();
         }
@@ -186,6 +198,50 @@ class SesTagResourceTest {
 
         ListTagsForResourceResponse afterUntag = sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
                 .resourceArn(templateArn).build());
+        assertThat(afterUntag.tags()).hasSize(1);
+        assertThat(afterUntag.tags().get(0).key()).isEqualTo("owner");
+    }
+
+    @Test
+    @Order(20)
+    void emailIdentity_createWithTags_visibleViaListTagsAndGet() {
+        sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
+                .emailIdentity(identityValue)
+                .tags(
+                        Tag.builder().key("env").value("dev").build(),
+                        Tag.builder().key("team").value("platform").build())
+                .build());
+
+        ListTagsForResourceResponse listed = sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
+                .resourceArn(identityArn).build());
+        assertThat(listed.tags()).hasSize(2);
+
+        GetEmailIdentityResponse got = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                .emailIdentity(identityValue).build());
+        assertThat(got.tags())
+                .extracting(Tag::key)
+                .containsExactlyInAnyOrder("env", "team");
+    }
+
+    @Test
+    @Order(21)
+    void emailIdentity_tagAndUntag_lifecycle() {
+        sesV2.tagResource(TagResourceRequest.builder()
+                .resourceArn(identityArn)
+                .tags(Tag.builder().key("owner").value("alice").build())
+                .build());
+
+        ListTagsForResourceResponse afterTag = sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
+                .resourceArn(identityArn).build());
+        assertThat(afterTag.tags()).hasSize(3);
+
+        sesV2.untagResource(UntagResourceRequest.builder()
+                .resourceArn(identityArn)
+                .tagKeys("env", "team")
+                .build());
+
+        ListTagsForResourceResponse afterUntag = sesV2.listTagsForResource(ListTagsForResourceRequest.builder()
+                .resourceArn(identityArn).build());
         assertThat(afterUntag.tags()).hasSize(1);
         assertThat(afterUntag.tags().get(0).key()).isEqualTo("owner");
     }
