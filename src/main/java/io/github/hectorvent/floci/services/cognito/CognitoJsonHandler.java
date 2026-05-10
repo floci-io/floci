@@ -78,6 +78,8 @@ public class CognitoJsonHandler {
             case "GetGroup" -> handleGetGroup(request);
             case "ListGroups" -> handleListGroups(request);
             case "DeleteGroup" -> handleDeleteGroup(request);
+            case "UpdateGroup" -> handleUpdateGroup(request);
+            case "ListUsersInGroup" -> handleListUsersInGroup(request);
             case "AdminAddUserToGroup" -> handleAdminAddUserToGroup(request);
             case "AdminRemoveUserFromGroup" -> handleAdminRemoveUserFromGroup(request);
             case "AdminListGroupsForUser" -> handleAdminListGroupsForUser(request);
@@ -696,6 +698,29 @@ public class CognitoJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode items = response.putArray("Groups");
         groups.forEach(g -> items.add(groupToNode(g)));
+        return Response.ok(response).build();
+    }
+
+    private Response handleUpdateGroup(JsonNode request) {
+        String userPoolId = request.path("UserPoolId").asText();
+        String groupName = request.path("GroupName").asText();
+        String description = request.has("Description") ? request.path("Description").asText() : null;
+        JsonNode precNode = request.path("Precedence");
+        Integer precedence = precNode.isMissingNode() || precNode.isNull() ? null : precNode.asInt();
+        String roleArn = request.has("RoleArn") ? request.path("RoleArn").asText() : null;
+        CognitoGroup group = service.updateGroup(userPoolId, groupName, description, precedence, roleArn);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("Group", groupToNode(group));
+        return Response.ok(response).build();
+    }
+
+    private Response handleListUsersInGroup(JsonNode request) {
+        String userPoolId = request.path("UserPoolId").asText();
+        String groupName = request.path("GroupName").asText();
+        List<CognitoUser> users = service.listUsersInGroup(userPoolId, groupName);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode items = response.putArray("Users");
+        users.forEach(u -> items.add(userToNode(u)));
         return Response.ok(response).build();
     }
 

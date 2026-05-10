@@ -659,6 +659,25 @@ public class CognitoService {
         LOG.infov("Deleted Cognito group: {0} from pool {1}", groupName, userPoolId);
     }
 
+    public CognitoGroup updateGroup(String userPoolId, String groupName, String description,
+                                     Integer precedence, String roleArn) {
+        CognitoGroup group = getGroup(userPoolId, groupName);
+        if (description != null) group.setDescription(description);
+        if (precedence != null) group.setPrecedence(precedence);
+        if (roleArn != null) group.setRoleArn(roleArn);
+        group.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        groupStore.put(groupKey(userPoolId, groupName), group);
+        LOG.infov("Updated Cognito group: {0} in pool {1}", groupName, userPoolId);
+        return group;
+    }
+
+    public List<CognitoUser> listUsersInGroup(String userPoolId, String groupName) {
+        CognitoGroup group = getGroup(userPoolId, groupName);
+        return group.getUserNames().stream()
+                .flatMap(username -> userStore.get(userKey(userPoolId, username)).stream())
+                .toList();
+    }
+
     public void adminAddUserToGroup(String userPoolId, String groupName, String username) {
         CognitoGroup group = getGroup(userPoolId, groupName);
         CognitoUser user = adminGetUser(userPoolId, username);

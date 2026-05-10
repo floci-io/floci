@@ -372,6 +372,105 @@ class CognitoIntegrationTest {
                 .statusCode(404);
     }
 
+    // ── UpdateGroup & ListUsersInGroup ────────────────────────────────
+
+    @Test
+    @Order(21)
+    void updateGroup() throws Exception {
+        // Create a group to update
+        cognitoJson("CreateGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors",
+                  "Description": "Original description",
+                  "Precedence": 10
+                }
+                """.formatted(poolId));
+
+        // Update the group
+        JsonNode resp = cognitoJson("UpdateGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors",
+                  "Description": "Updated description",
+                  "Precedence": 5,
+                  "RoleArn": "arn:aws:iam::000000000000:role/editors-role"
+                }
+                """.formatted(poolId));
+
+        JsonNode group = resp.path("Group");
+        assertEquals("editors", group.path("GroupName").asText());
+        assertEquals("Updated description", group.path("Description").asText());
+        assertEquals(5, group.path("Precedence").asInt());
+        assertEquals("arn:aws:iam::000000000000:role/editors-role", group.path("RoleArn").asText());
+
+        // Verify via GetGroup
+        JsonNode getResp = cognitoJson("GetGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors"
+                }
+                """.formatted(poolId));
+        assertEquals("Updated description", getResp.path("Group").path("Description").asText());
+        assertEquals(5, getResp.path("Group").path("Precedence").asInt());
+    }
+
+    @Test
+    @Order(22)
+    void listUsersInGroup() throws Exception {
+        // Add user to editors group
+        cognitoAction("AdminAddUserToGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username))
+                .then().statusCode(200);
+
+        // List users in group
+        JsonNode resp = cognitoJson("ListUsersInGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors"
+                }
+                """.formatted(poolId));
+
+        assertEquals(1, resp.path("Users").size());
+        assertEquals(username, resp.path("Users").get(0).path("Username").asText());
+    }
+
+    @Test
+    @Order(23)
+    void listUsersInGroupEmpty() throws Exception {
+        // Remove user and verify empty list
+        cognitoAction("AdminRemoveUserFromGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, username))
+                .then().statusCode(200);
+
+        JsonNode resp = cognitoJson("ListUsersInGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors"
+                }
+                """.formatted(poolId));
+        assertEquals(0, resp.path("Users").size());
+
+        // Cleanup
+        cognitoAction("DeleteGroup", """
+                {
+                  "UserPoolId": "%s",
+                  "GroupName": "editors"
+                }
+                """.formatted(poolId))
+                .then().statusCode(200);
+    }
+
     // ── Issue #228: AccessToken contains client_id ─────────────────────
 
     @Test
