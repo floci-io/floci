@@ -48,6 +48,9 @@ public class StepFunctionsJsonHandler {
             case "DescribeActivity" -> handleDescribeActivity(request);
             case "ListActivities" -> handleListActivities(request, region);
             case "GetActivityTask" -> handleGetActivityTask(request);
+            case "ListTagsForResource" -> handleListTagsForResource(request);
+            case "TagResource" -> handleTagResource(request);
+            case "UntagResource" -> handleUntagResource(request);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -258,6 +261,44 @@ public class StepFunctionsJsonHandler {
             response.put("input", task.getInput());
         }
         return Response.ok(response).build();
+    }
+
+    private Response handleListTagsForResource(JsonNode request) {
+        java.util.Map<String, String> tags = service.listTags(request.path("resourceArn").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("tags");
+        tags.forEach((k, v) -> {
+            ObjectNode entry = array.addObject();
+            entry.put("key", k);
+            entry.put("value", v);
+        });
+        return Response.ok(response).build();
+    }
+
+    private Response handleTagResource(JsonNode request) {
+        String arn = request.path("resourceArn").asText();
+        java.util.Map<String, String> tags = new java.util.HashMap<>();
+        JsonNode tagsNode = request.path("tags");
+        if (tagsNode.isArray()) {
+            for (JsonNode entry : tagsNode) {
+                tags.put(entry.path("key").asText(), entry.path("value").asText());
+            }
+        }
+        service.tagResource(arn, tags);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUntagResource(JsonNode request) {
+        String arn = request.path("resourceArn").asText();
+        java.util.List<String> tagKeys = new java.util.ArrayList<>();
+        JsonNode keysNode = request.path("tagKeys");
+        if (keysNode.isArray()) {
+            for (JsonNode key : keysNode) {
+                tagKeys.add(key.asText());
+            }
+        }
+        service.untagResource(arn, tagKeys);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
 }
