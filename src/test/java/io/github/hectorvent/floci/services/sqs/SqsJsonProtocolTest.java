@@ -174,6 +174,64 @@ class SqsJsonProtocolTest {
 
     @Test
     @Order(7)
+    void receiveMessage_messageSystemAttributeNamesFiltersOutput() {
+        String filterQueueName = QUEUE_NAME + "-filter";
+        String filterQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body("{\"QueueName\":\"" + filterQueueName + "\"}")
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessage")
+            .body("{\"QueueUrl\":\"" + filterQueueUrl + "\",\"MessageBody\":\"hi\"}")
+        .when().post("/").then().statusCode(200);
+
+        // Empty filter: no system attributes returned
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + filterQueueUrl + "\","
+                    + "\"MaxNumberOfMessages\":1,"
+                    + "\"VisibilityTimeout\":0,"
+                    + "\"MessageSystemAttributeNames\":[]}")
+        .when().post("/").then().statusCode(200)
+            .body("Messages", hasSize(1))
+            .body("Messages[0]", not(hasKey("Attributes")));
+
+        // Only SenderId requested: returns only SenderId
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + filterQueueUrl + "\","
+                    + "\"MaxNumberOfMessages\":1,"
+                    + "\"VisibilityTimeout\":0,"
+                    + "\"MessageSystemAttributeNames\":[\"SenderId\"]}")
+        .when().post("/").then().statusCode(200)
+            .body("Messages[0].Attributes.SenderId", equalTo(ACCOUNT_ID))
+            .body("Messages[0].Attributes", not(hasKey("SentTimestamp")))
+            .body("Messages[0].Attributes", not(hasKey("ApproximateReceiveCount")));
+
+        // All: returns SenderId, SentTimestamp, ApproximateReceiveCount,
+        // ApproximateFirstReceiveTimestamp
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + filterQueueUrl + "\","
+                    + "\"MaxNumberOfMessages\":1,"
+                    + "\"VisibilityTimeout\":0,"
+                    + "\"MessageSystemAttributeNames\":[\"All\"]}")
+        .when().post("/").then().statusCode(200)
+            .body("Messages[0].Attributes.SenderId", equalTo(ACCOUNT_ID))
+            .body("Messages[0].Attributes.SentTimestamp", notNullValue())
+            .body("Messages[0].Attributes.ApproximateReceiveCount", notNullValue())
+            .body("Messages[0].Attributes.ApproximateFirstReceiveTimestamp", notNullValue());
+    }
+
+    @Test
+    @Order(7)
     void receiveMessageOnEmptyQueueOmitsMessagesField() {
         // AWS omits the Messages field entirely when no messages are available.
         // The .NET SDK with InitializeCollections=false then leaves the

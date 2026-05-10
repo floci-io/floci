@@ -968,6 +968,17 @@ public class SqsService {
         return new java.util.LinkedHashMap<>(queue.getTags());
     }
 
+    /**
+     * SQS reports SenderId as the principal that called SendMessage. Floci
+     * has no per-call IAM context, so it falls back to the account that owns
+     * the queue (parsed from the queue URL when present, otherwise the
+     * configured default).
+     */
+    public String senderIdFor(String queueUrl) {
+        String fromUrl = accountFromQueueUrl(queueUrl);
+        return fromUrl != null ? fromUrl : regionResolver.getAccountId();
+    }
+
     private static String regionKey(String region, String queueUrl) {
         return region + "::" + extractQueuePath(queueUrl);
     }
