@@ -56,9 +56,37 @@ public class SqsQueryHandler {
             case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(params, region);
             case "StartMessageMoveTask" -> handleStartMessageMoveTask(params, region);
             case "ListMessageMoveTasks" -> handleListMessageMoveTasks(params, region);
+            case "AddPermission" -> handleAddPermission(params, region);
+            case "RemovePermission" -> handleRemovePermission(params, region);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported by SQS.", AwsNamespaces.SQS, 400);
         };
+    }
+
+    private Response handleAddPermission(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String label = getParam(params, "Label");
+        List<String> accountIds = collectIndexed(params, "AWSAccountId.");
+        List<String> actions = collectIndexed(params, "ActionName.");
+        sqsService.addPermission(queueUrl, label, accountIds, actions, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AddPermission", null)).build();
+    }
+
+    private Response handleRemovePermission(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String label = getParam(params, "Label");
+        sqsService.removePermission(queueUrl, label, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RemovePermission", null)).build();
+    }
+
+    private List<String> collectIndexed(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String v = getParam(params, prefix + i);
+            if (v == null) break;
+            values.add(v);
+        }
+        return values;
     }
 
     private Response handleCreateQueue(MultivaluedMap<String, String> params, String region) {
