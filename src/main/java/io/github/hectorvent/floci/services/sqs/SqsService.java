@@ -354,9 +354,12 @@ public class SqsService {
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
 
-        if (body.length() > maxMessageSize) {
+        int queueMaxMessageSize = parseMaxMessageSize(queue.getAttributes().get("MaximumMessageSize"));
+        int totalSize = computeMessageSize(body, messageAttributes);
+        if (totalSize > queueMaxMessageSize) {
             throw new AwsException("InvalidParameterValue",
-                    "Message body must be shorter than " + maxMessageSize + " bytes.", 400);
+                    "One or more parameters are invalid. " +
+                            "Reason: Message must be shorter than " + queueMaxMessageSize + " bytes.", 400);
         }
 
         int queueDelaySeconds = parseDelaySecondsAttribute(queue.getAttributes().get("DelaySeconds"));
@@ -443,6 +446,43 @@ public class SqsService {
         LOG.tracev("Sent message {0} to queue {1} body={2} attributes={3}",
                 message.getMessageId(), queueUrl, body, message.getMessageAttributes());
         return message;
+    }
+
+    private int parseMaxMessageSize(String value) {
+        if (value != null && !value.isEmpty()) {
+            try {
+                int parsed = Integer.parseInt(value);
+                if (parsed >= 1024 && parsed <= 1048576) {
+                    return parsed;
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return maxMessageSize;
+    }
+
+    /**
+     * Total wire-level message size, in bytes, matching AWS SQS accounting:
+     * UTF-8 body bytes + per-attribute (name UTF-8 + type UTF-8 + value bytes).
+     */
+    private static int computeMessageSize(String body, Map<String, MessageAttributeValue> attributes) {
+        int total = body == null ? 0 : body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (attributes == null || attributes.isEmpty()) {
+            return total;
+        }
+        for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
+            total += entry.getKey().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            MessageAttributeValue value = entry.getValue();
+            if (value.getDataType() != null) {
+                total += value.getDataType().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            }
+            if (value.getBinaryValue() != null) {
+                total += value.getBinaryValue().length;
+            } else if (value.getStringValue() != null) {
+                total += value.getStringValue().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            }
+        }
+        return total;
     }
 
     /**

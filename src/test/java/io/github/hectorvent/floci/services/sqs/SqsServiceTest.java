@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -437,6 +438,41 @@ class SqsServiceTest {
         service.purgeQueue(queue.getQueueUrl());
         assertTrue(dedupStore.keys().isEmpty(),
                 "Dedup store must be empty after purge with clearFifoDeduplicationCacheOnPurge=true");
+    }
+
+    @Test
+    void sendMessage_usesQueueMaximumMessageSizeAttribute() {
+        Queue queue = sqsService.createQueue("big-queue",
+                Map.of("MaximumMessageSize", "524288"));
+        String halfMeg = "x".repeat(300_000);
+
+        assertDoesNotThrow(() -> sqsService.sendMessage(queue.getQueueUrl(), halfMeg, 0),
+                "Body within the queue's MaximumMessageSize must be accepted");
+    }
+
+    @Test
+    void sendMessage_oversize_errorReportsQueueLimit() {
+        Queue queue = sqsService.createQueue("limited-queue",
+                Map.of("MaximumMessageSize", "2048"));
+        String oversized = "x".repeat(3000);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), oversized, 0));
+        assertTrue(ex.getMessage().contains("2048"),
+                "Error message must reference the queue's configured MaximumMessageSize, got: " + ex.getMessage());
+    }
+
+    @Test
+    void sendMessage_attributesCountTowardsLimit() {
+        Queue queue = sqsService.createQueue("attr-limit-queue",
+                Map.of("MaximumMessageSize", "2048"));
+        String body = "x".repeat(2040);
+        Map<String, MessageAttributeValue> attrs = Map.of(
+                "key", new MessageAttributeValue("value", "String"));
+
+        // Body alone fits; body + attributes exceed the 2048 byte limit.
+        assertThrows(AwsException.class,
+                () -> sqsService.sendMessage(queue.getQueueUrl(), body, 0, null, null, attrs, "us-east-1"));
     }
 
     @Test
