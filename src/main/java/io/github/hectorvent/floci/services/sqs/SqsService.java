@@ -406,10 +406,22 @@ public class SqsService {
             Instant previous = dedupMap.putIfAbsent(dedupId, expiry);
             persistDedup(storageKey);
             if (previous != null && Instant.now().isBefore(previous)) {
-                // Duplicate within window — return the original message idempotently
+                // Duplicate within window — keep the original messageId and
+                // sequenceNumber but compute response MD5s from this request's
+                // body and attributes, otherwise SDK clients (which validate
+                // MD5 against what they sent) reject the response.
                 Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(dedupId);
                 if (existing != null) {
-                    return existing;
+                    Message response = new Message(body);
+                    response.setMessageId(existing.getMessageId());
+                    response.setMessageGroupId(messageGroupId);
+                    response.setMessageDeduplicationId(dedupId);
+                    response.setSequenceNumber(existing.getSequenceNumber());
+                    if (messageAttributes != null && !messageAttributes.isEmpty()) {
+                        response.getMessageAttributes().putAll(messageAttributes);
+                        response.updateMd5OfMessageAttributes();
+                    }
+                    return response;
                 }
             }
 
