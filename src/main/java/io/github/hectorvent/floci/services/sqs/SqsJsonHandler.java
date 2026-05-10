@@ -175,6 +175,12 @@ public class SqsJsonHandler {
                 visibilityTimeout, waitTimeSeconds, region);
 
         ObjectNode response = objectMapper.createObjectNode();
+        // Match AWS: omit the Messages field entirely when no messages are
+        // available, so SDK clients with InitializeCollections=false see null
+        // instead of an empty list.
+        if (messages.isEmpty()) {
+            return Response.ok(response).build();
+        }
         ArrayNode messagesArray = response.putArray("Messages");
         for (Message msg : messages) {
             ObjectNode msgNode = objectMapper.createObjectNode();
