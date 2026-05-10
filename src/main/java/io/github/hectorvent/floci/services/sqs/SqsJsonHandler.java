@@ -57,10 +57,38 @@ public class SqsJsonHandler {
             case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(request, region);
             case "StartMessageMoveTask" -> handleStartMessageMoveTask(request, region);
             case "ListMessageMoveTasks" -> handleListMessageMoveTasks(request, region);
+            case "AddPermission" -> handleAddPermission(request, region);
+            case "RemovePermission" -> handleRemovePermission(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
         };
+    }
+
+    private Response handleAddPermission(JsonNode request, String region) {
+        String queueUrl = request.path("QueueUrl").asText(null);
+        String label = request.path("Label").asText(null);
+        List<String> accountIds = jsonNodeToList(request.path("AWSAccountIds"));
+        List<String> actions = jsonNodeToList(request.path("Actions"));
+        sqsService.addPermission(queueUrl, label, accountIds, actions, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleRemovePermission(JsonNode request, String region) {
+        String queueUrl = request.path("QueueUrl").asText(null);
+        String label = request.path("Label").asText(null);
+        sqsService.removePermission(queueUrl, label, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private List<String> jsonNodeToList(JsonNode node) {
+        List<String> values = new ArrayList<>();
+        if (node != null && node.isArray()) {
+            for (JsonNode item : node) {
+                values.add(item.asText());
+            }
+        }
+        return values;
     }
 
     private Response handleCreateQueue(JsonNode request, String region) {

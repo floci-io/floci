@@ -476,6 +476,84 @@ class SqsServiceTest {
     }
 
     @Test
+    void addPermission_appendsLabelledStatementToPolicy() {
+        Queue queue = sqsService.createQueue("perm-queue", null);
+        sqsService.addPermission(queue.getQueueUrl(), "share",
+                List.of("111122223333"), List.of("SendMessage", "ReceiveMessage"), "us-east-1");
+
+        String policy = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("Policy"), "us-east-1").get("Policy");
+        assertNotNull(policy, "Policy attribute must be set after AddPermission");
+        assertTrue(policy.contains("\"Sid\":\"share\""));
+        assertTrue(policy.contains("arn:aws:iam::111122223333:root"));
+        assertTrue(policy.contains("SQS:SendMessage"));
+        assertTrue(policy.contains("SQS:ReceiveMessage"));
+    }
+
+    @Test
+    void addPermission_duplicateLabel_throws() {
+        Queue queue = sqsService.createQueue("perm-queue", null);
+        sqsService.addPermission(queue.getQueueUrl(), "share",
+                List.of("111122223333"), List.of("SendMessage"), "us-east-1");
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.addPermission(queue.getQueueUrl(), "share",
+                        List.of("444455556666"), List.of("ReceiveMessage"), "us-east-1"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void addPermission_queueDoesNotExist_throws() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.addPermission(BASE_URL + "/000000000000/missing", "share",
+                        List.of("111122223333"), List.of("SendMessage"), "us-east-1"));
+        assertEquals("AWS.SimpleQueueService.NonExistentQueue", ex.getErrorCode());
+    }
+
+    @Test
+    void removePermission_removesLabelledStatement() {
+        Queue queue = sqsService.createQueue("perm-queue", null);
+        sqsService.addPermission(queue.getQueueUrl(), "a",
+                List.of("111122223333"), List.of("SendMessage"), "us-east-1");
+        sqsService.addPermission(queue.getQueueUrl(), "b",
+                List.of("444455556666"), List.of("ReceiveMessage"), "us-east-1");
+
+        sqsService.removePermission(queue.getQueueUrl(), "a", "us-east-1");
+
+        String policy = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("Policy"), "us-east-1").get("Policy");
+        assertNotNull(policy);
+        assertFalse(policy.contains("\"Sid\":\"a\""));
+        assertTrue(policy.contains("\"Sid\":\"b\""));
+    }
+
+    @Test
+    void removePermission_lastStatement_removesPolicyAttribute() {
+        Queue queue = sqsService.createQueue("perm-queue", null);
+        sqsService.addPermission(queue.getQueueUrl(), "only",
+                List.of("111122223333"), List.of("SendMessage"), "us-east-1");
+        sqsService.removePermission(queue.getQueueUrl(), "only", "us-east-1");
+
+        String policy = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("Policy"), "us-east-1").get("Policy");
+        assertNull(policy, "Policy must be removed when last statement is dropped");
+    }
+
+    @Test
+    void removePermission_unknownLabel_throws() {
+        Queue queue = sqsService.createQueue("perm-queue", null);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.removePermission(queue.getQueueUrl(), "ghost", "us-east-1"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void removePermission_queueDoesNotExist_throws() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.removePermission(BASE_URL + "/000000000000/missing", "share", "us-east-1"));
+        assertEquals("AWS.SimpleQueueService.NonExistentQueue", ex.getErrorCode());
+    }
+
+    @Test
     void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
         final var sns = mock(SnsService.class);
         final var service = new SqsService(
