@@ -850,11 +850,11 @@ public class SqsService {
         }
         if (awsAccountIds == null || awsAccountIds.isEmpty()) {
             throw new AwsException("MissingParameter",
-                    "The request must contain the parameter AWSAccountIds.", 400);
+                    "The request must contain the parameter AWSAccountId.", 400);
         }
         if (actionNames == null || actionNames.isEmpty()) {
             throw new AwsException("MissingParameter",
-                    "The request must contain the parameter Actions.", 400);
+                    "The request must contain the parameter ActionName.", 400);
         }
 
         String storageKey = regionKey(region, queueUrl);
@@ -938,21 +938,21 @@ public class SqsService {
             policy.putArray("Statement");
             return policy;
         }
+        JsonNode parsed;
         try {
-            JsonNode parsed = POLICY_MAPPER.readTree(raw);
-            if (parsed instanceof ObjectNode obj) {
-                if (!obj.has("Version")) {
-                    obj.put("Version", "2012-10-17");
-                }
-                return obj;
-            }
+            parsed = POLICY_MAPPER.readTree(raw);
         } catch (Exception e) {
-            LOG.warnv("Failed to parse existing queue Policy; replacing with fresh document");
+            throw new AwsException("InvalidAttributeValue",
+                    "Invalid value for the parameter Policy.", 400);
         }
-        ObjectNode policy = POLICY_MAPPER.createObjectNode();
-        policy.put("Version", "2012-10-17");
-        policy.putArray("Statement");
-        return policy;
+        if (!(parsed instanceof ObjectNode obj)) {
+            throw new AwsException("InvalidAttributeValue",
+                    "Invalid value for the parameter Policy.", 400);
+        }
+        if (!obj.has("Version")) {
+            obj.put("Version", "2012-10-17");
+        }
+        return obj;
     }
 
     private static ArrayNode ensureStatementArray(ObjectNode policy) {
