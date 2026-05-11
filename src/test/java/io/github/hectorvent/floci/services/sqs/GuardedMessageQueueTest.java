@@ -185,9 +185,13 @@ class GuardedMessageQueueTest {
         var first = queue.claimVisibleMessages(10, 30, true, -1, null);
         assertEquals(3, first.claimed().size(),
                 "Single FIFO ReceiveMessage should return all visible messages up to MaxNumberOfMessages");
-        assertEquals("g1-msg1", first.claimed().get(0).getBody());
-        assertEquals("g1-msg2", first.claimed().get(1).getBody());
-        assertEquals("g2-msg1", first.claimed().get(2).getBody());
+        List<String> bodies = first.claimed().stream().map(Message::getBody).toList();
+        // Inter-group ordering is not guaranteed by FIFO; only within-group order is.
+        assertTrue(bodies.contains("g2-msg1"), "batch must contain group2 message");
+        int g1m1Idx = bodies.indexOf("g1-msg1");
+        int g1m2Idx = bodies.indexOf("g1-msg2");
+        assertTrue(g1m1Idx >= 0 && g1m2Idx >= 0, "batch must contain both group1 messages");
+        assertTrue(g1m1Idx < g1m2Idx, "group1 messages must be in insertion order");
 
         // All groups now have in-flight messages — second call returns empty
         var second = queue.claimVisibleMessages(10, 30, true, -1, null);

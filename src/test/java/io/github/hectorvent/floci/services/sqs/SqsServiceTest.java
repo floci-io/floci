@@ -289,9 +289,13 @@ class SqsServiceTest {
         List<Message> first = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0);
         assertEquals(3, first.size(),
                 "Single FIFO ReceiveMessage should drain all visible messages up to MaxNumberOfMessages");
-        assertEquals("g1-msg1", first.get(0).getBody());
-        assertEquals("g1-msg2", first.get(1).getBody());
-        assertEquals("g2-msg1", first.get(2).getBody());
+        List<String> bodies = first.stream().map(Message::getBody).toList();
+        // Inter-group ordering is not guaranteed by FIFO; only within-group order is.
+        assertTrue(bodies.contains("g2-msg1"), "batch must contain group2 message");
+        int g1m1Idx = bodies.indexOf("g1-msg1");
+        int g1m2Idx = bodies.indexOf("g1-msg2");
+        assertTrue(g1m1Idx >= 0 && g1m2Idx >= 0, "batch must contain both group1 messages");
+        assertTrue(g1m1Idx < g1m2Idx, "group1 messages must be in insertion order");
 
         // Both groups are now in-flight; second call returns empty.
         List<Message> second = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0);
@@ -552,7 +556,7 @@ class SqsServiceTest {
     }
 
     @Test
-    void fifoQueue_groupLockBlocksAcrossCallsButNotWithin() {
+    void fifoQueueGroupLockBlocksAcrossCallsButNotWithin() {
         Queue queue = sqsService.createQueue("group-lock.fifo", null);
         for (int i = 1; i <= 5; i++) {
             sqsService.sendMessage(queue.getQueueUrl(), "msg" + i, 0, "g1", "d" + i);
