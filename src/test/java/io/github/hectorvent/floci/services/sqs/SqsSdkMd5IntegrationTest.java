@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.sqs;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.eclipse.microprofile.config.inject.ConfigProperty;
-import jakarta.inject.Inject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -19,6 +18,7 @@ import java.util.Map;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 /**
@@ -31,7 +31,6 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 @QuarkusTest
 class SqsSdkMd5IntegrationTest {
 
-    @Inject
     @ConfigProperty(name = "quarkus.http.test-port", defaultValue = "8081")
     int testPort;
 
@@ -122,17 +121,25 @@ class SqsSdkMd5IntegrationTest {
         var secondAttrs = Map.of(
                 "k", MessageAttributeValue.builder().dataType("String").stringValue("v2").build());
 
-        sqs.sendMessage(SendMessageRequest.builder()
+        var firstResponse = sqs.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl).messageBody("body-1").messageGroupId("g1")
                 .messageDeduplicationId("same-dedup")
                 .messageAttributes(firstAttrs).build());
 
         // Duplicate within window with different attributes/body — SDK will
         // throw "MD5 hash mismatch" if Floci returns the cached first MD5.
-        assertDoesNotThrow(() -> sqs.sendMessage(SendMessageRequest.builder()
+        var secondResponse = assertDoesNotThrow(() -> sqs.sendMessage(SendMessageRequest.builder()
                 .queueUrl(queueUrl).messageBody("body-2").messageGroupId("g1")
                 .messageDeduplicationId("same-dedup")
                 .messageAttributes(secondAttrs).build()));
+
+        // Same MessageId and SequenceNumber proves this was a dedup replay,
+        // not a fresh accept; the test would otherwise pass even if dedup
+        // were silently disabled.
+        assertEquals(firstResponse.messageId(), secondResponse.messageId(),
+                "FIFO dedup must return the original MessageId");
+        assertEquals(firstResponse.sequenceNumber(), secondResponse.sequenceNumber(),
+                "FIFO dedup must return the original SequenceNumber");
     }
 
     @Test
