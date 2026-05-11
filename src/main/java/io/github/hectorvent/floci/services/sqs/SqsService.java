@@ -449,16 +449,14 @@ public class SqsService {
     }
 
     private int parseMaxMessageSize(String value) {
-        if (value != null && !value.isEmpty()) {
-            try {
-                int parsed = Integer.parseInt(value);
-                if (parsed >= 1024 && parsed <= 1048576) {
-                    return parsed;
-                }
-            } catch (NumberFormatException ignored) {
-            }
+        if (value == null || value.isEmpty()) {
+            return maxMessageSize;
         }
-        return maxMessageSize;
+        try {
+            return Math.min(1048576, Math.max(1024, Integer.parseInt(value)));
+        } catch (NumberFormatException ignored) {
+            return maxMessageSize;
+        }
     }
 
     /**

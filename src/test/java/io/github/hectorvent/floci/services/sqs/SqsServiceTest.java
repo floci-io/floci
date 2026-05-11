@@ -444,9 +444,9 @@ class SqsServiceTest {
     void sendMessage_usesQueueMaximumMessageSizeAttribute() {
         Queue queue = sqsService.createQueue("big-queue",
                 Map.of("MaximumMessageSize", "524288"));
-        String halfMeg = "x".repeat(300_000);
+        String body = "x".repeat(300_000);
 
-        assertDoesNotThrow(() -> sqsService.sendMessage(queue.getQueueUrl(), halfMeg, 0),
+        assertDoesNotThrow(() -> sqsService.sendMessage(queue.getQueueUrl(), body, 0),
                 "Body within the queue's MaximumMessageSize must be accepted");
     }
 
