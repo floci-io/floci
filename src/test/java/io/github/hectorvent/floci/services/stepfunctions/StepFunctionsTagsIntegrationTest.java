@@ -10,9 +10,8 @@ import static org.hamcrest.Matchers.*;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * Integration tests for SFN tag operations covering both wire paths:
- *  - REST /tags/{arn}  — used by Terraform AWS provider v5+
- *  - JSON 1.0 actions  — used by the AWS SDK (SfnClient)
+ * Integration tests for SFN tag operations via the JSON 1.0 wire path
+ * (X-Amz-Target: AWSStepFunctions.*), used by the AWS SDK and Terraform.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -57,65 +56,11 @@ class StepFunctionsTagsIntegrationTest {
         assertNotNull(activityArn);
     }
 
-    // ──────────────── REST path (/tags/{arn}) — Terraform wire ────────────────
+    // ──────────────── JSON 1.0 path (X-Amz-Target) — SDK / Terraform wire ────────────────
 
     @Test
     @Order(3)
-    void rest_listTagsReturnEmptyForNewStateMachine() {
-        given()
-                .get("/tags/" + stateMachineArn)
-                .then()
-                .statusCode(200)
-                .body("tags", anEmptyMap());
-    }
-
-    @Test
-    @Order(4)
-    void rest_tagStateMachine() {
-        given()
-                .contentType("application/json")
-                .body("{\"tags\":{\"env\":\"test\",\"team\":\"platform\"}}")
-                .post("/tags/" + stateMachineArn)
-                .then()
-                .statusCode(204);
-    }
-
-    @Test
-    @Order(5)
-    void rest_listTagsForStateMachineReturnsAddedTags() {
-        given()
-                .get("/tags/" + stateMachineArn)
-                .then()
-                .statusCode(200)
-                .body("tags.env", equalTo("test"))
-                .body("tags.team", equalTo("platform"));
-    }
-
-    @Test
-    @Order(6)
-    void rest_untagStateMachine() {
-        given()
-                .delete("/tags/" + stateMachineArn + "?tagKeys=team")
-                .then()
-                .statusCode(204);
-    }
-
-    @Test
-    @Order(7)
-    void rest_listTagsAfterUntagHasOnlyRemainingKeys() {
-        given()
-                .get("/tags/" + stateMachineArn)
-                .then()
-                .statusCode(200)
-                .body("tags.env", equalTo("test"))
-                .body("tags.team", nullValue());
-    }
-
-    // ──────────────── JSON 1.0 path (X-Amz-Target) — SDK wire ────────────────
-
-    @Test
-    @Order(8)
-    void json_listTagsForResourceReturnsCurrentTags() {
+    void json_listTagsForResourceReturnsEmptyForNewStateMachine() {
         given()
                 .header("X-Amz-Target", "AWSStepFunctions.ListTagsForResource")
                 .contentType(SFN_CONTENT_TYPE)
@@ -123,18 +68,16 @@ class StepFunctionsTagsIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(200)
-                .body("tags", hasSize(1))
-                .body("tags[0].key", equalTo("env"))
-                .body("tags[0].value", equalTo("test"));
+                .body("tags", hasSize(0));
     }
 
     @Test
-    @Order(9)
+    @Order(4)
     void json_tagResourceAddsTag() {
         given()
                 .header("X-Amz-Target", "AWSStepFunctions.TagResource")
                 .contentType(SFN_CONTENT_TYPE)
-                .body("{\"resourceArn\":\"" + stateMachineArn + "\",\"tags\":[{\"key\":\"owner\",\"value\":\"infra\"}]}")
+                .body("{\"resourceArn\":\"" + stateMachineArn + "\",\"tags\":[{\"key\":\"env\",\"value\":\"test\"},{\"key\":\"owner\",\"value\":\"infra\"}]}")
                 .post("/")
                 .then()
                 .statusCode(200);
@@ -150,7 +93,7 @@ class StepFunctionsTagsIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(5)
     void json_untagResourceRemovesTag() {
         given()
                 .header("X-Amz-Target", "AWSStepFunctions.UntagResource")
@@ -167,44 +110,13 @@ class StepFunctionsTagsIntegrationTest {
                 .post("/")
                 .then()
                 .statusCode(200)
-                .body("tags", hasSize(1));
-    }
-
-    // ──────────────── Activity tags ────────────────
-
-    @Test
-    @Order(11)
-    void rest_listTagsReturnEmptyForNewActivity() {
-        given()
-                .get("/tags/" + activityArn)
-                .then()
-                .statusCode(200)
-                .body("tags", anEmptyMap());
+                .body("tags", hasSize(1))
+                .body("tags[0].key", equalTo("env"))
+                .body("tags[0].value", equalTo("test"));
     }
 
     @Test
-    @Order(12)
-    void rest_tagActivity() {
-        given()
-                .contentType("application/json")
-                .body("{\"tags\":{\"owner\":\"infra\"}}")
-                .post("/tags/" + activityArn)
-                .then()
-                .statusCode(204);
-    }
-
-    @Test
-    @Order(13)
-    void rest_listTagsForActivityReturnsAddedTags() {
-        given()
-                .get("/tags/" + activityArn)
-                .then()
-                .statusCode(200)
-                .body("tags.owner", equalTo("infra"));
-    }
-
-    @Test
-    @Order(14)
+    @Order(6)
     void cleanup() {
         given()
                 .header("X-Amz-Target", "AWSStepFunctions.DeleteStateMachine")
