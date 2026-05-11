@@ -29,6 +29,7 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -51,7 +52,8 @@ public class SnsService {
     private final String baseUrl;
     private final ObjectMapper objectMapper;
     private final Map<String, Instant> fifoDeduplicationCache = new ConcurrentHashMap<>();
-
+    private static final HexFormat HEX = HexFormat.of();
+    
     @Inject
     public SnsService(StorageFactory storageFactory, EmulatorConfig config,
                       RegionResolver regionResolver, SqsService sqsService,
@@ -768,13 +770,9 @@ public class SnsService {
 
     private static String sha256(String message) {
         try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
+        	MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] hash = md.digest(message.getBytes(StandardCharsets.UTF_8));
-            var sb = new StringBuilder();
-            for (byte b : hash) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
+            return HEX.formatHex(hash);
         } catch (NoSuchAlgorithmException e) {
             return UUID.randomUUID().toString();
         }

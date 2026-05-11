@@ -35,6 +35,7 @@ public class SqsService {
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
     private final AtomicLong sequenceCounter = new AtomicLong(0);
+    private static final HexFormat HEX = HexFormat.of();
 
     private record RedrivePolicy(int maxReceiveCount, String deadLetterTargetArn) {
     }
@@ -483,11 +484,7 @@ public class SqsService {
         try {
             var md = java.security.MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            var sb = new StringBuilder();
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
+            return HEX.formatHex(digest);
         } catch (java.security.NoSuchAlgorithmException e) {
             return "";
         }
