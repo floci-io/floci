@@ -60,6 +60,23 @@ class CloudFormationIntegrationTest {
         return xml.substring(start, end);
     }
 
+    private static String physicalIdByLogicalId(String xml, String logicalId) {
+        String memberOpen = "<member>";
+        String memberClose = "</member>";
+        String logicalMarker = "<LogicalResourceId>" + logicalId + "</LogicalResourceId>";
+        int logicalIdx = xml.indexOf(logicalMarker);
+        assertThat("logical id '" + logicalId + "' present in DescribeStackResources output",
+                logicalIdx, not(equalTo(-1)));
+        int memberStart = xml.lastIndexOf(memberOpen, logicalIdx);
+        int memberEnd = xml.indexOf(memberClose, logicalIdx);
+        String member = xml.substring(memberStart, memberEnd);
+        String physicalOpen = "<PhysicalResourceId>";
+        String physicalClose = "</PhysicalResourceId>";
+        int pStart = member.indexOf(physicalOpen) + physicalOpen.length();
+        int pEnd = member.indexOf(physicalClose, pStart);
+        return member.substring(pStart, pEnd);
+    }
+
     @Test
     void createStack_withS3AndSqs() {
         String template = """
@@ -3337,6 +3354,420 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(400);
+    }
+
+    // ── Issue #788: AWS::ApiGateway::Authorizer support + Method.AuthorizerId wiring ───
+
+    @Test
+    void createStack_withApiGatewayAuthorizer_createsAuthorizerResource() {
+        // Regression test for issue #788: CFN previously fell through the default
+        // stub branch for AWS::ApiGateway::Authorizer, so the resource never reached
+        // ApiGatewayService and `get-authorizers` returned an empty list.
+        String stackName = "cfn-apigw-auth-create-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-auth-create-api"
+                  }
+                },
+                "MyAuthorizer": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "MyTokenAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:my-auth/invocations",
+                    "IdentitySource": "method.request.header.Authorization"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String authorizerId = physicalIdByLogicalId(resourcesXml, "MyAuthorizer");
+
+        // PhysicalResourceId must be the ApiGatewayService-issued authorizer id, not the logical name.
+        assertThat(authorizerId, matchesRegex("^[A-Za-z0-9]+$"));
+        assertThat(authorizerId, not(equalTo("MyAuthorizer")));
+
+        // The authorizer must be retrievable from the standard REST endpoint.
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/authorizers")
+        .then()
+            .statusCode(200)
+            .body("item.size()", equalTo(1))
+            .body("item[0].id", equalTo(authorizerId))
+            .body("item[0].name", equalTo("MyTokenAuth"))
+            .body("item[0].type", equalTo("TOKEN"));
+    }
+
+    @Test
+    void createStack_withApiGatewayMethod_wiresAuthorizerIdViaRef() {
+        // Core scenario from issue #788: `AuthorizationType: CUSTOM` plus
+        // `AuthorizerId: !Ref MyAuthorizer` must produce a method whose
+        // authorizerId points to the actual authorizer resource. Before the fix,
+        // authorizerId was null on the method and the API behaved as `NONE`.
+        String stackName = "cfn-apigw-auth-method-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-auth-method-api"
+                  }
+                },
+                "ApiResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "secured"
+                  }
+                },
+                "TokenAuthorizer": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "MyTokenAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:my-auth/invocations",
+                    "IdentitySource": "method.request.header.Authorization",
+                    "AuthorizerResultTtlInSeconds": 0
+                  }
+                },
+                "SecuredMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "ApiResource"},
+                    "HttpMethod": "GET",
+                    "AuthorizationType": "CUSTOM",
+                    "AuthorizerId": {"Ref": "TokenAuthorizer"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String resourceId = physicalIdByLogicalId(resourcesXml, "ApiResource");
+        String authorizerId = physicalIdByLogicalId(resourcesXml, "TokenAuthorizer");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+        .then()
+            .statusCode(200)
+            .body("httpMethod", equalTo("GET"))
+            .body("authorizationType", equalTo("CUSTOM"))
+            .body("authorizerId", equalTo(authorizerId));
+    }
+
+    @Test
+    void createStack_withApiGatewayAuthorizer_preservesAllFields() {
+        // Reviewer-defence: every CFN-supported property on AWS::ApiGateway::Authorizer
+        // round-trips through GET /restapis/{apiId}/authorizers, not just the Name.
+        // Catches future regressions where a new field is added to the CFN handler
+        // but not threaded into the service request map.
+        String stackName = "cfn-apigw-auth-fields-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {"Name": "cfn-apigw-auth-fields-api"}
+                },
+                "TokenAuth": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "FieldsTokenAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:fields-auth/invocations",
+                    "IdentitySource": "method.request.header.X-Auth",
+                    "AuthorizerResultTtlInSeconds": 120
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String authorizerId = physicalIdByLogicalId(resourcesXml, "TokenAuth");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/authorizers/" + authorizerId)
+        .then()
+            .statusCode(200)
+            .body("id", equalTo(authorizerId))
+            .body("name", equalTo("FieldsTokenAuth"))
+            .body("type", equalTo("TOKEN"))
+            .body("authorizerUri", containsString("function:fields-auth"))
+            .body("identitySource", equalTo("method.request.header.X-Auth"))
+            .body("authorizerResultTtlInSeconds", equalTo(120));
+    }
+
+    @Test
+    void createStack_withApiGatewayMethod_withoutAuthorizerId_authorizerIdRemainsNull() {
+        // Backwards-compat: methods that omit AuthorizerId must NOT acquire one
+        // accidentally (e.g. from a stale loop variable or default value). A
+        // NONE-auth method whose authorizerId surfaces in GET is a contract leak
+        // for SDK clients.
+        String stackName = "cfn-apigw-method-noauth-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {"Name": "cfn-apigw-method-noauth-api"}
+                },
+                "PublicResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "public"
+                  }
+                },
+                "PublicMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "PublicResource"},
+                    "HttpMethod": "GET",
+                    "AuthorizationType": "NONE"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String resourceId = physicalIdByLogicalId(resourcesXml, "PublicResource");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+        .then()
+            .statusCode(200)
+            .body("authorizationType", equalTo("NONE"))
+            .body("authorizerId", nullValue());
+    }
+
+    @Test
+    void createStack_withMultipleAuthorizers_eachWiredToOwnMethod() {
+        // Multi-authorizer isolation: two authorizers + two methods, each method
+        // must end up wired to the correct authorizer id. Prevents future
+        // regressions where a shared local would leak across iterations of the
+        // resource provisioning loop.
+        String stackName = "cfn-apigw-multi-auth-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {"Name": "cfn-apigw-multi-auth-api"}
+                },
+                "FirstResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "first"
+                  }
+                },
+                "SecondResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "second"
+                  }
+                },
+                "FirstAuth": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "FirstAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:first-auth/invocations",
+                    "IdentitySource": "method.request.header.Authorization"
+                  }
+                },
+                "SecondAuth": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "SecondAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:second-auth/invocations",
+                    "IdentitySource": "method.request.header.X-Token"
+                  }
+                },
+                "FirstMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "FirstResource"},
+                    "HttpMethod": "GET",
+                    "AuthorizationType": "CUSTOM",
+                    "AuthorizerId": {"Ref": "FirstAuth"}
+                  }
+                },
+                "SecondMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "SecondResource"},
+                    "HttpMethod": "POST",
+                    "AuthorizationType": "CUSTOM",
+                    "AuthorizerId": {"Ref": "SecondAuth"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String firstResource = physicalIdByLogicalId(resourcesXml, "FirstResource");
+        String secondResource = physicalIdByLogicalId(resourcesXml, "SecondResource");
+        String firstAuth = physicalIdByLogicalId(resourcesXml, "FirstAuth");
+        String secondAuth = physicalIdByLogicalId(resourcesXml, "SecondAuth");
+
+        assertThat(firstAuth, not(equalTo(secondAuth)));
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + firstResource + "/methods/GET")
+        .then()
+            .statusCode(200)
+            .body("authorizationType", equalTo("CUSTOM"))
+            .body("authorizerId", equalTo(firstAuth));
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + secondResource + "/methods/POST")
+        .then()
+            .statusCode(200)
+            .body("authorizationType", equalTo("CUSTOM"))
+            .body("authorizerId", equalTo(secondAuth));
     }
 
 }

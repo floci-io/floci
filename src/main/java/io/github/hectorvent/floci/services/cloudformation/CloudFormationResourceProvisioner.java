@@ -155,6 +155,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Events::Rule" -> provisionEventBridgeRule(resource, properties, engine, region, stackName);
                 case "AWS::ApiGateway::RestApi" -> provisionApiGatewayRestApi(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ApiGateway::Resource" -> provisionApiGatewayResource(resource, properties, engine, region);
+                case "AWS::ApiGateway::Authorizer" -> provisionApiGatewayAuthorizer(resource, properties, engine, region);
                 case "AWS::ApiGateway::Method" -> provisionApiGatewayMethod(resource, properties, engine, region);
                 case "AWS::ApiGateway::Deployment" -> provisionApiGatewayDeployment(resource, properties, engine, region);
                 case "AWS::ApiGateway::Stage" -> provisionApiGatewayStage(resource, properties, engine, region);
@@ -1399,6 +1400,22 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(res.getId());
     }
 
+    private void provisionApiGatewayAuthorizer(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                               String region) {
+        String apiId = resolveOptional(props, "RestApiId", engine);
+        Map<String, Object> req = new HashMap<>();
+        req.put("name", resolveOptional(props, "Name", engine));
+        req.put("type", resolveOptional(props, "Type", engine));
+        req.put("authorizerUri", resolveOptional(props, "AuthorizerUri", engine));
+        req.put("identitySource", resolveOptional(props, "IdentitySource", engine));
+        String ttl = resolveOptional(props, "AuthorizerResultTtlInSeconds", engine);
+        if (ttl != null) {
+            req.put("authorizerResultTtlInSeconds", ttl);
+        }
+        var authorizer = apiGatewayService.createAuthorizer(region, apiId, req);
+        r.setPhysicalId(authorizer.getId());
+    }
+
     private void provisionApiGatewayMethod(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                            String region) {
         String apiId = resolveOptional(props, "RestApiId", engine);
@@ -1407,6 +1424,10 @@ public class CloudFormationResourceProvisioner {
 
         Map<String, Object> req = new HashMap<>();
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
+        String authorizerId = resolveOptional(props, "AuthorizerId", engine);
+        if (authorizerId != null) {
+            req.put("authorizerId", authorizerId);
+        }
 
         apiGatewayService.putMethod(region, apiId, resourceId, httpMethod, req);
         r.setPhysicalId(apiId + "-" + resourceId + "-" + httpMethod);
