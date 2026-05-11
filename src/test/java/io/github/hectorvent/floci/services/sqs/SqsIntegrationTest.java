@@ -468,4 +468,68 @@ class SqsIntegrationTest {
             .body(containsString("QueueDoesNotExist"))
             .body(not(containsString("AWS.SimpleQueueService.NonExistentQueue")));
     }
+
+    @Test
+    void receiveMessage_queryProtocol_attributeNameFiltersSystemAttributes() {
+        String filterQueueName = "query-attr-filter-queue";
+        String filterQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", filterQueueName)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("MessageBody", "hi")
+            .when().post("/").then().statusCode(200);
+
+            // No AttributeName.N requested: response must contain no <Attribute> entries
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+                .formParam("VisibilityTimeout", "0")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Message>"))
+                .body(not(containsString("<Attribute>")));
+
+            // AttributeName.1=SenderId: only SenderId present, no SentTimestamp / ApproximateReceiveCount
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+                .formParam("VisibilityTimeout", "0")
+                .formParam("AttributeName.1", "SenderId")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Name>SenderId</Name>"))
+                .body(not(containsString("<Name>SentTimestamp</Name>")))
+                .body(not(containsString("<Name>ApproximateReceiveCount</Name>")));
+
+            // MessageSystemAttributeName.1=All: full system-attribute set returned
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", filterQueueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+                .formParam("VisibilityTimeout", "0")
+                .formParam("MessageSystemAttributeName.1", "All")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Name>SenderId</Name>"))
+                .body(containsString("<Name>SentTimestamp</Name>"))
+                .body(containsString("<Name>ApproximateReceiveCount</Name>"))
+                .body(containsString("<Name>ApproximateFirstReceiveTimestamp</Name>"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", filterQueueUrl)
+            .when().post("/");
+        }
+    }
 }

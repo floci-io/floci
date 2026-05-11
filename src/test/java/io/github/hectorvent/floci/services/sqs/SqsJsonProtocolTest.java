@@ -260,6 +260,33 @@ class SqsJsonProtocolTest {
             .body("Messages[0].Attributes.SentTimestamp", notNullValue())
             .body("Messages[0].Attributes.ApproximateReceiveCount", notNullValue())
             .body("Messages[0].Attributes.ApproximateFirstReceiveTimestamp", notNullValue());
+
+        // Legacy AttributeNames parameter (pre-2023 SDKs): SenderId-only filter
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + filterQueueUrl + "\","
+                    + "\"MaxNumberOfMessages\":1,"
+                    + "\"VisibilityTimeout\":0,"
+                    + "\"AttributeNames\":[\"SenderId\"]}")
+        .when().post("/").then().statusCode(200)
+            .body("Messages[0].Attributes.SenderId", equalTo(ACCOUNT_ID))
+            .body("Messages[0].Attributes", not(hasKey("SentTimestamp")))
+            .body("Messages[0].Attributes", not(hasKey("ApproximateReceiveCount")));
+
+        // Legacy AttributeNames=["All"]: same expansion as MessageSystemAttributeNames
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body("{\"QueueUrl\":\"" + filterQueueUrl + "\","
+                    + "\"MaxNumberOfMessages\":1,"
+                    + "\"VisibilityTimeout\":0,"
+                    + "\"AttributeNames\":[\"All\"]}")
+        .when().post("/").then().statusCode(200)
+            .body("Messages[0].Attributes.SenderId", equalTo(ACCOUNT_ID))
+            .body("Messages[0].Attributes.SentTimestamp", notNullValue())
+            .body("Messages[0].Attributes.ApproximateReceiveCount", notNullValue())
+            .body("Messages[0].Attributes.ApproximateFirstReceiveTimestamp", notNullValue());
     }
 
     @Test

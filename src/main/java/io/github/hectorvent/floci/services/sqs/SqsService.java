@@ -978,8 +978,9 @@ public class SqsService {
     /**
      * SQS reports SenderId as the principal that called SendMessage. Floci
      * has no per-call IAM context, so it falls back to the account that owns
-     * the queue (parsed from the queue URL when present, otherwise the
-     * configured default).
+     * the queue (parsed from the queue URL when present), otherwise the
+     * account from the current request context, otherwise the configured
+     * default account.
      */
     public String senderIdFor(String queueUrl) {
         String fromUrl = accountFromQueueUrl(queueUrl);
