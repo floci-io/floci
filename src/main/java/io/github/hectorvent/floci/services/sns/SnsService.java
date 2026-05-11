@@ -272,6 +272,12 @@ public class SnsService {
     public String publish(String topicArn, String targetArn, String phoneNumber, String message,
                           String subject, Map<String, MessageAttributeValue> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
+        int payloadSize = computePublishSize(message, subject, messageAttributes);
+        if (payloadSize > MAX_PUBLISH_SIZE) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid parameter: Message too long", 400);
+        }
+
         // Send SMS
         if (phoneNumber != null) {
             return UUID.randomUUID().toString();
@@ -287,12 +293,6 @@ public class SnsService {
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
         if (message == null || message.isBlank()) {
             throw new AwsException("InvalidParameter", "Message is required.", 400);
-        }
-
-        int payloadSize = computePublishSize(message, subject, messageAttributes);
-        if (payloadSize > MAX_PUBLISH_SIZE) {
-            throw new AwsException("InvalidParameterException",
-                    "Invalid parameter: Message too long", 400);
         }
 
         boolean isFifo = "true".equals(topic.getAttributes().get("FifoTopic"));

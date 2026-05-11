@@ -228,10 +228,12 @@ public class SnsJsonHandler {
 
                 JsonNode attrsNode = entryNode.path("MessageAttributes");
                 if (attrsNode.isObject()) {
-                    Map<String, String> messageAttributes = new HashMap<>();
-                    attrsNode.fields().forEachRemaining(field ->
-                        messageAttributes.put(field.getKey(), field.getValue().path("StringValue").asText())
-                    );
+                    Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
+                    attrsNode.fields().forEachRemaining(field -> {
+                        String dataType = field.getValue().path("DataType").asText("String");
+                        String stringValue = field.getValue().path("StringValue").asText();
+                        messageAttributes.put(field.getKey(), new MessageAttributeValue(stringValue, dataType));
+                    });
                     entry.put("MessageAttributes", messageAttributes);
                 }
 
