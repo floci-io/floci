@@ -2224,6 +2224,363 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_withEventBridgeRule_preservesSqsParametersMessageGroupId() {
+        // Regression test for issue #787: CFN provisioner dropped Targets[].SqsParameters,
+        // making FIFO SQS delivery fail with "The request must contain the parameter MessageGroupId".
+        // The same target works when registered via direct events PutTargets, proving the
+        // EventBridge API path supports the field — only the CFN translator was missing it.
+        String template = """
+            {
+              "Resources": {
+                "FifoQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-fifo-target.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "FifoRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-fifo-rule",
+                    "EventPattern": {
+                      "source": ["cfn.fifo.test"]
+                    },
+                    "Targets": [
+                      {
+                        "Id": "FifoQueueTarget",
+                        "Arn": {"Fn::GetAtt": ["FifoQueue", "Arn"]},
+                        "SqsParameters": {"MessageGroupId": "group-1"}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-fifo-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eb-fifo-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-fifo-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("FifoQueueTarget"))
+            .body("Targets[0].Arn", equalTo("arn:aws:sqs:us-east-1:000000000000:cfn-eb-fifo-target.fifo"))
+            .body("Targets[0].SqsParameters.MessageGroupId", equalTo("group-1"));
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_fifoDeliveryEndToEnd() {
+        // Functional regression for issue #787: not only must the field round-trip
+        // through ListTargetsByRule, an event published via PutEvents must actually
+        // be delivered to the FIFO queue. Without MessageGroupId, SQS rejects with
+        // "The request must contain the parameter MessageGroupId" and the message
+        // never lands. We verify delivery + that MessageGroupId surfaces on the
+        // received SQS attribute.
+        String template = """
+            {
+              "Resources": {
+                "FifoQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-fifo-e2e.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "FifoRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-fifo-e2e-rule",
+                    "EventPattern": {
+                      "source": ["cfn.fifo.e2e"]
+                    },
+                    "Targets": [
+                      {
+                        "Id": "FifoQueueTarget",
+                        "Arn": {"Fn::GetAtt": ["FifoQueue", "Arn"]},
+                        "SqsParameters": {"MessageGroupId": "e2e-group"}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-fifo-e2e-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Match the issue #787 reproducer: re-apply ContentBasedDeduplication via
+        // SetQueueAttributes to control for a separate Floci CFN→SQS bug where
+        // FIFO queue attributes do not always propagate from the template. This
+        // test focuses solely on the EventBridge target SqsParameters wiring.
+        String queueUrl = "http://localhost:4566/000000000000/cfn-eb-fifo-e2e.fifo";
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetQueueAttributes")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("Attribute.1.Name", "ContentBasedDeduplication")
+            .formParam("Attribute.1.Value", "true")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.PutEvents")
+            .body("""
+                {
+                  "Entries": [
+                    {
+                      "Source": "cfn.fifo.e2e",
+                      "DetailType": "poc",
+                      "Detail": "{\\"marker\\":\\"cfn-fifo-e2e\\"}"
+                    }
+                  ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("FailedEntryCount", equalTo(0));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "1")
+            .formParam("AttributeName.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Body>"))
+            .body(containsString("cfn-fifo-e2e"))
+            .body(containsString("<Name>MessageGroupId</Name>"))
+            .body(containsString("<Value>e2e-group</Value>"));
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_targetWithoutSqsParameters_omitsField() {
+        // Backwards-compat: targets that have no SqsParameters in the CFN template
+        // must NOT acquire one in the materialised target. Real AWS omits the field
+        // entirely from ListTargetsByRule when none was supplied at PutTargets time;
+        // we mirror that to avoid SDK clients seeing a phantom (null) container.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "cfn-eb-no-sqs-params-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            {
+              "Resources": {
+                "PlainRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-no-sqs-params-rule",
+                    "EventPattern": {"source": ["cfn.no.sqs.params"]},
+                    "Targets": [
+                      {
+                        "Id": "PlainTarget",
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:cfn-eb-no-sqs-params-queue"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-no-sqs-params-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-no-sqs-params-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("PlainTarget"))
+            .body("Targets[0].SqsParameters", nullValue());
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_emptySqsParametersBlock_isIgnored() {
+        // Edge case mirroring the direct PutTargets handler (EventBridgeHandler line 211-219):
+        // an SqsParameters object that is present but does not carry a MessageGroupId
+        // produces NO SqsParameters on the target. We do not coerce empty input into a
+        // half-populated object — that would mask user mistakes.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "cfn-eb-empty-sqs-params-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            {
+              "Resources": {
+                "EmptyParamsRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-empty-sqs-params-rule",
+                    "EventPattern": {"source": ["cfn.empty.sqs.params"]},
+                    "Targets": [
+                      {
+                        "Id": "EmptyParamsTarget",
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:cfn-eb-empty-sqs-params-queue",
+                        "SqsParameters": {}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-empty-sqs-params-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-empty-sqs-params-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("EmptyParamsTarget"))
+            .body("Targets[0].SqsParameters", nullValue());
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_mixedTargets_preservesPerTargetSqsParameters() {
+        // Reviewer-defence test: a single rule with two FIFO targets — only one carrying
+        // SqsParameters — must keep them on the right target and leave the other untouched.
+        // Catches future regressions where the field would leak across iterations of the
+        // Targets[] loop (e.g. via a hoisted local variable).
+        String template = """
+            {
+              "Resources": {
+                "QueueA": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-mixed-a.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "QueueB": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-mixed-b.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MixedRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-mixed-rule",
+                    "EventPattern": {"source": ["cfn.mixed.targets"]},
+                    "Targets": [
+                      {
+                        "Id": "TargetWithGroup",
+                        "Arn": {"Fn::GetAtt": ["QueueA", "Arn"]},
+                        "SqsParameters": {"MessageGroupId": "group-A"}
+                      },
+                      {
+                        "Id": "TargetWithoutGroup",
+                        "Arn": {"Fn::GetAtt": ["QueueB", "Arn"]}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-mixed-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-mixed-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets.find { it.Id == 'TargetWithGroup' }.SqsParameters.MessageGroupId", equalTo("group-A"))
+            .body("Targets.find { it.Id == 'TargetWithoutGroup' }.SqsParameters", nullValue());
+    }
+
+    @Test
     void createStack_dependencyOrdering_refBeforeTarget() {
         String template = """
             {

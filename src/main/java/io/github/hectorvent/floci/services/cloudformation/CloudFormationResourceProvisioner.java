@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
+import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.GlobalSecondaryIndex;
@@ -1176,7 +1177,17 @@ public class CloudFormationResourceProvisioner {
                 String input = resolved.path("Input").asText(null);
                 String inputPath = resolved.path("InputPath").asText(null);
                 if (targetId != null && targetArn != null) {
-                    targets.add(new Target(targetId, targetArn, input, inputPath));
+                    Target target = new Target(targetId, targetArn, input, inputPath);
+                    JsonNode sqsParamsNode = resolved.path("SqsParameters");
+                    if (!sqsParamsNode.isMissingNode() && sqsParamsNode.isObject()) {
+                        String messageGroupId = sqsParamsNode.path("MessageGroupId").asText(null);
+                        if (messageGroupId != null) {
+                            SqsParameters sqsParameters = new SqsParameters();
+                            sqsParameters.setMessageGroupId(messageGroupId);
+                            target.setSqsParameters(sqsParameters);
+                        }
+                    }
+                    targets.add(target);
                 }
             }
             if (!targets.isEmpty()) {
