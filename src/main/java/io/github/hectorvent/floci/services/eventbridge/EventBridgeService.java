@@ -636,16 +636,17 @@ public class EventBridgeService {
      * to {@link #matchesPattern(Map, String)}.
      */
     public boolean testEventPattern(String eventPattern, String eventJson) {
+        if (eventPattern == null || eventPattern.isBlank()) {
+            throw new AwsException("InvalidEventPatternException", "EventPattern is required.", 400);
+        }
         if (eventJson == null || eventJson.isBlank()) {
             throw new AwsException("InvalidEventPatternException", "Event is required.", 400);
         }
-        if (eventPattern != null && !eventPattern.isBlank()) {
-            try {
-                objectMapper.readTree(eventPattern);
-            } catch (Exception e) {
-                throw new AwsException("InvalidEventPatternException",
-                        "Event pattern is not valid JSON: " + e.getMessage(), 400);
-            }
+        try {
+            objectMapper.readTree(eventPattern);
+        } catch (Exception e) {
+            throw new AwsException("InvalidEventPatternException",
+                    "Event pattern is not valid JSON: " + e.getMessage(), 400);
         }
         JsonNode event;
         try {

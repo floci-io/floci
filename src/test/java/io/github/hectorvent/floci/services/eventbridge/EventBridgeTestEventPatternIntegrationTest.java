@@ -110,7 +110,9 @@ class EventBridgeTestEventPatternIntegrationTest {
     }
 
     @Test
-    void emptyPatternMatchesAnything() {
+    void emptyPatternRejected() {
+        // AWS spec: EventPattern is required; an empty string must be rejected
+        // rather than treated as a match-all wildcard.
         given()
             .contentType(EVENT_BRIDGE_CONTENT_TYPE)
             .header("X-Amz-Target", TARGET)
@@ -123,8 +125,23 @@ class EventBridgeTestEventPatternIntegrationTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200)
-            .body("Result", equalTo(true));
+            .statusCode(400);
+    }
+
+    @Test
+    void missingPatternRejected() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET)
+            .body("""
+                {
+                    "Event": "{\\"source\\":\\"com.myapp\\",\\"detail-type\\":\\"OrderPlaced\\",\\"detail\\":{}}"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400);
     }
 
     @Test
