@@ -231,12 +231,6 @@
             <artifactId>rds</artifactId>
             <scope>test</scope>
         </dependency>
-        <!-- AWS SDK SQS client to validate MD5/wire compatibility -->
-        <dependency>
-            <groupId>software.amazon.awssdk</groupId>
-            <artifactId>sqs</artifactId>
-            <scope>test</scope>
-        </dependency>
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
