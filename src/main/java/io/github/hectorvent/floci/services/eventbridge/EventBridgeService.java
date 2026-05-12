@@ -628,6 +628,49 @@ public class EventBridgeService {
 
     // ──────────────────────────── Pattern Matching ────────────────────────────
 
+    /**
+     * Tests whether a sample event matches a given event pattern, without firing any
+     * targets. Mirrors the AWS {@code TestEventPattern} API: callers pass the full event
+     * envelope (lowercase {@code source} / {@code detail-type} / {@code detail} /
+     * {@code resources}) as JSON; we adapt it to the internal entry shape and delegate
+     * to {@link #matchesPattern(Map, String)}.
+     */
+    public boolean testEventPattern(String eventPattern, String eventJson) {
+        if (eventJson == null || eventJson.isBlank()) {
+            throw new AwsException("InvalidEventPatternException", "Event is required.", 400);
+        }
+        if (eventPattern != null && !eventPattern.isBlank()) {
+            try {
+                objectMapper.readTree(eventPattern);
+            } catch (Exception e) {
+                throw new AwsException("InvalidEventPatternException",
+                        "Event pattern is not valid JSON: " + e.getMessage(), 400);
+            }
+        }
+        JsonNode event;
+        try {
+            event = objectMapper.readTree(eventJson);
+        } catch (Exception e) {
+            throw new AwsException("InvalidEventPatternException",
+                    "Event is not valid JSON: " + e.getMessage(), 400);
+        }
+        Map<String, Object> entry = new HashMap<>();
+        if (event.hasNonNull("source")) {
+            entry.put("Source", event.get("source").asText());
+        }
+        if (event.hasNonNull("detail-type")) {
+            entry.put("DetailType", event.get("detail-type").asText());
+        }
+        if (event.hasNonNull("detail")) {
+            JsonNode detail = event.get("detail");
+            entry.put("Detail", detail.isTextual() ? detail.asText() : detail.toString());
+        }
+        if (event.hasNonNull("resources") && event.get("resources").isArray()) {
+            entry.put("Resources", event.get("resources"));
+        }
+        return matchesPattern(entry, eventPattern);
+    }
+
     boolean matchesPattern(Map<String, Object> event, String eventPattern) {
         if (eventPattern == null || eventPattern.isBlank()) {
             return true;

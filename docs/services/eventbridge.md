@@ -21,6 +21,7 @@
 | `RemoveTargets` | Remove targets from a rule |
 | `ListTargetsByRule` | List targets for a rule |
 | `PutEvents` | Publish custom events to an event bus |
+| `TestEventPattern` | Test whether a sample event matches a given pattern (no targets fired) |
 
 ## Configuration
 

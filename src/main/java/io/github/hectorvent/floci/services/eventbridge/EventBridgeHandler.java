@@ -64,6 +64,7 @@ public class EventBridgeHandler {
                 case "RemoveTargets" -> handleRemoveTargets(request, region);
                 case "ListTargetsByRule" -> handleListTargetsByRule(request, region);
                 case "PutEvents" -> handlePutEvents(request, region);
+                case "TestEventPattern" -> handleTestEventPattern(request);
                 case "ListTagsForResource" -> handleListTagsForResource(request, region);
                 case "TagResource" -> handleTagResource(request, region);
                 case "UntagResource" -> handleUntagResource(request, region);
@@ -312,6 +313,15 @@ public class EventBridgeHandler {
             entry.forEach(node::put);
             resultEntries.add(node);
         }
+        return Response.ok(response).build();
+    }
+
+    private Response handleTestEventPattern(JsonNode request) {
+        String eventPattern = request.path("EventPattern").asText(null);
+        String event = request.path("Event").asText(null);
+        boolean result = eventBridgeService.testEventPattern(eventPattern, event);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Result", result);
         return Response.ok(response).build();
     }
 
