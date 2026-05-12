@@ -176,3 +176,5 @@ floci:
       enabled: true
     textract:
       enabled: true
+    pricing:
+      enabled: true

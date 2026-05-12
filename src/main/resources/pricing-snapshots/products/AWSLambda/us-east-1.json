@@ -1,0 +1,40 @@
+[
+  {
+    "product": {
+      "productFamily": "Serverless",
+      "attributes": {
+        "servicecode": "AWSLambda",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "group": "AWS-Lambda-Requests",
+        "groupDescription": "Invocation call for a Lambda function",
+        "regionCode": "us-east-1"
+      },
+      "sku": "FLOCI-LAMBDA-REQ-USE1"
+    },
+    "publicationDate": "2026-01-01T00:00:00Z",
+    "serviceCode": "AWSLambda",
+    "terms": {
+      "OnDemand": {
+        "FLOCI-LAMBDA-REQ-USE1.ONDEMAND": {
+          "priceDimensions": {
+            "FLOCI-LAMBDA-REQ-USE1.ONDEMAND.DIM1": {
+              "unit": "Requests",
+              "endRange": "Inf",
+              "description": "$0.20 per 1M requests",
+              "appliesTo": [],
+              "rateCode": "FLOCI-LAMBDA-REQ-USE1.ONDEMAND.DIM1",
+              "beginRange": "0",
+              "pricePerUnit": {"USD": "0.0000002000"}
+            }
+          },
+          "sku": "FLOCI-LAMBDA-REQ-USE1",
+          "effectiveDate": "2026-01-01T00:00:00Z",
+          "offerTermCode": "ONDEMAND",
+          "termAttributes": {}
+        }
+      }
+    },
+    "version": "20260101000000"
+  }
+]

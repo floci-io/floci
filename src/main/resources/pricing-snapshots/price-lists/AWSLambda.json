@@ -1,0 +1,9 @@
+[
+  {
+    "PriceListArn": "arn:aws:pricing:::price-list/aws/AWSLambda/USD/20260101000000/us-east-1",
+    "EffectiveDate": "2026-01-01T00:00:00Z",
+    "RegionCode": "us-east-1",
+    "CurrencyCode": "USD",
+    "FileFormats": ["json", "csv"]
+  }
+]

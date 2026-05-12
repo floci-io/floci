@@ -1,0 +1,23 @@
+[
+  {
+    "PriceListArn": "arn:aws:pricing:::price-list/aws/AmazonEC2/USD/20260101000000/us-east-1",
+    "EffectiveDate": "2026-01-01T00:00:00Z",
+    "RegionCode": "us-east-1",
+    "CurrencyCode": "USD",
+    "FileFormats": ["json", "csv"]
+  },
+  {
+    "PriceListArn": "arn:aws:pricing:::price-list/aws/AmazonEC2/USD/20260401000000/us-east-1",
+    "EffectiveDate": "2026-04-01T00:00:00Z",
+    "RegionCode": "us-east-1",
+    "CurrencyCode": "USD",
+    "FileFormats": ["json", "csv"]
+  },
+  {
+    "PriceListArn": "arn:aws:pricing:::price-list/aws/AmazonEC2/USD/20260101000000/us-west-2",
+    "EffectiveDate": "2026-01-01T00:00:00Z",
+    "RegionCode": "us-west-2",
+    "CurrencyCode": "USD",
+    "FileFormats": ["json", "csv"]
+  }
+]

@@ -300,6 +300,7 @@ public interface EmulatorConfig {
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
+        PricingServiceConfig pricing();
     }
 
     interface TransferServiceConfig {
@@ -638,6 +639,19 @@ public interface EmulatorConfig {
     interface TextractServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface PricingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Filesystem directory overriding the bundled pricing snapshot. When set, files at
+         * {@code <path>/services.json}, {@code <path>/products/<service>/<region>.json},
+         * {@code <path>/attribute-values/<service>/<attribute>.json}, and
+         * {@code <path>/price-lists/<service>.json} are read in preference to the classpath copy.
+         */
+        Optional<String> snapshotPath();
     }
 
     interface EcrServiceConfig {

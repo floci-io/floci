@@ -1,0 +1,125 @@
+[
+  {
+    "product": {
+      "productFamily": "Compute Instance",
+      "attributes": {
+        "servicecode": "AmazonEC2",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "instanceType": "t3.micro",
+        "tenancy": "Shared",
+        "operatingSystem": "Linux",
+        "preInstalledSw": "NA",
+        "capacitystatus": "Used",
+        "regionCode": "us-east-1"
+      },
+      "sku": "FLOCI-EC2-T3MICRO-USE1"
+    },
+    "publicationDate": "2026-01-01T00:00:00Z",
+    "serviceCode": "AmazonEC2",
+    "terms": {
+      "OnDemand": {
+        "FLOCI-EC2-T3MICRO-USE1.ONDEMAND": {
+          "priceDimensions": {
+            "FLOCI-EC2-T3MICRO-USE1.ONDEMAND.DIM1": {
+              "unit": "Hrs",
+              "endRange": "Inf",
+              "description": "$0.0104 per On Demand Linux t3.micro Instance Hour",
+              "appliesTo": [],
+              "rateCode": "FLOCI-EC2-T3MICRO-USE1.ONDEMAND.DIM1",
+              "beginRange": "0",
+              "pricePerUnit": {"USD": "0.0104000000"}
+            }
+          },
+          "sku": "FLOCI-EC2-T3MICRO-USE1",
+          "effectiveDate": "2026-01-01T00:00:00Z",
+          "offerTermCode": "ONDEMAND",
+          "termAttributes": {}
+        }
+      }
+    },
+    "version": "20260101000000"
+  },
+  {
+    "product": {
+      "productFamily": "Compute Instance",
+      "attributes": {
+        "servicecode": "AmazonEC2",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "instanceType": "m5.large",
+        "tenancy": "Shared",
+        "operatingSystem": "Linux",
+        "preInstalledSw": "NA",
+        "capacitystatus": "Used",
+        "regionCode": "us-east-1"
+      },
+      "sku": "FLOCI-EC2-M5LARGE-USE1"
+    },
+    "publicationDate": "2026-01-01T00:00:00Z",
+    "serviceCode": "AmazonEC2",
+    "terms": {
+      "OnDemand": {
+        "FLOCI-EC2-M5LARGE-USE1.ONDEMAND": {
+          "priceDimensions": {
+            "FLOCI-EC2-M5LARGE-USE1.ONDEMAND.DIM1": {
+              "unit": "Hrs",
+              "endRange": "Inf",
+              "description": "$0.096 per On Demand Linux m5.large Instance Hour",
+              "appliesTo": [],
+              "rateCode": "FLOCI-EC2-M5LARGE-USE1.ONDEMAND.DIM1",
+              "beginRange": "0",
+              "pricePerUnit": {"USD": "0.0960000000"}
+            }
+          },
+          "sku": "FLOCI-EC2-M5LARGE-USE1",
+          "effectiveDate": "2026-01-01T00:00:00Z",
+          "offerTermCode": "ONDEMAND",
+          "termAttributes": {}
+        }
+      }
+    },
+    "version": "20260101000000"
+  },
+  {
+    "product": {
+      "productFamily": "Compute Instance",
+      "attributes": {
+        "servicecode": "AmazonEC2",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "instanceType": "c5.large",
+        "tenancy": "Shared",
+        "operatingSystem": "Linux",
+        "preInstalledSw": "NA",
+        "capacitystatus": "Used",
+        "regionCode": "us-east-1"
+      },
+      "sku": "FLOCI-EC2-C5LARGE-USE1"
+    },
+    "publicationDate": "2026-01-01T00:00:00Z",
+    "serviceCode": "AmazonEC2",
+    "terms": {
+      "OnDemand": {
+        "FLOCI-EC2-C5LARGE-USE1.ONDEMAND": {
+          "priceDimensions": {
+            "FLOCI-EC2-C5LARGE-USE1.ONDEMAND.DIM1": {
+              "unit": "Hrs",
+              "endRange": "Inf",
+              "description": "$0.085 per On Demand Linux c5.large Instance Hour",
+              "appliesTo": [],
+              "rateCode": "FLOCI-EC2-C5LARGE-USE1.ONDEMAND.DIM1",
+              "beginRange": "0",
+              "pricePerUnit": {"USD": "0.0850000000"}
+            }
+          },
+          "sku": "FLOCI-EC2-C5LARGE-USE1",
+          "effectiveDate": "2026-01-01T00:00:00Z",
+          "offerTermCode": "ONDEMAND",
+          "termAttributes": {}
+        }
+      }
+    },
+    "version": "20260101000000"
+  }
+]

@@ -1,0 +1,40 @@
+[
+  {
+    "product": {
+      "productFamily": "Storage",
+      "attributes": {
+        "servicecode": "AmazonS3",
+        "location": "US East (N. Virginia)",
+        "locationType": "AWS Region",
+        "storageClass": "General Purpose",
+        "volumeType": "Standard",
+        "regionCode": "us-east-1"
+      },
+      "sku": "FLOCI-S3-STANDARD-USE1"
+    },
+    "publicationDate": "2026-01-01T00:00:00Z",
+    "serviceCode": "AmazonS3",
+    "terms": {
+      "OnDemand": {
+        "FLOCI-S3-STANDARD-USE1.ONDEMAND": {
+          "priceDimensions": {
+            "FLOCI-S3-STANDARD-USE1.ONDEMAND.DIM1": {
+              "unit": "GB-Mo",
+              "endRange": "51200",
+              "description": "$0.023 per GB - first 50 TB / month of storage used",
+              "appliesTo": [],
+              "rateCode": "FLOCI-S3-STANDARD-USE1.ONDEMAND.DIM1",
+              "beginRange": "0",
+              "pricePerUnit": {"USD": "0.0230000000"}
+            }
+          },
+          "sku": "FLOCI-S3-STANDARD-USE1",
+          "effectiveDate": "2026-01-01T00:00:00Z",
+          "offerTermCode": "ONDEMAND",
+          "termAttributes": {}
+        }
+      }
+    },
+    "version": "20260101000000"
+  }
+]
