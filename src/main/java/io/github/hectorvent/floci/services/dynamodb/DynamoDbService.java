@@ -62,6 +62,14 @@ public class DynamoDbService {
     // relies on ReentrantLock's re-entrancy so the inner put/update/delete calls do
     // not deadlock after the outer transaction already took each participant's lock.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
+    // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
+    // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
+    // request body so a replay with the same token but different parameters can be
+    // rejected with IdempotentParameterMismatchException.
+    private final ConcurrentHashMap<String, IdempotencyEntry> txIdempotency = new ConcurrentHashMap<>();
+    private static final long TX_IDEMPOTENCY_TTL_NANOS = java.time.Duration.ofMinutes(10).toNanos();
+
+    private record IdempotencyEntry(String requestHash, long insertedAtNanos) {}
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private DynamoDbStreamService streamService;
@@ -741,7 +749,60 @@ public class DynamoDbService {
 
     // --- Transact Operations ---
 
+    /**
+     * Backward-compatible overload for callers that do not pass a ClientRequestToken.
+     * The 4-arg variant is what {@link DynamoDbJsonHandler#handleTransactWriteItems}
+     * uses so the caller's ClientRequestToken is honoured.
+     */
     public void transactWriteItems(List<JsonNode> transactItems, String region) {
+        transactWriteItems(transactItems, region, null, null);
+    }
+
+    public void transactWriteItems(List<JsonNode> transactItems, String region,
+                                    String clientRequestToken, JsonNode rawRequest) {
+        // Idempotency check via ClientRequestToken — AWS contract:
+        //   * Same token + identical request body  → no-op success (silently dedupe).
+        //   * Same token + different request body  → IdempotentParameterMismatchException.
+        //   * No token, or expired token           → proceed normally.
+        if (clientRequestToken != null && !clientRequestToken.isEmpty() && rawRequest != null) {
+            String cacheKey = region + "::" + clientRequestToken;
+            String requestHash = sha256(rawRequest.toString());
+            long nowNanos = System.nanoTime();
+
+            IdempotencyEntry existing = txIdempotency.get(cacheKey);
+            if (existing != null && nowNanos - existing.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
+                if (existing.requestHash().equals(requestHash)) {
+                    LOG.debugv("transactWriteItems: idempotent replay for token={0}", clientRequestToken);
+                    return;
+                }
+                throw new AwsException("IdempotentParameterMismatchException",
+                        "Request parameters do not match those of an in-flight or recent transaction using the same ClientRequestToken",
+                        400);
+            }
+
+            // Register the token. compute() is used so a concurrent replay with the same body
+            // collapses onto the same entry without double-applying writes.
+            IdempotencyEntry registered = txIdempotency.compute(cacheKey, (k, v) -> {
+                if (v != null && nowNanos - v.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
+                    return v;
+                }
+                return new IdempotencyEntry(requestHash, nowNanos);
+            });
+            if (!registered.requestHash().equals(requestHash)) {
+                throw new AwsException("IdempotentParameterMismatchException",
+                        "Request parameters do not match those of an in-flight or recent transaction using the same ClientRequestToken",
+                        400);
+            }
+            if (registered.insertedAtNanos() != nowNanos) {
+                // Lost the race to a concurrent identical request — treat as a replay.
+                LOG.debugv("transactWriteItems: concurrent identical replay for token={0}", clientRequestToken);
+                return;
+            }
+
+            // Best-effort eviction of stale entries.
+            txIdempotency.entrySet().removeIf(e -> nowNanos - e.getValue().insertedAtNanos() > TX_IDEMPOTENCY_TTL_NANOS);
+        }
+
         // Acquire every participant's item lock in a deterministic (storageKey, itemKey)
         // order before evaluating conditions or applying writes. Total-ordered acquisition
         // prevents deadlock across concurrent transactions; ReentrantLock lets the inner
@@ -1129,6 +1190,13 @@ public class DynamoDbService {
         // Stop when we hit another clause keyword (REMOVE, ADD, DELETE) or end
         LOG.debugv("applySetClause: clause={0}, exprAttrNames={1}, exprAttrValues={2}",
                    clause, exprAttrNames, exprAttrValues);
+
+        // Snapshot the item before applying any assignments so cross-attribute
+        // references within the same SET expression (e.g. "SET b = a, a = :v")
+        // resolve to pre-update values, matching real DynamoDB semantics
+        // (actions are applied atomically and attribute references read original values).
+        ObjectNode snapshot = item.deepCopy();
+
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("REMOVE ") || upper.startsWith("ADD ") || upper.startsWith("DELETE ")) {
@@ -1163,18 +1231,27 @@ public class DynamoDbService {
                 rest = "";
             }
 
+            // Strip balanced outer parentheses so producers that wrap the RHS
+            // (e.g. ElectroDB emits "SET c = (c - :v)") behave the same as the
+            // unwrapped form. DynamoDB grammar accepts parentheses around any
+            // SET-action RHS.
+            valuePart = stripOuterParens(valuePart);
 
             // Resolve the value
             // Check for arithmetic expressions (operand + operand, operand - operand)
             // before handling individual expression types, since the left operand can be
             // a function like if_not_exists(...).
+            //
+            // RHS reads use `snapshot` (pre-update item state) so multiple comma-separated
+            // assignments behave atomically: each clause sees the original values, not the
+            // intermediate state produced by previous clauses in the same expression.
             int arithmeticIdx = findArithmeticOperator(valuePart);
             if (arithmeticIdx >= 0) {
                 String leftExpr = valuePart.substring(0, arithmeticIdx).trim();
                 char operator = valuePart.charAt(arithmeticIdx);
                 String rightExpr = valuePart.substring(arithmeticIdx + 1).trim();
-                JsonNode leftVal = evaluateSetExpr(item, leftExpr, exprAttrNames, exprAttrValues);
-                JsonNode rightVal = evaluateSetExpr(item, rightExpr, exprAttrNames, exprAttrValues);
+                JsonNode leftVal = evaluateSetExpr(snapshot, leftExpr, exprAttrNames, exprAttrValues);
+                JsonNode rightVal = evaluateSetExpr(snapshot, rightExpr, exprAttrNames, exprAttrValues);
                 if (leftVal == null || rightVal == null || !leftVal.has("N") || !rightVal.has("N")) {
                     throw new AwsException("ValidationException",
                             "Invalid UpdateExpression: Incorrect operand type for operator or function", 400);
@@ -1200,14 +1277,14 @@ public class DynamoDbService {
                     String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
                     String fallbackExpr = args[1].trim();
                     JsonNode resolved;
-                    if (hasValueAtPath(item, checkAttr, exprAttrNames)) {
+                    if (hasValueAtPath(snapshot, checkAttr, exprAttrNames)) {
                         // attrRef exists — evaluate to its current value
-                        resolved = getValueAtPath(item, checkAttr, exprAttrNames);
+                        resolved = getValueAtPath(snapshot, checkAttr, exprAttrNames);
                     } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
                         resolved = exprAttrValues.get(fallbackExpr);
                     } else {
                         // fallback is itself an attribute reference
-                        resolved = getValueAtPath(item, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
+                        resolved = getValueAtPath(snapshot, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
                     }
                     if (resolved != null) {
                         setValueAtPath(item, attrPath, resolved, exprAttrNames);
@@ -1222,8 +1299,8 @@ public class DynamoDbService {
                     if (commaPos >= 0) {
                         String arg1 = inner.substring(0, commaPos).trim();
                         String arg2 = inner.substring(commaPos + 1).trim();
-                        JsonNode list1 = evaluateSetExpr(item, arg1, exprAttrNames, exprAttrValues);
-                        JsonNode list2 = evaluateSetExpr(item, arg2, exprAttrNames, exprAttrValues);
+                        JsonNode list1 = evaluateSetExpr(snapshot, arg1, exprAttrNames, exprAttrValues);
+                        JsonNode list2 = evaluateSetExpr(snapshot, arg2, exprAttrNames, exprAttrValues);
                         if (list1 != null && list2 != null && list1.has("L") && list2.has("L")) {
                             com.fasterxml.jackson.databind.node.ArrayNode merged =
                                     com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
@@ -1249,7 +1326,7 @@ public class DynamoDbService {
             } else if (!valuePart.isEmpty()) {
                 // Plain attribute reference: SET a = b  or  SET a = #alias
                 String refAttr = resolveAttributeName(valuePart, exprAttrNames);
-                JsonNode refValue = getValueAtPath(item, refAttr, exprAttrNames);
+                JsonNode refValue = getValueAtPath(snapshot, refAttr, exprAttrNames);
                 if (refValue != null) {
                     setValueAtPath(item, attrPath, refValue, exprAttrNames);
                 }
@@ -1258,6 +1335,29 @@ public class DynamoDbService {
             clause = rest;
         }
         return clause;
+    }
+
+    /**
+     * Strip balanced outer parentheses from a SET-action RHS expression, repeatedly,
+     * so that producers wrapping arithmetic or function calls in parens (e.g.
+     * "(c - :v)" or "((if_not_exists(c, :d) - :v))") parse identically to the
+     * unwrapped form. Rejects forms like "(a) - (b)" where the outer parens do
+     * not actually enclose the whole expression.
+     */
+    private static String stripOuterParens(String expr) {
+        String s = expr.trim();
+        while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
+            int depth = 0;
+            boolean wraps = true;
+            for (int i = 0; i < s.length() - 1; i++) {
+                if (s.charAt(i) == '(') depth++;
+                else if (s.charAt(i) == ')') depth--;
+                if (depth == 0) { wraps = false; break; }
+            }
+            if (!wraps) break;
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        return s;
     }
 
     private JsonNode evaluateSetExpr(ObjectNode item, String expr,
@@ -2143,6 +2243,23 @@ public class DynamoDbService {
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException e) {
             return "unknown";
+        }
+    }
+
+    /**
+     * SHA-256 hex digest of a string, used by ClientRequestToken idempotency to compare
+     * request bodies. SHA-256 is required (not MD5) for the dedup contract because a
+     * collision would allow a request with different parameters to be silently treated
+     * as a replay; SHA-256 is supported on every JVM via {@link MessageDigest}.
+     */
+    private static String sha256(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is mandated by the JLS to be available on every JVM; this should never trigger.
+            throw new IllegalStateException("SHA-256 is required but not available on this JVM", e);
         }
     }
 

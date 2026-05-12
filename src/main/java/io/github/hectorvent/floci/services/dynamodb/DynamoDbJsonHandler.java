@@ -622,8 +622,15 @@ public class DynamoDbJsonHandler {
             transactItemsNode.forEach(transactItems::add);
         }
 
+        // ClientRequestToken makes TransactWriteItems idempotent within ~10 minutes.
+        // Forward the token and the raw request body so the service can hash the body
+        // and reject replays whose parameters changed.
+        String clientRequestToken = request.has("ClientRequestToken") && !request.get("ClientRequestToken").isNull()
+                ? request.get("ClientRequestToken").asText()
+                : null;
+
         try {
-            dynamoDbService.transactWriteItems(transactItems, region);
+            dynamoDbService.transactWriteItems(transactItems, region, clientRequestToken, request);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (TransactionCanceledException e) {
             ObjectNode body = objectMapper.createObjectNode();
