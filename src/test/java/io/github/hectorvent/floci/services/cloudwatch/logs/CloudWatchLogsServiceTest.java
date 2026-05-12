@@ -356,8 +356,17 @@ class CloudWatchLogsServiceTest {
         assertEquals("/app/logs", f.getLogGroupName());
         assertEquals("ERROR", f.getFilterPattern());
         assertEquals("arn:aws:lambda:us-east-1:000000000000:function:test", f.getDestinationArn());
-        assertNull(f.getDistribution());
+        assertEquals("ByLogStream", f.getDistribution());
         assertTrue(f.getCreationTime() > 0);
+    }
+
+    @Test
+    void putSubscriptionFilterDefaultsDistribution() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.putSubscriptionFilter("/app/logs", "my-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION);
+
+        SubscriptionFilter f = service.describeSubscriptionFilters("/app/logs", null, null, 50, REGION).subscriptionFilters().getFirst();
+        assertEquals("ByLogStream", f.getDistribution());
     }
 
     @Test
@@ -367,11 +376,17 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
-    void putSubscriptionFilterDuplicateThrows() {
+    void putSubscriptionFilterUpsertsDuplicate() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.putSubscriptionFilter("/app/logs", "my-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION);
-        assertThrows(AwsException.class, () ->
-                service.putSubscriptionFilter("/app/logs", "my-filter", "WARN", "arn:aws:lambda:us-east-1:000000000000:function:other", null, REGION));
+        // Upsert: calling with same name overwrites
+        service.putSubscriptionFilter("/app/logs", "my-filter", "WARN", "arn:aws:lambda:us-east-1:000000000000:function:other", null, REGION);
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult result =
+                service.describeSubscriptionFilters("/app/logs", null, null, 50, REGION);
+        assertEquals(1, result.subscriptionFilters().size());
+        assertEquals("WARN", result.subscriptionFilters().getFirst().getFilterPattern());
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:other", result.subscriptionFilters().getFirst().getDestinationArn());
     }
 
     @Test

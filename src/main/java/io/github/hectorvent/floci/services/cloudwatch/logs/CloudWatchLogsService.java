@@ -368,19 +368,15 @@ public class CloudWatchLogsService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "The specified log group does not exist: " + logGroupName, 400));
 
-        String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
-        if (subscriptionFilterStore.get(filterKey).isPresent()) {
-            throw new AwsException("LimitExceededException",
-                    "The specified subscription filter already exists: " + filterName, 400);
-        }
-
         SubscriptionFilter filter = new SubscriptionFilter();
         filter.setFilterName(filterName);
         filter.setLogGroupName(logGroupName);
-        filter.setFilterPattern(filterPattern);
+        filter.setFilterPattern(filterPattern != null ? filterPattern : "");
         filter.setDestinationArn(destinationArn);
-        filter.setDistribution(distribution);
+        filter.setDistribution(distribution != null ? distribution : "ByLogStream");
         filter.setCreationTime(System.currentTimeMillis());
+
+        String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
         subscriptionFilterStore.put(filterKey, filter);
         LOG.infov("Created subscription filter: {0} on log group: {1}", filterName, logGroupName);
     }
