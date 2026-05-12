@@ -197,6 +197,133 @@ class KmsServiceTest {
                 kmsService.decrypt("not-valid-ciphertext".getBytes(StandardCharsets.UTF_8), REGION));
     }
 
+    @Test
+    void encryptIsNonDeterministic() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+
+        byte[] c1 = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+        byte[] c2 = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+        assertFalse(java.util.Arrays.equals(c1, c2),
+                "two Encrypt calls with identical inputs must yield different ciphertexts");
+        // Both still round-trip
+        assertArrayEquals(plaintext, kmsService.decrypt(c1, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(c2, REGION));
+    }
+
+    @Test
+    void encryptIsNonDeterministicWithIdenticalContext() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        Map<String, String> ctx = Map.of("tenant", "1");
+
+        byte[] c1 = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
+        byte[] c2 = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
+
+        assertFalse(java.util.Arrays.equals(c1, c2));
+    }
+
+    @Test
+    void decryptWithMatchingContextSucceeds() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        Map<String, String> ctx = Map.of("tenant", "1", "purpose", "test");
+
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
+        // Different insertion order, same logical context — must succeed (AWS is order-independent)
+        Map<String, String> reordered = new java.util.LinkedHashMap<>();
+        reordered.put("purpose", "test");
+        reordered.put("tenant", "1");
+
+        assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, reordered, REGION));
+    }
+
+    @Test
+    void decryptWithMismatchedContextValueThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("tenant", "999"), REGION));
+        assertEquals("InvalidCiphertextException", ex.getErrorCode());
+    }
+
+    @Test
+    void decryptWithMismatchedContextKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        // Same value under a different key — must fail
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("account", "1"), REGION));
+    }
+
+    @Test
+    void decryptWithoutContextRejectsCiphertextEncryptedWithContext() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        // Decrypt without supplying the context the ciphertext was bound to — must fail
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, REGION));
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of(), REGION));
+    }
+
+    @Test
+    void decryptWithExtraContextKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("tenant", "1", "extra", "x"), REGION));
+    }
+
+    @Test
+    void emptyContextIsInterchangeableWithNull() {
+        // AWS treats omitted EncryptionContext and {} the same: both must decrypt
+        // a ciphertext that was encrypted without one.
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+
+        byte[] noCtx = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+        assertArrayEquals(plaintext, kmsService.decrypt(noCtx, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(noCtx, Map.of(), REGION));
+
+        byte[] emptyCtx = kmsService.encrypt(key.getKeyId(), plaintext, Map.of(), REGION);
+        assertArrayEquals(plaintext, kmsService.decrypt(emptyCtx, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(emptyCtx, Map.of(), REGION));
+    }
+
+    @Test
+    void contextIsCaseSensitive() {
+        // AWS performs case-sensitive matching of EncryptionContext keys and values.
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("Tenant", "Alpha"), REGION);
+
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("tenant", "Alpha"), REGION));
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("Tenant", "alpha"), REGION));
+        // Exact match still works
+        assertNotNull(kmsService.decrypt(ciphertext, Map.of("Tenant", "Alpha"), REGION));
+    }
+
+    @Test
+    void decryptToKeyArnResolvesKeyFromBlob() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        assertEquals(key.getArn(), kmsService.decryptToKeyArn(ciphertext, REGION));
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"ECC_NIST_P256", "ECC_NIST_P384", "ECC_NIST_P521", "ECC_SECG_P256K1"})
     void signAndVerify(String keySpec) {
