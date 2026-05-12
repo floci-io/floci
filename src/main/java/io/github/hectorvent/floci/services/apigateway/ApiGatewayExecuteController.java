@@ -1195,29 +1195,27 @@ public class ApiGatewayExecuteController {
                 }
             }
         }
-        // 3. Proxy+ wildcard — {proxy+} matches any remaining path
-        // Pick the proxy+ resource whose parent path is the longest prefix of requestPath
+        // 3. Proxy+ wildcard — {proxy+} matches longest parent prefix
+        // Requires at least one path segment after the parent prefix (except root /{proxy+})
         ApiGatewayResource best = null;
         int bestLen = -1;
         for (ApiGatewayResource r : resources) {
-            if (r.getPathPart() == null || !r.getPathPart().contains("{")) continue;
-            String path = r.getPath();
-            if (path == null) continue;
-            // Parent path is everything before the last / (i.e. strip /{proxy+})
-            int lastSlash = path.lastIndexOf('/');
-            String parent = lastSlash > 0 ? path.substring(0, lastSlash) : "/";
-            if ("/".equals(parent)) {
-                // Root /{proxy+} — fallback if nothing more specific matches
+            if (r.getPath() == null || !r.getPath().contains("{proxy+}")) continue;
+            String parentPrefix = r.getPath().substring(0, r.getPath().indexOf("{proxy+}"));
+            // Root /{proxy+} matches everything including /
+            if ("/".equals(parentPrefix)) {
                 if (best == null) {
                     best = r;
                     bestLen = 0;
                 }
                 continue;
             }
-            String prefix = parent.endsWith("/") ? parent : parent + "/";
-            if (requestPath.startsWith(prefix) && parent.length() > bestLen) {
+            // Non-root proxy+ requires at least one char after the prefix
+            if (requestPath.startsWith(parentPrefix)
+                    && requestPath.length() > parentPrefix.length()
+                    && parentPrefix.length() > bestLen) {
                 best = r;
-                bestLen = parent.length();
+                bestLen = parentPrefix.length();
             }
         }
         return best;

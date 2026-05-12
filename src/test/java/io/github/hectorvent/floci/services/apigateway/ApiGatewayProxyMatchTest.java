@@ -60,10 +60,19 @@ class ApiGatewayProxyMatchTest {
         List<ApiGatewayResource> resources = List.of(authProxy, productsProxy);
 
         assertSame(authProxy, ctrl.matchResource(resources, "/auth/login"));
-        assertSame(authProxy, ctrl.matchResource(resources, "/auth/"));
         assertSame(productsProxy, ctrl.matchResource(resources, "/products/123"));
         assertSame(productsProxy, ctrl.matchResource(resources, "/products/abc/def"));
         assertNull(ctrl.matchResource(resources, "/other"));
+    }
+
+    @Test
+    void emptyProxySegmentDoesNotMatchNonRootProxy() {
+        ApiGatewayResource authProxy = resource("r1", "root", "{proxy+}", "/auth/{proxy+}");
+        ApiGatewayResource productsProxy = resource("r2", "root", "{proxy+}", "/products/{proxy+}");
+
+        assertNull(ctrl.matchResource(List.of(authProxy), "/auth/"));
+        assertNull(ctrl.matchResource(List.of(authProxy, productsProxy), "/auth/"));
+        assertNull(ctrl.matchResource(List.of(authProxy, productsProxy), "/products/"));
     }
 
     @Test
@@ -105,7 +114,7 @@ class ApiGatewayProxyMatchTest {
 
         assertSame(apiV1Proxy, ctrl.matchResource(resources, "/api/v1/users"));
         assertSame(apiProxy, ctrl.matchResource(resources, "/api/v2"));
-        assertSame(apiProxy, ctrl.matchResource(resources, "/api/"));
+        assertNull(ctrl.matchResource(resources, "/api/"));
     }
 
     @Test
