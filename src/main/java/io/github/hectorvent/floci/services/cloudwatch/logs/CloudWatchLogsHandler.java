@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -48,6 +49,9 @@ public class CloudWatchLogsHandler {
             case "ListTagsForResource" -> handleListTagsForResource(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
+            case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
+            case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
+            case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -254,6 +258,54 @@ public class CloudWatchLogsHandler {
         List<String> tagKeys = new ArrayList<>();
         request.path("tagKeys").forEach(k -> tagKeys.add(k.asText()));
         logsService.untagLogGroup(groupName, tagKeys, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handlePutSubscriptionFilter(JsonNode request, String region) {
+        String logGroupName = request.path("logGroupName").asText();
+        String filterName = request.path("filterName").asText();
+        String filterPattern = request.path("filterPattern").asText();
+        String destinationArn = request.path("destinationArn").asText();
+        String distribution = request.has("distribution") ? request.path("distribution").asText(null) : null;
+
+        logsService.putSubscriptionFilter(logGroupName, filterName, filterPattern, destinationArn, distribution, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDescribeSubscriptionFilters(JsonNode request, String region) {
+        String logGroupName = request.path("logGroupName").asText();
+        String filterNamePrefix = request.path("filterNamePrefix").asText(null);
+        String nextToken = request.has("nextToken") ? request.path("nextToken").asText(null) : null;
+        int limit = request.path("limit").asInt(0);
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult result =
+                logsService.describeSubscriptionFilters(logGroupName, filterNamePrefix, nextToken, limit, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode filtersArray = objectMapper.createArrayNode();
+        for (SubscriptionFilter f : result.subscriptionFilters()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("filterName", f.getFilterName());
+            node.put("logGroupName", f.getLogGroupName());
+            node.put("filterPattern", f.getFilterPattern());
+            node.put("destinationArn", f.getDestinationArn());
+            if (f.getDistribution() != null) {
+                node.put("distribution", f.getDistribution());
+            }
+            node.put("creationTime", f.getCreationTime());
+            filtersArray.add(node);
+        }
+        response.set("subscriptionFilters", filtersArray);
+        if (result.nextToken() != null) {
+            response.put("nextToken", result.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteSubscriptionFilter(JsonNode request, String region) {
+        String logGroupName = request.path("logGroupName").asText();
+        String filterName = request.path("filterName").asText();
+        logsService.deleteSubscriptionFilter(logGroupName, filterName, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
