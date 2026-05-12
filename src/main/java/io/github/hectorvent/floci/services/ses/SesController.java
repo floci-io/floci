@@ -704,8 +704,9 @@ public class SesController {
                 throw new AwsException("BadRequestException", "Request body is required.", 400);
             }
             JsonNode request = objectMapper.readTree(body);
-            String emailAddress = request.path("EmailAddress").asText(null);
-            String reason = request.path("Reason").asText(null);
+            requireJsonObject(request);
+            String emailAddress = readRequiredStringField(request, "EmailAddress");
+            String reason = readRequiredStringField(request, "Reason");
             sesService.putSuppressedDestination(region, emailAddress, reason);
             LOG.infov("SES V2 PutSuppressedDestination: {0} ({1})", emailAddress, reason);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -714,6 +715,14 @@ public class SesController {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    private static String readRequiredStringField(JsonNode request, String fieldName) {
+        JsonNode node = request.path(fieldName);
+        if (node.isMissingNode() || node.isNull() || !node.isTextual()) {
+            throw new AwsException("BadRequestException", fieldName + " is required.", 400);
+        }
+        return node.asText();
     }
 
     @GET

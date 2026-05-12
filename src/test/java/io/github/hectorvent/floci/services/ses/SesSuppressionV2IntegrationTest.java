@@ -227,6 +227,53 @@ class SesSuppressionV2IntegrationTest {
     }
 
     @Test
+    @Order(16)
+    void putSuppressedDestination_nullEmailAddress_returns400() {
+        // JSON null for EmailAddress must not coerce into the literal string "null".
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailAddress": null, "Reason": "BOUNCE"}
+                """)
+        .when()
+            .put("/v2/email/suppression/addresses")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(17)
+    void putSuppressedDestination_nullReason_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailAddress": "null-reason@example.com", "Reason": null}
+                """)
+        .when()
+            .put("/v2/email/suppression/addresses")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(18)
+    void putSuppressedDestination_nonObjectBody_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("[\"not\", \"an\", \"object\"]")
+        .when()
+            .put("/v2/email/suppression/addresses")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
     @Order(13)
     void putSuppressedDestination_trimsWhitespaceFromEmailAddress() {
         // AWS silently trims leading/trailing whitespace from EmailAddress on Put.
