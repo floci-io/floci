@@ -301,6 +301,6 @@ target_arn() {
     out=$(aws_cmd sqs receive-message \
         --queue-url "$TARGET_QUEUE_URL" \
         --max-number-of-messages 1)
-    msgs=$(echo "$out" | jq '.Messages // [] | length')
+    msgs=$(echo "${out:-"{}"}" | jq '.Messages // [] | length')
     [ "$msgs" = "0" ]
 }
