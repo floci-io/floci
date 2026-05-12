@@ -139,10 +139,15 @@ jobs:
             EXTRA_ARGS="$EXTRA_ARGS -v /tmp/floci-hot-reload:/tmp/floci-hot-reload -e HOT_RELOAD_BASE_DIR=/tmp/floci-hot-reload"
           fi
 
+          # --dns injects Floci's embedded DNS so *.floci wildcard subdomains
+          # (e.g. my-bucket.floci) resolve to Floci's IP inside the test container.
+          # FLOCI_S3_VHOST_ENDPOINT tells the S3 virtual-host client to use
+          # http://floci:4566 as the endpoint base instead of the public DNS fallback.
           docker run --rm --network compat-net \
+            --dns "${FLOCI_IP}" \
             -e FLOCI_ENDPOINT=http://floci:4566 \
+            -e FLOCI_S3_VHOST_ENDPOINT=http://floci:4566 \
             -v "$(pwd)/test-results:/results" \
-            --add-host "sdk-vhost-bucket.floci:${FLOCI_IP}" \
             $EXTRA_ARGS \
             compat-${{ matrix.test }}
 

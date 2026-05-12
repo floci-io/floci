@@ -24,11 +24,26 @@ class S3VirtualHostFilterTest {
             // K8s-style service hostname with FLOCI_HOSTNAME set
             "my-bucket.floci.default.svc.cluster.local, floci.default.svc.cluster.local, my-bucket",
             "my-bucket.floci-svc.namespace.svc, floci-svc.namespace.svc, my-bucket",
+            // localhost is always recognized regardless of baseHostname (fixes virtual-host when FLOCI_HOSTNAME=floci)
+            "my-bucket.localhost,      floci, my-bucket",
+            "my-bucket.localhost:4566, floci, my-bucket",
             // AWS S3 domains (fallback — independent of baseHostname)
             "my-bucket.s3.amazonaws.com,               localhost, my-bucket",
             "my-bucket.s3.amazonaws.com:443,            localhost, my-bucket",
             "my-bucket.s3.us-east-1.amazonaws.com,      localhost, my-bucket",
             "my-bucket.s3.eu-west-1.amazonaws.com:443,  localhost, my-bucket",
+            // LocalStack-compatible domains (*.localhost.localstack.cloud resolves to 127.0.0.1 via public DNS)
+            "my-bucket.s3.localhost.localstack.cloud,           localhost, my-bucket",
+            "my-bucket.s3.localhost.localstack.cloud:4566,      localhost, my-bucket",
+            "my-bucket.s3.us-east-1.localhost.localstack.cloud, localhost, my-bucket",
+            "my-bucket.localhost.localstack.cloud,              localhost, my-bucket",
+            "my-bucket.localhost.localstack.cloud:4566,         localhost, my-bucket",
+            // Floci public wildcard DNS (*.s3.localhost.floci.io and *.localhost.floci.io resolve to 127.0.0.1)
+            "my-bucket.s3.localhost.floci.io,       localhost, my-bucket",
+            "my-bucket.s3.localhost.floci.io:4566,  localhost, my-bucket",
+            "my-bucket.localhost.floci.io,          localhost, my-bucket",
+            "my-bucket.localhost.floci.io:4566,     localhost, my-bucket",
+            "my-bucket.s3.us-east-1.localhost.floci.io, localhost, my-bucket",
     })
     void extractsBucketFromVirtualHostedStyle(String host, String baseHostname, String expectedBucket) {
         assertEquals(expectedBucket, S3VirtualHostFilter.extractBucket(host, baseHostname));
@@ -73,9 +88,17 @@ class S3VirtualHostFilterTest {
 
     @Test
     void returnsNullForNullBaseHostname() {
-        // Without a baseHostname, only AWS S3 domains should match
-        assertNull(S3VirtualHostFilter.extractBucket("my-bucket.localhost:4566", null));
+        // path-style bare hostname (no subdomain) — must return null
+        assertNull(S3VirtualHostFilter.extractBucket("localhost:4566", null));
+        // well-known domains match regardless of baseHostname
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost:4566", null));
         assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.amazonaws.com", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.localhost.localstack.cloud", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost.localstack.cloud", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.localhost.floci.io", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost.floci.io", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost.floci.io", null));
     }
 
     // --- Hostname extraction from URL ---

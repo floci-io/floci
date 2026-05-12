@@ -171,10 +171,19 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         if (remainder.startsWith("s3.") && remainder.endsWith(".amazonaws.com")) {
             return true;
         }
-        // Support localstack.cloud subdomains (used by cdklocal and other tools)
-        // Example: bucket.s3.localhost.localstack.cloud
+        // localhost always resolves to 127.0.0.1 — accept regardless of FLOCI_HOSTNAME config.
+        // Fixes: SDK with endpointOverride("http://localhost:4566") without forcePathStyle sends
+        // Host: my-bucket.localhost:4566, which must be recognized even when baseHostname=floci.
+        if ("localhost".equals(remainder)) {
+            return true;
+        }
+        // LocalStack public wildcard DNS: bucket.s3.localhost.localstack.cloud and bucket.localhost.localstack.cloud
         if (remainder.endsWith(".localstack.cloud")) {
-            return remainder.startsWith("s3.");
+            return remainder.startsWith("s3.") || "localhost.localstack.cloud".equals(remainder);
+        }
+        // Floci public wildcard DNS: bucket.s3.localhost.floci.io and bucket.localhost.floci.io → 127.0.0.1
+        if (remainder.endsWith(".localhost.floci.io") || "localhost.floci.io".equals(remainder)) {
+            return remainder.startsWith("s3.") || "localhost.floci.io".equals(remainder);
         }
         return false;
     }
