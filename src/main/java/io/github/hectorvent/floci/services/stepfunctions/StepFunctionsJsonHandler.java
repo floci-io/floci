@@ -14,7 +14,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 @ApplicationScoped
 public class StepFunctionsJsonHandler {
@@ -63,7 +65,8 @@ public class StepFunctionsJsonHandler {
                 request.path("definition").asText(),
                 request.path("roleArn").asText(),
                 request.path("type").asText(null),
-                region
+                region,
+                parseTagsArray(request.path("tags"))
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.put("stateMachineArn", sm.getStateMachineArn());
@@ -217,7 +220,7 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleCreateActivity(JsonNode request, String region) {
-        Activity activity = service.createActivity(request.path("name").asText(), region);
+        Activity activity = service.createActivity(request.path("name").asText(), region, parseTagsArray(request.path("tags")));
         ObjectNode response = objectMapper.createObjectNode();
         response.put("activityArn", activity.getActivityArn());
         response.put("creationDate", activity.getCreationDate());
@@ -277,28 +280,40 @@ public class StepFunctionsJsonHandler {
 
     private Response handleTagResource(JsonNode request) {
         String arn = request.path("resourceArn").asText();
-        java.util.Map<String, String> tags = new java.util.HashMap<>();
         JsonNode tagsNode = request.path("tags");
-        if (tagsNode.isArray()) {
-            for (JsonNode entry : tagsNode) {
-                tags.put(entry.path("key").asText(), entry.path("value").asText());
-            }
+        if (!tagsNode.isArray()) {
+            return Response.status(400)
+                    .entity(new AwsErrorResponse("ValidationException", "Parameter 'tags' must be a list"))
+                    .build();
         }
-        service.tagResource(arn, tags);
+        service.tagResource(arn, parseTagsArray(tagsNode));
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleUntagResource(JsonNode request) {
         String arn = request.path("resourceArn").asText();
-        java.util.List<String> tagKeys = new java.util.ArrayList<>();
         JsonNode keysNode = request.path("tagKeys");
-        if (keysNode.isArray()) {
-            for (JsonNode key : keysNode) {
-                tagKeys.add(key.asText());
-            }
+        if (!keysNode.isArray()) {
+            return Response.status(400)
+                    .entity(new AwsErrorResponse("ValidationException", "Parameter 'tagKeys' must be a list"))
+                    .build();
+        }
+        java.util.List<String> tagKeys = new java.util.ArrayList<>();
+        for (JsonNode key : keysNode) {
+            tagKeys.add(key.asText());
         }
         service.untagResource(arn, tagKeys);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Map<String, String> parseTagsArray(JsonNode tagsNode) {
+        Map<String, String> tags = new HashMap<>();
+        if (tagsNode != null && tagsNode.isArray()) {
+            for (JsonNode entry : tagsNode) {
+                tags.put(entry.path("key").asText(), entry.path("value").asText());
+            }
+        }
+        return tags;
     }
 
 }

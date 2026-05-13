@@ -1,10 +1,19 @@
 package com.floci.test;
 
-import org.junit.jupiter.api.*;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.MethodOrderer;
+import org.junit.jupiter.api.Order;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.TestMethodOrder;
 import software.amazon.awssdk.services.sfn.SfnClient;
-import software.amazon.awssdk.services.sfn.model.*;
+import software.amazon.awssdk.services.sfn.model.ListTagsForResourceResponse;
+import software.amazon.awssdk.services.sfn.model.Tag;
 
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -61,7 +70,7 @@ class StepFunctionsTagsTest {
 
     @Test
     @Order(1)
-    void listTags_newStateMachine_returnsEmptyMap() {
+    void listTags_newStateMachine_returnsEmptyList() {
         ListTagsForResourceResponse resp = sfn.listTagsForResource(b -> b.resourceArn(stateMachineArn));
         assertThat(resp.tags()).isEmpty();
     }
@@ -71,10 +80,10 @@ class StepFunctionsTagsTest {
     void tagResource_stateMachine_addsTagsAndListReturnsAll() {
         sfn.tagResource(b -> b
                 .resourceArn(stateMachineArn)
-                .tags(Map.of("env", "test", "team", "platform")));
+                .tags(tag("env", "test"), tag("team", "platform")));
 
-        ListTagsForResourceResponse resp = sfn.listTagsForResource(b -> b.resourceArn(stateMachineArn));
-        assertThat(resp.tags())
+        Map<String, String> tags = tagsAsMap(sfn.listTagsForResource(b -> b.resourceArn(stateMachineArn)).tags());
+        assertThat(tags)
                 .containsEntry("env", "test")
                 .containsEntry("team", "platform");
     }
@@ -86,8 +95,8 @@ class StepFunctionsTagsTest {
                 .resourceArn(stateMachineArn)
                 .tagKeys("team"));
 
-        ListTagsForResourceResponse resp = sfn.listTagsForResource(b -> b.resourceArn(stateMachineArn));
-        assertThat(resp.tags())
+        Map<String, String> tags = tagsAsMap(sfn.listTagsForResource(b -> b.resourceArn(stateMachineArn)).tags());
+        assertThat(tags)
                 .containsEntry("env", "test")
                 .doesNotContainKey("team");
     }
@@ -97,17 +106,17 @@ class StepFunctionsTagsTest {
     void tagResource_stateMachine_overwritesExistingKey() {
         sfn.tagResource(b -> b
                 .resourceArn(stateMachineArn)
-                .tags(Map.of("env", "prod")));
+                .tags(tag("env", "prod")));
 
-        ListTagsForResourceResponse resp = sfn.listTagsForResource(b -> b.resourceArn(stateMachineArn));
-        assertThat(resp.tags()).containsEntry("env", "prod");
+        Map<String, String> tags = tagsAsMap(sfn.listTagsForResource(b -> b.resourceArn(stateMachineArn)).tags());
+        assertThat(tags).containsEntry("env", "prod");
     }
 
     // ──────────────── Activity Tags ────────────────
 
     @Test
     @Order(5)
-    void listTags_newActivity_returnsEmptyMap() {
+    void listTags_newActivity_returnsEmptyList() {
         ListTagsForResourceResponse resp = sfn.listTagsForResource(b -> b.resourceArn(activityArn));
         assertThat(resp.tags()).isEmpty();
     }
@@ -117,10 +126,10 @@ class StepFunctionsTagsTest {
     void tagResource_activity_addsTagsAndListReturnsAll() {
         sfn.tagResource(b -> b
                 .resourceArn(activityArn)
-                .tags(Map.of("owner", "infra")));
+                .tags(tag("owner", "infra")));
 
-        ListTagsForResourceResponse resp = sfn.listTagsForResource(b -> b.resourceArn(activityArn));
-        assertThat(resp.tags()).containsEntry("owner", "infra");
+        Map<String, String> tags = tagsAsMap(sfn.listTagsForResource(b -> b.resourceArn(activityArn)).tags());
+        assertThat(tags).containsEntry("owner", "infra");
     }
 
     @Test
@@ -130,7 +139,17 @@ class StepFunctionsTagsTest {
                 .resourceArn(activityArn)
                 .tagKeys("owner"));
 
-        ListTagsForResourceResponse resp = sfn.listTagsForResource(b -> b.resourceArn(activityArn));
-        assertThat(resp.tags()).doesNotContainKey("owner");
+        Map<String, String> tags = tagsAsMap(sfn.listTagsForResource(b -> b.resourceArn(activityArn)).tags());
+        assertThat(tags).doesNotContainKey("owner");
+    }
+
+    // ──────────────── Helpers ────────────────
+
+    private static Tag tag(String key, String value) {
+        return Tag.builder().key(key).value(value).build();
+    }
+
+    private static Map<String, String> tagsAsMap(List<Tag> tags) {
+        return tags.stream().collect(Collectors.toMap(Tag::key, Tag::value));
     }
 }

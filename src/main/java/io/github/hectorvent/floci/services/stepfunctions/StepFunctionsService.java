@@ -62,7 +62,7 @@ public class StepFunctionsService {
 
     // ──────────────────────────── State Machines ────────────────────────────
 
-    public StateMachine createStateMachine(String name, String definition, String roleArn, String type, String region) {
+    public StateMachine createStateMachine(String name, String definition, String roleArn, String type, String region, Map<String, String> tags) {
         String arn = regionResolver.buildArn("states", region, "stateMachine:" + name);
         if (stateMachineStore.get(arn).isPresent()) {
             throw new AwsException("StateMachineAlreadyExists", "State machine already exists: " + arn, 400);
@@ -77,6 +77,9 @@ public class StepFunctionsService {
         sm.setRoleArn(roleArn);
         if (type != null && !type.isEmpty()) {
             sm.setType(type);
+        }
+        if (tags != null && !tags.isEmpty()) {
+            sm.getTags().putAll(tags);
         }
 
         stateMachineStore.put(arn, sm);
@@ -213,7 +216,7 @@ public class StepFunctionsService {
 
     // ──────────────────────────── Activities ────────────────────────────
 
-    public Activity createActivity(String name, String region) {
+    public Activity createActivity(String name, String region, Map<String, String> tags) {
         String arn = regionResolver.buildArn("states", region, "activity:" + name);
         if (activityStore.get(arn).isPresent()) {
             throw new AwsException("ActivityAlreadyExists", "Activity already exists: " + arn, 400);
@@ -221,6 +224,9 @@ public class StepFunctionsService {
         Activity activity = new Activity();
         activity.setActivityArn(arn);
         activity.setName(name);
+        if (tags != null && !tags.isEmpty()) {
+            activity.getTags().putAll(tags);
+        }
         activityStore.put(arn, activity);
         LOG.infov("Created activity: {0}", arn);
         return activity;
