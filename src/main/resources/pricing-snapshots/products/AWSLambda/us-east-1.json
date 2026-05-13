@@ -8,7 +8,8 @@
         "locationType": "AWS Region",
         "group": "AWS-Lambda-Requests",
         "groupDescription": "Invocation call for a Lambda function",
-        "regionCode": "us-east-1"
+        "regionCode": "us-east-1",
+        "usagetype": "AWS-Lambda-Requests"
       },
       "sku": "FLOCI-LAMBDA-REQ-USE1"
     },

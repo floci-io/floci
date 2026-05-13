@@ -178,3 +178,5 @@ floci:
       enabled: true
     pricing:
       enabled: true
+    ce:
+      enabled: true

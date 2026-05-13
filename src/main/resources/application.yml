@@ -262,3 +262,6 @@ floci:
       enabled: true
     transcribe:
       enabled: true
+    ce:
+      enabled: true
+      credit-usd-monthly: 0.0

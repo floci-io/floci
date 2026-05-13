@@ -11,7 +11,8 @@
         "operatingSystem": "Linux",
         "preInstalledSw": "NA",
         "capacitystatus": "Used",
-        "regionCode": "us-east-1"
+        "regionCode": "us-east-1",
+        "usagetype": "BoxUsage:t3.micro"
       },
       "sku": "FLOCI-EC2-T3MICRO-USE1"
     },
@@ -52,7 +53,8 @@
         "operatingSystem": "Linux",
         "preInstalledSw": "NA",
         "capacitystatus": "Used",
-        "regionCode": "us-east-1"
+        "regionCode": "us-east-1",
+        "usagetype": "BoxUsage:m5.large"
       },
       "sku": "FLOCI-EC2-M5LARGE-USE1"
     },
@@ -93,7 +95,8 @@
         "operatingSystem": "Linux",
         "preInstalledSw": "NA",
         "capacitystatus": "Used",
-        "regionCode": "us-east-1"
+        "regionCode": "us-east-1",
+        "usagetype": "BoxUsage:c5.large"
       },
       "sku": "FLOCI-EC2-C5LARGE-USE1"
     },

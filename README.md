@@ -300,6 +300,7 @@ All default images are configurable via environment variables — useful for pin
 | **Transfer Family** | In-process | Server lifecycle (`CreateServer` / `DeleteServer` / `StartServer` / `StopServer` / `UpdateServer`), user management, SSH public key import, and tagging |
 | **Textract** | In-process (stub) | API-compatible stubs for all operations; dummy block data with realistic shape and metadata; async job simulation with immediate SUCCEEDED status |
 | **Pricing (Price List Service)** | In-process + bundled static snapshot | `DescribeServices`, `GetAttributeValues`, `GetProducts`, `ListPriceLists`, `GetPriceListFileUrl`; pagination; filesystem override via `FLOCI_SERVICES_PRICING_SNAPSHOT_PATH` |
+| **Cost Explorer** | In-process; cost synthesized from Floci resource state × Pricing snapshot | `GetCostAndUsage` (full `Filter`/`GroupBy`/`Metrics`/`RECORD_TYPE`), `GetCostAndUsageWithResources`, `GetDimensionValues`, `GetTags`, RI/SP coverage+utilization stubs; CDI-discovered `ResourceUsageEnumerator` SPI for new services to emit cost lines without touching CE |
 
 ---
 
