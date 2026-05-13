@@ -151,13 +151,12 @@ public class KmsJsonHandler {
     private Response handleDecrypt(JsonNode request, String region) {
         byte[] ciphertext = Base64.getDecoder().decode(request.path("CiphertextBlob").asText());
         Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
-        byte[] plaintext = service.decrypt(ciphertext, context, region);
+        KmsService.DecryptResult result = service.decryptAndResolveKey(ciphertext, context, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("Plaintext", Base64.getEncoder().encodeToString(plaintext));
-        String keyArn = service.decryptToKeyArn(ciphertext, region);
-        if (keyArn != null) {
-            response.put("KeyId", keyArn);
+        response.put("Plaintext", Base64.getEncoder().encodeToString(result.plaintext()));
+        if (result.keyArn() != null) {
+            response.put("KeyId", result.keyArn());
         }
         return Response.ok(response).build();
     }
@@ -197,13 +196,13 @@ public class KmsJsonHandler {
         Map<String, String> sourceContext = readEncryptionContext(request.path("SourceEncryptionContext"));
         Map<String, String> destContext = readEncryptionContext(request.path("DestinationEncryptionContext"));
 
-        byte[] plaintext = service.decrypt(ciphertext, sourceContext, region);
-        byte[] newCiphertext = service.encrypt(destKeyId, plaintext, destContext, region);
+        KmsService.DecryptResult source = service.decryptAndResolveKey(ciphertext, sourceContext, region);
+        byte[] newCiphertext = service.encrypt(destKeyId, source.plaintext(), destContext, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CiphertextBlob", Base64.getEncoder().encodeToString(newCiphertext));
         response.put("KeyId", service.describeKey(destKeyId, region).getArn());
-        response.put("SourceKeyId", service.decryptToKeyArn(ciphertext, region));
+        response.put("SourceKeyId", source.keyArn());
         return Response.ok(response).build();
     }
 

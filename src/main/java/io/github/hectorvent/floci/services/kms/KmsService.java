@@ -327,11 +327,13 @@ public class KmsService {
 
     // ──────────────────────────── Crypto Ops (Mocks) ────────────────────────────
 
-    // Blob format v2: kms:v2:<keyId>:<nonceHex>:<contextFingerprintHex>:<base64(plaintext)>
-    // - nonce makes Encrypt non-deterministic (matches AWS, which derives a fresh AES-GCM key per call)
-    // - contextFingerprint binds the EncryptionContext to the ciphertext as AAD, so Decrypt fails on mismatch
-    private static final String BLOB_PREFIX = "kms:v2:";
+    // v2 blob: kms:v2:<keyId>:<nonceHex>:<contextFingerprintHex>:<base64(plaintext)>
+    // Nonce makes Encrypt non-deterministic; contextFingerprint binds EncryptionContext as AAD.
+    // Legacy v1 (kms:<keyId>:<base64>) still accepted on Decrypt for persistent-store back-compat.
+    private static final String BLOB_PREFIX_V2 = "kms:v2:";
+    private static final String BLOB_PREFIX_V1 = "kms:";
     private static final int NONCE_BYTES = 8;
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     public byte[] encrypt(String keyId, byte[] plaintext, String region) {
         return encrypt(keyId, plaintext, Map.of(), region);
@@ -341,10 +343,10 @@ public class KmsService {
         KmsKey kmsKey = resolveKey(keyId, region);
 
         byte[] nonceBytes = new byte[NONCE_BYTES];
-        new SecureRandom().nextBytes(nonceBytes);
+        SECURE_RANDOM.nextBytes(nonceBytes);
         String nonceHex = HexFormat.of().formatHex(nonceBytes);
 
-        String blob = BLOB_PREFIX
+        String blob = BLOB_PREFIX_V2
                 + kmsKey.getKeyId() + ":"
                 + nonceHex + ":"
                 + contextFingerprint(encryptionContext) + ":"
@@ -359,7 +361,6 @@ public class KmsService {
     public byte[] decrypt(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
         ParsedBlob parsed = parseBlob(ciphertext);
         if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
-            // AWS binds EncryptionContext as AAD: a mismatch (or missing context) fails decryption.
             throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
         }
         return Base64.getDecoder().decode(parsed.payload);
@@ -373,19 +374,48 @@ public class KmsService {
         }
     }
 
+    /**
+     * Single-pass decrypt + source-key-ARN resolution. {@link #decrypt} and
+     * {@link #decryptToKeyArn} remain independent primitives — neither delegates here.
+     */
+    public DecryptResult decryptAndResolveKey(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
+        ParsedBlob parsed = parseBlob(ciphertext);
+        if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
+            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        }
+        byte[] plaintext = Base64.getDecoder().decode(parsed.payload);
+        String keyArn;
+        try {
+            keyArn = resolveKey(parsed.keyId, region).getArn();
+        } catch (AwsException e) {
+            keyArn = null;
+        }
+        return new DecryptResult(plaintext, keyArn);
+    }
+
+    public record DecryptResult(byte[] plaintext, String keyArn) {}
+
     private record ParsedBlob(String keyId, String nonce, String contextFingerprint, String payload) {}
 
     private static ParsedBlob parseBlob(byte[] ciphertext) {
         String data = new String(ciphertext, StandardCharsets.UTF_8);
-        if (!data.startsWith(BLOB_PREFIX)) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        if (data.startsWith(BLOB_PREFIX_V2)) {
+            // v2: keyId, nonce, contextFingerprint, payload
+            String[] parts = data.substring(BLOB_PREFIX_V2.length()).split(":", 4);
+            if (parts.length < 4) {
+                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            }
+            return new ParsedBlob(parts[0], parts[1], parts[2], parts[3]);
         }
-        // split into the 4 segments after the prefix: keyId, nonce, contextFingerprint, payload
-        String[] parts = data.substring(BLOB_PREFIX.length()).split(":", 4);
-        if (parts.length < 4) {
-            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        if (data.startsWith(BLOB_PREFIX_V1)) {
+            // Legacy v1: kms:<keyId>:<base64>. No nonce, no context binding.
+            // Decrypts only when caller supplies empty/null context (fingerprint "").
+            String[] parts = data.substring(BLOB_PREFIX_V1.length()).split(":", 2);
+            if (parts.length == 2) {
+                return new ParsedBlob(parts[0], "", "", parts[1]);
+            }
         }
-        return new ParsedBlob(parts[0], parts[1], parts[2], parts[3]);
+        throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
     }
 
     /**

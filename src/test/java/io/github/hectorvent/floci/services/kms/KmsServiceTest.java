@@ -16,7 +16,9 @@ import java.security.Security;
 import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.spec.X509EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -205,7 +207,7 @@ class KmsServiceTest {
         byte[] c1 = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
         byte[] c2 = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
 
-        assertFalse(java.util.Arrays.equals(c1, c2),
+        assertFalse(Arrays.equals(c1, c2),
                 "two Encrypt calls with identical inputs must yield different ciphertexts");
         // Both still round-trip
         assertArrayEquals(plaintext, kmsService.decrypt(c1, REGION));
@@ -221,7 +223,7 @@ class KmsServiceTest {
         byte[] c1 = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
         byte[] c2 = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
 
-        assertFalse(java.util.Arrays.equals(c1, c2));
+        assertFalse(Arrays.equals(c1, c2));
     }
 
     @Test
@@ -232,7 +234,7 @@ class KmsServiceTest {
 
         byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
         // Different insertion order, same logical context — must succeed (AWS is order-independent)
-        Map<String, String> reordered = new java.util.LinkedHashMap<>();
+        Map<String, String> reordered = new LinkedHashMap<>();
         reordered.put("purpose", "test");
         reordered.put("tenant", "1");
 
@@ -322,6 +324,48 @@ class KmsServiceTest {
                 "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
 
         assertEquals(key.getArn(), kmsService.decryptToKeyArn(ciphertext, REGION));
+    }
+
+    @Test
+    void reEncryptHonorsSourceContext() {
+        // Simulates the ReEncrypt flow: decrypt under source ctx, encrypt under dest ctx.
+        KmsKey src = kmsService.createKey(null, REGION);
+        KmsKey dst = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        Map<String, String> sourceCtx = Map.of("tenant", "1");
+        Map<String, String> destCtx = Map.of("tenant", "2");
+
+        byte[] srcBlob = kmsService.encrypt(src.getKeyId(), plaintext, sourceCtx, REGION);
+
+        // Wrong source context → fails on the decrypt half of ReEncrypt
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(srcBlob, Map.of("tenant", "wrong"), REGION));
+
+        // Correct source context → ReEncrypt round-trips, output is bound to destCtx
+        byte[] roundtripped = kmsService.decrypt(srcBlob, sourceCtx, REGION);
+        byte[] destBlob = kmsService.encrypt(dst.getKeyId(), roundtripped, destCtx, REGION);
+
+        // New blob requires destCtx, not sourceCtx, to decrypt
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(destBlob, sourceCtx, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(destBlob, destCtx, REGION));
+    }
+
+    @Test
+    void legacyV1BlobDecryptsForBackCompat() {
+        // Persistent stores written before this PR contain kms:<keyId>:<base64> blobs.
+        // Decrypt must still accept them (no context binding on v1).
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        byte[] v1Blob = ("kms:" + key.getKeyId() + ":"
+                + Base64.getEncoder().encodeToString(plaintext)).getBytes(StandardCharsets.UTF_8);
+
+        assertArrayEquals(plaintext, kmsService.decrypt(v1Blob, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(v1Blob, Map.of(), REGION));
+        // v1 carried no context, so any non-empty context must fail (matches AWS semantics)
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(v1Blob, Map.of("tenant", "1"), REGION));
+        assertEquals(key.getArn(), kmsService.decryptToKeyArn(v1Blob, REGION));
     }
 
     @ParameterizedTest
