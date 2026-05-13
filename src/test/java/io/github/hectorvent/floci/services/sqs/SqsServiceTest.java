@@ -571,6 +571,32 @@ class SqsServiceTest {
     }
 
     @Test
+    void fifoQueueGroupUnlocksAfterAllInFlightMessagesDeleted() {
+        Queue queue = sqsService.createQueue("unlock-test.fifo", null);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg1", 0, "g1", "d1");
+        sqsService.sendMessage(queue.getQueueUrl(), "msg2", 0, "g1", "d2");
+        sqsService.sendMessage(queue.getQueueUrl(), "msg3", 0, "g1", "d3");
+
+        // Partial drain: MaxNumberOfMessages=2 returns msg1 + msg2
+        List<Message> first = sqsService.receiveMessage(queue.getQueueUrl(), 2, 30, 0);
+        assertEquals(2, first.size());
+        assertEquals("msg1", first.get(0).getBody());
+        assertEquals("msg2", first.get(1).getBody());
+
+        // Group still locked — msg3 is not returned
+        assertTrue(sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0).isEmpty());
+
+        // Delete both in-flight messages → group unlocks
+        sqsService.deleteMessage(queue.getQueueUrl(), first.get(0).getReceiptHandle());
+        sqsService.deleteMessage(queue.getQueueUrl(), first.get(1).getReceiptHandle());
+
+        // Now msg3 should be available
+        List<Message> third = sqsService.receiveMessage(queue.getQueueUrl(), 10, 30, 0);
+        assertEquals(1, third.size());
+        assertEquals("msg3", third.get(0).getBody());
+    }
+
+    @Test
     void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
         final var sns = mock(SnsService.class);
         final var service = new SqsService(
