@@ -183,11 +183,15 @@ class DynamoDbServiceTest {
         ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":name", attributeValue("S", "Alice"));
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+
         ObjectNode update = mapper.createObjectNode();
         update.put("TableName", usersArn);
         update.set("Key", item("userId", "user-1"));
-        update.put("ConditionExpression", "name = :name");
+        update.put("ConditionExpression", "#n = :name");
         update.put("UpdateExpression", "SET email = :name");
+        update.set("ExpressionAttributeNames", exprNames);
         update.set("ExpressionAttributeValues", exprValues);
 
         ObjectNode transactItem = mapper.createObjectNode();
@@ -573,9 +577,12 @@ class DynamoDbServiceTest {
         exprValues.set(":name", nameVal);
         exprValues.set(":score", scoreVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#n", "name");
+
         service.updateItem("Users", key, null,
-                "SET name = if_not_exists(name, :name), score = if_not_exists(score, :score)",
-                null, exprValues, null);
+                "SET #n = if_not_exists(#n, :name), score = if_not_exists(score, :score)",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored, "item should have been created");
@@ -604,10 +611,13 @@ class DynamoDbServiceTest {
         ObjectNode fallbackVal = mapper.createObjectNode(); fallbackVal.put("S", "fallback");
         exprValues.set(":v", fallbackVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#src", "source");
+
         // target = if_not_exists(source, :v) — source exists, so target should receive source's value
         service.updateItem("Users", key, null,
-                "SET target = if_not_exists(source, :v)",
-                null, exprValues, null);
+                "SET target = if_not_exists(#src, :v)",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -630,9 +640,12 @@ class DynamoDbServiceTest {
         ObjectNode fallbackVal = mapper.createObjectNode(); fallbackVal.put("S", "fallback");
         exprValues.set(":v", fallbackVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#src", "source");
+
         service.updateItem("Users", key, null,
-                "SET target = if_not_exists(source, :v)",
-                null, exprValues, null);
+                "SET target = if_not_exists(#src, :v)",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -659,9 +672,12 @@ class DynamoDbServiceTest {
         incVal.put("N", "1");
         exprValues.set(":inc", incVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
         service.updateItem("Users", key, null,
-                "SET counter = counter + :inc",
-                null, exprValues, null);
+                "SET #cnt = #cnt + :inc",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -686,9 +702,12 @@ class DynamoDbServiceTest {
         decVal.put("N", "3");
         exprValues.set(":dec", decVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
         service.updateItem("Users", key, null,
-                "SET counter = counter - :dec",
-                null, exprValues, null);
+                "SET #cnt = #cnt - :dec",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -709,9 +728,12 @@ class DynamoDbServiceTest {
         exprValues.set(":start", startVal);
         exprValues.set(":inc", incVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
         service.updateItem("Users", key, null,
-                "SET counter = if_not_exists(counter, :start) + :inc",
-                null, exprValues, null);
+                "SET #cnt = if_not_exists(#cnt, :start) + :inc",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -739,9 +761,12 @@ class DynamoDbServiceTest {
         exprValues.set(":start", startVal);
         exprValues.set(":inc", incVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
         service.updateItem("Users", key, null,
-                "SET counter = if_not_exists(counter, :start) + :inc",
-                null, exprValues, null);
+                "SET #cnt = if_not_exists(#cnt, :start) + :inc",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -762,11 +787,14 @@ class DynamoDbServiceTest {
         exprValues.set(":start", startVal);
         exprValues.set(":inc", incVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
         // Three consecutive increments
         for (int i = 0; i < 3; i++) {
             service.updateItem("Users", key, null,
-                    "SET counter = if_not_exists(counter, :start) + :inc",
-                    null, exprValues, null);
+                    "SET #cnt = if_not_exists(#cnt, :start) + :inc",
+                    exprNames, exprValues, null);
         }
 
         JsonNode stored = service.getItem("Users", key);
@@ -833,7 +861,10 @@ class DynamoDbServiceTest {
         ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":r", attributeValue("S", "admin"));
 
-        DynamoDbService.ScanResult result = service.scan("Users", "contains(roles, :r)", null, exprValues, null, null, null);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#r", "roles");
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(#r, :r)", exprNames, exprValues, null, null, null);
         assertEquals(1, result.items().size());
     }
 
@@ -966,9 +997,12 @@ class DynamoDbServiceTest {
         exprValues.set(":e", listAttributeValue());
         exprValues.set(":val", listAttributeValue("a"));
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#items", "items");
+
         service.updateItem("Users", key, null,
-                "SET items = list_append(if_not_exists(items, :e), :val)",
-                null, exprValues, null);
+                "SET #items = list_append(if_not_exists(#items, :e), :val)",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -990,9 +1024,12 @@ class DynamoDbServiceTest {
         exprValues.set(":e", listAttributeValue());
         exprValues.set(":val", listAttributeValue("b"));
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#items", "items");
+
         service.updateItem("Users", key, null,
-                "SET items = list_append(if_not_exists(items, :e), :val)",
-                null, exprValues, null);
+                "SET #items = list_append(if_not_exists(#items, :e), :val)",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertNotNull(stored);
@@ -1025,7 +1062,10 @@ class DynamoDbServiceTest {
         ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":v", attributeValue("N", "10.0"));
 
-        DynamoDbService.ScanResult result = service.scan("Users", "contains(values, :v)", null, exprValues, null, null, null);
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#vals", "values");
+
+        DynamoDbService.ScanResult result = service.scan("Users", "contains(#vals, :v)", exprNames, exprValues, null, null, null);
         assertEquals(1, result.items().size(), "contains() on List with N elements should use type-aware numeric comparison");
     }
 
@@ -1305,16 +1345,18 @@ class DynamoDbServiceTest {
         ObjectNode key1 = item("customerId", "c1", "orderId", "app1");
         ObjectNode exprValues = mapper.createObjectNode();
         exprValues.set(":owner", attributeValue("S", "owner-1"));
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#owner", "owner");
 
         service.updateItem("Orders", key1, null,
-                "SET owner = :owner", null, exprValues, null);
+                "SET #owner = :owner", exprNames, exprValues, null);
 
         ObjectNode key2 = item("customerId", "c1", "orderId", "app2");
         exprValues = mapper.createObjectNode();
         exprValues.set(":owner", attributeValue("S", "owner-2"));
 
         service.updateItem("Orders", key2, null,
-                "SET owner = :owner", null, exprValues, null);
+                "SET #owner = :owner", exprNames, exprValues, null);
 
         DynamoDbService.ScanResult scanResult = service.scan("Orders", null, null, null, null, null, null);
         assertEquals(2, scanResult.items().size(),
@@ -1678,8 +1720,11 @@ class DynamoDbServiceTest {
         values.set(":v1", attributeValue("S", "one"));
         values.set(":v2", attributeValue("S", "two"));
 
+        ObjectNode names = mapper.createObjectNode();
+        names.put("#other", "other");
+
         service.updateItem("Users", userIdKey("u11"), null,
-                "SET prefixSET = :v1, other = :v2", null, values, "ALL_NEW");
+                "SET prefixSET = :v1, #other = :v2", names, values, "ALL_NEW");
 
         JsonNode stored = service.getItem("Users", userIdKey("u11"));
         assertEquals("one", stored.get("prefixSET").get("S").asText());
@@ -2113,9 +2158,12 @@ class DynamoDbServiceTest {
         ObjectNode vNode = mapper.createObjectNode(); vNode.put("N", "3");
         exprValues.set(":v", vNode);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
         service.updateItem("Users", key, null,
-                "SET counter = ((counter - :v))",
-                null, exprValues, null);
+                "SET #cnt = ((#cnt - :v))",
+                exprNames, exprValues, null);
 
         JsonNode stored = service.getItem("Users", key);
         assertEquals("7", stored.get("counter").get("N").asText());

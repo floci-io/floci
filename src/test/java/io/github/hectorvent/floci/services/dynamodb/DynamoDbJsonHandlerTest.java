@@ -123,9 +123,12 @@ class DynamoDbJsonHandlerTest {
         exprValues.set(":start", startVal);
         exprValues.set(":inc", incVal);
 
+        ObjectNode exprNames = mapper.createObjectNode();
+        exprNames.put("#cnt", "counter");
+
         JsonNode request = createRequest("Users", key,
-                "SET counter = if_not_exists(counter, :start) + :inc",
-                null, exprValues, "UPDATED_NEW");
+                "SET #cnt = if_not_exists(#cnt, :start) + :inc",
+                exprNames, exprValues, "UPDATED_NEW");
 
         Response response = handler.handle("UpdateItem", request, "us-east-1");
         assertNotNull(response);

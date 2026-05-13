@@ -128,8 +128,9 @@ class DynamoDbTableArnIntegrationTest {
                             "Update": {
                                 "TableName": "%s",
                                 "Key": {"pk": {"S": "user-1"}},
-                                "ConditionExpression": "name = :expected",
+                                "ConditionExpression": "#n = :expected",
                                 "UpdateExpression": "SET email = :email",
+                                "ExpressionAttributeNames": {"#n": "name"},
                                 "ExpressionAttributeValues": {
                                     ":expected": {"S": "Alice"},
                                     ":email": {"S": "alice@example.com"}

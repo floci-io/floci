@@ -959,7 +959,8 @@ class DynamoDbIntegrationTest {
                 {
                     "TableName": "ListAppendTable",
                     "Key": {"pk": {"S": "k1"}},
-                    "UpdateExpression": "SET items = list_append(items, :val)",
+                    "UpdateExpression": "SET #i = list_append(#i, :val)",
+                    "ExpressionAttributeNames": {"#i": "items"},
                     "ExpressionAttributeValues": {":val": {"L": [{"S": "b"}]}}
                 }
                 """)
@@ -1645,7 +1646,8 @@ given()
                 {
                     "TableName": "%s",
                     "Key": {"GroupKey": {"S": "leader"}, "Id": {"S": "app1"}},
-                    "UpdateExpression": "SET Owner = :1",
+                    "UpdateExpression": "SET #o = :1",
+                    "ExpressionAttributeNames": {"#o": "Owner"},
                     "ExpressionAttributeValues": {":1": {"S": "owner-app1"}}
                 }
                 """.formatted(tableName))
@@ -1659,7 +1661,8 @@ given()
                 {
                     "TableName": "%s",
                     "Key": {"GroupKey": {"S": "leader"}, "Id": {"S": "app2"}},
-                    "UpdateExpression": "SET Owner = :1",
+                    "UpdateExpression": "SET #o = :1",
+                    "ExpressionAttributeNames": {"#o": "Owner"},
                     "ExpressionAttributeValues": {":1": {"S": "owner-app2"}}
                 }
                 """.formatted(tableName))
