@@ -352,6 +352,23 @@ class KmsServiceTest {
     }
 
     @Test
+    void v1BlobWithOverrideIdEqualToV2VersionMarkerCollidesAndFails() {
+        // Documented limitation: a v1 blob with override-id "v2" looks like "kms:v2:<base64>",
+        // which collides with the v2 prefix. Pinned so any change to BLOB_PREFIX_V2 or v2-branch
+        // fall-through behavior fails this test loudly instead of silently changing semantics.
+        KmsKey key = kmsService.createKey(null, "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT", null,
+                Map.of("floci:override-id", "v2"), REGION);
+        byte[] v1BlobWithV2KeyId = ("kms:v2:"
+                + Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8)))
+                .getBytes(StandardCharsets.UTF_8);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.decrypt(v1BlobWithV2KeyId, REGION));
+        assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        assertEquals("v2", key.getKeyId());
+    }
+
+    @Test
     void legacyV1BlobDecryptsForBackCompat() {
         // Persistent stores written before this PR contain kms:<keyId>:<base64> blobs.
         // Decrypt must still accept them (no context binding on v1).
