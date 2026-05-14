@@ -492,7 +492,14 @@ public class PricingService {
                 }
             }
             String resource = "pricing-snapshots/" + relativePath;
-            try (InputStream in = Thread.currentThread().getContextClassLoader().getResourceAsStream(resource)) {
+            // Use the class's own loader rather than the thread's context loader.
+            // In a GraalVM native image the thread context loader can be the
+            // bootstrap loader, which sees no application resources, while the
+            // class's loader sees everything bundled into the image.
+            ClassLoader cl = PricingService.class.getClassLoader();
+            try (InputStream in = cl != null
+                    ? cl.getResourceAsStream(resource)
+                    : ClassLoader.getSystemResourceAsStream(resource)) {
                 if (in == null) {
                     return null;
                 }

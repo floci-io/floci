@@ -20,6 +20,12 @@ quarkus:
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
   native:
+    resources:
+      # The Pricing service reads its bundled snapshot at runtime via
+      # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
+      # cannot detect dynamically-built paths, so the tree is registered
+      # explicitly to ensure GraalVM includes every file in the native image.
+      includes: pricing-snapshots/**
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
