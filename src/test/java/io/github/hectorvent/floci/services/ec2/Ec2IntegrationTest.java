@@ -1,13 +1,17 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import io.quarkus.test.junit.QuarkusTest;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.startsWith;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import io.quarkus.test.junit.QuarkusTest;
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
 
 /**
  * Integration tests for EC2 via the EC2 Query Protocol (form-encoded POST, XML response).
