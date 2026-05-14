@@ -157,6 +157,11 @@ public class S3Service {
     public Bucket createBucket(String bucketName, String region) {
         var existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
+            Bucket bucket = existing.get();
+            if (isDefaultS3Region(bucket.getRegion()) && isDefaultS3Region(region)) {
+                LOG.infov("Bucket already exists in default region, treating CreateBucket as idempotent: {0}", bucketName);
+                return bucket;
+            }
             throw new AwsException("BucketAlreadyOwnedByYou",
                     "Your previous request to create the named bucket succeeded and you already own it.", 409);
         }
@@ -166,6 +171,10 @@ public class S3Service {
         bucketStore.put(bucketName, bucket);
         LOG.infov("Created bucket: {0} in region: {1}", bucketName, region);
         return bucket;
+    }
+
+    private static boolean isDefaultS3Region(String region) {
+        return region == null || region.isBlank() || "us-east-1".equalsIgnoreCase(region);
     }
 
     public void deleteBucket(String bucketName) {

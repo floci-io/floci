@@ -58,9 +58,16 @@ class S3ServiceTest {
     }
 
     @Test
-    void createDuplicateBucketThrows() {
-        s3Service.createBucket("test-bucket", "us-east-1");
-        assertThrows(AwsException.class, () -> s3Service.createBucket("test-bucket", "us-east-1"));
+    void createDuplicateBucketInUsEast1IsIdempotent() {
+        Bucket first = s3Service.createBucket("test-bucket", "us-east-1");
+        Bucket duplicate = s3Service.createBucket("test-bucket", "us-east-1");
+        assertSame(first, duplicate);
+    }
+
+    @Test
+    void createDuplicateBucketOutsideUsEast1Throws() {
+        s3Service.createBucket("eu-bucket", "eu-central-1");
+        assertThrows(AwsException.class, () -> s3Service.createBucket("eu-bucket", "eu-central-1"));
     }
 
     @Test
