@@ -25,6 +25,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class StepFunctionsService {
@@ -367,6 +369,12 @@ public class StepFunctionsService {
     private static final int MAX_DEFINITION_LENGTH = 1_048_576;
     private static final String PARSE_ERROR_MARKER = "INVALID_JSON_DESCRIPTION:";
 
+    // Parse the structured location out of the validator's flat error strings,
+    // which currently encode it as "...field 'X' is only supported... at /States/Y".
+    // AWS's published Diagnostic.location format is "/States/<StateName>/<FieldName>".
+    private static final Pattern FIELD_PATTERN = Pattern.compile("field '([^']+)' is only supported");
+    private static final Pattern LOCATION_SUFFIX_PATTERN = Pattern.compile(" at (/States/\\S+)$");
+
     public ValidationResult validateStateMachineDefinition(String definition, String type,
                                                            String severity, Integer maxResults) {
         if (definition == null || definition.isBlank()) {
@@ -410,7 +418,18 @@ public class StepFunctionsService {
         String code = isParseError ? "INVALID_JSON_DESCRIPTION" : "SCHEMA_VALIDATION_FAILED";
         String message = isParseError
                 ? error.substring(PARSE_ERROR_MARKER.length()).trim() : error;
-        return new Diagnostic("ERROR", code, message, "");
+        String location = "";
+        if (!isParseError) {
+            Matcher locM = LOCATION_SUFFIX_PATTERN.matcher(message);
+            Matcher fieldM = FIELD_PATTERN.matcher(message);
+            if (locM.find() && fieldM.find()) {
+                // Build the structured location and strip the redundant suffix
+                // from the message, matching AWS's wire format.
+                location = locM.group(1) + "/" + fieldM.group(1);
+                message = message.substring(0, locM.start()).trim();
+            }
+        }
+        return new Diagnostic("ERROR", code, message, location);
     }
 
     private void validateDefinition(String definition) {

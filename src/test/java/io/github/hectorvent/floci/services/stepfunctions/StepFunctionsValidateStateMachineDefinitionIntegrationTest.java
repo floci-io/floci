@@ -13,6 +13,7 @@ import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
+import static org.hamcrest.Matchers.nullValue;
 import static org.hamcrest.Matchers.startsWith;
 
 /**
@@ -64,7 +65,9 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("result", equalTo("FAIL"))
                 .body("diagnostics", hasSize(1))
                 .body("diagnostics[0].severity", equalTo("ERROR"))
-                .body("diagnostics[0].code", equalTo("INVALID_JSON_DESCRIPTION"));
+                .body("diagnostics[0].code", equalTo("INVALID_JSON_DESCRIPTION"))
+                // No location for JSON parse errors — there's no state path to point to yet.
+                .body("diagnostics[0].location", nullValue());
     }
 
     @Test
@@ -80,7 +83,8 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("result", equalTo("FAIL"))
                 .body("diagnostics", hasSize(1))
                 .body("diagnostics[0].severity", equalTo("ERROR"))
-                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"));
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].location", equalTo("/States/X/InputPath"));
     }
 
     @Test
