@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
@@ -55,6 +56,11 @@ public class RdsQueryHandler {
                 case "DeleteDBParameterGroup" -> handleDeleteDbParameterGroup(params);
                 case "ModifyDBParameterGroup" -> handleModifyDbParameterGroup(params);
                 case "DescribeDBParameters" -> handleDescribeDbParameters(params);
+                case "CreateDBClusterParameterGroup" -> handleCreateDbClusterParameterGroup(params);
+                case "DescribeDBClusterParameterGroups" -> handleDescribeDbClusterParameterGroups(params);
+                case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params);
+                case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params);
+                case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", AwsNamespaces.RDS, 400);
             };
@@ -344,6 +350,101 @@ public class RdsQueryHandler {
         }
     }
 
+    // ── Cluster Parameter Groups ──────────────────────────────────────────────
+
+    private Response handleCreateDbClusterParameterGroup(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBClusterParameterGroupName");
+        String family = params.getFirst("DBParameterGroupFamily");
+        String description = params.getFirst("Description");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbClusterParameterGroup group = service.createDbClusterParameterGroup(name, family, description);
+            String result = clusterParamGroupXml(group);
+            return Response.ok(AwsQueryResponse.envelope("CreateDBClusterParameterGroup", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeDbClusterParameterGroups(MultivaluedMap<String, String> params) {
+        String filterName = params.getFirst("DBClusterParameterGroupName");
+        try {
+            Collection<DbClusterParameterGroup> result = service.listDbClusterParameterGroups(filterName);
+            XmlBuilder xml = new XmlBuilder().start("DBClusterParameterGroups");
+            for (DbClusterParameterGroup g : result) {
+                xml.start("DBClusterParameterGroup").raw(clusterParamGroupInnerXml(g)).end("DBClusterParameterGroup");
+            }
+            xml.end("DBClusterParameterGroups").start("Marker").end("Marker");
+            return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameterGroups", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDeleteDbClusterParameterGroup(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBClusterParameterGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            service.deleteDbClusterParameterGroup(name);
+            return Response.ok(AwsQueryResponse.envelopeNoResult("DeleteDBClusterParameterGroup", AwsNamespaces.RDS)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyDbClusterParameterGroup(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBClusterParameterGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        Map<String, String> parameters = new HashMap<>();
+        for (int n = 1; ; n++) {
+            String paramName = params.getFirst("Parameters.member." + n + ".ParameterName");
+            if (paramName == null) {
+                break;
+            }
+            String paramValue = params.getFirst("Parameters.member." + n + ".ParameterValue");
+            if (paramValue != null) {
+                parameters.put(paramName, paramValue);
+            }
+        }
+        try {
+            DbClusterParameterGroup group = service.modifyDbClusterParameterGroup(name, parameters);
+            String result = new XmlBuilder()
+                    .elem("DBClusterParameterGroupName", group.getDbClusterParameterGroupName())
+                    .build();
+            return Response.ok(AwsQueryResponse.envelope("ModifyDBClusterParameterGroup", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeDbClusterParameters(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBClusterParameterGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue", "DBClusterParameterGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            DbClusterParameterGroup group = service.getDbClusterParameterGroup(name);
+            XmlBuilder xml = new XmlBuilder().start("Parameters");
+            for (Map.Entry<String, String> entry : group.getParameters().entrySet()) {
+                xml.start("member")
+                   .elem("ParameterName", entry.getKey())
+                   .elem("ParameterValue", entry.getValue())
+                   .elem("IsModifiable", true)
+                   .end("member");
+            }
+            xml.end("Parameters").start("Marker").end("Marker");
+            return Response.ok(AwsQueryResponse.envelope("DescribeDBClusterParameters", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
     // ── XML builders ──────────────────────────────────────────────────────────
 
     private String dbInstanceXml(DbInstance i) {
@@ -467,6 +568,18 @@ public class RdsQueryHandler {
     private String paramGroupInnerXml(DbParameterGroup g) {
         return new XmlBuilder()
                 .elem("DBParameterGroupName", g.getDbParameterGroupName())
+                .elem("DBParameterGroupFamily", g.getDbParameterGroupFamily())
+                .elem("Description", g.getDescription())
+                .build();
+    }
+
+    private String clusterParamGroupXml(DbClusterParameterGroup g) {
+        return new XmlBuilder().start("DBClusterParameterGroup").raw(clusterParamGroupInnerXml(g)).end("DBClusterParameterGroup").build();
+    }
+
+    private String clusterParamGroupInnerXml(DbClusterParameterGroup g) {
+        return new XmlBuilder()
+                .elem("DBClusterParameterGroupName", g.getDbClusterParameterGroupName())
                 .elem("DBParameterGroupFamily", g.getDbParameterGroupFamily())
                 .elem("Description", g.getDescription())
                 .build();
