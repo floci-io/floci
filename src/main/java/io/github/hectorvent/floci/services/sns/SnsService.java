@@ -29,6 +29,7 @@ import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -40,6 +41,7 @@ public class SnsService {
 
     private static final Logger LOG = Logger.getLogger(SnsService.class);
     private static final Duration FIFO_DEDUP_WINDOW = Duration.ofMinutes(5);
+    private static final int MAX_PUBLISH_SIZE = 262_144;
     private static final List<String> PENDING_CONFIRMATION_PROTOCOLS =
             List.of("http", "https", "email", "email-json", "sms");
 
@@ -51,7 +53,8 @@ public class SnsService {
     private final String baseUrl;
     private final ObjectMapper objectMapper;
     private final Map<String, Instant> fifoDeduplicationCache = new ConcurrentHashMap<>();
-
+    private static final HexFormat HEX = HexFormat.of();
+    
     @Inject
     public SnsService(StorageFactory storageFactory, EmulatorConfig config,
                       RegionResolver regionResolver, SqsService sqsService,
@@ -271,6 +274,12 @@ public class SnsService {
     public String publish(String topicArn, String targetArn, String phoneNumber, String message,
                           String subject, Map<String, MessageAttributeValue> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
+        int payloadSize = computePublishSize(message, subject, messageAttributes);
+        if (payloadSize > MAX_PUBLISH_SIZE) {
+            throw new AwsException("InvalidParameterException",
+                    "Invalid parameter: Message too long", 400);
+        }
+
         // Send SMS
         if (phoneNumber != null) {
             return UUID.randomUUID().toString();
@@ -353,6 +362,21 @@ public class SnsService {
         String topicStoreKey = topicKey(region, topicArn);
         Topic topic = topicStore.get(topicStoreKey)
                 .orElseThrow(() -> new AwsException("NotFound", "Topic does not exist.", 404));
+
+        int batchSize = 0;
+        for (Map<String, Object> entry : entries) {
+            String message = (String) entry.get("Message");
+            String subject = (String) entry.get("Subject");
+            @SuppressWarnings("unchecked")
+            Map<String, MessageAttributeValue> attrs =
+                    (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
+            batchSize += computePublishSize(message, subject, attrs);
+        }
+        if (batchSize > MAX_PUBLISH_SIZE) {
+            throw new AwsException("BatchRequestTooLong",
+                    "Batch requests cannot be longer than " + MAX_PUBLISH_SIZE + " bytes.", 400);
+        }
+
         boolean isFifo = "true".equals(topic.getAttributes().get("FifoTopic"));
         List<String[]> successful = new ArrayList<>();
         List<String[]> failed = new ArrayList<>();
@@ -766,15 +790,37 @@ public class SnsService {
         return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
     }
 
+    private static int computePublishSize(String message, String subject,
+                                          Map<String, MessageAttributeValue> attributes) {
+        int total = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
+        if (subject != null) {
+            total += subject.getBytes(StandardCharsets.UTF_8).length;
+        }
+        if (attributes != null) {
+            for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
+                total += entry.getKey().getBytes(StandardCharsets.UTF_8).length;
+                MessageAttributeValue value = entry.getValue();
+                if (value == null) {
+                    continue;
+                }
+                if (value.getDataType() != null) {
+                    total += value.getDataType().getBytes(StandardCharsets.UTF_8).length;
+                }
+                if (value.getBinaryValue() != null) {
+                    total += value.getBinaryValue().length;
+                } else if (value.getStringValue() != null) {
+                    total += value.getStringValue().getBytes(StandardCharsets.UTF_8).length;
+                }
+            }
+        }
+        return total;
+    }
+
     private static String sha256(String message) {
         try {
-            MessageDigest md = MessageDigest.getInstance("SHA-256");
+        	MessageDigest md = MessageDigest.getInstance("SHA-256");
             byte[] hash = md.digest(message.getBytes(StandardCharsets.UTF_8));
-            var sb = new StringBuilder();
-            for (byte b : hash) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
+            return HEX.formatHex(hash);
         } catch (NoSuchAlgorithmException e) {
             return UUID.randomUUID().toString();
         }

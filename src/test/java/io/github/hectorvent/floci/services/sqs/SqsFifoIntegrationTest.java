@@ -111,6 +111,7 @@ class SqsFifoIntegrationTest {
             .formParam("Action", "ReceiveMessage")
             .formParam("QueueUrl", queueUrl)
             .formParam("MaxNumberOfMessages", "10")
+            .formParam("AttributeName.1", "All")
         .when()
             .post("/")
         .then()

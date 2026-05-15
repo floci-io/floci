@@ -243,7 +243,19 @@ public class ResolvedServiceCatalog {
                 descriptor("textract", "textract", config.services().textract().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("Textract."), Set.of("textract"), Set.of(), Set.of())
+                        Set.of("Textract."), Set.of("textract"), Set.of(), Set.of()),
+                descriptor("pricing", "pricing", config.services().pricing().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSPriceListService."), Set.of("pricing", "api.pricing"), Set.of(), Set.of()),
+                descriptor("transcribe", "transcribe", config.services().transcribe().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("Transcribe."), Set.of("transcribe"), Set.of(), Set.of()),
+                descriptor("ce", "ce", config.services().ce().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSInsightsIndexService."), Set.of("ce"), Set.of(), Set.of())
         ));
     }
 

@@ -1,9 +1,12 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.List;
 
 /**
@@ -33,6 +36,7 @@ final class ExpressionEvaluator {
         GE,    // >=
         // Punctuation
         LPAREN, RPAREN, COMMA, DOT,
+        LIST_INDEX,      // [n] — list element access
         // Functions
         FUNCTION,        // attribute_exists, attribute_not_exists, begins_with, contains, size
         // End
@@ -62,6 +66,21 @@ final class ExpressionEvaluator {
             if (c == ')') { tokens.add(new Token(TokenType.RPAREN, ")", i)); i++; continue; }
             if (c == ',') { tokens.add(new Token(TokenType.COMMA, ",", i)); i++; continue; }
             if (c == '.') { tokens.add(new Token(TokenType.DOT, ".", i)); i++; continue; }
+
+            // List index [n]
+            if (c == '[') {
+                int start = i;
+                i++; // skip '['
+                while (i < len && Character.isDigit(expression.charAt(i))) i++;
+                if (i < len && expression.charAt(i) == ']') {
+                    i++; // skip ']'
+                    tokens.add(new Token(TokenType.LIST_INDEX, expression.substring(start, i), start));
+                } else {
+                    throw new IllegalArgumentException(
+                            "Expected ']' after list index at position " + i + " in: " + expression);
+                }
+                continue;
+            }
 
             // Comparators (must check <> and <= before <, >= before >)
             if (c == '<') {
@@ -120,7 +139,8 @@ final class ExpressionEvaluator {
                     case "not" -> tokens.add(new Token(TokenType.NOT, word, start));
                     case "in" -> tokens.add(new Token(TokenType.IN, word, start));
                     case "between" -> tokens.add(new Token(TokenType.BETWEEN, word, start));
-                    case "attribute_exists", "attribute_not_exists", "begins_with", "contains", "size" ->
+                    case "attribute_exists", "attribute_not_exists", "begins_with", "contains", "size",
+                         "attribute_type" ->
                         tokens.add(new Token(TokenType.FUNCTION, word, start));
                     default -> tokens.add(new Token(TokenType.IDENTIFIER, word, start));
                 }
@@ -291,15 +311,23 @@ final class ExpressionEvaluator {
                 return new PlaceholderOperand(advance().value());
             }
 
-            // Path: identifier or #name, possibly dotted
+            // Path: identifier or #name, possibly dotted with nested [n] list indices
             if (current.type() == TokenType.IDENTIFIER || current.type() == TokenType.NAME_REF) {
                 var segments = new ArrayList<String>();
                 segments.add(advance().value());
+                // Consume any immediately-following list indices (no dot needed before [n])
+                while (peek().type() == TokenType.LIST_INDEX) {
+                    segments.add(advance().value());
+                }
+                // Consume .name and .name[n] sequences
                 while (peek().type() == TokenType.DOT) {
                     advance(); // consume dot
                     Token seg = peek();
                     if (seg.type() == TokenType.IDENTIFIER || seg.type() == TokenType.NAME_REF) {
                         segments.add(advance().value());
+                        while (peek().type() == TokenType.LIST_INDEX) {
+                            segments.add(advance().value());
+                        }
                     } else {
                         throw new IllegalArgumentException(
                                 "Expected identifier after '.' at position %d".formatted(seg.pos()));
@@ -354,6 +382,24 @@ final class ExpressionEvaluator {
      */
     static String[] splitKeyCondition(String expression) {
         if (expression == null || expression.isBlank()) return new String[]{expression, null};
+
+        // Strip a single layer of outer parens when they wrap the entire expression,
+        // e.g. "(pk = :pk AND sk = :sk)" → "pk = :pk AND sk = :sk"
+        String stripped = expression.strip();
+        if (stripped.startsWith("(") && stripped.endsWith(")")) {
+            int depth = 0;
+            boolean wrapsAll = true;
+            for (int i = 0; i < stripped.length() - 1; i++) {
+                if (stripped.charAt(i) == '(') depth++;
+                else if (stripped.charAt(i) == ')') {
+                    depth--;
+                    if (depth == 0) { wrapsAll = false; break; }
+                }
+            }
+            if (wrapsAll) {
+                expression = stripped.substring(1, stripped.length() - 1).strip();
+            }
+        }
 
         var tokens = tokenize(expression.trim());
         // Find the top-level AND that separates PK from SK.
@@ -446,32 +492,37 @@ final class ExpressionEvaluator {
 
     private static boolean evaluateComparison(CompareExpr cmp, JsonNode item,
                                                JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        String leftVal = resolveScalar(cmp.left(), item, exprAttrNames, exprAttrValues);
-        String rightVal = resolveScalar(cmp.right(), item, exprAttrNames, exprAttrValues);
+        // For EQ/NE, resolve full attribute values to support set comparison
+        if (cmp.op() == TokenType.EQ || cmp.op() == TokenType.NE) {
+            JsonNode leftNode = resolveAttributeValue(cmp.left(), item, exprAttrNames, exprAttrValues);
+            JsonNode rightNode = resolveAttributeValue(cmp.right(), item, exprAttrNames, exprAttrValues);
+            if (leftNode == null && cmp.op() == TokenType.NE) return true;
+            if (rightNode == null && cmp.op() == TokenType.NE) return true;
+            if (leftNode == null || rightNode == null) return false;
+            boolean equal = attributeValuesEqual(leftNode, rightNode);
+            return cmp.op() == TokenType.EQ ? equal : !equal;
+        }
 
-        // DynamoDB: comparing a missing attribute with <> returns true
-        if (leftVal == null && cmp.op() == TokenType.NE) return true;
-        if (rightVal == null && cmp.op() == TokenType.NE) return true;
-        if (leftVal == null || rightVal == null) return false;
-
+        JsonNode leftNode = resolveAttributeValue(cmp.left(), item, exprAttrNames, exprAttrValues);
+        JsonNode rightNode = resolveAttributeValue(cmp.right(), item, exprAttrNames, exprAttrValues);
+        if (leftNode == null || rightNode == null) return false;
+        int cmpResult = compareAttributeValues(leftNode, rightNode);
         return switch (cmp.op()) {
-            case EQ -> leftVal.equals(rightVal);
-            case NE -> !leftVal.equals(rightVal);
-            case LT -> compareValues(leftVal, rightVal) < 0;
-            case LE -> compareValues(leftVal, rightVal) <= 0;
-            case GT -> compareValues(leftVal, rightVal) > 0;
-            case GE -> compareValues(leftVal, rightVal) >= 0;
+            case LT -> cmpResult < 0;
+            case LE -> cmpResult <= 0;
+            case GT -> cmpResult > 0;
+            case GE -> cmpResult >= 0;
             default -> false;
         };
     }
 
     private static boolean evaluateBetween(BetweenExpr bet, JsonNode item,
                                             JsonNode exprAttrNames, JsonNode exprAttrValues) {
-        String val = resolveScalar(bet.value(), item, exprAttrNames, exprAttrValues);
-        String low = resolveScalar(bet.low(), item, exprAttrNames, exprAttrValues);
-        String high = resolveScalar(bet.high(), item, exprAttrNames, exprAttrValues);
+        JsonNode val = resolveAttributeValue(bet.value(), item, exprAttrNames, exprAttrValues);
+        JsonNode low = resolveAttributeValue(bet.low(), item, exprAttrNames, exprAttrValues);
+        JsonNode high = resolveAttributeValue(bet.high(), item, exprAttrNames, exprAttrValues);
         if (val == null || low == null || high == null) return false;
-        return compareValues(val, low) >= 0 && compareValues(val, high) <= 0;
+        return compareAttributeValues(val, low) >= 0 && compareAttributeValues(val, high) <= 0;
     }
 
     private static boolean evaluateIn(InExpr in, JsonNode item,
@@ -507,14 +558,34 @@ final class ExpressionEvaluator {
                 if (func.args().size() < 2) yield false;
                 String path = resolveAttributePath(func.args().get(0), exprAttrNames);
                 JsonNode attrNode = item != null ? resolveNestedAttribute(item, path) : null;
+                JsonNode prefixNode = resolveAttributeValue(func.args().get(1), item, exprAttrNames, exprAttrValues);
+                if (attrNode == null || prefixNode == null) yield false;
+                if (attrNode.has("B") && prefixNode.has("B")) {
+                    byte[] attrBytes = java.util.Base64.getDecoder().decode(attrNode.get("B").asText());
+                    byte[] prefixBytes = java.util.Base64.getDecoder().decode(prefixNode.get("B").asText());
+                    if (prefixBytes.length > attrBytes.length) yield false;
+                    for (int bi = 0; bi < prefixBytes.length; bi++) {
+                        if (attrBytes[bi] != prefixBytes[bi]) yield false;
+                    }
+                    yield true;
+                }
                 String actual = extractScalarValue(attrNode);
-                String prefix = resolveScalar(func.args().get(1), item, exprAttrNames, exprAttrValues);
+                String prefix = extractScalarValue(prefixNode);
                 yield actual != null && prefix != null && actual.startsWith(prefix);
             }
             case "contains" -> {
                 if (func.args().size() < 2) yield false;
                 yield evaluateContains(func.args().get(0), func.args().get(1),
                         item, exprAttrNames, exprAttrValues);
+            }
+            case "attribute_type" -> {
+                if (func.args().size() < 2) yield false;
+                String attrPath = resolveAttributePath(func.args().get(0), exprAttrNames);
+                JsonNode attrVal = item != null ? resolveNestedAttribute(item, attrPath) : null;
+                JsonNode typeNode = resolveAttributeValue(func.args().get(1), item, exprAttrNames, exprAttrValues);
+                if (attrVal == null || typeNode == null) yield false;
+                String typeCode = typeNode.has("S") ? typeNode.get("S").asText() : typeNode.asText();
+                yield attrVal.has(typeCode);
             }
             default -> false;
         };
@@ -615,7 +686,18 @@ final class ExpressionEvaluator {
                 String resolvedPath = resolvePathString(path, exprAttrNames);
                 yield item != null ? resolveNestedAttribute(item, resolvedPath) : null;
             }
-            case FunctionOperand _ -> null;
+            case FunctionOperand func -> {
+                if ("size".equalsIgnoreCase(func.functionName()) && !func.args().isEmpty()) {
+                    String path = resolveAttributePath(func.args().getFirst(), exprAttrNames);
+                    JsonNode attrNode = item != null ? resolveNestedAttribute(item, path) : null;
+                    if (attrNode != null) {
+                        ObjectNode numNode = JsonNodeFactory.instance.objectNode();
+                        numNode.put("N", String.valueOf(computeSize(attrNode)));
+                        yield numNode;
+                    }
+                }
+                yield null;
+            }
         };
     }
 
@@ -631,14 +713,18 @@ final class ExpressionEvaluator {
     private static String resolvePathString(PathOperand path, JsonNode exprAttrNames) {
         var sb = new StringBuilder();
         for (int i = 0; i < path.segments().size(); i++) {
-            if (i > 0) sb.append(".");
             String segment = path.segments().get(i);
-            String resolved = resolveAttributeName(segment, exprAttrNames);
-            // If the resolved name contains dots, escape them so resolveNestedAttribute treats it as one key
-            if (segment.startsWith("#") && resolved != null) {
-                resolved = resolved.replace(".", DOT_ESCAPE);
+            if (segment.startsWith("[")) {
+                // List index: append directly without preceding dot
+                sb.append(segment);
+            } else {
+                if (i > 0) sb.append(".");
+                String resolved = resolveAttributeName(segment, exprAttrNames);
+                if (segment.startsWith("#") && resolved != null) {
+                    resolved = resolved.replace(".", DOT_ESCAPE);
+                }
+                sb.append(resolved);
             }
-            sb.append(resolved);
         }
         return sb.toString();
     }
@@ -664,13 +750,43 @@ final class ExpressionEvaluator {
         return attrValue.asText();
     }
 
+    // Tokenizes a resolved path string (e.g. "a.b[0].c") into segments.
+    // Each segment is either a plain attribute name or a "[n]" list index string.
+    private static List<String> parsePathSegments(String path) {
+        var segs = new ArrayList<String>();
+        for (String dotPart : path.split("\\.")) {
+            dotPart = dotPart.replace(DOT_ESCAPE, ".");
+            int brk = dotPart.indexOf('[');
+            if (brk < 0) {
+                if (!dotPart.isEmpty()) segs.add(dotPart);
+            } else {
+                if (brk > 0) segs.add(dotPart.substring(0, brk));
+                String rest = dotPart.substring(brk);
+                int p = 0;
+                while (p < rest.length() && rest.charAt(p) == '[') {
+                    int close = rest.indexOf(']', p);
+                    if (close < 0) break;
+                    segs.add(rest.substring(p, close + 1)); // "[n]"
+                    p = close + 1;
+                }
+            }
+        }
+        return segs;
+    }
+
     private static JsonNode resolveNestedAttribute(JsonNode item, String path) {
-        String[] segments = path.split("\\.");
+        List<String> segments = parsePathSegments(path);
         JsonNode current = item;
-        for (int i = 0; i < segments.length; i++) {
+        for (int i = 0; i < segments.size(); i++) {
             if (current == null) return null;
-            String segment = segments[i].replace(DOT_ESCAPE, ".");
-            if (i == 0) {
+            String segment = segments.get(i);
+            if (segment.matches("\\[\\d+\\]")) {
+                // List index navigation
+                int idx = Integer.parseInt(segment.substring(1, segment.length() - 1));
+                JsonNode listNode = current.has("L") ? current.get("L") : (current.isArray() ? current : null);
+                if (listNode == null || !listNode.isArray() || idx >= listNode.size()) return null;
+                current = listNode.get(idx);
+            } else if (i == 0) {
                 current = current.get(segment);
             } else {
                 if (current.has("M")) {
@@ -721,6 +837,36 @@ final class ExpressionEvaluator {
             }
             return true;
         }
+        // Set types: SS, NS, BS — order-independent comparison
+        if (a.has("SS") && b.has("SS")) {
+            JsonNode aArr = a.get("SS"), bArr = b.get("SS");
+            if (aArr.size() != bArr.size()) return false;
+            var aSet = new java.util.HashSet<String>();
+            aArr.forEach(e -> aSet.add(e.asText()));
+            for (JsonNode e : bArr) { if (!aSet.contains(e.asText())) return false; }
+            return true;
+        }
+        if (a.has("SS") || b.has("SS")) return false;
+        if (a.has("BS") && b.has("BS")) {
+            JsonNode aArr = a.get("BS"), bArr = b.get("BS");
+            if (aArr.size() != bArr.size()) return false;
+            var aSet = new java.util.HashSet<String>();
+            aArr.forEach(e -> aSet.add(e.asText()));
+            for (JsonNode e : bArr) { if (!aSet.contains(e.asText())) return false; }
+            return true;
+        }
+        if (a.has("BS") || b.has("BS")) return false;
+        if (a.has("NS") && b.has("NS")) {
+            JsonNode aArr = a.get("NS"), bArr = b.get("NS");
+            if (aArr.size() != bArr.size()) return false;
+            var aSet = new java.util.HashSet<BigDecimal>();
+            try {
+                aArr.forEach(e -> aSet.add(new BigDecimal(e.asText())));
+                for (JsonNode e : bArr) { if (!aSet.contains(new BigDecimal(e.asText()))) return false; }
+            } catch (NumberFormatException ex) { return false; }
+            return true;
+        }
+        if (a.has("NS") || b.has("NS")) return false;
         return false;
     }
 
@@ -730,6 +876,32 @@ final class ExpressionEvaluator {
         } catch (NumberFormatException e) {
             return a.compareTo(b);
         }
+    }
+
+    static int compareAttributeValues(JsonNode a, JsonNode b) {
+        if (a.has("N") && b.has("N")) {
+            try {
+                return new BigDecimal(a.get("N").asText())
+                        .compareTo(new BigDecimal(b.get("N").asText()));
+            } catch (NumberFormatException e) {
+                return a.get("N").asText().compareTo(b.get("N").asText());
+            }
+        }
+        if (a.has("B") && b.has("B")) {
+            byte[] aBytes = Base64.getDecoder().decode(a.get("B").asText());
+            byte[] bBytes = Base64.getDecoder().decode(b.get("B").asText());
+            int minLen = Math.min(aBytes.length, bBytes.length);
+            for (int i = 0; i < minLen; i++) {
+                int diff = (aBytes[i] & 0xFF) - (bBytes[i] & 0xFF);
+                if (diff != 0) return diff;
+            }
+            return Integer.compare(aBytes.length, bBytes.length);
+        }
+        String aStr = a.has("S") ? a.get("S").asText() : extractScalarValue(a);
+        String bStr = b.has("S") ? b.get("S").asText() : extractScalarValue(b);
+        if (aStr == null) aStr = "";
+        if (bStr == null) bStr = "";
+        return aStr.compareTo(bStr);
     }
 
     private static int computeSize(JsonNode attrNode) {

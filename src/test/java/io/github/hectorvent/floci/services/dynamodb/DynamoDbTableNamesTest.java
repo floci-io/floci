@@ -41,7 +41,7 @@ class DynamoDbTableNamesTest {
                 DynamoDbTableNames.resolveWithRegion(
                         "arn:aws:dynamodb:eu-west-1:000000000000:table/Orders",
                         "us-east-1"));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -62,7 +62,7 @@ class DynamoDbTableNamesTest {
     })
     void resolveRejectsMalformedInputs(String input) {
         AwsException ex = assertThrows(AwsException.class, () -> DynamoDbTableNames.resolve(input));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -85,7 +85,7 @@ class DynamoDbTableNamesTest {
     })
     void requireShortNameRejectsArnInput(String arn) {
         AwsException ex = assertThrows(AwsException.class, () -> DynamoDbTableNames.requireShortName(arn));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 
@@ -93,7 +93,7 @@ class DynamoDbTableNamesTest {
     @ValueSource(strings = {"", " ", "ab", "name with spaces"})
     void requireShortNameRejectsMalformedInput(String input) {
         AwsException ex = assertThrows(AwsException.class, () -> DynamoDbTableNames.requireShortName(input));
-        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertEquals("ValidationException", ex.getErrorCode());
         assertEquals(400, ex.getHttpStatus());
     }
 

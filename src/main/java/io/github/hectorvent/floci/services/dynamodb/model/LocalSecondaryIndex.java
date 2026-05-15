@@ -18,17 +18,27 @@ public class LocalSecondaryIndex {
     private List<KeySchemaElement> keySchema;
     private String indexArn;
     private String projectionType;
+    private List<String> nonKeyAttributes;
     private long indexSizeBytes;
     private long itemCount;
 
-    public LocalSecondaryIndex() {}
+    public LocalSecondaryIndex() {
+        this.nonKeyAttributes = new java.util.ArrayList<>();
+    }
 
     public LocalSecondaryIndex(String indexName, List<KeySchemaElement> keySchema,
                                 String indexArn, String projectionType) {
+        this(indexName, keySchema, indexArn, projectionType, null);
+    }
+
+    public LocalSecondaryIndex(String indexName, List<KeySchemaElement> keySchema,
+                                String indexArn, String projectionType, List<String> nonKeyAttributes) {
         this.indexName = indexName;
         this.keySchema = keySchema;
         this.indexArn = indexArn;
         this.projectionType = projectionType != null ? projectionType : "ALL";
+        this.nonKeyAttributes = "INCLUDE".equals(this.projectionType) && nonKeyAttributes != null
+                ? nonKeyAttributes : new java.util.ArrayList<>();
     }
 
     public String getIndexName() { return indexName; }
@@ -42,6 +52,9 @@ public class LocalSecondaryIndex {
 
     public String getProjectionType() { return projectionType; }
     public void setProjectionType(String projectionType) { this.projectionType = projectionType; }
+
+    public List<String> getNonKeyAttributes() { return nonKeyAttributes; }
+    public void setNonKeyAttributes(List<String> nonKeyAttributes) { this.nonKeyAttributes = nonKeyAttributes; }
 
     public long getIndexSizeBytes() { return indexSizeBytes; }
     public void setIndexSizeBytes(long indexSizeBytes) { this.indexSizeBytes = indexSizeBytes; }

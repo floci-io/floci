@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
+import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -54,6 +55,7 @@ public class SesService {
     private final StorageBackend<String, Boolean> accountSettingsStore;
     private final StorageBackend<String, EmailTemplate> templateStore;
     private final StorageBackend<String, ConfigurationSet> configSetStore;
+    private final StorageBackend<String, SuppressedDestination> suppressionStore;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
 
@@ -69,6 +71,8 @@ public class SesService {
                 new TypeReference<Map<String, EmailTemplate>>() {});
         this.configSetStore = storageFactory.create("ses", "ses-config-sets.json",
                 new TypeReference<Map<String, ConfigurationSet>>() {});
+        this.suppressionStore = storageFactory.create("ses", "ses-suppression.json",
+                new TypeReference<Map<String, SuppressedDestination>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
     }
@@ -78,6 +82,7 @@ public class SesService {
                StorageBackend<String, Boolean> accountSettingsStore,
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
+               StorageBackend<String, SuppressedDestination> suppressionStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper) {
         this.identityStore = identityStore;
@@ -85,6 +90,7 @@ public class SesService {
         this.accountSettingsStore = accountSettingsStore;
         this.templateStore = templateStore;
         this.configSetStore = configSetStore;
+        this.suppressionStore = suppressionStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
     }
@@ -687,6 +693,87 @@ public class SesService {
             throw new AwsException("BadRequestException", "Invalid ARN: " + arn, 400);
         }
         return new ResourceRef(parsed.region(), resource.substring(0, slash), resource.substring(slash + 1));
+    }
+
+    // ──────────────────────────── Suppression list ────────────────────────────
+
+    public void putSuppressedDestination(String region, String emailAddress, String reason) {
+        String normalized = normalizeSuppressionEmail(emailAddress);
+        validateSuppressionReason(reason, "reason", false);
+        String key = suppressionKey(region, normalized);
+        SuppressedDestination existing = suppressionStore.get(key).orElse(null);
+        SuppressedDestination entry = existing != null ? existing : new SuppressedDestination(normalized, reason);
+        entry.setReason(reason);
+        entry.setLastUpdateTime(Instant.now());
+        suppressionStore.put(key, entry);
+        LOG.infov("Suppressed destination {0} in region {1} (reason={2})", normalized, region, reason);
+    }
+
+    public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
+        String normalized = normalizeSuppressionEmail(emailAddress);
+        return suppressionStore.get(suppressionKey(region, normalized))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Email address " + normalized + " does not exist on your suppression list.",
+                        404));
+    }
+
+    public void deleteSuppressedDestination(String region, String emailAddress) {
+        String normalized = normalizeSuppressionEmail(emailAddress);
+        String key = suppressionKey(region, normalized);
+        if (suppressionStore.get(key).isEmpty()) {
+            throw new AwsException("NotFoundException",
+                    "Email address " + normalized + " does not exist on your suppression list.",
+                    404);
+        }
+        suppressionStore.delete(key);
+        LOG.infov("Removed suppression entry for {0} in region {1}", normalized, region);
+    }
+
+    public List<SuppressedDestination> listSuppressedDestinations(String region, List<String> reasonFilters) {
+        Set<String> filters = new HashSet<>();
+        if (reasonFilters != null) {
+            for (String r : reasonFilters) {
+                if (r != null && !r.isBlank()) {
+                    validateSuppressionReason(r, "reasons", true);
+                    filters.add(r);
+                }
+            }
+        }
+        String prefix = "suppression::" + region + "::";
+        List<SuppressedDestination> all = new ArrayList<>(suppressionStore.scan(k -> k.startsWith(prefix)));
+        all.sort(Comparator.comparing(SuppressedDestination::getLastUpdateTime,
+                        Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(SuppressedDestination::getEmailAddress,
+                        Comparator.nullsLast(Comparator.naturalOrder())));
+        if (filters.isEmpty()) {
+            return all;
+        }
+        return all.stream()
+                .filter(s -> filters.contains(s.getReason()))
+                .toList();
+    }
+
+    private static String suppressionKey(String region, String emailAddress) {
+        return "suppression::" + region + "::" + emailAddress;
+    }
+
+    private static String normalizeSuppressionEmail(String emailAddress) {
+        if (emailAddress == null || emailAddress.isBlank()) {
+            throw new AwsException("BadRequestException", "EmailAddress is required.", 400);
+        }
+        // AWS trims leading/trailing whitespace from EmailAddress before storing.
+        return emailAddress.trim();
+    }
+
+    private static void validateSuppressionReason(String reason, String fieldName, boolean nested) {
+        if (reason == null || (!"BOUNCE".equals(reason) && !"COMPLAINT".equals(reason))) {
+            String constraint = nested
+                    ? "Member must satisfy constraint: [Member must satisfy enum value set: [BOUNCE, COMPLAINT]]"
+                    : "Member must satisfy enum value set: [BOUNCE, COMPLAINT]";
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at '" + fieldName + "' failed to satisfy constraint: "
+                            + constraint, 400);
+        }
     }
 
     static void validateTag(Tag tag) {

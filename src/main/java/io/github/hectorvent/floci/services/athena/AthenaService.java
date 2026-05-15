@@ -1,14 +1,13 @@
 package io.github.hectorvent.floci.services.athena;
 
 import com.fasterxml.jackson.core.type.TypeReference;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
-import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.CsvParser;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.athena.model.*;
+import io.github.hectorvent.floci.services.floci.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Table;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -21,10 +20,6 @@ import org.jboss.logging.Logger;
 import java.io.BufferedReader;
 import java.io.ByteArrayInputStream;
 import java.io.InputStreamReader;
-import java.net.URI;
-import java.net.http.HttpClient;
-import java.net.http.HttpRequest;
-import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.*;
@@ -36,37 +31,26 @@ public class AthenaService {
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
 
     private final StorageBackend<String, QueryExecution> queryStore;
-    private final FlociDuckManager duckManager;
+    private final FlociDuckClient duckClient;
     private final GlueService glueService;
     private final S3Service s3Service;
     private final EmulatorConfig config;
     private final Vertx vertx;
-    private final ObjectMapper mapper;
-    private final HttpClient httpClient;
-    private final DockerHostResolver dockerHostResolver;
-    private final EmbeddedDnsServer embeddedDnsServer;
 
     @Inject
     public AthenaService(StorageFactory storageFactory,
-                         FlociDuckManager duckManager,
+                         FlociDuckClient duckClient,
                          GlueService glueService,
                          S3Service s3Service,
                          EmulatorConfig config,
-                         Vertx vertx,
-                         ObjectMapper mapper,
-                         DockerHostResolver dockerHostResolver,
-                         EmbeddedDnsServer embeddedDnsServer) {
+                         Vertx vertx) {
         this.queryStore = storageFactory.create("athena", "queries.json",
-                new TypeReference<Map<String, QueryExecution>>() {});
-        this.duckManager = duckManager;
+                new TypeReference<>() {});
+        this.duckClient = duckClient;
         this.glueService = glueService;
         this.s3Service = s3Service;
         this.config = config;
         this.vertx = vertx;
-        this.mapper = mapper;
-        this.httpClient = HttpClient.newHttpClient();
-        this.dockerHostResolver = dockerHostResolver;
-        this.embeddedDnsServer = embeddedDnsServer;
     }
 
     public String startQueryExecution(String query,
@@ -95,9 +79,9 @@ public class AthenaService {
         // Submit async — caller gets the ID immediately while execution runs in background
         String finalDatabase = database;
         vertx.executeBlocking(() -> {
-            String duckUrl = duckManager.ensureReady();
             String setupDdl = buildGlueDdl(finalDatabase);
-            callDuck(duckUrl, query, setupDdl, outputLocation, id);
+            ensureOutputBucket(outputLocation);
+            duckClient.execute(query, setupDdl, outputLocation + "results.csv");
             return null;
         }).onSuccess(v -> {
             execution.getStatus().setState(QueryExecutionState.SUCCEEDED);
@@ -197,56 +181,12 @@ public class AthenaService {
         return base.endsWith("/") ? base + queryId + "/" : base + "/" + queryId + "/";
     }
 
-    private void callDuck(String duckUrl, String sql, String setupDdl, String outputS3Path, String queryId) {
-        try {
-            // Ensure the output bucket exists
-            String bucket = extractBucket(outputS3Path);
-            if (bucket != null) {
-                try {
-                    s3Service.createBucket(bucket, config.defaultRegion());
-                } catch (Exception ignored) {}
-            }
-
-            // Floci endpoint reachable from inside the floci-duck container.
-            // When the embedded DNS server is active, floci-duck containers already have it wired as their
-            // resolver and can reach Floci by the configured hostname (or the default DNS suffix).
-            // Fall back to the raw Docker host IP when the embedded DNS is not running (local dev mode).
-            int flociPort = URI.create(config.baseUrl()).getPort();
-            String flociHostname = embeddedDnsServer.getServerIp().isPresent()
-                    ? config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
-                    : dockerHostResolver.resolve();
-            String flociEndpoint = "http://" + flociHostname + ":" + flociPort;
-
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("sql", sql);
-            if (setupDdl != null && !setupDdl.isBlank()) {
-                body.put("setup_sql", setupDdl);
-            }
-            body.put("s3_endpoint", flociEndpoint);
-            body.put("s3_region", config.defaultRegion());
-            body.put("s3_access_key", "test");
-            body.put("s3_secret_key", "test");
-            body.put("s3_url_style", "path");
-            body.put("output_s3_path", outputS3Path + "results.csv");
-
-            String json = mapper.writeValueAsString(body);
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(duckUrl + "/execute"))
-                    .header("Content-Type", "application/json")
-                    .POST(HttpRequest.BodyPublishers.ofString(json))
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() != 200) {
-                throw new RuntimeException("floci-duck returned HTTP " + response.statusCode()
-                        + ": " + response.body());
-            }
-        } catch (RuntimeException e) {
-            throw e;
-        } catch (Exception e) {
-            throw new RuntimeException("Failed to call floci-duck for query " + queryId + ": " + e.getMessage(), e);
+    private void ensureOutputBucket(String s3Path) {
+        String bucket = extractBucket(s3Path);
+        if (bucket != null) {
+            try {
+                s3Service.createBucket(bucket, config.defaultRegion());
+            } catch (Exception ignored) {}
         }
     }
 
@@ -287,7 +227,7 @@ public class AthenaService {
                 return emptyResultSet();
             }
 
-            String[] headers = splitCsv(headerLine);
+            String[] headers = CsvParser.parseLine(headerLine).toArray(String[]::new);
             for (String h : headers) {
                 columns.add(new ResultSet.ColumnInfo(h, "varchar"));
             }
@@ -297,7 +237,7 @@ public class AthenaService {
 
             String line;
             while ((line = reader.readLine()) != null) {
-                rows.add(toRow(splitCsv(line)));
+                rows.add(toRow(CsvParser.parseLine(line).toArray(String[]::new)));
             }
         } catch (Exception e) {
             LOG.debugv("CSV parse error: {0}", e.getMessage());
@@ -312,31 +252,6 @@ public class AthenaService {
             data.add(new ResultSet.Datum(v));
         }
         return new ResultSet.Row(data);
-    }
-
-    /** Minimal CSV split — handles quoted fields. */
-    private String[] splitCsv(String line) {
-        List<String> fields = new ArrayList<>();
-        StringBuilder sb = new StringBuilder();
-        boolean inQuotes = false;
-        for (int i = 0; i < line.length(); i++) {
-            char c = line.charAt(i);
-            if (c == '"') {
-                if (inQuotes && i + 1 < line.length() && line.charAt(i + 1) == '"') {
-                    sb.append('"');
-                    i++;
-                } else {
-                    inQuotes = !inQuotes;
-                }
-            } else if (c == ',' && !inQuotes) {
-                fields.add(sb.toString());
-                sb.setLength(0);
-            } else {
-                sb.append(c);
-            }
-        }
-        fields.add(sb.toString());
-        return fields.toArray(new String[0]);
     }
 
     private String extractBucket(String s3Path) {

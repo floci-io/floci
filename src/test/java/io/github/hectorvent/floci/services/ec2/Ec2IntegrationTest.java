@@ -1,13 +1,17 @@
 package io.github.hectorvent.floci.services.ec2;
 
-import io.quarkus.test.junit.QuarkusTest;
+import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.greaterThan;
+import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.startsWith;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import io.quarkus.test.junit.QuarkusTest;
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.*;
 
 /**
  * Integration tests for EC2 via the EC2 Query Protocol (form-encoded POST, XML response).
@@ -1116,5 +1120,127 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(400)
             .body("Response.Errors.Error.Code", equalTo("UnsupportedOperation"));
+    }
+
+    // =========================================================================
+    // Wildcard filtering
+    // =========================================================================
+
+    @Test
+    @Order(300)
+    void describeVpcsWithWildcardTagFilter() {
+        // Create a VPC with a specific tag value
+        String vpcWithWildcard = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.1.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        // Tag it with BEGINANDEND
+        given()
+            .formParam("Action", "CreateTags")
+            .formParam("ResourceId.1", vpcWithWildcard)
+            .formParam("Tag.1.Key", "Name")
+            .formParam("Tag.1.Value", "BEGINANDEND")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Test exact match still works
+        given()
+            .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "tag:Name")
+            .formParam("Filter.1.Value.1", "BEGINANDEND")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcsResponse.vpcSet.item.vpcId", equalTo(vpcWithWildcard));
+
+        // Test wildcard with asterisk: BEGIN*END should match BEGINANDEND
+        given()
+            .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "tag:Name")
+            .formParam("Filter.1.Value.1", "BEGIN*END")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcsResponse.vpcSet.item.vpcId", equalTo(vpcWithWildcard));
+
+        // Test wildcard with middle asterisk: *AND* should match BEGINANDEND
+        given()
+            .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "tag:Name")
+            .formParam("Filter.1.Value.1", "*AND*")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcsResponse.vpcSet.item.vpcId", equalTo(vpcWithWildcard));
+
+        // Cleanup
+        given()
+            .formParam("Action", "DeleteVpc")
+            .formParam("VpcId", vpcWithWildcard)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/");
+    }
+
+    @Test
+    @Order(301)
+    void describeVpcsWithWildcardQuestionMark() {
+        // Create a VPC with a specific tag value
+        String vpcId1 = given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", "10.2.0.0/16")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+
+        // Tag it with "test1"
+        given()
+            .formParam("Action", "CreateTags")
+            .formParam("ResourceId.1", vpcId1)
+            .formParam("Tag.1.Key", "Name")
+            .formParam("Tag.1.Value", "test1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Test wildcard with question mark: test? should match test1
+        given()
+            .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "tag:Name")
+            .formParam("Filter.1.Value.1", "test?")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcsResponse.vpcSet.item.vpcId", equalTo(vpcId1));
+
+        // Cleanup
+        given()
+            .formParam("Action", "DeleteVpc")
+            .formParam("VpcId", vpcId1)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/");
     }
 }

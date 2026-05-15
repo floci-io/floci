@@ -335,7 +335,7 @@ class DynamoDbConcurrencyIntegrationTest {
             ObjectNode tx2 = buildUpdateTx(pkB, exprValues);
 
             try {
-                service.transactWriteItems(List.of(tx1, tx2), "us-east-1");
+                service.transactWriteItems(List.of(tx1, tx2), "us-east-1", null, null);
                 committed.incrementAndGet();
             } catch (TransactionCanceledException e) {
                 cancelled.incrementAndGet();
@@ -392,7 +392,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
             ObjectNode tx1 = buildUpdateTx(keyA, exprValues);
             ObjectNode tx2 = buildUpdateTx(keyB, exprValues);
-            service.transactWriteItems(List.of(tx1, tx2), "us-east-1");
+            service.transactWriteItems(List.of(tx1, tx2), "us-east-1", null, null);
         });
 
         assertTrue(errors.isEmpty(),

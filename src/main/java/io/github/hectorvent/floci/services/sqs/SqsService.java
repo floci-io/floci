@@ -11,6 +11,10 @@ import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.Queue;
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -35,6 +39,7 @@ public class SqsService {
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
     private final AtomicLong sequenceCounter = new AtomicLong(0);
+    private static final HexFormat HEX = HexFormat.of();
 
     private record RedrivePolicy(int maxReceiveCount, String deadLetterTargetArn) {
     }
@@ -354,9 +359,12 @@ public class SqsService {
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
 
-        if (body.length() > maxMessageSize) {
+        int queueMaxMessageSize = parseMaxMessageSize(queue.getAttributes().get("MaximumMessageSize"));
+        int totalSize = computeMessageSize(body, messageAttributes);
+        if (totalSize > queueMaxMessageSize) {
             throw new AwsException("InvalidParameterValue",
-                    "Message body must be shorter than " + maxMessageSize + " bytes.", 400);
+                    "One or more parameters are invalid. " +
+                            "Reason: Message must be shorter than " + queueMaxMessageSize + " bytes.", 400);
         }
 
         int queueDelaySeconds = parseDelaySecondsAttribute(queue.getAttributes().get("DelaySeconds"));
@@ -399,10 +407,22 @@ public class SqsService {
             Instant previous = dedupMap.putIfAbsent(dedupId, expiry);
             persistDedup(storageKey);
             if (previous != null && Instant.now().isBefore(previous)) {
-                // Duplicate within window — return the original message idempotently
+                // Duplicate within window — keep the original messageId and
+                // sequenceNumber but compute response MD5s from this request's
+                // body and attributes, otherwise SDK clients (which validate
+                // MD5 against what they sent) reject the response.
                 Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(dedupId);
                 if (existing != null) {
-                    return existing;
+                    Message response = new Message(body);
+                    response.setMessageId(existing.getMessageId());
+                    response.setMessageGroupId(messageGroupId);
+                    response.setMessageDeduplicationId(dedupId);
+                    response.setSequenceNumber(existing.getSequenceNumber());
+                    if (messageAttributes != null && !messageAttributes.isEmpty()) {
+                        response.getMessageAttributes().putAll(messageAttributes);
+                        response.updateMd5OfMessageAttributes();
+                    }
+                    return response;
                 }
             }
 
@@ -445,6 +465,41 @@ public class SqsService {
         return message;
     }
 
+    private int parseMaxMessageSize(String value) {
+        if (value == null || value.isEmpty()) {
+            return maxMessageSize;
+        }
+        try {
+            return Math.min(1048576, Math.max(1024, Integer.parseInt(value)));
+        } catch (NumberFormatException ignored) {
+            return maxMessageSize;
+        }
+    }
+
+    /**
+     * Total wire-level message size, in bytes, matching AWS SQS accounting:
+     * UTF-8 body bytes + per-attribute (name UTF-8 + type UTF-8 + value bytes).
+     */
+    private static int computeMessageSize(String body, Map<String, MessageAttributeValue> attributes) {
+        int total = body == null ? 0 : body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+        if (attributes == null || attributes.isEmpty()) {
+            return total;
+        }
+        for (Map.Entry<String, MessageAttributeValue> entry : attributes.entrySet()) {
+            total += entry.getKey().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            MessageAttributeValue value = entry.getValue();
+            if (value.getDataType() != null) {
+                total += value.getDataType().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            }
+            if (value.getBinaryValue() != null) {
+                total += value.getBinaryValue().length;
+            } else if (value.getStringValue() != null) {
+                total += value.getStringValue().getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
+            }
+        }
+        return total;
+    }
+
     /**
      * Parse the queue-level DelaySeconds attribute. Returns 0 when the
      * attribute is null, empty, non-numeric, or negative -- the queue falls
@@ -483,11 +538,7 @@ public class SqsService {
         try {
             var md = java.security.MessageDigest.getInstance("MD5");
             byte[] digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8));
-            var sb = new StringBuilder();
-            for (byte b : digest) {
-                sb.append(String.format("%02x", b));
-            }
-            return sb.toString();
+            return HEX.formatHex(digest);
         } catch (java.security.NoSuchAlgorithmException e) {
             return "";
         }
@@ -790,12 +841,150 @@ public class SqsService {
         LOG.infov("Untagged queue: {0}", queueUrl);
     }
 
+    private static final ObjectMapper POLICY_MAPPER = new ObjectMapper();
+
+    public void addPermission(String queueUrl, String label, List<String> awsAccountIds,
+                              List<String> actionNames, String region) {
+        if (label == null || label.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Value for parameter Label is invalid.", 400);
+        }
+        if (awsAccountIds == null || awsAccountIds.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter AWSAccountId.", 400);
+        }
+        if (actionNames == null || actionNames.isEmpty()) {
+            throw new AwsException("MissingParameter",
+                    "The request must contain the parameter ActionName.", 400);
+        }
+
+        String storageKey = regionKey(region, queueUrl);
+        Queue queue = queueStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
+
+        ObjectNode policy = parsePolicyOrEmpty(queue.getAttributes().get("Policy"));
+        ArrayNode statements = ensureStatementArray(policy);
+
+        for (JsonNode stmt : statements) {
+            if (label.equals(stmt.path("Sid").asText(null))) {
+                throw new AwsException("InvalidParameterValue",
+                        "Value " + label + " for parameter Label is invalid. " +
+                                "Reason: Already exists.", 400);
+            }
+        }
+
+        ObjectNode statement = POLICY_MAPPER.createObjectNode();
+        statement.put("Sid", label);
+        statement.put("Effect", "Allow");
+        ObjectNode principal = statement.putObject("Principal");
+        ArrayNode awsArns = principal.putArray("AWS");
+        for (String accountId : awsAccountIds) {
+            awsArns.add("arn:aws:iam::" + accountId + ":root");
+        }
+        ArrayNode actions = statement.putArray("Action");
+        for (String action : actionNames) {
+            actions.add("SQS:" + action);
+        }
+        statement.put("Resource", regionResolver.buildArn("sqs", region, queue.getQueueName()));
+        statements.add(statement);
+
+        queue.getAttributes().put("Policy", policy.toString());
+        queue.setLastModifiedTimestamp(Instant.now());
+        queueStore.put(storageKey, queue);
+        LOG.infov("Added permission {0} to queue {1}", label, queueUrl);
+    }
+
+    public void removePermission(String queueUrl, String label, String region) {
+        if (label == null || label.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "Value for parameter Label is invalid.", 400);
+        }
+
+        String storageKey = regionKey(region, queueUrl);
+        Queue queue = queueStore.get(storageKey)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
+
+        ObjectNode policy = parsePolicyOrEmpty(queue.getAttributes().get("Policy"));
+        ArrayNode statements = ensureStatementArray(policy);
+
+        int removeIndex = -1;
+        for (int i = 0; i < statements.size(); i++) {
+            if (label.equals(statements.get(i).path("Sid").asText(null))) {
+                removeIndex = i;
+                break;
+            }
+        }
+        if (removeIndex < 0) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value " + label + " for parameter Label is invalid. " +
+                            "Reason: can't find label on existing policy.", 400);
+        }
+        statements.remove(removeIndex);
+
+        if (statements.isEmpty()) {
+            queue.getAttributes().remove("Policy");
+        } else {
+            queue.getAttributes().put("Policy", policy.toString());
+        }
+        queue.setLastModifiedTimestamp(Instant.now());
+        queueStore.put(storageKey, queue);
+        LOG.infov("Removed permission {0} from queue {1}", label, queueUrl);
+    }
+
+    private static ObjectNode parsePolicyOrEmpty(String raw) {
+        if (raw == null || raw.isBlank()) {
+            ObjectNode policy = POLICY_MAPPER.createObjectNode();
+            policy.put("Version", "2012-10-17");
+            policy.putArray("Statement");
+            return policy;
+        }
+        JsonNode parsed;
+        try {
+            parsed = POLICY_MAPPER.readTree(raw);
+        } catch (Exception e) {
+            throw new AwsException("InvalidAttributeValue",
+                    "Invalid value for the parameter Policy.", 400);
+        }
+        if (!(parsed instanceof ObjectNode obj)) {
+            throw new AwsException("InvalidAttributeValue",
+                    "Invalid value for the parameter Policy.", 400);
+        }
+        if (!obj.has("Version")) {
+            obj.put("Version", "2012-10-17");
+        }
+        return obj;
+    }
+
+    private static ArrayNode ensureStatementArray(ObjectNode policy) {
+        JsonNode existing = policy.get("Statement");
+        if (existing instanceof ArrayNode arr) {
+            return arr;
+        }
+        ArrayNode arr = policy.putArray("Statement");
+        if (existing instanceof ObjectNode singleStatement) {
+            arr.add(singleStatement);
+        }
+        return arr;
+    }
+
     public Map<String, String> listQueueTags(String queueUrl, String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = queueStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
                         "The specified queue does not exist.", 400));
         return new java.util.LinkedHashMap<>(queue.getTags());
+    }
+
+    /**
+     * SQS reports SenderId as the principal that called SendMessage. Floci
+     * has no per-call IAM context, so it falls back to the account that owns
+     * the queue (parsed from the queue URL when present), otherwise the
+     * account from the current request context, otherwise the configured
+     * default account.
+     */
+    public String senderIdFor(String queueUrl) {
+        String fromUrl = accountFromQueueUrl(queueUrl);
+        return fromUrl != null ? fromUrl : regionResolver.getAccountId();
     }
 
     private static String regionKey(String region, String queueUrl) {

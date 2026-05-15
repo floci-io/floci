@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -23,6 +24,7 @@ class CloudWatchLogsServiceTest {
     @BeforeEach
     void setUp() {
         service = new CloudWatchLogsService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
@@ -245,6 +247,7 @@ class CloudWatchLogsServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 2,
                 new RegionResolver("us-east-1", "000000000000")
         );
@@ -336,6 +339,107 @@ class CloudWatchLogsServiceTest {
         assertEquals("msg-4", result.events().get(2).getMessage());
         assertEquals("b/2", result.nextBackwardToken());
         assertEquals("f/5", result.nextForwardToken());
+    }
+
+    // ──────────────────────────── Subscription Filters ────────────────────────────
+
+    @Test
+    void putSubscriptionFilter() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.putSubscriptionFilter("/app/logs", "my-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION);
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult result =
+                service.describeSubscriptionFilters("/app/logs", null, null, 50, REGION);
+        assertEquals(1, result.subscriptionFilters().size());
+        SubscriptionFilter f = result.subscriptionFilters().getFirst();
+        assertEquals("my-filter", f.getFilterName());
+        assertEquals("/app/logs", f.getLogGroupName());
+        assertEquals("ERROR", f.getFilterPattern());
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:test", f.getDestinationArn());
+        assertEquals("ByLogStream", f.getDistribution());
+        assertTrue(f.getCreationTime() > 0);
+    }
+
+    @Test
+    void putSubscriptionFilterDefaultsDistribution() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.putSubscriptionFilter("/app/logs", "my-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION);
+
+        SubscriptionFilter f = service.describeSubscriptionFilters("/app/logs", null, null, 50, REGION).subscriptionFilters().getFirst();
+        assertEquals("ByLogStream", f.getDistribution());
+    }
+
+    @Test
+    void putSubscriptionFilterWithoutLogGroupThrows() {
+        assertThrows(AwsException.class, () ->
+                service.putSubscriptionFilter("/missing", "my-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION));
+    }
+
+    @Test
+    void putSubscriptionFilterUpsertsDuplicate() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.putSubscriptionFilter("/app/logs", "my-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION);
+        // Upsert: calling with same name overwrites
+        service.putSubscriptionFilter("/app/logs", "my-filter", "WARN", "arn:aws:lambda:us-east-1:000000000000:function:other", null, REGION);
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult result =
+                service.describeSubscriptionFilters("/app/logs", null, null, 50, REGION);
+        assertEquals(1, result.subscriptionFilters().size());
+        assertEquals("WARN", result.subscriptionFilters().getFirst().getFilterPattern());
+        assertEquals("arn:aws:lambda:us-east-1:000000000000:function:other", result.subscriptionFilters().getFirst().getDestinationArn());
+    }
+
+    @Test
+    void describeSubscriptionFiltersWithPrefix() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.putSubscriptionFilter("/app/logs", "alpha-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:a", null, REGION);
+        service.putSubscriptionFilter("/app/logs", "beta-filter", "WARN", "arn:aws:lambda:us-east-1:000000000000:function:b", null, REGION);
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult result =
+                service.describeSubscriptionFilters("/app/logs", "alpha", null, 50, REGION);
+        assertEquals(1, result.subscriptionFilters().size());
+        assertEquals("alpha-filter", result.subscriptionFilters().getFirst().getFilterName());
+    }
+
+    @Test
+    void describeSubscriptionFiltersWithoutLogGroupThrows() {
+        assertThrows(AwsException.class, () ->
+                service.describeSubscriptionFilters("/missing", null, null, 50, REGION));
+    }
+
+    @Test
+    void describeSubscriptionFiltersPagination() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        for (int i = 0; i < 5; i++) {
+            service.putSubscriptionFilter("/app/logs", "filter-" + i, "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION);
+        }
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult page1 =
+                service.describeSubscriptionFilters("/app/logs", null, null, 2, REGION);
+        assertEquals(2, page1.subscriptionFilters().size());
+        assertNotNull(page1.nextToken());
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult page2 =
+                service.describeSubscriptionFilters("/app/logs", null, page1.nextToken(), 2, REGION);
+        assertEquals(2, page2.subscriptionFilters().size());
+    }
+
+    @Test
+    void deleteSubscriptionFilter() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.putSubscriptionFilter("/app/logs", "my-filter", "ERROR", "arn:aws:lambda:us-east-1:000000000000:function:test", null, REGION);
+        service.deleteSubscriptionFilter("/app/logs", "my-filter", REGION);
+
+        CloudWatchLogsService.DescribeSubscriptionFiltersResult result =
+                service.describeSubscriptionFilters("/app/logs", null, null, 50, REGION);
+        assertTrue(result.subscriptionFilters().isEmpty());
+    }
+
+    @Test
+    void deleteSubscriptionFilterNotFoundThrows() {
+        service.createLogGroup("/app/logs", null, null, REGION);
+        assertThrows(AwsException.class, () ->
+                service.deleteSubscriptionFilter("/app/logs", "nonexistent", REGION));
     }
 
     @Test

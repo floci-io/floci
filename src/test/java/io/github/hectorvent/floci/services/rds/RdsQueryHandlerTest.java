@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
@@ -213,6 +214,77 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("UnsupportedOperation"));
+    }
+
+    // ──────────────────────────── DBClusterParameterGroups ──────────────────────
+
+    @Test
+    void describeDbClusterParameterGroups_usesDBClusterParameterGroupTag() {
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test cluster group");
+        when(service.listDbClusterParameterGroups(null)).thenReturn(List.of(group));
+
+        Response response = handler.handle("DescribeDBClusterParameterGroups", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBClusterParameterGroup>"), "Expected <DBClusterParameterGroup> element in response");
+        assertFalse(body.contains("<member><DBClusterParameterGroupName>"), "Did not expect <member> wrapping DBClusterParameterGroup");
+    }
+
+    @Test
+    void createDbClusterParameterGroup_requiresName() {
+        Response response = handler.handle("CreateDBClusterParameterGroup", params());
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("DBClusterParameterGroupName is required."));
+    }
+
+    @Test
+    void createDbClusterParameterGroup_passesArgumentsToService() {
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc");
+        when(service.createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc")).thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterParameterGroupName", "cpg1");
+        p.add("DBParameterGroupFamily", "aurora-postgresql16");
+        p.add("Description", "desc");
+        Response response = handler.handle("CreateDBClusterParameterGroup", p);
+
+        verify(service).createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc");
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBClusterParameterGroupName>cpg1</DBClusterParameterGroupName>"));
+        assertTrue(body.contains("<DBParameterGroupFamily>aurora-postgresql16</DBParameterGroupFamily>"));
+    }
+
+    @Test
+    void modifyDbClusterParameterGroup_ignoresParametersWithoutValue() {
+        DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "test group");
+        when(service.modifyDbClusterParameterGroup(eq("cpg1"), eq(java.util.Map.of("log_statement", "all"))))
+                .thenReturn(group);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBClusterParameterGroupName", "cpg1");
+        p.add("Parameters.member.1.ParameterName", "log_statement");
+        p.add("Parameters.member.1.ParameterValue", "all");
+        p.add("Parameters.member.2.ParameterName", "ignored_without_value");
+        handler.handle("ModifyDBClusterParameterGroup", p);
+
+        verify(service).modifyDbClusterParameterGroup("cpg1", java.util.Map.of("log_statement", "all"));
+    }
+
+    @Test
+    void describeDbClusterParameters_requiresParameterGroupName() {
+        Response response = handler.handle("DescribeDBClusterParameters", params());
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("DBClusterParameterGroupName is required."));
+    }
+
+    @Test
+    void deleteDbClusterParameterGroup_requiresName() {
+        Response response = handler.handle("DeleteDBClusterParameterGroup", params());
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("DBClusterParameterGroupName is required."));
     }
 
     // ──────────────────────────── DBSubnetGroup shape ───────────────────────────

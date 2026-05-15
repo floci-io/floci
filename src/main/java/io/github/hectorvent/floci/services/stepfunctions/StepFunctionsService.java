@@ -62,7 +62,7 @@ public class StepFunctionsService {
 
     // ──────────────────────────── State Machines ────────────────────────────
 
-    public StateMachine createStateMachine(String name, String definition, String roleArn, String type, String region) {
+    public StateMachine createStateMachine(String name, String definition, String roleArn, String type, String region, Map<String, String> tags) {
         String arn = regionResolver.buildArn("states", region, "stateMachine:" + name);
         if (stateMachineStore.get(arn).isPresent()) {
             throw new AwsException("StateMachineAlreadyExists", "State machine already exists: " + arn, 400);
@@ -77,6 +77,9 @@ public class StepFunctionsService {
         sm.setRoleArn(roleArn);
         if (type != null && !type.isEmpty()) {
             sm.setType(type);
+        }
+        if (tags != null && !tags.isEmpty()) {
+            sm.getTags().putAll(tags);
         }
 
         stateMachineStore.put(arn, sm);
@@ -213,7 +216,7 @@ public class StepFunctionsService {
 
     // ──────────────────────────── Activities ────────────────────────────
 
-    public Activity createActivity(String name, String region) {
+    public Activity createActivity(String name, String region, Map<String, String> tags) {
         String arn = regionResolver.buildArn("states", region, "activity:" + name);
         if (activityStore.get(arn).isPresent()) {
             throw new AwsException("ActivityAlreadyExists", "Activity already exists: " + arn, 400);
@@ -221,6 +224,9 @@ public class StepFunctionsService {
         Activity activity = new Activity();
         activity.setActivityArn(arn);
         activity.setName(name);
+        if (tags != null && !tags.isEmpty()) {
+            activity.getTags().putAll(tags);
+        }
         activityStore.put(arn, activity);
         LOG.infov("Created activity: {0}", arn);
         return activity;
@@ -295,6 +301,56 @@ public class StepFunctionsService {
 
     public void sendTaskHeartbeat(String taskToken) {
         LOG.debugv("Task heartbeat for token {0}", taskToken);
+    }
+
+    // ──────────────────────────── Tags ────────────────────────────
+
+    public Map<String, String> listTags(String arn) {
+        Optional<StateMachine> sm = stateMachineStore.get(arn);
+        if (sm.isPresent()) {
+            return sm.get().getTags();
+        }
+        Optional<Activity> activity = activityStore.get(arn);
+        if (activity.isPresent()) {
+            return activity.get().getTags();
+        }
+        throw new AwsException("ResourceNotFound", "Resource not found: " + arn, 400);
+    }
+
+    public void tagResource(String arn, Map<String, String> tags) {
+        Optional<StateMachine> smOpt = stateMachineStore.get(arn);
+        if (smOpt.isPresent()) {
+            StateMachine sm = smOpt.get();
+            sm.getTags().putAll(tags);
+            stateMachineStore.put(arn, sm);
+            return;
+        }
+        Optional<Activity> actOpt = activityStore.get(arn);
+        if (actOpt.isPresent()) {
+            Activity activity = actOpt.get();
+            activity.getTags().putAll(tags);
+            activityStore.put(arn, activity);
+            return;
+        }
+        throw new AwsException("ResourceNotFound", "Resource not found: " + arn, 400);
+    }
+
+    public void untagResource(String arn, List<String> tagKeys) {
+        Optional<StateMachine> smOpt = stateMachineStore.get(arn);
+        if (smOpt.isPresent()) {
+            StateMachine sm = smOpt.get();
+            tagKeys.forEach(sm.getTags()::remove);
+            stateMachineStore.put(arn, sm);
+            return;
+        }
+        Optional<Activity> actOpt = activityStore.get(arn);
+        if (actOpt.isPresent()) {
+            Activity activity = actOpt.get();
+            tagKeys.forEach(activity.getTags()::remove);
+            activityStore.put(arn, activity);
+            return;
+        }
+        throw new AwsException("ResourceNotFound", "Resource not found: " + arn, 400);
     }
 
     // ──────────────────────────── Validation ────────────────────────────

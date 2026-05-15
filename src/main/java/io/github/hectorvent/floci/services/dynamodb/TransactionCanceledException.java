@@ -1,26 +1,27 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.util.List;
 
-/**
- * Thrown when a TransactWriteItems condition check fails.
- * Carries per-item cancellation reasons for the AWS response.
- */
 public class TransactionCanceledException extends AwsException {
 
-    private final List<String> cancellationReasons;
+    public record CancellationReason(String code, JsonNode item) {}
 
-    public TransactionCanceledException(List<String> cancellationReasons) {
+    private final List<CancellationReason> cancellationReasons;
+
+    public TransactionCanceledException(List<CancellationReason> cancellationReasons) {
         super("TransactionCanceledException",
                 "Transaction cancelled, please refer cancellation reasons for specific reasons [" +
-                        String.join(", ", cancellationReasons) + "]",
+                        cancellationReasons.stream()
+                                .map(r -> r.code().isEmpty() ? "None" : r.code())
+                                .reduce((a, b) -> a + ", " + b).orElse("") + "]",
                 400);
         this.cancellationReasons = cancellationReasons;
     }
 
-    public List<String> getCancellationReasons() {
+    public List<CancellationReason> getCancellationReasons() {
         return cancellationReasons;
     }
 }

@@ -343,6 +343,45 @@ class SqsTest {
 
     @Test
     @Order(20)
+    void fifoReceiveReturnsMultipleMessagesFromSameGroupInOneCall() {
+        // Regression test for https://github.com/floci-io/floci/issues/777
+        // AWS FIFO: a single ReceiveMessage may return multiple messages from
+        // the same MessageGroupId, up to MaxNumberOfMessages.
+        String fifoQueueName = "sdk-test-fifo-multi-" + System.currentTimeMillis() + ".fifo";
+        String fifoQueueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName(fifoQueueName)
+                .attributes(Map.of(QueueAttributeName.FIFO_QUEUE, "true"))
+                .build()).queueUrl();
+        try {
+            for (int i = 1; i <= 3; i++) {
+                sqs.sendMessage(SendMessageRequest.builder()
+                        .queueUrl(fifoQueueUrl)
+                        .messageBody("msg" + i)
+                        .messageGroupId("g1")
+                        .messageDeduplicationId("d" + i)
+                        .build());
+            }
+
+            ReceiveMessageResponse rcv = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(fifoQueueUrl)
+                    .maxNumberOfMessages(10)
+                    .build());
+
+            assertThat(rcv.messages())
+                    .as("FIFO ReceiveMessage must return all 3 messages from group g1 in one call")
+                    .hasSize(3);
+            assertThat(rcv.messages().get(0).body()).isEqualTo("msg1");
+            assertThat(rcv.messages().get(1).body()).isEqualTo("msg2");
+            assertThat(rcv.messages().get(2).body()).isEqualTo("msg3");
+        } finally {
+            try {
+                sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(fifoQueueUrl).build());
+            } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(21)
     void deleteQueue() {
         sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
         if (dlqUrl != null) {

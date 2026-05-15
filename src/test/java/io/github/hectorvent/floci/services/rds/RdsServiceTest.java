@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
@@ -115,5 +116,57 @@ class RdsServiceTest {
 
         assertEquals("InvalidDBClusterStateFault", exception.getErrorCode());
         assertTrue(exception.getMessage().contains("still has DB instances"));
+    }
+
+    @Test
+    void createDbClusterParameterGroupRoundTrip() {
+        DbClusterParameterGroup created = rdsService.createDbClusterParameterGroup(
+                "cpg1", "aurora-postgresql16", "test cluster group");
+
+        assertEquals("cpg1", created.getDbClusterParameterGroupName());
+        assertEquals("aurora-postgresql16", created.getDbParameterGroupFamily());
+
+        DbClusterParameterGroup fetched = rdsService.getDbClusterParameterGroup("cpg1");
+        assertEquals("cpg1", fetched.getDbClusterParameterGroupName());
+
+        Collection<DbClusterParameterGroup> listed = rdsService.listDbClusterParameterGroups(null);
+        assertEquals(1, listed.size());
+    }
+
+    @Test
+    void createDbClusterParameterGroupRejectsDuplicate() {
+        rdsService.createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc");
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc"));
+
+        assertEquals("DBParameterGroupAlreadyExists", exception.getErrorCode());
+    }
+
+    @Test
+    void modifyDbClusterParameterGroupAppliesParameters() {
+        rdsService.createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc");
+
+        DbClusterParameterGroup modified = rdsService.modifyDbClusterParameterGroup(
+                "cpg1", java.util.Map.of("log_statement", "all", "shared_preload_libraries", "pg_stat_statements"));
+
+        assertEquals("all", modified.getParameters().get("log_statement"));
+        assertEquals("pg_stat_statements", modified.getParameters().get("shared_preload_libraries"));
+    }
+
+    @Test
+    void deleteDbClusterParameterGroupMissingThrows() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.deleteDbClusterParameterGroup("nonexistent"));
+
+        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+    }
+
+    @Test
+    void getDbClusterParameterGroupMissingThrows() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.getDbClusterParameterGroup("nonexistent"));
+
+        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
     }
 }

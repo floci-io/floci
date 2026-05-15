@@ -16,7 +16,9 @@ import java.security.Security;
 import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.spec.X509EncodedKeySpec;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -195,6 +197,192 @@ class KmsServiceTest {
     void decryptInvalidCiphertextThrows() {
         assertThrows(AwsException.class, () ->
                 kmsService.decrypt("not-valid-ciphertext".getBytes(StandardCharsets.UTF_8), REGION));
+    }
+
+    @Test
+    void encryptIsNonDeterministic() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+
+        byte[] c1 = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+        byte[] c2 = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+
+        assertFalse(Arrays.equals(c1, c2),
+                "two Encrypt calls with identical inputs must yield different ciphertexts");
+        // Both still round-trip
+        assertArrayEquals(plaintext, kmsService.decrypt(c1, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(c2, REGION));
+    }
+
+    @Test
+    void encryptIsNonDeterministicWithIdenticalContext() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        Map<String, String> ctx = Map.of("tenant", "1");
+
+        byte[] c1 = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
+        byte[] c2 = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
+
+        assertFalse(Arrays.equals(c1, c2));
+    }
+
+    @Test
+    void decryptWithMatchingContextSucceeds() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        Map<String, String> ctx = Map.of("tenant", "1", "purpose", "test");
+
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(), plaintext, ctx, REGION);
+        // Different insertion order, same logical context — must succeed (AWS is order-independent)
+        Map<String, String> reordered = new LinkedHashMap<>();
+        reordered.put("purpose", "test");
+        reordered.put("tenant", "1");
+
+        assertArrayEquals(plaintext, kmsService.decrypt(ciphertext, reordered, REGION));
+    }
+
+    @Test
+    void decryptWithMismatchedContextValueThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("tenant", "999"), REGION));
+        assertEquals("InvalidCiphertextException", ex.getErrorCode());
+    }
+
+    @Test
+    void decryptWithMismatchedContextKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        // Same value under a different key — must fail
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("account", "1"), REGION));
+    }
+
+    @Test
+    void decryptWithoutContextRejectsCiphertextEncryptedWithContext() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        // Decrypt without supplying the context the ciphertext was bound to — must fail
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, REGION));
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of(), REGION));
+    }
+
+    @Test
+    void decryptWithExtraContextKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("tenant", "1", "extra", "x"), REGION));
+    }
+
+    @Test
+    void emptyContextIsInterchangeableWithNull() {
+        // AWS treats omitted EncryptionContext and {} the same: both must decrypt
+        // a ciphertext that was encrypted without one.
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+
+        byte[] noCtx = kmsService.encrypt(key.getKeyId(), plaintext, REGION);
+        assertArrayEquals(plaintext, kmsService.decrypt(noCtx, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(noCtx, Map.of(), REGION));
+
+        byte[] emptyCtx = kmsService.encrypt(key.getKeyId(), plaintext, Map.of(), REGION);
+        assertArrayEquals(plaintext, kmsService.decrypt(emptyCtx, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(emptyCtx, Map.of(), REGION));
+    }
+
+    @Test
+    void contextIsCaseSensitive() {
+        // AWS performs case-sensitive matching of EncryptionContext keys and values.
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("Tenant", "Alpha"), REGION);
+
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("tenant", "Alpha"), REGION));
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(ciphertext, Map.of("Tenant", "alpha"), REGION));
+        // Exact match still works
+        assertNotNull(kmsService.decrypt(ciphertext, Map.of("Tenant", "Alpha"), REGION));
+    }
+
+    @Test
+    void decryptToKeyArnResolvesKeyFromBlob() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] ciphertext = kmsService.encrypt(key.getKeyId(),
+                "hello".getBytes(StandardCharsets.UTF_8), Map.of("tenant", "1"), REGION);
+
+        assertEquals(key.getArn(), kmsService.decryptToKeyArn(ciphertext, REGION));
+    }
+
+    @Test
+    void reEncryptHonorsSourceContext() {
+        // Simulates the ReEncrypt flow: decrypt under source ctx, encrypt under dest ctx.
+        KmsKey src = kmsService.createKey(null, REGION);
+        KmsKey dst = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        Map<String, String> sourceCtx = Map.of("tenant", "1");
+        Map<String, String> destCtx = Map.of("tenant", "2");
+
+        byte[] srcBlob = kmsService.encrypt(src.getKeyId(), plaintext, sourceCtx, REGION);
+
+        // Wrong source context → fails on the decrypt half of ReEncrypt
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(srcBlob, Map.of("tenant", "wrong"), REGION));
+
+        // Correct source context → ReEncrypt round-trips, output is bound to destCtx
+        byte[] roundtripped = kmsService.decrypt(srcBlob, sourceCtx, REGION);
+        byte[] destBlob = kmsService.encrypt(dst.getKeyId(), roundtripped, destCtx, REGION);
+
+        // New blob requires destCtx, not sourceCtx, to decrypt
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(destBlob, sourceCtx, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(destBlob, destCtx, REGION));
+    }
+
+    @Test
+    void v1BlobWithOverrideIdEqualToV2VersionMarkerCollidesAndFails() {
+        // Documented limitation: a v1 blob with override-id "v2" looks like "kms:v2:<base64>",
+        // which collides with the v2 prefix. Pinned so any change to BLOB_PREFIX_V2 or v2-branch
+        // fall-through behavior fails this test loudly instead of silently changing semantics.
+        KmsKey key = kmsService.createKey(null, "ENCRYPT_DECRYPT", "SYMMETRIC_DEFAULT", null,
+                Map.of("floci:override-id", "v2"), REGION);
+        byte[] v1BlobWithV2KeyId = ("kms:v2:"
+                + Base64.getEncoder().encodeToString("hello".getBytes(StandardCharsets.UTF_8)))
+                .getBytes(StandardCharsets.UTF_8);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.decrypt(v1BlobWithV2KeyId, REGION));
+        assertEquals("InvalidCiphertextException", ex.getErrorCode());
+        assertEquals("v2", key.getKeyId());
+    }
+
+    @Test
+    void legacyV1BlobDecryptsForBackCompat() {
+        // Persistent stores written before this PR contain kms:<keyId>:<base64> blobs.
+        // Decrypt must still accept them (no context binding on v1).
+        KmsKey key = kmsService.createKey(null, REGION);
+        byte[] plaintext = "hello".getBytes(StandardCharsets.UTF_8);
+        byte[] v1Blob = ("kms:" + key.getKeyId() + ":"
+                + Base64.getEncoder().encodeToString(plaintext)).getBytes(StandardCharsets.UTF_8);
+
+        assertArrayEquals(plaintext, kmsService.decrypt(v1Blob, REGION));
+        assertArrayEquals(plaintext, kmsService.decrypt(v1Blob, Map.of(), REGION));
+        // v1 carried no context, so any non-empty context must fail (matches AWS semantics)
+        assertThrows(AwsException.class, () ->
+                kmsService.decrypt(v1Blob, Map.of("tenant", "1"), REGION));
+        assertEquals(key.getArn(), kmsService.decryptToKeyArn(v1Blob, REGION));
     }
 
     @ParameterizedTest

@@ -12,7 +12,10 @@ import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.firehose.FirehoseJsonHandler;
 import io.github.hectorvent.floci.services.glue.GlueJsonHandler;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingJsonHandler;
+import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
+import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
 import io.github.hectorvent.floci.services.textract.TextractJsonHandler;
+import io.github.hectorvent.floci.services.transcribe.TranscribeJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -66,6 +69,9 @@ public class AwsJson11Controller {
     private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
     private final TransferHandler transferHandler;
     private final TextractJsonHandler textractJsonHandler;
+    private final PricingJsonHandler pricingJsonHandler;
+    private final TranscribeJsonHandler transcribeJsonHandler;
+    private final CostExplorerJsonHandler costExplorerJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -85,7 +91,10 @@ public class AwsJson11Controller {
                                CodeDeployJsonHandler codeDeployJsonHandler,
                                Ec2MessagesJsonHandler ec2MessagesJsonHandler,
                                TransferHandler transferHandler,
-                               TextractJsonHandler textractJsonHandler) {
+                               TextractJsonHandler textractJsonHandler,
+                               PricingJsonHandler pricingJsonHandler,
+                               TranscribeJsonHandler transcribeJsonHandler,
+                               CostExplorerJsonHandler costExplorerJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -109,6 +118,9 @@ public class AwsJson11Controller {
         this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
         this.transferHandler = transferHandler;
         this.textractJsonHandler = textractJsonHandler;
+        this.pricingJsonHandler = pricingJsonHandler;
+        this.transcribeJsonHandler = transcribeJsonHandler;
+        this.costExplorerJsonHandler = costExplorerJsonHandler;
     }
 
     @POST
@@ -157,6 +169,9 @@ public class AwsJson11Controller {
                 case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
                 case "transfer" -> transferHandler.handle(action, request, region);
                 case "textract" -> textractJsonHandler.handle(action, request, region);
+                case "pricing" -> pricingJsonHandler.handle(action, request, region);
+                case "transcribe" -> transcribeJsonHandler.handle(action, request, region);
+                case "ce" -> costExplorerJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

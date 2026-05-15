@@ -725,7 +725,8 @@ teardown() {
 
     run aws_cmd dynamodb scan \
         --table-name "$TABLE_NAME" \
-        --filter-expression 'contains(roles, :role)' \
+        --filter-expression 'contains(#r, :role)' \
+        --expression-attribute-names '{"#r":"roles"}' \
         --expression-attribute-values '{":role":{"S":"admin"}}'
     assert_success
     count=$(json_get "$output" '.Count')

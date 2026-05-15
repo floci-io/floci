@@ -830,9 +830,26 @@ public class AslExecutor {
             futures.add(executor.submit(() -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context)));
         }
 
+        int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
+        long deadlineNanos = timeoutSeconds > 0
+                ? System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds)
+                : Long.MAX_VALUE;
+
         ArrayNode results = objectMapper.createArrayNode();
         for (Future<JsonNode> future : futures) {
-            results.add(future.get(60, TimeUnit.SECONDS));
+            long remainingNanos = deadlineNanos - System.nanoTime();
+            if (remainingNanos <= 0) {
+                futures.forEach(f -> f.cancel(true));
+                throw new FailStateException("States.Timeout",
+                        "Parallel state timed out after " + timeoutSeconds + " seconds");
+            }
+            try {
+                results.add(future.get(remainingNanos, TimeUnit.NANOSECONDS));
+            } catch (java.util.concurrent.TimeoutException e) {
+                futures.forEach(f -> f.cancel(true));
+                throw new FailStateException("States.Timeout",
+                        "Parallel state timed out after " + timeoutSeconds + " seconds");
+            }
         }
 
         if (jsonata) {

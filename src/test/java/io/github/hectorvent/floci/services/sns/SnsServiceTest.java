@@ -221,6 +221,41 @@ class SnsServiceTest {
     }
 
     @Test
+    void publish_messageExceedsSizeLimit_throwsInvalidParameterException() {
+        Topic topic = snsService.createTopic("size-topic", null, null, REGION);
+        String tooBig = "x".repeat(262_145);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                snsService.publish(topic.getTopicArn(), null, tooBig, null, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertTrue(ex.getMessage().toLowerCase().contains("too long"));
+    }
+
+    @Test
+    void publish_messagePlusAttributesExceedsLimit_throws() {
+        Topic topic = snsService.createTopic("size-topic", null, null, REGION);
+        String body = "x".repeat(262_100);
+        Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> attrs = Map.of(
+                "longAttribute", new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue(
+                        "y".repeat(200), "String"));
+        AwsException ex = assertThrows(AwsException.class, () ->
+                snsService.publish(topic.getTopicArn(), null, null, body, null, attrs, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void publishBatch_totalSizeExceedsLimit_throwsBatchRequestTooLong() {
+        Topic topic = snsService.createTopic("size-topic", null, null, REGION);
+        String halfMeg = "x".repeat(130_000);
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Id", "1", "Message", halfMeg),
+                Map.of("Id", "2", "Message", halfMeg),
+                Map.of("Id", "3", "Message", halfMeg));
+        AwsException ex = assertThrows(AwsException.class, () ->
+                snsService.publishBatch(topic.getTopicArn(), entries, REGION));
+        assertEquals("BatchRequestTooLong", ex.getErrorCode());
+    }
+
+    @Test
     void subscriptionsConfirmed_countsCorrectly() {
         Topic topic = snsService.createTopic("my-topic", null, null, REGION);
         snsService.subscribe(topic.getTopicArn(), "sqs", "http://queue1", REGION, Map.of());

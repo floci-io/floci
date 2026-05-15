@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.athena;
+package io.github.hectorvent.floci.services.floci;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -23,7 +23,7 @@ import java.util.Optional;
  * On the first call to {@link #ensureReady()}, Floci pulls the image and starts
  * a named container "floci-duck". Subsequent calls return the cached URL immediately.
  *
- * If {@code floci.services.athena.duck-url} is configured, container management is
+ * If {@code floci.services.duck.url} is configured, container management is
  * skipped entirely and that URL is used as-is — useful in Docker Compose setups where
  * the user runs floci-duck as a separate service.
  */
@@ -56,6 +56,37 @@ public class FlociDuckManager {
     }
 
     /**
+     * Returns true if floci-duck is reachable without starting anything.
+     * If a URL is pre-configured and healthy, that URL is cached for future ensureReady() calls.
+     */
+    public synchronized boolean isAvailable() {
+        if (resolvedUrl != null) {
+            return true;
+        }
+        Optional<String> configured = config.services().duck().url();
+        if (configured.isPresent() && !configured.get().isBlank()) {
+            String url = configured.get();
+            if (probeHealth(url)) {
+                resolvedUrl = url;
+                LOG.infov("floci-duck is available at pre-configured URL: {0}", url);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean probeHealth(String baseUrl) {
+        try {
+            HttpURLConnection conn = (HttpURLConnection) URI.create(baseUrl + "/health").toURL().openConnection();
+            conn.setConnectTimeout(500);
+            conn.setReadTimeout(500);
+            return conn.getResponseCode() == 200;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
      * Returns the floci-duck base URL, starting the container on first call if needed.
      * Thread-safe — concurrent callers wait while the first thread does the pull+start.
      */
@@ -64,7 +95,7 @@ public class FlociDuckManager {
             return resolvedUrl;
         }
 
-        Optional<String> configured = config.services().athena().duckUrl();
+        Optional<String> configured = config.services().duck().url();
         if (configured.isPresent() && !configured.get().isBlank()) {
             resolvedUrl = configured.get();
             LOG.infov("Using pre-configured floci-duck URL: {0}", resolvedUrl);
@@ -76,7 +107,7 @@ public class FlociDuckManager {
     }
 
     private void startContainer() {
-        String image = config.services().athena().defaultImage();
+        String image = config.services().duck().defaultImage();
         LOG.infov("Starting floci-duck container using image {0}", image);
 
         lifecycleManager.removeIfExists(CONTAINER_NAME);

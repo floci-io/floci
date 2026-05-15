@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.15] - 2026-05-13
+
+### Added
+
+- **pricing:** AWS Price List Service — `DescribeServices`, `GetAttributeValues`, `GetProducts`, `ListPriceLists`, `GetPriceListFileUrl` with pagination; backed by a bundled static snapshot; `PriceList` shape matches the real SDK's array-of-JSON-strings format ([#821](https://github.com/floci-io/floci/pull/821))
+- **eventbridge:** `TestEventPattern` — validates a sample event against a pattern without firing any targets; returns `{"Result": <bool>}`; raises `InvalidEventPatternException` on malformed patterns ([#824](https://github.com/floci-io/floci/pull/824))
+- **ses:** v2 suppression list endpoints — `PutSuppressedDestination`, `GetSuppressedDestination`, `DeleteSuppressedDestination`, `ListSuppressedDestinations` ([#813](https://github.com/floci-io/floci/pull/813))
+- **s3:** virtual-hosted style addressing — `*.s3.localhost.floci.io`, `*.localhost.localstack.cloud`, and `*.s3.localhost.localstack.cloud` are now resolved as virtual-hosted buckets; `EmbeddedDnsServer` ships `localhost.localstack.cloud` and `localhost.floci.io` as built-in suffixes so spawned containers resolve correctly without extra config ([#805](https://github.com/floci-io/floci/pull/805))
+- **cloudwatch-logs:** `PutSubscriptionFilter`, `DescribeSubscriptionFilters`, `DeleteSubscriptionFilter` — upsert semantics and `ByLogStream` default distribution ([#810](https://github.com/floci-io/floci/pull/810))
+
+### Fixed
+
+- **dynamodb:** broad conformance pass — `ValidationException` (was `InvalidParameterValue`) for table-name errors; min-length 3 enforced for all operations; `ListTables` alphabetical ordering, `Limit` validation, pagination; enum validation for `ReturnValues`/`ReturnConsumedCapacity` fires before table lookup; `ProjectionExpression` on `GetItem`, `Query`, `Scan`, `BatchGetItem`; `Select=COUNT` omits `Items`; parallel scan `Segment`/`TotalSegments` validation with hash-based sharding; reserved words rejected in `FilterExpression`/`ConditionExpression`/`UpdateExpression`; legacy `AttributesToGet`, `AttributeUpdates`, `QueryFilter`, `ScanFilter`, `KeyConditions` API; item size limit (400 KB) and number normalization on write; `TagResource`/`UntagResource`/`ListTagsOfResource` with ARN validation; `SET` into a non-existent nested map auto-creates the map ([#826](https://github.com/floci-io/floci/pull/826))
+- **dynamodb:** `SET a = :v, b = a` now reads pre-update value of `a` for `b` (atomic snapshot semantics); `ClientRequestToken` idempotency with 10-minute TTL and SHA-256 body-hash conflict detection; parenthesized arithmetic `SET c = (c - :v)` now applies correctly ([#804](https://github.com/floci-io/floci/pull/804))
+- **apigateway:** sibling `{proxy+}` resources now resolved by longest parent prefix, matching real AWS routing behaviour ([#811](https://github.com/floci-io/floci/pull/811))
+- **cloudformation:** provision `AWS::ApiGateway::Authorizer` and wire `AuthorizerId` on methods — previously the resource was silently stubbed, leaving stacks reporting `CREATE_COMPLETE` with no authorizer registered ([#796](https://github.com/floci-io/floci/pull/796))
+- **cloudformation:** preserve `Targets[].SqsParameters` (including `MessageGroupId`) when provisioning `AWS::Events::Rule` — FIFO SQS targets delivered without a `MessageGroupId` were rejected by AWS ([#793](https://github.com/floci-io/floci/pull/793))
+- **sqs:** return MD5 of current request body on FIFO deduplication replay ([#786](https://github.com/floci-io/floci/pull/786))
+- **sqs:** honor `MaximumMessageSize` attribute on `SendMessage` ([#782](https://github.com/floci-io/floci/pull/782))
+- **sqs:** omit `Messages` field from empty `ReceiveMessage` JSON response ([#780](https://github.com/floci-io/floci/pull/780))
+- **sns:** enforce message size limits on `Publish` and `PublishBatch` ([#783](https://github.com/floci-io/floci/pull/783))
+- **ses:** allow `SendRawEmail` without `Source` when a `From:` header is present in the MIME payload ([#800](https://github.com/floci-io/floci/pull/800))
+- **lambda:** automatically detect the Docker network of the running Floci container and use it for spawned Lambda containers — removes the need to manually set `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` in Docker Compose setups ([#765](https://github.com/floci-io/floci/pull/765))
+- **core:** fix CRLF line-ending issues on Windows by adding `.gitattributes` normalisation rules ([#790](https://github.com/floci-io/floci/pull/790))
+
 ## [1.5.14] - 2026-05-10
 
 ### Added
@@ -584,7 +609,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.14...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.15...HEAD
+[1.5.15]: https://github.com/floci-io/floci/compare/1.5.14...1.5.15
 [1.5.14]: https://github.com/floci-io/floci/compare/1.5.13...1.5.14
 [1.5.13]: https://github.com/floci-io/floci/compare/1.5.12...1.5.13
 [1.5.12]: https://github.com/floci-io/floci/compare/1.5.11...1.5.12

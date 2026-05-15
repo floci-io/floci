@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
+import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFilter;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -28,6 +29,7 @@ public class CloudWatchLogsService {
     private final StorageBackend<String, LogGroup> groupStore;
     private final StorageBackend<String, LogStream> streamStore;
     private final StorageBackend<String, LogEvent> eventStore;
+    private final StorageBackend<String, SubscriptionFilter> subscriptionFilterStore;
     private final RegionResolver regionResolver;
     private final int maxEventsPerQuery;
 
@@ -42,6 +44,8 @@ public class CloudWatchLogsService {
                         new TypeReference<>() {}),
                 storageFactory.create("cloudwatchlogs", "cwlogs-events.json",
                         new TypeReference<>() {}),
+                storageFactory.create("cloudwatchlogs", "cwlogs-subscription-filters.json",
+                        new TypeReference<>() {}),
                 config.services().cloudwatchlogs().maxEventsPerQuery(),
                 regionResolver
         );
@@ -50,11 +54,13 @@ public class CloudWatchLogsService {
     CloudWatchLogsService(StorageBackend<String, LogGroup> groupStore,
                            StorageBackend<String, LogStream> streamStore,
                            StorageBackend<String, LogEvent> eventStore,
+                           StorageBackend<String, SubscriptionFilter> subscriptionFilterStore,
                            int maxEventsPerQuery,
                            RegionResolver regionResolver) {
         this.groupStore = groupStore;
         this.streamStore = streamStore;
         this.eventStore = eventStore;
+        this.subscriptionFilterStore = subscriptionFilterStore;
         this.maxEventsPerQuery = maxEventsPerQuery;
         this.regionResolver = regionResolver;
     }
@@ -353,6 +359,76 @@ public class CloudWatchLogsService {
         return new FilteredLogEventsResult(result, nextToken);
     }
 
+    // ──────────────────────────── Subscription Filters ────────────────────────────
+
+    public void putSubscriptionFilter(String logGroupName, String filterName, String filterPattern,
+                                       String destinationArn, String distribution, String region) {
+        String groupKey = groupKey(region, logGroupName);
+        groupStore.get(groupKey)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified log group does not exist: " + logGroupName, 400));
+
+        SubscriptionFilter filter = new SubscriptionFilter();
+        filter.setFilterName(filterName);
+        filter.setLogGroupName(logGroupName);
+        filter.setFilterPattern(filterPattern != null ? filterPattern : "");
+        filter.setDestinationArn(destinationArn);
+        filter.setDistribution(distribution != null ? distribution : "ByLogStream");
+        filter.setCreationTime(System.currentTimeMillis());
+
+        String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
+        subscriptionFilterStore.put(filterKey, filter);
+        LOG.infov("Created subscription filter: {0} on log group: {1}", filterName, logGroupName);
+    }
+
+    public record DescribeSubscriptionFiltersResult(List<SubscriptionFilter> subscriptionFilters, String nextToken) {}
+
+    public DescribeSubscriptionFiltersResult describeSubscriptionFilters(String logGroupName, String filterNamePrefix,
+                                                                          String nextToken, int limit, String region) {
+        String groupKey = groupKey(region, logGroupName);
+        groupStore.get(groupKey)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified log group does not exist: " + logGroupName, 400));
+
+        String prefix = subscriptionFilterKeyPrefix(region, logGroupName);
+        List<SubscriptionFilter> all = subscriptionFilterStore.scan(k -> {
+            if (!k.startsWith(prefix)) return false;
+            if (filterNamePrefix == null || filterNamePrefix.isBlank()) return true;
+            String name = k.substring(prefix.length());
+            return name.startsWith(filterNamePrefix);
+        });
+        all.sort(Comparator.comparing(SubscriptionFilter::getFilterName));
+
+        int maxResults = Math.min(limit > 0 ? limit : 50, 50);
+        int offset = 0;
+        if (nextToken != null && !nextToken.isBlank()) {
+            try {
+                offset = Integer.parseInt(nextToken);
+            } catch (NumberFormatException e) {
+                offset = 0;
+            }
+        }
+
+        int end = Math.min(offset + maxResults, all.size());
+        List<SubscriptionFilter> page = all.subList(offset, end);
+        String token = end < all.size() ? String.valueOf(end) : null;
+        return new DescribeSubscriptionFiltersResult(page, token);
+    }
+
+    public void deleteSubscriptionFilter(String logGroupName, String filterName, String region) {
+        String groupKey = groupKey(region, logGroupName);
+        groupStore.get(groupKey)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified log group does not exist: " + logGroupName, 400));
+
+        String filterKey = subscriptionFilterKey(region, logGroupName, filterName);
+        subscriptionFilterStore.get(filterKey)
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "The specified subscription filter does not exist: " + filterName, 400));
+        subscriptionFilterStore.delete(filterKey);
+        LOG.infov("Deleted subscription filter: {0} on log group: {1}", filterName, logGroupName);
+    }
+
     // ──────────────────────────── Helpers ────────────────────────────
 
     private void deleteEventsForStream(String region, String groupName, String streamName) {
@@ -391,6 +467,14 @@ public class CloudWatchLogsService {
                                     long timestamp, String uuid) {
         return region + "::" + groupName + "::" + streamName + "::"
                 + String.format("%015d", timestamp) + "::" + uuid;
+    }
+
+    private static String subscriptionFilterKeyPrefix(String region, String logGroupName) {
+        return region + "::" + logGroupName + "::filter::";
+    }
+
+    private static String subscriptionFilterKey(String region, String logGroupName, String filterName) {
+        return region + "::" + logGroupName + "::filter::" + filterName;
     }
 
     private static long toLong(Object value, long defaultValue) {

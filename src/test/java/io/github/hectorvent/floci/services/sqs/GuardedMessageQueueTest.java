@@ -167,7 +167,10 @@ class GuardedMessageQueueTest {
     // --- FIFO ---
 
     @Test
-    void fifoClaimRespectsGroupOrdering() {
+    void fifoClaimReturnsMultipleMessagesPerGroupWithinSingleCall() {
+        // AWS FIFO: a single ReceiveMessage may return multiple messages from
+        // the same MessageGroupId, preserving insertion order. The cross-call
+        // group lock applies only against future calls.
         Message g1m1 = new Message("g1-msg1");
         g1m1.setMessageGroupId("group1");
         Message g1m2 = new Message("g1-msg2");
@@ -179,13 +182,18 @@ class GuardedMessageQueueTest {
         queue.addMessage(g1m2);
         queue.addMessage(g2m1);
 
-        // Should get first from each group
         var first = queue.claimVisibleMessages(10, 30, true, -1, null);
-        assertEquals(2, first.claimed().size());
-        assertEquals("g1-msg1", first.claimed().get(0).getBody());
-        assertEquals("g2-msg1", first.claimed().get(1).getBody());
+        assertEquals(3, first.claimed().size(),
+                "Single FIFO ReceiveMessage should return all visible messages up to MaxNumberOfMessages");
+        List<String> bodies = first.claimed().stream().map(Message::getBody).toList();
+        // Inter-group ordering is not guaranteed by FIFO; only within-group order is.
+        assertTrue(bodies.contains("g2-msg1"), "batch must contain group2 message");
+        int g1m1Idx = bodies.indexOf("g1-msg1");
+        int g1m2Idx = bodies.indexOf("g1-msg2");
+        assertTrue(g1m1Idx >= 0 && g1m2Idx >= 0, "batch must contain both group1 messages");
+        assertTrue(g1m1Idx < g1m2Idx, "group1 messages must be in insertion order");
 
-        // Both groups blocked
+        // All groups now have in-flight messages — second call returns empty
         var second = queue.claimVisibleMessages(10, 30, true, -1, null);
         assertTrue(second.claimed().isEmpty());
     }

@@ -300,6 +300,10 @@ public interface EmulatorConfig {
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
+        PricingServiceConfig pricing();
+        DuckConfig duck();
+        TranscribeServiceConfig transcribe();
+        CostExplorerServiceConfig ce();
     }
 
     interface TransferServiceConfig {
@@ -549,9 +553,11 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean mock();
+    }
 
+    interface DuckConfig {
         /** When set, Floci uses this URL and skips floci-duck container management. */
-        Optional<String> duckUrl();
+        Optional<String> url();
 
         @WithDefault("floci/floci-duck:latest")
         String defaultImage();
@@ -638,6 +644,38 @@ public interface EmulatorConfig {
     interface TextractServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface PricingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Filesystem directory overriding the bundled pricing snapshot. When set, files at
+         * {@code <path>/services.json}, {@code <path>/products/<service>/<region>.json},
+         * {@code <path>/attribute-values/<service>/<attribute>.json}, and
+         * {@code <path>/price-lists/<service>.json} are read in preference to the classpath copy.
+         */
+        Optional<String> snapshotPath();
+    }
+
+    interface TranscribeServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CostExplorerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Synthetic monthly USD credit applied as a {@code Credit} {@code RECORD_TYPE}
+         * row in {@code GetCostAndUsage} responses. The emitted credit is capped at
+         * the synthesized monthly usage so net cost never goes below zero.
+         * Defaults to zero (no credit emitted).
+         */
+        @WithDefault("0.0")
+        double creditUsdMonthly();
     }
 
     interface EcrServiceConfig {

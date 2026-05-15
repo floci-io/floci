@@ -60,6 +60,23 @@ class CloudFormationIntegrationTest {
         return xml.substring(start, end);
     }
 
+    private static String physicalIdByLogicalId(String xml, String logicalId) {
+        String memberOpen = "<member>";
+        String memberClose = "</member>";
+        String logicalMarker = "<LogicalResourceId>" + logicalId + "</LogicalResourceId>";
+        int logicalIdx = xml.indexOf(logicalMarker);
+        assertThat("logical id '" + logicalId + "' present in DescribeStackResources output",
+                logicalIdx, not(equalTo(-1)));
+        int memberStart = xml.lastIndexOf(memberOpen, logicalIdx);
+        int memberEnd = xml.indexOf(memberClose, logicalIdx);
+        String member = xml.substring(memberStart, memberEnd);
+        String physicalOpen = "<PhysicalResourceId>";
+        String physicalClose = "</PhysicalResourceId>";
+        int pStart = member.indexOf(physicalOpen) + physicalOpen.length();
+        int pEnd = member.indexOf(physicalClose, pStart);
+        return member.substring(pStart, pEnd);
+    }
+
     @Test
     void createStack_withS3AndSqs() {
         String template = """
@@ -2224,6 +2241,363 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_withEventBridgeRule_preservesSqsParametersMessageGroupId() {
+        // Regression test for issue #787: CFN provisioner dropped Targets[].SqsParameters,
+        // making FIFO SQS delivery fail with "The request must contain the parameter MessageGroupId".
+        // The same target works when registered via direct events PutTargets, proving the
+        // EventBridge API path supports the field — only the CFN translator was missing it.
+        String template = """
+            {
+              "Resources": {
+                "FifoQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-fifo-target.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "FifoRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-fifo-rule",
+                    "EventPattern": {
+                      "source": ["cfn.fifo.test"]
+                    },
+                    "Targets": [
+                      {
+                        "Id": "FifoQueueTarget",
+                        "Arn": {"Fn::GetAtt": ["FifoQueue", "Arn"]},
+                        "SqsParameters": {"MessageGroupId": "group-1"}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-fifo-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-eb-fifo-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-fifo-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("FifoQueueTarget"))
+            .body("Targets[0].Arn", equalTo("arn:aws:sqs:us-east-1:000000000000:cfn-eb-fifo-target.fifo"))
+            .body("Targets[0].SqsParameters.MessageGroupId", equalTo("group-1"));
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_fifoDeliveryEndToEnd() {
+        // Functional regression for issue #787: not only must the field round-trip
+        // through ListTargetsByRule, an event published via PutEvents must actually
+        // be delivered to the FIFO queue. Without MessageGroupId, SQS rejects with
+        // "The request must contain the parameter MessageGroupId" and the message
+        // never lands. We verify delivery + that MessageGroupId surfaces on the
+        // received SQS attribute.
+        String template = """
+            {
+              "Resources": {
+                "FifoQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-fifo-e2e.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "FifoRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-fifo-e2e-rule",
+                    "EventPattern": {
+                      "source": ["cfn.fifo.e2e"]
+                    },
+                    "Targets": [
+                      {
+                        "Id": "FifoQueueTarget",
+                        "Arn": {"Fn::GetAtt": ["FifoQueue", "Arn"]},
+                        "SqsParameters": {"MessageGroupId": "e2e-group"}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-fifo-e2e-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Match the issue #787 reproducer: re-apply ContentBasedDeduplication via
+        // SetQueueAttributes to control for a separate Floci CFN→SQS bug where
+        // FIFO queue attributes do not always propagate from the template. This
+        // test focuses solely on the EventBridge target SqsParameters wiring.
+        String queueUrl = "http://localhost:4566/000000000000/cfn-eb-fifo-e2e.fifo";
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "SetQueueAttributes")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("Attribute.1.Name", "ContentBasedDeduplication")
+            .formParam("Attribute.1.Value", "true")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.PutEvents")
+            .body("""
+                {
+                  "Entries": [
+                    {
+                      "Source": "cfn.fifo.e2e",
+                      "DetailType": "poc",
+                      "Detail": "{\\"marker\\":\\"cfn-fifo-e2e\\"}"
+                    }
+                  ]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("FailedEntryCount", equalTo(0));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", queueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+            .formParam("WaitTimeSeconds", "1")
+            .formParam("AttributeName.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<Body>"))
+            .body(containsString("cfn-fifo-e2e"))
+            .body(containsString("<Name>MessageGroupId</Name>"))
+            .body(containsString("<Value>e2e-group</Value>"));
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_targetWithoutSqsParameters_omitsField() {
+        // Backwards-compat: targets that have no SqsParameters in the CFN template
+        // must NOT acquire one in the materialised target. Real AWS omits the field
+        // entirely from ListTargetsByRule when none was supplied at PutTargets time;
+        // we mirror that to avoid SDK clients seeing a phantom (null) container.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "cfn-eb-no-sqs-params-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            {
+              "Resources": {
+                "PlainRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-no-sqs-params-rule",
+                    "EventPattern": {"source": ["cfn.no.sqs.params"]},
+                    "Targets": [
+                      {
+                        "Id": "PlainTarget",
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:cfn-eb-no-sqs-params-queue"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-no-sqs-params-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-no-sqs-params-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("PlainTarget"))
+            .body("Targets[0].SqsParameters", nullValue());
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_emptySqsParametersBlock_isIgnored() {
+        // Edge case mirroring the direct PutTargets handler (EventBridgeHandler line 211-219):
+        // an SqsParameters object that is present but does not carry a MessageGroupId
+        // produces NO SqsParameters on the target. We do not coerce empty input into a
+        // half-populated object — that would mask user mistakes.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "cfn-eb-empty-sqs-params-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String template = """
+            {
+              "Resources": {
+                "EmptyParamsRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-empty-sqs-params-rule",
+                    "EventPattern": {"source": ["cfn.empty.sqs.params"]},
+                    "Targets": [
+                      {
+                        "Id": "EmptyParamsTarget",
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:cfn-eb-empty-sqs-params-queue",
+                        "SqsParameters": {}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-empty-sqs-params-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-empty-sqs-params-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets[0].Id", equalTo("EmptyParamsTarget"))
+            .body("Targets[0].SqsParameters", nullValue());
+    }
+
+    @Test
+    void createStack_withEventBridgeRule_mixedTargets_preservesPerTargetSqsParameters() {
+        // Reviewer-defence test: a single rule with two FIFO targets — only one carrying
+        // SqsParameters — must keep them on the right target and leave the other untouched.
+        // Catches future regressions where the field would leak across iterations of the
+        // Targets[] loop (e.g. via a hoisted local variable).
+        String template = """
+            {
+              "Resources": {
+                "QueueA": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-mixed-a.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "QueueB": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-eb-mixed-b.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MixedRule": {
+                  "Type": "AWS::Events::Rule",
+                  "Properties": {
+                    "Name": "cfn-eb-mixed-rule",
+                    "EventPattern": {"source": ["cfn.mixed.targets"]},
+                    "Targets": [
+                      {
+                        "Id": "TargetWithGroup",
+                        "Arn": {"Fn::GetAtt": ["QueueA", "Arn"]},
+                        "SqsParameters": {"MessageGroupId": "group-A"}
+                      },
+                      {
+                        "Id": "TargetWithoutGroup",
+                        "Arn": {"Fn::GetAtt": ["QueueB", "Arn"]}
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-eb-mixed-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "AWSEvents.ListTargetsByRule")
+            .body("{\"Rule\":\"cfn-eb-mixed-rule\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Targets.find { it.Id == 'TargetWithGroup' }.SqsParameters.MessageGroupId", equalTo("group-A"))
+            .body("Targets.find { it.Id == 'TargetWithoutGroup' }.SqsParameters", nullValue());
+    }
+
+    @Test
     void createStack_dependencyOrdering_refBeforeTarget() {
         String template = """
             {
@@ -3337,6 +3711,420 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(400);
+    }
+
+    // ── Issue #788: AWS::ApiGateway::Authorizer support + Method.AuthorizerId wiring ───
+
+    @Test
+    void createStack_withApiGatewayAuthorizer_createsAuthorizerResource() {
+        // Regression test for issue #788: CFN previously fell through the default
+        // stub branch for AWS::ApiGateway::Authorizer, so the resource never reached
+        // ApiGatewayService and `get-authorizers` returned an empty list.
+        String stackName = "cfn-apigw-auth-create-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-auth-create-api"
+                  }
+                },
+                "MyAuthorizer": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "MyTokenAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:my-auth/invocations",
+                    "IdentitySource": "method.request.header.Authorization"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String authorizerId = physicalIdByLogicalId(resourcesXml, "MyAuthorizer");
+
+        // PhysicalResourceId must be the ApiGatewayService-issued authorizer id, not the logical name.
+        assertThat(authorizerId, matchesRegex("^[A-Za-z0-9]+$"));
+        assertThat(authorizerId, not(equalTo("MyAuthorizer")));
+
+        // The authorizer must be retrievable from the standard REST endpoint.
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/authorizers")
+        .then()
+            .statusCode(200)
+            .body("item.size()", equalTo(1))
+            .body("item[0].id", equalTo(authorizerId))
+            .body("item[0].name", equalTo("MyTokenAuth"))
+            .body("item[0].type", equalTo("TOKEN"));
+    }
+
+    @Test
+    void createStack_withApiGatewayMethod_wiresAuthorizerIdViaRef() {
+        // Core scenario from issue #788: `AuthorizationType: CUSTOM` plus
+        // `AuthorizerId: !Ref MyAuthorizer` must produce a method whose
+        // authorizerId points to the actual authorizer resource. Before the fix,
+        // authorizerId was null on the method and the API behaved as `NONE`.
+        String stackName = "cfn-apigw-auth-method-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-auth-method-api"
+                  }
+                },
+                "ApiResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "secured"
+                  }
+                },
+                "TokenAuthorizer": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "MyTokenAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:my-auth/invocations",
+                    "IdentitySource": "method.request.header.Authorization",
+                    "AuthorizerResultTtlInSeconds": 0
+                  }
+                },
+                "SecuredMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "ApiResource"},
+                    "HttpMethod": "GET",
+                    "AuthorizationType": "CUSTOM",
+                    "AuthorizerId": {"Ref": "TokenAuthorizer"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String resourceId = physicalIdByLogicalId(resourcesXml, "ApiResource");
+        String authorizerId = physicalIdByLogicalId(resourcesXml, "TokenAuthorizer");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+        .then()
+            .statusCode(200)
+            .body("httpMethod", equalTo("GET"))
+            .body("authorizationType", equalTo("CUSTOM"))
+            .body("authorizerId", equalTo(authorizerId));
+    }
+
+    @Test
+    void createStack_withApiGatewayAuthorizer_preservesAllFields() {
+        // Reviewer-defence: every CFN-supported property on AWS::ApiGateway::Authorizer
+        // round-trips through GET /restapis/{apiId}/authorizers, not just the Name.
+        // Catches future regressions where a new field is added to the CFN handler
+        // but not threaded into the service request map.
+        String stackName = "cfn-apigw-auth-fields-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {"Name": "cfn-apigw-auth-fields-api"}
+                },
+                "TokenAuth": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "FieldsTokenAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:fields-auth/invocations",
+                    "IdentitySource": "method.request.header.X-Auth",
+                    "AuthorizerResultTtlInSeconds": 120
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String authorizerId = physicalIdByLogicalId(resourcesXml, "TokenAuth");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/authorizers/" + authorizerId)
+        .then()
+            .statusCode(200)
+            .body("id", equalTo(authorizerId))
+            .body("name", equalTo("FieldsTokenAuth"))
+            .body("type", equalTo("TOKEN"))
+            .body("authorizerUri", containsString("function:fields-auth"))
+            .body("identitySource", equalTo("method.request.header.X-Auth"))
+            .body("authorizerResultTtlInSeconds", equalTo(120));
+    }
+
+    @Test
+    void createStack_withApiGatewayMethod_withoutAuthorizerId_authorizerIdRemainsNull() {
+        // Backwards-compat: methods that omit AuthorizerId must NOT acquire one
+        // accidentally (e.g. from a stale loop variable or default value). A
+        // NONE-auth method whose authorizerId surfaces in GET is a contract leak
+        // for SDK clients.
+        String stackName = "cfn-apigw-method-noauth-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {"Name": "cfn-apigw-method-noauth-api"}
+                },
+                "PublicResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "public"
+                  }
+                },
+                "PublicMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "PublicResource"},
+                    "HttpMethod": "GET",
+                    "AuthorizationType": "NONE"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String resourceId = physicalIdByLogicalId(resourcesXml, "PublicResource");
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + resourceId + "/methods/GET")
+        .then()
+            .statusCode(200)
+            .body("authorizationType", equalTo("NONE"))
+            .body("authorizerId", nullValue());
+    }
+
+    @Test
+    void createStack_withMultipleAuthorizers_eachWiredToOwnMethod() {
+        // Multi-authorizer isolation: two authorizers + two methods, each method
+        // must end up wired to the correct authorizer id. Prevents future
+        // regressions where a shared local would leak across iterations of the
+        // resource provisioning loop.
+        String stackName = "cfn-apigw-multi-auth-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {"Name": "cfn-apigw-multi-auth-api"}
+                },
+                "FirstResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "first"
+                  }
+                },
+                "SecondResource": {
+                  "Type": "AWS::ApiGateway::Resource",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ParentId": {"Fn::GetAtt": ["RestApi", "RootResourceId"]},
+                    "PathPart": "second"
+                  }
+                },
+                "FirstAuth": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "FirstAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:first-auth/invocations",
+                    "IdentitySource": "method.request.header.Authorization"
+                  }
+                },
+                "SecondAuth": {
+                  "Type": "AWS::ApiGateway::Authorizer",
+                  "Properties": {
+                    "Name": "SecondAuth",
+                    "Type": "TOKEN",
+                    "RestApiId": {"Ref": "RestApi"},
+                    "AuthorizerUri": "arn:aws:apigateway:us-east-1:lambda:path/2015-03-31/functions/arn:aws:lambda:us-east-1:000000000000:function:second-auth/invocations",
+                    "IdentitySource": "method.request.header.X-Token"
+                  }
+                },
+                "FirstMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "FirstResource"},
+                    "HttpMethod": "GET",
+                    "AuthorizationType": "CUSTOM",
+                    "AuthorizerId": {"Ref": "FirstAuth"}
+                  }
+                },
+                "SecondMethod": {
+                  "Type": "AWS::ApiGateway::Method",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "ResourceId": {"Ref": "SecondResource"},
+                    "HttpMethod": "POST",
+                    "AuthorizationType": "CUSTOM",
+                    "AuthorizerId": {"Ref": "SecondAuth"}
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String firstResource = physicalIdByLogicalId(resourcesXml, "FirstResource");
+        String secondResource = physicalIdByLogicalId(resourcesXml, "SecondResource");
+        String firstAuth = physicalIdByLogicalId(resourcesXml, "FirstAuth");
+        String secondAuth = physicalIdByLogicalId(resourcesXml, "SecondAuth");
+
+        assertThat(firstAuth, not(equalTo(secondAuth)));
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + firstResource + "/methods/GET")
+        .then()
+            .statusCode(200)
+            .body("authorizationType", equalTo("CUSTOM"))
+            .body("authorizerId", equalTo(firstAuth));
+
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/resources/" + secondResource + "/methods/POST")
+        .then()
+            .statusCode(200)
+            .body("authorizationType", equalTo("CUSTOM"))
+            .body("authorizerId", equalTo(secondAuth));
     }
 
 }

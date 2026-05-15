@@ -205,6 +205,33 @@ services:
 1. Switch to `latest-compat` if your init scripts use `aws` or `boto3`.
 2. LocalStack stores data in `/var/lib/localstack`; Floci uses `/app/data`.
 
+## S3 virtual-hosted style DNS
+
+If you use LocalStack's public wildcard DNS (`*.s3.localhost.localstack.cloud`) for S3 virtual-hosted style addressing, Floci supports it without any change:
+
+```java
+// This LocalStack endpoint works unchanged with Floci
+S3Client s3 = S3Client.builder()
+    .endpointOverride(URI.create("http://s3.localhost.localstack.cloud:4566"))
+    .build();
+// SDK sends to: my-bucket.s3.localhost.localstack.cloud:4566 → Floci
+```
+
+Floci also registers its own wildcard DNS domains for virtual-hosted style:
+
+| Domain | Usage |
+|---|---|
+| `*.s3.localhost.floci.io` | S3 virtual-hosted style (`bucket.s3.localhost.floci.io`) |
+| `*.localhost.floci.io` | Direct subdomain style (`bucket.localhost.floci.io`) |
+
+DNS resolution works differently depending on where the client runs:
+
+**From the host machine** — both `*.localhost.localstack.cloud` and `*.localhost.floci.io` are registered in public DNS and resolve to `127.0.0.1`. Requests reach Floci via the Docker port binding (`4566:4566`) with no extra configuration.
+
+**From inside a Docker container** — `127.0.0.1` is the container's own loopback, not Floci. Floci's embedded DNS server handles this: it resolves `*.localhost.floci.io` and `*.localhost.localstack.cloud` (and `*.localhost.localstack.cloud` subdomains) to Floci's container IP on the Docker network. Spawned containers (Lambda, RDS, ElastiCache) are automatically configured to use Floci as their DNS resolver, so virtual-hosted S3 URLs work inside them without any extra setup.
+
+See [S3 → Virtual-Hosted Style](../services/s3.md#virtual-hosted-style) for full details and SDK examples.
+
 ## What stays the same
 
 - Port `4566`

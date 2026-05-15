@@ -43,12 +43,21 @@ public class EmbeddedDnsServer {
     private static final int TTL = 60;
     private static final String FALLBACK_UPSTREAM = "127.0.0.11";
     public static final String DEFAULT_SUFFIX = "localhost.floci.io";
+    public static final String LOCALSTACK_SUFFIX = "localhost.localstack.cloud";
+
+    // Well-known emulator wildcard DNS domains that always resolve to Floci's IP.
+    // The suffix "localhost.X" covers "localhost.X" itself and "*.localhost.X" — it does
+    // NOT cover "*.X" (e.g. "localhost.floci.io" does NOT resolve bare "*.floci.io").
+    //   localhost.localstack.cloud → localhost.localstack.cloud, *.localhost.localstack.cloud
+    //   localhost.floci.io         → localhost.floci.io, *.localhost.floci.io
+    static final List<String> BUILTIN_SUFFIXES = List.of(DEFAULT_SUFFIX, LOCALSTACK_SUFFIX);
 
     private volatile String serverIp;
     private final List<String> suffixes = new ArrayList<>();
     private String upstreamDns;
 
     EmbeddedDnsServer(List<String> suffixes) {
+        this.suffixes.addAll(BUILTIN_SUFFIXES);
         this.suffixes.addAll(suffixes);
     }
 
@@ -61,7 +70,8 @@ public class EmbeddedDnsServer {
             String myIp = InetAddress.getLocalHost().getHostAddress();
             upstreamDns = readUpstreamDns();
 
-            suffixes.add(config.hostname().orElse(DEFAULT_SUFFIX));
+            suffixes.addAll(BUILTIN_SUFFIXES);
+            config.hostname().ifPresent(suffixes::add);
             config.dns().extraSuffixes().ifPresent(suffixes::addAll);
 
             DatagramSocket socket = vertx.createDatagramSocket(new DatagramSocketOptions().setIpV6(false));

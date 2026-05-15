@@ -1180,7 +1180,7 @@ public class ApiGatewayExecuteController {
      * Finds the best-matching resource for {@code requestPath}.
      * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
      */
-    private ApiGatewayResource matchResource(List<ApiGatewayResource> resources, String requestPath) {
+    ApiGatewayResource matchResource(List<ApiGatewayResource> resources, String requestPath) {
         // 1. Exact match
         for (ApiGatewayResource r : resources) {
             if (requestPath.equals(r.getPath())) {
@@ -1195,13 +1195,30 @@ public class ApiGatewayExecuteController {
                 }
             }
         }
-        // 3. Proxy+ wildcard — {proxy+} matches any remaining path
+        // 3. Proxy+ wildcard — {proxy+} matches longest parent prefix
+        // Requires at least one path segment after the parent prefix (except root /{proxy+})
+        ApiGatewayResource best = null;
+        int bestLen = -1;
         for (ApiGatewayResource r : resources) {
-            if (r.getPathPart() != null && r.getPathPart().contains("{")) {
-                return r;
+            if (r.getPath() == null || !r.getPath().contains("{proxy+}")) continue;
+            String parentPrefix = r.getPath().substring(0, r.getPath().indexOf("{proxy+}"));
+            // Root /{proxy+} matches everything including /
+            if ("/".equals(parentPrefix)) {
+                if (best == null) {
+                    best = r;
+                    bestLen = 0;
+                }
+                continue;
+            }
+            // Non-root proxy+ requires at least one char after the prefix
+            if (requestPath.startsWith(parentPrefix)
+                    && requestPath.length() > parentPrefix.length()
+                    && parentPrefix.length() > bestLen) {
+                best = r;
+                bestLen = parentPrefix.length();
             }
         }
-        return null;
+        return best;
     }
 
     /**

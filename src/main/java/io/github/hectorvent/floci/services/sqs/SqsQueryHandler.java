@@ -56,9 +56,77 @@ public class SqsQueryHandler {
             case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(params, region);
             case "StartMessageMoveTask" -> handleStartMessageMoveTask(params, region);
             case "ListMessageMoveTasks" -> handleListMessageMoveTasks(params, region);
+            case "AddPermission" -> handleAddPermission(params, region);
+            case "RemovePermission" -> handleRemovePermission(params, region);
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported by SQS.", AwsNamespaces.SQS, 400);
         };
+    }
+
+    private Response handleAddPermission(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String label = getParam(params, "Label");
+        List<String> accountIds = collectIndexed(params, "AWSAccountId.");
+        List<String> actions = collectIndexed(params, "ActionName.");
+        sqsService.addPermission(queueUrl, label, accountIds, actions, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("AddPermission", null)).build();
+    }
+
+    private Response handleRemovePermission(MultivaluedMap<String, String> params, String region) {
+        String queueUrl = getParam(params, "QueueUrl");
+        String label = getParam(params, "Label");
+        sqsService.removePermission(queueUrl, label, region);
+        return Response.ok(AwsQueryResponse.envelopeNoResult("RemovePermission", null)).build();
+    }
+
+    private static void writeSystemAttributesXml(XmlBuilder xml, Message msg,
+                                                 java.util.Set<String> requested, String senderId) {
+        if (requested.isEmpty()) {
+            return;
+        }
+        boolean all = requested.contains("All");
+        if (all || requested.contains("SenderId")) {
+            if (senderId != null) {
+                xml.start("Attribute").elem("Name", "SenderId")
+                        .elem("Value", senderId).end("Attribute");
+            }
+        }
+        if (all || requested.contains("SentTimestamp")) {
+            xml.start("Attribute").elem("Name", "SentTimestamp")
+                    .elem("Value", String.valueOf(msg.getSentTimestamp().toEpochMilli())).end("Attribute");
+        }
+        if (all || requested.contains("ApproximateReceiveCount")) {
+            xml.start("Attribute").elem("Name", "ApproximateReceiveCount")
+                    .elem("Value", String.valueOf(msg.getReceiveCount())).end("Attribute");
+        }
+        if (all || requested.contains("ApproximateFirstReceiveTimestamp")) {
+            if (msg.getFirstReceiveTimestamp() != null) {
+                xml.start("Attribute").elem("Name", "ApproximateFirstReceiveTimestamp")
+                        .elem("Value", String.valueOf(msg.getFirstReceiveTimestamp().toEpochMilli())).end("Attribute");
+            }
+        }
+        if (msg.getMessageGroupId() != null && (all || requested.contains("MessageGroupId"))) {
+            xml.start("Attribute").elem("Name", "MessageGroupId")
+                    .elem("Value", msg.getMessageGroupId()).end("Attribute");
+        }
+        if (msg.getSequenceNumber() > 0 && (all || requested.contains("SequenceNumber"))) {
+            xml.start("Attribute").elem("Name", "SequenceNumber")
+                    .elem("Value", String.valueOf(msg.getSequenceNumber())).end("Attribute");
+        }
+        if (msg.getMessageDeduplicationId() != null && (all || requested.contains("MessageDeduplicationId"))) {
+            xml.start("Attribute").elem("Name", "MessageDeduplicationId")
+                    .elem("Value", msg.getMessageDeduplicationId()).end("Attribute");
+        }
+    }
+
+    private List<String> collectIndexed(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String v = getParam(params, prefix + i);
+            if (v == null) break;
+            values.add(v);
+        }
+        return values;
     }
 
     private Response handleCreateQueue(MultivaluedMap<String, String> params, String region) {
@@ -164,7 +232,12 @@ public class SqsQueryHandler {
         int visibilityTimeout = getIntParam(params, "VisibilityTimeout", -1);
         int waitTimeSeconds = getIntParam(params, "WaitTimeSeconds", 0);
 
+        java.util.Set<String> requestedAttrs = new java.util.LinkedHashSet<>();
+        requestedAttrs.addAll(collectIndexed(params, "AttributeName."));
+        requestedAttrs.addAll(collectIndexed(params, "MessageSystemAttributeName."));
+
         List<Message> messages = sqsService.receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds, region);
+        String senderId = sqsService.senderIdFor(queueUrl);
 
         var xml = new XmlBuilder();
         for (Message msg : messages) {
@@ -175,23 +248,8 @@ public class SqsQueryHandler {
             if (msg.getMd5OfMessageAttributes() != null) {
                 xml.elem("MD5OfMessageAttributes", msg.getMd5OfMessageAttributes());
             }
-            xml.elem("Body", msg.getBody())
-               .start("Attribute").elem("Name", "ApproximateReceiveCount")
-                 .elem("Value", String.valueOf(msg.getReceiveCount())).end("Attribute")
-               .start("Attribute").elem("Name", "SentTimestamp")
-                 .elem("Value", String.valueOf(msg.getSentTimestamp().toEpochMilli())).end("Attribute");
-            if (msg.getMessageGroupId() != null) {
-                xml.start("Attribute").elem("Name", "MessageGroupId")
-                   .elem("Value", msg.getMessageGroupId()).end("Attribute");
-            }
-            if (msg.getSequenceNumber() > 0) {
-                xml.start("Attribute").elem("Name", "SequenceNumber")
-                   .elem("Value", String.valueOf(msg.getSequenceNumber())).end("Attribute");
-            }
-            if (msg.getMessageDeduplicationId() != null) {
-                xml.start("Attribute").elem("Name", "MessageDeduplicationId")
-                   .elem("Value", msg.getMessageDeduplicationId()).end("Attribute");
-            }
+            xml.elem("Body", msg.getBody());
+            writeSystemAttributesXml(xml, msg, requestedAttrs, senderId);
             if (msg.getMessageAttributes() != null && !msg.getMessageAttributes().isEmpty()) {
                 for (var entry : msg.getMessageAttributes().entrySet()) {
                     xml.start("MessageAttribute")

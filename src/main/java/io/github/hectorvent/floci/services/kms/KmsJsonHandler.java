@@ -139,7 +139,8 @@ public class KmsJsonHandler {
     private Response handleEncrypt(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         byte[] plaintext = Base64.getDecoder().decode(request.path("Plaintext").asText());
-        byte[] ciphertext = service.encrypt(keyId, plaintext, region);
+        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
+        byte[] ciphertext = service.encrypt(keyId, plaintext, context, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CiphertextBlob", Base64.getEncoder().encodeToString(ciphertext));
@@ -149,16 +150,13 @@ public class KmsJsonHandler {
 
     private Response handleDecrypt(JsonNode request, String region) {
         byte[] ciphertext = Base64.getDecoder().decode(request.path("CiphertextBlob").asText());
-        byte[] plaintext = service.decrypt(ciphertext, region);
+        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
+        KmsService.DecryptResult result = service.decryptAndResolveKey(ciphertext, context, region);
 
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("Plaintext", Base64.getEncoder().encodeToString(plaintext));
-        // In our mock, we don't strictly track which key was used for decryption from blob alone,
-        // but we could extract it from our mock format "kms:keyId:..."
-        String data = new String(ciphertext);
-        if (data.startsWith("kms:")) {
-            String keyId = data.split(":")[1];
-            response.put("KeyId", service.describeKey(keyId, region).getArn());
+        response.put("Plaintext", Base64.getEncoder().encodeToString(result.plaintext()));
+        if (result.keyArn() != null) {
+            response.put("KeyId", result.keyArn());
         }
         return Response.ok(response).build();
     }
@@ -167,8 +165,9 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         String spec = request.path("KeySpec").asText(null);
         int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
-        Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, region);
+        Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("Plaintext", Base64.getEncoder().encodeToString((byte[]) result.get("Plaintext")));
@@ -181,8 +180,9 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         String spec = request.path("KeySpec").asText(null);
         int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        Map<String, String> context = readEncryptionContext(request.path("EncryptionContext"));
 
-        Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, region);
+        Map<String, Object> result = service.generateDataKey(keyId, spec, numberOfBytes, context, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CiphertextBlob", Base64.getEncoder().encodeToString((byte[]) result.get("CiphertextBlob")));
@@ -193,15 +193,26 @@ public class KmsJsonHandler {
     private Response handleReEncrypt(JsonNode request, String region) {
         byte[] ciphertext = Base64.getDecoder().decode(request.path("CiphertextBlob").asText());
         String destKeyId = request.path("DestinationKeyId").asText();
+        Map<String, String> sourceContext = readEncryptionContext(request.path("SourceEncryptionContext"));
+        Map<String, String> destContext = readEncryptionContext(request.path("DestinationEncryptionContext"));
 
-        byte[] plaintext = service.decrypt(ciphertext, region);
-        byte[] newCiphertext = service.encrypt(destKeyId, plaintext, region);
+        KmsService.DecryptResult source = service.decryptAndResolveKey(ciphertext, sourceContext, region);
+        byte[] newCiphertext = service.encrypt(destKeyId, source.plaintext(), destContext, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("CiphertextBlob", Base64.getEncoder().encodeToString(newCiphertext));
         response.put("KeyId", service.describeKey(destKeyId, region).getArn());
-        response.put("SourceKeyId", service.decryptToKeyArn(ciphertext, region));
+        response.put("SourceKeyId", source.keyArn());
         return Response.ok(response).build();
+    }
+
+    private static Map<String, String> readEncryptionContext(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull() || !node.isObject()) {
+            return Map.of();
+        }
+        Map<String, String> result = new HashMap<>();
+        node.fields().forEachRemaining(e -> result.put(e.getKey(), e.getValue().asText()));
+        return result;
     }
 
     private Response handleSign(JsonNode request, String region) {

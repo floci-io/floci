@@ -126,7 +126,8 @@ class DynamoDbExpressionTests {
     void filterInSingle() {
         ScanResponse resp = ddb.scan(ScanRequest.builder()
                 .tableName(FILTER_TABLE)
-                .filterExpression("status IN (:v0)")
+                .filterExpression("#s IN (:v0)")
+                .expressionAttributeNames(Map.of("#s", "status"))
                 .expressionAttributeValues(Map.of(":v0", AttributeValue.fromN("1")))
                 .build());
         assertThat(resp.count()).isEqualTo(2);
@@ -138,7 +139,8 @@ class DynamoDbExpressionTests {
     void filterInMultiple() {
         ScanResponse resp = ddb.scan(ScanRequest.builder()
                 .tableName(FILTER_TABLE)
-                .filterExpression("status IN (:v0, :v1)")
+                .filterExpression("#s IN (:v0, :v1)")
+                .expressionAttributeNames(Map.of("#s", "status"))
                 .expressionAttributeValues(Map.of(
                         ":v0", AttributeValue.fromN("1"),
                         ":v1", AttributeValue.fromN("3")))
@@ -154,7 +156,8 @@ class DynamoDbExpressionTests {
     void filterOr() {
         ScanResponse resp = ddb.scan(ScanRequest.builder()
                 .tableName(FILTER_TABLE)
-                .filterExpression("status = :v1 OR status = :v2")
+                .filterExpression("#s = :v1 OR #s = :v2")
+                .expressionAttributeNames(Map.of("#s", "status"))
                 .expressionAttributeValues(Map.of(
                         ":v1", AttributeValue.fromN("1"),
                         ":v2", AttributeValue.fromN("2")))
@@ -184,7 +187,8 @@ class DynamoDbExpressionTests {
     void filterParenthesizedAndOr() {
         ScanResponse resp = ddb.scan(ScanRequest.builder()
                 .tableName(FILTER_TABLE)
-                .filterExpression("(status = :v1 OR status = :v3) AND category = :catA")
+                .filterExpression("(#s = :v1 OR #s = :v3) AND category = :catA")
+                .expressionAttributeNames(Map.of("#s", "status"))
                 .expressionAttributeValues(Map.of(
                         ":v1", AttributeValue.fromN("1"),
                         ":v3", AttributeValue.fromN("3"),
@@ -334,7 +338,8 @@ class DynamoDbExpressionTests {
             ddb.updateItem(UpdateItemRequest.builder()
                     .tableName(table)
                     .key(Map.of("pk", AttributeValue.fromS("k1")))
-                    .updateExpression("SET counter = if_not_exists(counter, :start) + :inc")
+                    .updateExpression("SET #cnt = if_not_exists(#cnt, :start) + :inc")
+                    .expressionAttributeNames(Map.of("#cnt", "counter"))
                     .expressionAttributeValues(Map.of(
                             ":start", AttributeValue.builder().n("0").build(),
                             ":inc", AttributeValue.builder().n("1").build()))
@@ -350,7 +355,8 @@ class DynamoDbExpressionTests {
             ddb.updateItem(UpdateItemRequest.builder()
                     .tableName(table)
                     .key(Map.of("pk", AttributeValue.fromS("k1")))
-                    .updateExpression("SET counter = if_not_exists(counter, :start) + :inc")
+                    .updateExpression("SET #cnt = if_not_exists(#cnt, :start) + :inc")
+                    .expressionAttributeNames(Map.of("#cnt", "counter"))
                     .expressionAttributeValues(Map.of(
                             ":start", AttributeValue.builder().n("0").build(),
                             ":inc", AttributeValue.builder().n("1").build()))
@@ -366,7 +372,8 @@ class DynamoDbExpressionTests {
             ddb.updateItem(UpdateItemRequest.builder()
                     .tableName(table)
                     .key(Map.of("pk", AttributeValue.fromS("k1")))
-                    .updateExpression("SET counter = counter - :dec")
+                    .updateExpression("SET #cnt = #cnt - :dec")
+                    .expressionAttributeNames(Map.of("#cnt", "counter"))
                     .expressionAttributeValues(Map.of(
                             ":dec", AttributeValue.builder().n("1").build()))
                     .build());

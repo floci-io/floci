@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -690,6 +691,97 @@ public class SesController {
         } catch (Exception e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    // ──────────────────── Suppression list ───────────────────────────
+
+    @PUT
+    @Path("/suppression/addresses")
+    public Response putSuppressedDestination(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            if (body == null || body.isBlank()) {
+                throw new AwsException("BadRequestException", "Request body is required.", 400);
+            }
+            JsonNode request = objectMapper.readTree(body);
+            requireJsonObject(request);
+            String emailAddress = readRequiredStringField(request, "EmailAddress");
+            String reason = readRequiredStringField(request, "Reason");
+            sesService.putSuppressedDestination(region, emailAddress, reason);
+            LOG.infov("SES V2 PutSuppressedDestination: {0} ({1})", emailAddress, reason);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    private static String readRequiredStringField(JsonNode request, String fieldName) {
+        JsonNode node = request.path(fieldName);
+        if (node.isMissingNode() || node.isNull() || !node.isTextual()) {
+            throw new AwsException("BadRequestException", fieldName + " is required.", 400);
+        }
+        return node.asText();
+    }
+
+    @GET
+    @Path("/suppression/addresses/{emailAddress}")
+    public Response getSuppressedDestination(@Context HttpHeaders headers,
+                                              @PathParam("emailAddress") String emailAddress) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            SuppressedDestination suppressed = sesService.getSuppressedDestination(region, emailAddress);
+            ObjectNode result = objectMapper.createObjectNode();
+            ObjectNode entry = result.putObject("SuppressedDestination");
+            entry.put("EmailAddress", suppressed.getEmailAddress());
+            entry.put("Reason", suppressed.getReason());
+            if (suppressed.getLastUpdateTime() != null) {
+                entry.put("LastUpdateTime", suppressed.getLastUpdateTime().getEpochSecond());
+            }
+            return Response.ok(result).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @DELETE
+    @Path("/suppression/addresses/{emailAddress}")
+    public Response deleteSuppressedDestination(@Context HttpHeaders headers,
+                                                 @PathParam("emailAddress") String emailAddress) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            sesService.deleteSuppressedDestination(region, emailAddress);
+            LOG.infov("SES V2 DeleteSuppressedDestination: {0}", emailAddress);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @GET
+    @Path("/suppression/addresses")
+    public Response listSuppressedDestinations(@Context HttpHeaders headers,
+                                                @QueryParam("Reason") List<String> reasons) {
+        String region = regionResolver.resolveRegion(headers);
+        List<SuppressedDestination> entries;
+        try {
+            entries = sesService.listSuppressedDestinations(region, reasons);
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode summaries = result.putArray("SuppressedDestinationSummaries");
+        for (SuppressedDestination s : entries) {
+            ObjectNode item = objectMapper.createObjectNode();
+            item.put("EmailAddress", s.getEmailAddress());
+            item.put("Reason", s.getReason());
+            if (s.getLastUpdateTime() != null) {
+                item.put("LastUpdateTime", s.getLastUpdateTime().getEpochSecond());
+            }
+            summaries.add(item);
+        }
+        return Response.ok(result).build();
     }
 
     // ──────────────────────────── Tags ───────────────────────────────

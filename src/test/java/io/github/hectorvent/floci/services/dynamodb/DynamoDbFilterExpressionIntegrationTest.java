@@ -92,11 +92,13 @@ class DynamoDbFilterExpressionIntegrationTest {
     void scanFilterInOperator_singleValue() {
         // status IN (:v0) where v0=1 should return u1, u3
         scanWithFilter(
-                "status IN (:v0)",
+                "#s IN (:v0)",
                 """
                 {":v0": {"N": "1"}}
                 """,
-                null,
+                """
+                {"#s": "status"}
+                """,
                 2);
     }
 
@@ -104,11 +106,13 @@ class DynamoDbFilterExpressionIntegrationTest {
     void scanFilterInOperator_multipleValues() {
         // status IN (:v0, :v1) where v0=1, v1=3 should return u1, u3, u4
         scanWithFilter(
-                "status IN (:v0, :v1)",
+                "#s IN (:v0, :v1)",
                 """
                 {":v0": {"N": "1"}, ":v1": {"N": "3"}}
                 """,
-                null,
+                """
+                {"#s": "status"}
+                """,
                 3);
     }
 
@@ -132,11 +136,13 @@ class DynamoDbFilterExpressionIntegrationTest {
     void scanFilterOrOperator() {
         // status = :v1 OR status = :v2 should return u1, u2, u3 (status 1 or 2)
         scanWithFilter(
-                "status = :v1 OR status = :v2",
+                "#s = :v1 OR #s = :v2",
                 """
                 {":v1": {"N": "1"}, ":v2": {"N": "2"}}
                 """,
-                null,
+                """
+                {"#s": "status"}
+                """,
                 3);
     }
 
@@ -159,11 +165,13 @@ class DynamoDbFilterExpressionIntegrationTest {
         // (status = :v1 OR status = :v3) AND category = :catA
         // status=1 OR status=3 → u1,u3,u4; AND category=A → u1,u3
         scanWithFilter(
-                "(status = :v1 OR status = :v3) AND category = :catA",
+                "(#s = :v1 OR #s = :v3) AND category = :catA",
                 """
                 {":v1": {"N": "1"}, ":v3": {"N": "3"}, ":catA": {"S": "A"}}
                 """,
-                null,
+                """
+                {"#s": "status"}
+                """,
                 2);
     }
 
@@ -189,11 +197,13 @@ class DynamoDbFilterExpressionIntegrationTest {
         // (status 1 or 3) AND category A → u1,u3; OR deleted=true → u2
         // Total: u1, u2, u3
         scanWithFilter(
-                "((status = :v1 OR status = :v3) AND category = :catA) OR deleted = :del",
+                "((#s = :v1 OR #s = :v3) AND category = :catA) OR deleted = :del",
                 """
                 {":v1": {"N": "1"}, ":v3": {"N": "3"}, ":catA": {"S": "A"}, ":del": {"BOOL": true}}
                 """,
-                null,
+                """
+                {"#s": "status"}
+                """,
                 3);
     }
 
@@ -201,11 +211,13 @@ class DynamoDbFilterExpressionIntegrationTest {
     void scanFilterNotWithParenthesizedAnd() {
         // NOT (deleted = :true AND status = :v2) — negate (u2 only) → u1, u3, u4
         scanWithFilter(
-                "NOT (deleted = :d AND status = :v2)",
+                "NOT (deleted = :d AND #s = :v2)",
                 """
                 {":d": {"BOOL": true}, ":v2": {"N": "2"}}
                 """,
-                null,
+                """
+                {"#s": "status"}
+                """,
                 3);
     }
 

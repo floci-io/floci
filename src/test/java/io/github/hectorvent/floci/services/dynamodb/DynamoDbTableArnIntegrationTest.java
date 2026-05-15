@@ -128,8 +128,9 @@ class DynamoDbTableArnIntegrationTest {
                             "Update": {
                                 "TableName": "%s",
                                 "Key": {"pk": {"S": "user-1"}},
-                                "ConditionExpression": "name = :expected",
+                                "ConditionExpression": "#n = :expected",
                                 "UpdateExpression": "SET email = :email",
+                                "ExpressionAttributeNames": {"#n": "name"},
                                 "ExpressionAttributeValues": {
                                     ":expected": {"S": "Alice"},
                                     ":email": {"S": "alice@example.com"}
@@ -250,7 +251,7 @@ class DynamoDbTableArnIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
+            .body("__type", equalTo("ValidationException"))
             .body("message", containsString("does not match request region"));
 
         given()
@@ -263,7 +264,7 @@ class DynamoDbTableArnIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
+            .body("__type", equalTo("ValidationException"))
             .body("message", containsString("does not accept index or stream ARNs"));
     }
 
@@ -409,7 +410,7 @@ class DynamoDbTableArnIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidParameterValue"))
+            .body("__type", equalTo("ValidationException"))
             .body("message", containsString("must be a short name, not an ARN"));
     }
 

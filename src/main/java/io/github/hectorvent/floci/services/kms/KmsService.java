@@ -32,6 +32,7 @@ import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
+import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.*;
 import java.security.spec.*;
@@ -326,31 +327,121 @@ public class KmsService {
 
     // ──────────────────────────── Crypto Ops (Mocks) ────────────────────────────
 
+    // v2 blob: kms:v2:<keyId>:<nonceHex>:<contextFingerprintHex>:<base64(plaintext)>
+    // Nonce makes Encrypt non-deterministic; contextFingerprint binds EncryptionContext as AAD.
+    // Legacy v1 (kms:<keyId>:<base64>) still accepted on Decrypt for persistent-store back-compat.
+    private static final String BLOB_PREFIX_V2 = "kms:v2:";
+    private static final String BLOB_PREFIX_V1 = "kms:";
+    private static final int NONCE_BYTES = 8;
+    private static final SecureRandom SECURE_RANDOM = new SecureRandom();
+
     public byte[] encrypt(String keyId, byte[] plaintext, String region) {
+        return encrypt(keyId, plaintext, Map.of(), region);
+    }
+
+    public byte[] encrypt(String keyId, byte[] plaintext, Map<String, String> encryptionContext, String region) {
         KmsKey kmsKey = resolveKey(keyId, region);
-        // Local mock: prefix with keyId and base64
-        String mock = "kms:" + kmsKey.getKeyId() + ":" + Base64.getEncoder().encodeToString(plaintext);
-        return mock.getBytes(StandardCharsets.UTF_8);
+
+        byte[] nonceBytes = new byte[NONCE_BYTES];
+        SECURE_RANDOM.nextBytes(nonceBytes);
+        String nonceHex = HexFormat.of().formatHex(nonceBytes);
+
+        String blob = BLOB_PREFIX_V2
+                + kmsKey.getKeyId() + ":"
+                + nonceHex + ":"
+                + contextFingerprint(encryptionContext) + ":"
+                + Base64.getEncoder().encodeToString(plaintext);
+        return blob.getBytes(StandardCharsets.UTF_8);
     }
 
     public byte[] decrypt(byte[] ciphertext, String region) {
-        String data = new String(ciphertext, StandardCharsets.UTF_8);
-        if (!data.startsWith("kms:")) {
+        return decrypt(ciphertext, Map.of(), region);
+    }
+
+    public byte[] decrypt(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
+        ParsedBlob parsed = parseBlob(ciphertext);
+        if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
             throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
         }
-        String[] parts = data.split(":", 3);
-        if (parts.length < 3) throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
-
-        return Base64.getDecoder().decode(parts[2]);
+        return Base64.getDecoder().decode(parsed.payload);
     }
 
     public String decryptToKeyArn(byte[] ciphertext, String region) {
-        String data = new String(ciphertext, StandardCharsets.UTF_8);
-        if (data.startsWith("kms:")) {
-            String keyId = data.split(":")[1];
-            return resolveKey(keyId, region).getArn();
+        try {
+            return resolveKey(parseBlob(ciphertext).keyId, region).getArn();
+        } catch (AwsException e) {
+            return null;
         }
-        return null;
+    }
+
+    /**
+     * Single-pass decrypt + source-key-ARN resolution. {@link #decrypt} and
+     * {@link #decryptToKeyArn} remain independent primitives — neither delegates here.
+     */
+    public DecryptResult decryptAndResolveKey(byte[] ciphertext, Map<String, String> encryptionContext, String region) {
+        ParsedBlob parsed = parseBlob(ciphertext);
+        if (!parsed.contextFingerprint.equals(contextFingerprint(encryptionContext))) {
+            throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+        }
+        byte[] plaintext = Base64.getDecoder().decode(parsed.payload);
+        String keyArn;
+        try {
+            keyArn = resolveKey(parsed.keyId, region).getArn();
+        } catch (AwsException e) {
+            keyArn = null;
+        }
+        return new DecryptResult(plaintext, keyArn);
+    }
+
+    public record DecryptResult(byte[] plaintext, String keyArn) {}
+
+    private record ParsedBlob(String keyId, String nonce, String contextFingerprint, String payload) {}
+
+    private static ParsedBlob parseBlob(byte[] ciphertext) {
+        String data = new String(ciphertext, StandardCharsets.UTF_8);
+        if (data.startsWith(BLOB_PREFIX_V2)) {
+            // v2: keyId, nonce, contextFingerprint, payload
+            String[] parts = data.substring(BLOB_PREFIX_V2.length()).split(":", 4);
+            if (parts.length < 4) {
+                throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+            }
+            return new ParsedBlob(parts[0], parts[1], parts[2], parts[3]);
+        }
+        if (data.startsWith(BLOB_PREFIX_V1)) {
+            // Legacy v1: kms:<keyId>:<base64>. No nonce, no context binding.
+            // Decrypts only when caller supplies empty/null context (fingerprint "").
+            String[] parts = data.substring(BLOB_PREFIX_V1.length()).split(":", 2);
+            if (parts.length == 2) {
+                return new ParsedBlob(parts[0], "", "", parts[1]);
+            }
+        }
+        throw new AwsException("InvalidCiphertextException", "The ciphertext is invalid.", 400);
+    }
+
+    /**
+     * Stable fingerprint of an EncryptionContext map. AWS treats EncryptionContext as a
+     * case-sensitive exact match, so we hash a length-prefixed serialization of the sorted
+     * (key, value) pairs. Returns "" for null / empty, so omitted-context and empty-map
+     * ciphertexts are interchangeable (matches AWS).
+     */
+    private static String contextFingerprint(Map<String, String> ctx) {
+        if (ctx == null || ctx.isEmpty()) {
+            return "";
+        }
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            new TreeMap<>(ctx).forEach((k, v) -> {
+                byte[] kb = k.getBytes(StandardCharsets.UTF_8);
+                byte[] vb = (v == null ? "" : v).getBytes(StandardCharsets.UTF_8);
+                md.update(ByteBuffer.allocate(4).putInt(kb.length).array());
+                md.update(kb);
+                md.update(ByteBuffer.allocate(4).putInt(vb.length).array());
+                md.update(vb);
+            });
+            return HexFormat.of().formatHex(md.digest());
+        } catch (NoSuchAlgorithmException e) {
+            throw new AwsException("InternalFailure", "SHA-256 unavailable", 500);
+        }
     }
 
     public byte[] sign(String keyId, byte[] message, String algorithm, String region) {
@@ -452,14 +543,19 @@ public class KmsService {
     }
 
     public Map<String, Object> generateDataKey(String keyId, String keySpec, int numberOfBytes, String region) {
+        return generateDataKey(keyId, keySpec, numberOfBytes, Map.of(), region);
+    }
+
+    public Map<String, Object> generateDataKey(String keyId, String keySpec, int numberOfBytes,
+                                               Map<String, String> encryptionContext, String region) {
         resolveKey(keyId, region);
         int len = (keySpec != null && keySpec.contains("256")) ? 32 : (numberOfBytes > 0 ? numberOfBytes : 32);
-        
+
         byte[] plaintext = new byte[len];
         ThreadLocalRandom.current().nextBytes(plaintext);
-        
-        byte[] ciphertext = encrypt(keyId, plaintext, region);
-        
+
+        byte[] ciphertext = encrypt(keyId, plaintext, encryptionContext, region);
+
         Map<String, Object> result = new HashMap<>();
         result.put("Plaintext", plaintext);
         result.put("CiphertextBlob", ciphertext);

@@ -88,9 +88,16 @@ Provide credentials for private registries (e.g. for Lambda base images). Use in
 
 ## DNS
 
+Floci's embedded DNS server always resolves the following wildcard suffixes to Floci's container IP — no configuration required:
+
+| Built-in suffix | Covers |
+|---|---|
+| `localhost.floci.io` | `localhost.floci.io` and `*.localhost.floci.io` (e.g. `my-bucket.s3.localhost.floci.io`) |
+| `localhost.localstack.cloud` | `localhost.localstack.cloud` and `*.localhost.localstack.cloud` (e.g. `my-bucket.s3.localhost.localstack.cloud`) |
+
 | Variable | Default | Description |
 |---|---|---|
-| `FLOCI_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of hostname suffixes that the embedded DNS server resolves to Floci's container IP. Useful when migrating from LocalStack: `FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud` |
+| `FLOCI_DNS_EXTRA_SUFFIXES` | _(none)_ | Comma-separated list of additional hostname suffixes to resolve to Floci's container IP. Use this for custom domains beyond the built-in ones above (e.g. a private internal suffix). |
 
 ---
 

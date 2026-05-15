@@ -17,7 +17,7 @@ class EmbeddedDnsServerTest {
         dns = new EmbeddedDnsServer(List.of("localhost.floci.io"));
     }
 
-    // ── matchesSuffix ─────────────────────────────────────────────────────────
+    // ── matchesSuffix — configured suffix ────────────────────────────────────
 
     @Test
     void matchesSuffix_exactMatch() {
@@ -49,10 +49,74 @@ class EmbeddedDnsServerTest {
         assertFalse(dns.matchesSuffix("floci.io"));
     }
 
+    // bare *.floci.io (without localhost.) must NOT match — only *.localhost.floci.io is registered
+    @Test
+    void matchesSuffix_bareFlociIoSubdomainNoMatch() {
+        assertFalse(dns.matchesSuffix("my-bucket.floci.io"));
+    }
+
+    @Test
+    void matchesSuffix_bareS3FlociIoNoMatch() {
+        assertFalse(dns.matchesSuffix("s3.floci.io"));
+    }
+
+    // bare *.localstack.cloud (without localhost.) must NOT match either
+    @Test
+    void matchesSuffix_bareLocalstackCloudNoMatch() {
+        assertFalse(dns.matchesSuffix("my-bucket.localstack.cloud"));
+    }
+
     @Test
     void matchesSuffix_nullAndEmpty() {
         assertFalse(dns.matchesSuffix(null));
         assertFalse(dns.matchesSuffix(""));
+    }
+
+    // ── matchesSuffix — built-in emulator domains ─────────────────────────────
+
+    @Test
+    void matchesSuffix_localhostFlociIo_exact() {
+        assertTrue(dns.matchesSuffix("localhost.floci.io"));
+    }
+
+    @Test
+    void matchesSuffix_localhostFlociIo_subdomain() {
+        assertTrue(dns.matchesSuffix("my-bucket.localhost.floci.io"));
+    }
+
+    @Test
+    void matchesSuffix_s3LocalhostFlociIo() {
+        assertTrue(dns.matchesSuffix("s3.localhost.floci.io"));
+    }
+
+    @Test
+    void matchesSuffix_bucketS3LocalhostFlociIo() {
+        assertTrue(dns.matchesSuffix("my-bucket.s3.localhost.floci.io"));
+    }
+
+    @Test
+    void matchesSuffix_localhostLocalstackCloud_exact() {
+        assertTrue(dns.matchesSuffix("localhost.localstack.cloud"));
+    }
+
+    @Test
+    void matchesSuffix_localhostLocalstackCloud_subdomain() {
+        assertTrue(dns.matchesSuffix("my-bucket.localhost.localstack.cloud"));
+    }
+
+    @Test
+    void matchesSuffix_s3LocalhostLocalstackCloud() {
+        assertTrue(dns.matchesSuffix("s3.localhost.localstack.cloud"));
+    }
+
+    @Test
+    void matchesSuffix_bucketS3LocalhostLocalstackCloud() {
+        assertTrue(dns.matchesSuffix("my-bucket.s3.localhost.localstack.cloud"));
+    }
+
+    @Test
+    void matchesSuffix_bucketS3RegionLocalstackCloud() {
+        assertTrue(dns.matchesSuffix("my-bucket.s3.us-east-1.localhost.localstack.cloud"));
     }
 
     // ── readName ──────────────────────────────────────────────────────────────

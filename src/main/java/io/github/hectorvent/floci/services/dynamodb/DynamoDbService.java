@@ -34,10 +34,13 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.HexFormat;
+import java.util.LinkedHashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -62,6 +65,14 @@ public class DynamoDbService {
     // relies on ReentrantLock's re-entrancy so the inner put/update/delete calls do
     // not deadlock after the outer transaction already took each participant's lock.
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReentrantLock>> itemLocks = new ConcurrentHashMap<>();
+    // ClientRequestToken idempotency for TransactWriteItems. AWS retains tokens for
+    // ~10 minutes; floci uses the same window. The cache entry stores a hash of the
+    // request body so a replay with the same token but different parameters can be
+    // rejected with IdempotentParameterMismatchException.
+    private final ConcurrentHashMap<String, IdempotencyEntry> txIdempotency = new ConcurrentHashMap<>();
+    private static final long TX_IDEMPOTENCY_TTL_NANOS = java.time.Duration.ofMinutes(10).toNanos();
+
+    private record IdempotencyEntry(String requestHash, long insertedAtNanos) {}
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private DynamoDbStreamService streamService;
@@ -186,6 +197,98 @@ public class DynamoDbService {
                     "Table already exists: " + tableName, 400);
         }
 
+        if (keySchema == null || keySchema.isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "No defined attribute for index key schema: hash or range", 400);
+        }
+
+        // Validate KeyType values
+        for (int i = 0; i < keySchema.size(); i++) {
+            String keyType = keySchema.get(i).getKeyType();
+            if (!"HASH".equals(keyType) && !"RANGE".equals(keyType)) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + keyType
+                        + "' at 'keySchema." + (i + 1) + ".member.keyType' failed to satisfy constraint: "
+                        + "Member must satisfy enum value set: [HASH, RANGE]", 400);
+            }
+        }
+
+        // Validate keySchema size <= 2
+        if (keySchema.size() > 2) {
+            String repr = "[" + keySchema.stream()
+                    .map(k -> "KeySchemaElement(attributeName=" + k.getAttributeName() + ", keyType=" + k.getKeyType() + ")")
+                    .collect(java.util.stream.Collectors.joining(", ")) + "]";
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + repr + "' at 'keySchema' failed to satisfy constraint: "
+                    + "Member must have length less than or equal to 2", 400);
+        }
+
+        // Validate no duplicate attribute names in keySchema
+        Set<String> keySchemaAttrNames = new HashSet<>();
+        for (KeySchemaElement k : keySchema) {
+            if (!keySchemaAttrNames.add(k.getAttributeName())) {
+                throw new AwsException("ValidationException",
+                        "Invalid KeySchema: Some index key attribute have no definition", 400);
+            }
+        }
+
+        // Validate AttributeType values
+        if (attributeDefinitions != null) {
+            for (int i = 0; i < attributeDefinitions.size(); i++) {
+                String attrType = attributeDefinitions.get(i).getAttributeType();
+                if (!"B".equals(attrType) && !"N".equals(attrType) && !"S".equals(attrType)) {
+                    throw new AwsException("ValidationException",
+                            "1 validation error detected: Value '" + attrType
+                            + "' at 'attributeDefinitions." + (i + 1) + ".member.attributeType' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [B, N, S]", 400);
+                }
+            }
+        }
+
+        Set<String> referencedAttrs = new HashSet<>();
+        keySchema.forEach(k -> referencedAttrs.add(k.getAttributeName()));
+        if (gsis != null) {
+            gsis.forEach(g -> g.getKeySchema().forEach(k -> referencedAttrs.add(k.getAttributeName())));
+        }
+        if (lsis != null) {
+            lsis.forEach(l -> l.getKeySchema().forEach(k -> referencedAttrs.add(k.getAttributeName())));
+        }
+        if (attributeDefinitions != null) {
+            for (AttributeDefinition ad : attributeDefinitions) {
+                if (!referencedAttrs.contains(ad.getAttributeName())) {
+                    throw new AwsException("ValidationException",
+                            "Invalid attribute: " + ad.getAttributeName()
+                            + " is defined in AttributeDefinitions but is not used in any key schema", 400);
+                }
+            }
+        }
+
+        boolean tableHasSortKey = keySchema.stream().anyMatch(k -> "RANGE".equals(k.getKeyType()));
+        if (lsis != null && !lsis.isEmpty() && !tableHasSortKey) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: Table KeySchema does not have a range key, "
+                    + "which is required when specifying a LocalSecondaryIndex", 400);
+        }
+
+        // Validate no duplicate index names
+        Set<String> indexNames = new HashSet<>();
+        if (gsis != null) {
+            for (GlobalSecondaryIndex gsi : gsis) {
+                if (!indexNames.add(gsi.getIndexName())) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values were invalid: Duplicate index name: " + gsi.getIndexName(), 400);
+                }
+            }
+        }
+        if (lsis != null) {
+            for (LocalSecondaryIndex lsi : lsis) {
+                if (!indexNames.add(lsi.getIndexName())) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values were invalid: Duplicate index name: " + lsi.getIndexName(), 400);
+                }
+            }
+        }
+
         TableDefinition table = new TableDefinition(tableName, keySchema, attributeDefinitions,
                 region, regionResolver.getAccountId());
         if (readCapacity != null && writeCapacity != null) {
@@ -272,8 +375,33 @@ public class DynamoDbService {
         String prefix = region + "::";
         return tableStore.scan(k -> k.startsWith(prefix)).stream()
                 .map(TableDefinition::getTableName)
+                .sorted()
                 .toList();
     }
+
+    public ListTablesResult listTables(String region, Integer limit, String exclusiveStartTableName) {
+        List<String> all = listTables(region);
+
+        int startIdx = 0;
+        if (exclusiveStartTableName != null && !exclusiveStartTableName.isBlank()) {
+            int pos = Collections.binarySearch(all, exclusiveStartTableName);
+            if (pos >= 0) {
+                startIdx = pos + 1;
+            } else {
+                startIdx = -(pos + 1);
+            }
+        }
+
+        List<String> page = all.subList(startIdx, all.size());
+        String lastEvaluatedTableName = null;
+        if (limit != null && limit > 0 && page.size() > limit) {
+            lastEvaluatedTableName = page.get(limit - 1);
+            page = page.subList(0, limit);
+        }
+        return new ListTablesResult(List.copyOf(page), lastEvaluatedTableName);
+    }
+
+    public record ListTablesResult(List<String> tableNames, String lastEvaluatedTableName) {}
 
     public void putItem(String tableName, JsonNode item) {
         putItem(tableName, item, null, null, null, regionResolver.getDefaultRegion(), "NONE");
@@ -292,7 +420,10 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        String itemKey = buildItemKey(table, item);
+        // Validate and normalize all number attributes before storage
+        final JsonNode normalizedItem = DynamoDbNumberUtils.normalizeNumbersInItem(item);
+        DynamoDbItemSize.validateSize(normalizedItem);
+        String itemKey = buildItemKey(table, normalizedItem);
 
         withItemLock(storageKey, itemKey, () -> {
             var tableItems = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
@@ -303,7 +434,7 @@ public class DynamoDbService {
                 evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             }
 
-            tableItems.put(itemKey, item);
+            tableItems.put(itemKey, normalizedItem);
             persistItems(storageKey);
             LOG.debugv("Put item in {0}: key={1}", canonicalTableName, itemKey);
             LOG.tracev("Put item in {0}: key={1} item={2}", canonicalTableName, itemKey, item);
@@ -328,7 +459,7 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        String itemKey = buildItemKey(table, key);
+        String itemKey = buildItemKey(table, key, true);
         var items = itemsByTable.get(storageKey);
         if (items == null) {
             LOG.tracev("Got item from {0}: key={1} item=<not found>", canonicalTableName, itemKey);
@@ -360,7 +491,7 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        String itemKey = buildItemKey(table, key);
+        String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
             var items = itemsByTable.get(storageKey);
@@ -415,7 +546,7 @@ public class DynamoDbService {
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
 
-        String itemKey = buildItemKey(table, key);
+        String itemKey = buildItemKey(table, key, true);
 
         return withItemLock(storageKey, itemKey, () -> {
             var items = itemsByTable.computeIfAbsent(storageKey, k -> new ConcurrentSkipListMap<>());
@@ -450,12 +581,83 @@ public class DynamoDbService {
 
                     switch (action) {
                         case "PUT" -> { if (value != null) item.set(attrName, value); }
-                        case "DELETE" -> item.remove(attrName);
+                        case "DELETE" -> {
+                            if (value == null) {
+                                item.remove(attrName);
+                            } else {
+                                // Remove elements from a set
+                                JsonNode curAttr = item.get(attrName);
+                                if (curAttr != null) {
+                                    for (String setType : new String[]{"SS", "NS", "BS"}) {
+                                        if (curAttr.has(setType) && value.has(setType)) {
+                                            Set<String> removeSet = new HashSet<>();
+                                            for (JsonNode v : value.get(setType)) removeSet.add(v.asText());
+                                            com.fasterxml.jackson.databind.node.ArrayNode newArr = objectMapper.createArrayNode();
+                                            for (JsonNode v : curAttr.get(setType)) {
+                                                if (!removeSet.contains(v.asText())) newArr.add(v);
+                                            }
+                                            if (newArr.isEmpty()) {
+                                                item.remove(attrName);
+                                            } else {
+                                                ((com.fasterxml.jackson.databind.node.ObjectNode) curAttr).set(setType, newArr);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         case "ADD" -> {
-                            // Simple ADD for numeric values
-                            if (value != null) item.set(attrName, value);
+                            if (value != null) {
+                                JsonNode curAttr = item.get(attrName);
+                                if (value.has("N")) {
+                                    java.math.BigDecimal delta = new java.math.BigDecimal(value.get("N").asText());
+                                    java.math.BigDecimal current = curAttr != null && curAttr.has("N")
+                                            ? new java.math.BigDecimal(curAttr.get("N").asText()) : java.math.BigDecimal.ZERO;
+                                    com.fasterxml.jackson.databind.node.ObjectNode numNode = objectMapper.createObjectNode();
+                                    numNode.put("N", current.add(delta).stripTrailingZeros().toPlainString());
+                                    item.set(attrName, numNode);
+                                } else {
+                                    // Add elements to a set
+                                    for (String setType : new String[]{"SS", "NS", "BS"}) {
+                                        if (value.has(setType)) {
+                                            if (curAttr == null || !curAttr.has(setType)) {
+                                                item.set(attrName, value);
+                                            } else {
+                                                Set<String> existingSet = new LinkedHashSet<>();
+                                                for (JsonNode v : curAttr.get(setType)) existingSet.add(v.asText());
+                                                for (JsonNode v : value.get(setType)) existingSet.add(v.asText());
+                                                com.fasterxml.jackson.databind.node.ArrayNode newArr = objectMapper.createArrayNode();
+                                                for (String s : existingSet) newArr.add(s);
+                                                ((com.fasterxml.jackson.databind.node.ObjectNode) curAttr).set(setType, newArr);
+                                            }
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
+                }
+            }
+
+            // Reject any attempt to modify a key attribute
+            String pkName = table.getPartitionKeyName();
+            JsonNode origPk = key.get(pkName);
+            JsonNode newPk = item.get(pkName);
+            if (origPk != null && newPk != null && !origPk.equals(newPk)) {
+                throw new AwsException("ValidationException",
+                        "One or more parameter values were invalid: Cannot update attribute " + pkName
+                        + ". This attribute is part of the key", 400);
+            }
+            String skName = table.getSortKeyName();
+            if (skName != null) {
+                JsonNode origSk = key.get(skName);
+                JsonNode newSk = item.get(skName);
+                if (origSk != null && newSk != null && !origSk.equals(newSk)) {
+                    throw new AwsException("ValidationException",
+                            "One or more parameter values were invalid: Cannot update attribute " + skName
+                            + ". This attribute is part of the key", 400);
                 }
             }
 
@@ -566,12 +768,12 @@ public class DynamoDbService {
             String finalSkName = skName;
             results = new ArrayList<>(results);
             results.sort((a, b) -> {
-                String aVal = extractScalarValue(a.get(finalSkName));
-                String bVal = extractScalarValue(b.get(finalSkName));
-                if (aVal == null && bVal == null) return 0;
-                if (aVal == null) return -1;
-                if (bVal == null) return 1;
-                return compareValues(aVal, bVal);
+                JsonNode aAttr = a.get(finalSkName);
+                JsonNode bAttr = b.get(finalSkName);
+                if (aAttr == null && bAttr == null) return 0;
+                if (aAttr == null) return -1;
+                if (bAttr == null) return 1;
+                return ExpressionEvaluator.compareAttributeValues(aAttr, bAttr);
             });
             if (Boolean.FALSE.equals(scanIndexForward)) {
                 Collections.reverse(results);
@@ -606,10 +808,26 @@ public class DynamoDbService {
         List<JsonNode> evaluatedItems = results;
         JsonNode lastEvaluatedKey = null;
 
+        // Apply Limit (stops at N items)
         if (limit != null && limit > 0 && evaluatedItems.size() > limit) {
             JsonNode lastItem = evaluatedItems.get(limit - 1);
             lastEvaluatedKey = buildKeyNode(table, lastItem, pkName, skName, indexName != null);
             evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, limit));
+        }
+
+        // Apply 1MB response size limit (DynamoDB stops reading when scanned data exceeds 1MB)
+        if (lastEvaluatedKey == null) {
+            final int MAX_RESPONSE_BYTES = 1024 * 1024;
+            int accSize = 0;
+            for (int i = 0; i < evaluatedItems.size(); i++) {
+                int sz = DynamoDbItemSize.calculateItemSize(evaluatedItems.get(i));
+                if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
+                    lastEvaluatedKey = buildKeyNode(table, evaluatedItems.get(i - 1), pkName, skName, indexName != null);
+                    evaluatedItems = new ArrayList<>(evaluatedItems.subList(0, i));
+                    break;
+                }
+                accSize += sz;
+            }
         }
 
         int scannedCount = evaluatedItems.size();
@@ -636,6 +854,7 @@ public class DynamoDbService {
     public ScanResult scan(String tableName, String filterExpression,
                             JsonNode expressionAttrNames, JsonNode expressionAttrValues,
                             JsonNode scanFilter, Integer limit, JsonNode exclusiveStartKey, String region) {
+        DynamoDbReservedWords.check(filterExpression, "FilterExpression");
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
@@ -677,9 +896,32 @@ public class DynamoDbService {
             results = results.subList(0, limit);
         }
 
+        // Apply 1MB response size limit
+        if (lastEvaluatedKey == null) {
+            final int MAX_RESPONSE_BYTES = 1024 * 1024;
+            int accSize = 0;
+            for (int i = 0; i < results.size(); i++) {
+                int sz = DynamoDbItemSize.calculateItemSize(results.get(i));
+                if (accSize > 0 && accSize + sz > MAX_RESPONSE_BYTES) {
+                    lastEvaluatedKey = buildKeyNode(table, results.get(i - 1), pkName, skName);
+                    results = new ArrayList<>(results.subList(0, i));
+                    break;
+                }
+                accSize += sz;
+            }
+        }
+
         LOG.tracev("Scan on {0}: returned={1} scanned={2}",
                 canonicalTableName, results.size(), totalScanned);
         return new ScanResult(results, totalScanned, lastEvaluatedKey);
+    }
+
+    public boolean matchesScanFilterPublic(JsonNode item, JsonNode scanFilter) {
+        return matchesScanFilter(item, scanFilter);
+    }
+
+    public boolean matchesKeyConditionPublic(JsonNode attrValue, JsonNode condition) {
+        return matchesKeyCondition(attrValue, condition);
     }
 
     private boolean matchesScanFilter(JsonNode item, JsonNode scanFilter) {
@@ -741,7 +983,61 @@ public class DynamoDbService {
 
     // --- Transact Operations ---
 
+    /**
+     * Backward-compatible overload for callers that do not pass a ClientRequestToken.
+     * The 4-arg variant is what {@link DynamoDbJsonHandler#handleTransactWriteItems}
+     * uses so the caller's ClientRequestToken is honoured.
+     */
     public void transactWriteItems(List<JsonNode> transactItems, String region) {
+        transactWriteItems(transactItems, region, null, null);
+    }
+
+    public void transactWriteItems(List<JsonNode> transactItems, String region,
+                                    String clientRequestToken, JsonNode rawRequest) {
+        // Idempotency check via ClientRequestToken — AWS contract:
+        //   * Same token + identical request body  → no-op success (silently dedupe).
+        //   * Same token + different request body  → IdempotentParameterMismatchException.
+        //   * No token, or expired token           → proceed normally.
+        if (clientRequestToken != null && !clientRequestToken.isEmpty() && rawRequest != null) {
+            String cacheKey = region + "::" + clientRequestToken;
+            String requestHash = sha256(rawRequest.toString());
+            long nowNanos = System.nanoTime();
+
+            IdempotencyEntry existing = txIdempotency.get(cacheKey);
+            if (existing != null && nowNanos - existing.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
+                if (existing.requestHash().equals(requestHash)) {
+                    LOG.debugv("transactWriteItems: idempotent replay for token={0}", clientRequestToken);
+                    return;
+                }
+                throw new AwsException("IdempotentParameterMismatchException",
+                        "Request parameters do not match those of an in-flight or recent transaction using the same ClientRequestToken",
+                        400);
+            }
+
+            // Register the token. compute() is used so a concurrent replay with the same body
+            // collapses onto the same entry without double-applying writes.
+            IdempotencyEntry registered = txIdempotency.compute(cacheKey, (k, v) -> {
+                if (v != null && nowNanos - v.insertedAtNanos() <= TX_IDEMPOTENCY_TTL_NANOS) {
+                    return v;
+                }
+                return new IdempotencyEntry(requestHash, nowNanos);
+            });
+            if (!registered.requestHash().equals(requestHash)) {
+                throw new AwsException("IdempotentParameterMismatchException",
+                        "Request parameters do not match those of an in-flight or recent transaction using the same ClientRequestToken",
+                        400);
+            }
+            if (registered.insertedAtNanos() != nowNanos) {
+                // Lost the race to a concurrent identical request — treat as a replay.
+                LOG.debugv("transactWriteItems: concurrent identical replay for token={0}", clientRequestToken);
+                return;
+            }
+
+            // Best-effort eviction of stale entries.
+            txIdempotency.entrySet().removeIf(e -> nowNanos - e.getValue().insertedAtNanos() > TX_IDEMPOTENCY_TTL_NANOS);
+        }
+
+
         // Acquire every participant's item lock in a deterministic (storageKey, itemKey)
         // order before evaluating conditions or applying writes. Total-ordered acquisition
         // prevents deadlock across concurrent transactions; ReentrantLock lets the inner
@@ -765,15 +1061,15 @@ public class DynamoDbService {
             }
 
             // First pass: evaluate all conditions and collect failures.
-            List<String> cancellationReasons = new ArrayList<>();
+            List<TransactionCanceledException.CancellationReason> cancellationReasons = new ArrayList<>();
             boolean hasFailed = false;
             for (JsonNode transactItem : transactItems) {
-                String failReason = evaluateTransactCondition(transactItem, region);
+                TransactionCanceledException.CancellationReason failReason = evaluateTransactCondition(transactItem, region);
                 if (failReason != null) {
                     hasFailed = true;
                     cancellationReasons.add(failReason);
                 } else {
-                    cancellationReasons.add("");
+                    cancellationReasons.add(new TransactionCanceledException.CancellationReason("", null));
                 }
             }
 
@@ -849,7 +1145,7 @@ public class DynamoDbService {
         return new TransactParticipant(storageKey, itemKey);
     }
 
-    private String evaluateTransactCondition(JsonNode transactItem, String region) {
+    private TransactionCanceledException.CancellationReason evaluateTransactCondition(JsonNode transactItem, String region) {
         JsonNode target;
         if (transactItem.has("Put")) {
             target = transactItem.get("Put");
@@ -888,23 +1184,45 @@ public class DynamoDbService {
         try {
             evaluateCondition(existing, conditionExpression, exprAttrNames, exprAttrValues, returnValuesOnConditionCheckFailure);
             return null;
+        } catch (ConditionalCheckFailedException e) {
+            return new TransactionCanceledException.CancellationReason("ConditionalCheckFailed", e.getItem());
         } catch (AwsException e) {
-            return e.getMessage();
+            return new TransactionCanceledException.CancellationReason(e.getMessage(), null);
         }
     }
 
     public List<JsonNode> transactGetItems(List<JsonNode> transactItems, String region) {
         List<JsonNode> results = new ArrayList<>();
+        List<TransactionCanceledException.CancellationReason> cancelReasons = new ArrayList<>();
+        boolean hasCancelled = false;
+
         for (JsonNode transactItem : transactItems) {
             if (transactItem.has("Get")) {
                 JsonNode get = transactItem.get("Get");
                 String tableName = get.path("TableName").asText();
                 JsonNode key = get.get("Key");
-                results.add(getItem(tableName, key, region));
+                try {
+                    results.add(getItem(tableName, key, region));
+                    cancelReasons.add(new TransactionCanceledException.CancellationReason("", null));
+                } catch (AwsException e) {
+                    if ("ValidationException".equals(e.getErrorCode())) {
+                        hasCancelled = true;
+                        results.add(null);
+                        cancelReasons.add(new TransactionCanceledException.CancellationReason("ValidationError", null));
+                    } else {
+                        throw e;
+                    }
+                }
             } else {
                 results.add(null);
+                cancelReasons.add(new TransactionCanceledException.CancellationReason("", null));
             }
         }
+
+        if (hasCancelled) {
+            throw new TransactionCanceledException(cancelReasons);
+        }
+
         return results;
     }
 
@@ -921,6 +1239,50 @@ public class DynamoDbService {
         String storageKey = regionKey(region, canonicalTableName);
         TableDefinition table = tableStore.get(storageKey)
                 .orElseThrow(() -> resourceNotFoundException(canonicalTableName));
+
+        if (readCapacity != null && readCapacity <= 0) {
+            throw new AwsException("ValidationException",
+                    "The parameter 'ProvisionedThroughput.ReadCapacityUnits' must be greater than 0", 400);
+        }
+        if (writeCapacity != null && writeCapacity <= 0) {
+            throw new AwsException("ValidationException",
+                    "The parameter 'ProvisionedThroughput.WriteCapacityUnits' must be greater than 0", 400);
+        }
+        if (readCapacity != null && writeCapacity != null
+                && "PROVISIONED".equals(table.getBillingMode())
+                && readCapacity.equals(table.getProvisionedThroughput().getReadCapacityUnits())
+                && writeCapacity.equals(table.getProvisionedThroughput().getWriteCapacityUnits())) {
+            throw new AwsException("ValidationException",
+                    "The provisioned throughput for the table will not change. "
+                    + "The requested value equals the current value.", 400);
+        }
+
+        for (GlobalSecondaryIndex newGsi : gsiCreates) {
+            if (table.findGsi(newGsi.getIndexName()).isPresent()) {
+                throw new AwsException("ValidationException",
+                        "GSI " + newGsi.getIndexName() + " already exists", 400);
+            }
+        }
+
+        Set<String> knownAttrs = table.getAttributeDefinitions().stream()
+                .map(AttributeDefinition::getAttributeName)
+                .collect(java.util.stream.Collectors.toSet());
+        if (newAttrDefs != null) newAttrDefs.forEach(ad -> knownAttrs.add(ad.getAttributeName()));
+        for (GlobalSecondaryIndex newGsi : gsiCreates) {
+            for (KeySchemaElement k : newGsi.getKeySchema()) {
+                if (!knownAttrs.contains(k.getAttributeName())) {
+                    throw new AwsException("ValidationException",
+                            "Attribute: " + k.getAttributeName() + " is not defined in AttributeDefinitions", 400);
+                }
+            }
+        }
+
+        for (String gsiName : gsiDeletes) {
+            if (table.findGsi(gsiName).isEmpty()) {
+                throw new AwsException("ResourceNotFoundException",
+                        "Global secondary index " + gsiName + " does not exist on the table", 400);
+            }
+        }
 
         if (readCapacity != null) {
             table.getProvisionedThroughput().setReadCapacityUnits(readCapacity);
@@ -1085,6 +1447,7 @@ public class DynamoDbService {
 
     private void evaluateCondition(JsonNode existingItem, String conditionExpression,
                                     JsonNode exprAttrNames, JsonNode exprAttrValues, String returnValuesOnConditionCheckFailure) {
+        DynamoDbReservedWords.check(conditionExpression, "ConditionExpression");
         if (!matchesFilterExpression(existingItem, conditionExpression, exprAttrNames, exprAttrValues)) {
             if ("ALL_OLD".equals(returnValuesOnConditionCheckFailure)){                
                 throw new ConditionalCheckFailedException(existingItem);
@@ -1101,6 +1464,11 @@ public class DynamoDbService {
                                         JsonNode exprAttrNames, JsonNode exprAttrValues) {
         // Parse SET and REMOVE clauses from expressions like:
         // "SET #n = :newName, age = :newAge REMOVE oldField"
+        if (expression.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "Invalid UpdateExpression: The expression can not be empty;", 400);
+        }
+        DynamoDbReservedWords.check(expression, "UpdateExpression");
         String remaining = expression.trim();
 
         while (!remaining.isEmpty()) {
@@ -1118,7 +1486,14 @@ public class DynamoDbService {
                 remaining = remaining.substring(7).trim();
                 remaining = applyDeleteClause(item, remaining, exprAttrNames, exprAttrValues);
             } else {
-                break;
+                // Unknown keyword — syntax error
+                String[] parts = remaining.split("\\s+", 3);
+                String token = parts[0];
+                String near = parts.length >= 2
+                        ? (token + " " + parts[1]).substring(0, Math.min(token.length() + 1 + parts[1].length(), 20))
+                        : token;
+                throw new AwsException("ValidationException",
+                        "Invalid UpdateExpression: Syntax error; token: \"" + token + "\", near: \"" + near + "\"", 400);
             }
         }
     }
@@ -1129,6 +1504,13 @@ public class DynamoDbService {
         // Stop when we hit another clause keyword (REMOVE, ADD, DELETE) or end
         LOG.debugv("applySetClause: clause={0}, exprAttrNames={1}, exprAttrValues={2}",
                    clause, exprAttrNames, exprAttrValues);
+
+        // Snapshot the item before applying any assignments so cross-attribute
+        // references within the same SET expression (e.g. "SET b = a, a = :v")
+        // resolve to pre-update values, matching real DynamoDB semantics
+        // (actions are applied atomically and attribute references read original values).
+        ObjectNode snapshot = item.deepCopy();
+
         while (!clause.isEmpty()) {
             String upper = clause.toUpperCase();
             if (upper.startsWith("REMOVE ") || upper.startsWith("ADD ") || upper.startsWith("DELETE ")) {
@@ -1163,18 +1545,27 @@ public class DynamoDbService {
                 rest = "";
             }
 
+            // Strip balanced outer parentheses so producers that wrap the RHS
+            // (e.g. ElectroDB emits "SET c = (c - :v)") behave the same as the
+            // unwrapped form. DynamoDB grammar accepts parentheses around any
+            // SET-action RHS.
+            valuePart = stripOuterParens(valuePart);
 
             // Resolve the value
             // Check for arithmetic expressions (operand + operand, operand - operand)
             // before handling individual expression types, since the left operand can be
             // a function like if_not_exists(...).
+            //
+            // RHS reads use `snapshot` (pre-update item state) so multiple comma-separated
+            // assignments behave atomically: each clause sees the original values, not the
+            // intermediate state produced by previous clauses in the same expression.
             int arithmeticIdx = findArithmeticOperator(valuePart);
             if (arithmeticIdx >= 0) {
                 String leftExpr = valuePart.substring(0, arithmeticIdx).trim();
                 char operator = valuePart.charAt(arithmeticIdx);
                 String rightExpr = valuePart.substring(arithmeticIdx + 1).trim();
-                JsonNode leftVal = evaluateSetExpr(item, leftExpr, exprAttrNames, exprAttrValues);
-                JsonNode rightVal = evaluateSetExpr(item, rightExpr, exprAttrNames, exprAttrValues);
+                JsonNode leftVal = evaluateSetExpr(snapshot, leftExpr, exprAttrNames, exprAttrValues);
+                JsonNode rightVal = evaluateSetExpr(snapshot, rightExpr, exprAttrNames, exprAttrValues);
                 if (leftVal == null || rightVal == null || !leftVal.has("N") || !rightVal.has("N")) {
                     throw new AwsException("ValidationException",
                             "Invalid UpdateExpression: Incorrect operand type for operator or function", 400);
@@ -1200,14 +1591,14 @@ public class DynamoDbService {
                     String checkAttr = resolveAttributeName(args[0].trim(), exprAttrNames);
                     String fallbackExpr = args[1].trim();
                     JsonNode resolved;
-                    if (hasValueAtPath(item, checkAttr, exprAttrNames)) {
+                    if (hasValueAtPath(snapshot, checkAttr, exprAttrNames)) {
                         // attrRef exists — evaluate to its current value
-                        resolved = getValueAtPath(item, checkAttr, exprAttrNames);
+                        resolved = getValueAtPath(snapshot, checkAttr, exprAttrNames);
                     } else if (fallbackExpr.startsWith(":") && exprAttrValues != null) {
                         resolved = exprAttrValues.get(fallbackExpr);
                     } else {
                         // fallback is itself an attribute reference
-                        resolved = getValueAtPath(item, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
+                        resolved = getValueAtPath(snapshot, resolveAttributeName(fallbackExpr, exprAttrNames), exprAttrNames);
                     }
                     if (resolved != null) {
                         setValueAtPath(item, attrPath, resolved, exprAttrNames);
@@ -1222,8 +1613,8 @@ public class DynamoDbService {
                     if (commaPos >= 0) {
                         String arg1 = inner.substring(0, commaPos).trim();
                         String arg2 = inner.substring(commaPos + 1).trim();
-                        JsonNode list1 = evaluateSetExpr(item, arg1, exprAttrNames, exprAttrValues);
-                        JsonNode list2 = evaluateSetExpr(item, arg2, exprAttrNames, exprAttrValues);
+                        JsonNode list1 = evaluateSetExpr(snapshot, arg1, exprAttrNames, exprAttrValues);
+                        JsonNode list2 = evaluateSetExpr(snapshot, arg2, exprAttrNames, exprAttrValues);
                         if (list1 != null && list2 != null && list1.has("L") && list2.has("L")) {
                             com.fasterxml.jackson.databind.node.ArrayNode merged =
                                     com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.arrayNode();
@@ -1249,7 +1640,7 @@ public class DynamoDbService {
             } else if (!valuePart.isEmpty()) {
                 // Plain attribute reference: SET a = b  or  SET a = #alias
                 String refAttr = resolveAttributeName(valuePart, exprAttrNames);
-                JsonNode refValue = getValueAtPath(item, refAttr, exprAttrNames);
+                JsonNode refValue = getValueAtPath(snapshot, refAttr, exprAttrNames);
                 if (refValue != null) {
                     setValueAtPath(item, attrPath, refValue, exprAttrNames);
                 }
@@ -1258,6 +1649,29 @@ public class DynamoDbService {
             clause = rest;
         }
         return clause;
+    }
+
+    /**
+     * Strip balanced outer parentheses from a SET-action RHS expression, repeatedly,
+     * so that producers wrapping arithmetic or function calls in parens (e.g.
+     * "(c - :v)" or "((if_not_exists(c, :d) - :v))") parse identically to the
+     * unwrapped form. Rejects forms like "(a) - (b)" where the outer parens do
+     * not actually enclose the whole expression.
+     */
+    private static String stripOuterParens(String expr) {
+        String s = expr.trim();
+        while (s.length() >= 2 && s.charAt(0) == '(' && s.charAt(s.length() - 1) == ')') {
+            int depth = 0;
+            boolean wraps = true;
+            for (int i = 0; i < s.length() - 1; i++) {
+                if (s.charAt(i) == '(') depth++;
+                else if (s.charAt(i) == ')') depth--;
+                if (depth == 0) { wraps = false; break; }
+            }
+            if (!wraps) break;
+            s = s.substring(1, s.length() - 1).trim();
+        }
+        return s;
     }
 
     private JsonNode evaluateSetExpr(ObjectNode item, String expr,
@@ -1533,132 +1947,233 @@ public class DynamoDbService {
         return nameOrPlaceholder;
     }
 
-    /**
-     * Sets a value at a potentially nested attribute path.
-     * Supports paths like "attr", "parent.child", "#alias.nested" etc.
-     * For nested paths, navigates into the DynamoDB Map structure (M field).
-     */
-    private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
-        // Resolve any # placeholders in the path segments
-        String[] segments = path.split("\\.");
-        for (int i = 0; i < segments.length; i++) {
-            segments[i] = resolveAttributeName(segments[i].trim(), exprAttrNames);
-        }
-
-        if (segments.length == 1) {
-            // Simple top-level attribute
-            item.set(segments[0], value);
-            return;
-        }
-
-        // Navigate to the parent of the target attribute
-        ObjectNode current = item;
-        for (int i = 0; i < segments.length - 1; i++) {
-            String segment = segments[i];
-            JsonNode child = current.get(segment);
-
-            if (child == null || !child.has("M")) {
-                // Create nested map structure if it doesn't exist
-                ObjectNode newMap = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
-                ObjectNode wrapper = com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
-                wrapper.set("M", newMap);
-                current.set(segment, wrapper);
-                current = newMap;
+    // Tokenizes a DynamoDB path like "a.b[0].c" or "#l[5]" into a list of
+    // String (attr name) and Integer (list index) tokens.
+    private List<Object> parsePath(String path, JsonNode exprAttrNames) {
+        List<Object> tokens = new ArrayList<>();
+        for (String dotSeg : path.split("\\.")) {
+            dotSeg = dotSeg.trim();
+            if (dotSeg.isEmpty()) continue;
+            int brk = dotSeg.indexOf('[');
+            if (brk < 0) {
+                tokens.add(resolveAttributeName(dotSeg, exprAttrNames));
             } else {
-                // Navigate into existing map
-                JsonNode mapContent = child.get("M");
-                if (mapContent instanceof ObjectNode) {
-                    current = (ObjectNode) mapContent;
-                } else {
-                    // Cannot navigate further, structure mismatch
-                    return;
+                String namePart = dotSeg.substring(0, brk);
+                if (!namePart.isEmpty()) tokens.add(resolveAttributeName(namePart, exprAttrNames));
+                String rest = dotSeg.substring(brk);
+                int p = 0;
+                while (p < rest.length() && rest.charAt(p) == '[') {
+                    int close = rest.indexOf(']', p);
+                    if (close < 0) break;
+                    tokens.add(Integer.parseInt(rest.substring(p + 1, close)));
+                    p = close + 1;
                 }
             }
         }
-
-        // Set the final attribute
-        current.set(segments[segments.length - 1], value);
+        return tokens;
     }
 
-    /**
-     * Gets a value at a potentially nested attribute path.
-     * Returns null if the path doesn't exist.
-     */
-    private JsonNode getValueAtPath(JsonNode item, String path, JsonNode exprAttrNames) {
-        // Resolve any # placeholders in the path segments
-        String[] segments = path.split("\\.");
-        for (int i = 0; i < segments.length; i++) {
-            segments[i] = resolveAttributeName(segments[i].trim(), exprAttrNames);
+    // Pads arr with NULL elements up to idx-1, then sets/appends value at idx.
+    private void padAndSet(com.fasterxml.jackson.databind.node.ArrayNode arr, int idx, JsonNode value) {
+        com.fasterxml.jackson.databind.node.ObjectNode nullNode =
+                com.fasterxml.jackson.databind.node.JsonNodeFactory.instance.objectNode();
+        nullNode.put("NULL", true);
+        while (arr.size() < idx) arr.add(nullNode.deepCopy());
+        if (idx < arr.size()) arr.set(idx, value);
+        else arr.add(value);
+    }
+
+    private void setValueAtPath(ObjectNode item, String path, JsonNode value, JsonNode exprAttrNames) {
+        List<Object> tokens = parsePath(path, exprAttrNames);
+        if (tokens.isEmpty()) return;
+
+        if (tokens.size() == 1) {
+            if (tokens.get(0) instanceof String attrName) item.set(attrName, value);
+            return;
         }
 
-        JsonNode current = item;
-        for (int i = 0; i < segments.length; i++) {
-            if (current == null) return null;
+        JsonNode container = item;
+        for (int i = 0; i < tokens.size() - 1; i++) {
+            Object tok = tokens.get(i);
+            Object nextTok = tokens.get(i + 1);
+            boolean last = (i == tokens.size() - 2);
 
-            String segment = segments[i];
-            JsonNode child = current.get(segment);
-
-            if (child == null) return null;
-
-            if (i < segments.length - 1) {
-                // Need to navigate deeper - check for Map structure
-                if (child.has("M")) {
-                    current = child.get("M");
-                } else {
-                    return null;
+            if (tok instanceof String attrName) {
+                if (!(container instanceof ObjectNode obj)) return;
+                JsonNode child = obj.get(attrName);
+                if (last) {
+                    if (nextTok instanceof String finalAttr) {
+                        if (child == null) {
+                            ObjectNode newMap = objectMapper.createObjectNode();
+                            newMap.set(finalAttr, value);
+                            ObjectNode wrapper = objectMapper.createObjectNode();
+                            wrapper.set("M", newMap);
+                            obj.set(attrName, wrapper);
+                        } else if (!child.has("M")) {
+                            throw new AwsException("ValidationException",
+                                    "The document path provided in the update expression is invalid for update", 400);
+                        } else {
+                            ((ObjectNode) child.get("M")).set(finalAttr, value);
+                        }
+                    } else if (nextTok instanceof Integer finalIdx) {
+                        if (child == null || !child.has("L")) throw new AwsException("ValidationException",
+                                "The document path provided in the update expression is invalid for update", 400);
+                        padAndSet((com.fasterxml.jackson.databind.node.ArrayNode) child.get("L"), finalIdx, value);
+                    }
+                    return;
                 }
-            } else {
-                // This is the final segment
-                return child;
+                if (nextTok instanceof String) {
+                    if (child == null) {
+                        ObjectNode newMap = objectMapper.createObjectNode();
+                        ObjectNode wrapper = objectMapper.createObjectNode();
+                        wrapper.set("M", newMap);
+                        obj.set(attrName, wrapper);
+                        container = newMap;
+                    } else if (!child.has("M")) {
+                        throw new AwsException("ValidationException",
+                                "The document path provided in the update expression is invalid for update", 400);
+                    } else {
+                        container = child.get("M");
+                    }
+                } else if (nextTok instanceof Integer) {
+                    if (child == null || !child.has("L")) throw new AwsException("ValidationException",
+                            "The document path provided in the update expression is invalid for update", 400);
+                    container = child.get("L");
+                }
+            } else if (tok instanceof Integer listIdx) {
+                if (!(container instanceof com.fasterxml.jackson.databind.node.ArrayNode arr)) return;
+                if (listIdx >= arr.size()) throw new AwsException("ValidationException",
+                        "The document path provided in the update expression is invalid for update", 400);
+                JsonNode element = arr.get(listIdx);
+                if (last) {
+                    if (nextTok instanceof String finalAttr) {
+                        if (!element.has("M")) throw new AwsException("ValidationException",
+                                "The document path provided in the update expression is invalid for update", 400);
+                        ((ObjectNode) element.get("M")).set(finalAttr, value);
+                    } else if (nextTok instanceof Integer finalIdx) {
+                        if (!element.has("L")) throw new AwsException("ValidationException",
+                                "The document path provided in the update expression is invalid for update", 400);
+                        padAndSet((com.fasterxml.jackson.databind.node.ArrayNode) element.get("L"), finalIdx, value);
+                    }
+                    return;
+                }
+                if (nextTok instanceof String) {
+                    if (!element.has("M")) throw new AwsException("ValidationException",
+                            "The document path provided in the update expression is invalid for update", 400);
+                    container = element.get("M");
+                } else if (nextTok instanceof Integer) {
+                    if (!element.has("L")) throw new AwsException("ValidationException",
+                            "The document path provided in the update expression is invalid for update", 400);
+                    container = element.get("L");
+                }
+            }
+        }
+    }
+
+    private JsonNode getValueAtPath(JsonNode item, String path, JsonNode exprAttrNames) {
+        List<Object> tokens = parsePath(path, exprAttrNames);
+        if (tokens.isEmpty()) return null;
+        JsonNode current = item;
+        for (int i = 0; i < tokens.size(); i++) {
+            if (current == null) return null;
+            Object tok = tokens.get(i);
+            boolean isLast = (i == tokens.size() - 1);
+            if (tok instanceof String attrName) {
+                JsonNode child = current.get(attrName);
+                if (child == null) return null;
+                if (isLast) return child;
+                Object nextTok = tokens.get(i + 1);
+                if (nextTok instanceof String) {
+                    if (!child.has("M")) return null;
+                    current = child.get("M");
+                } else if (nextTok instanceof Integer) {
+                    if (!child.has("L")) return null;
+                    current = child.get("L");
+                } else return null;
+            } else if (tok instanceof Integer listIdx) {
+                if (!current.isArray() || listIdx >= current.size()) return null;
+                JsonNode element = current.get(listIdx);
+                if (element == null) return null;
+                if (isLast) return element;
+                Object nextTok = tokens.get(i + 1);
+                if (nextTok instanceof String) {
+                    if (!element.has("M")) return null;
+                    current = element.get("M");
+                } else if (nextTok instanceof Integer) {
+                    if (!element.has("L")) return null;
+                    current = element.get("L");
+                } else return null;
             }
         }
         return current;
     }
 
-    /**
-     * Checks if a value exists at a potentially nested attribute path.
-     */
     private boolean hasValueAtPath(JsonNode item, String path, JsonNode exprAttrNames) {
         return getValueAtPath(item, path, exprAttrNames) != null;
     }
 
-    /**
-     * Removes a value at a potentially nested attribute path.
-     * Supports paths like "attr", "parent.child", "#alias.nested" etc.
-     * For nested paths, navigates into the DynamoDB Map structure (M field)
-     * and removes the final key from its parent.
-     */
     private void removeValueAtPath(ObjectNode item, String path, JsonNode exprAttrNames) {
-        String[] segments = path.split("\\.");
-        for (int i = 0; i < segments.length; i++) {
-            segments[i] = resolveAttributeName(segments[i].trim(), exprAttrNames);
-        }
+        List<Object> tokens = parsePath(path, exprAttrNames);
+        if (tokens.isEmpty()) return;
 
-        if (segments.length == 1) {
-            item.remove(segments[0]);
+        if (tokens.size() == 1) {
+            if (tokens.get(0) instanceof String attrName) item.remove(attrName);
             return;
         }
 
-        // Navigate to the parent of the target attribute
-        ObjectNode current = item;
-        for (int i = 0; i < segments.length - 1; i++) {
-            String segment = segments[i];
-            JsonNode child = current.get(segment);
+        JsonNode container = item;
+        for (int i = 0; i < tokens.size() - 1; i++) {
+            Object tok = tokens.get(i);
+            Object nextTok = tokens.get(i + 1);
+            boolean last = (i == tokens.size() - 2);
 
-            if (child == null || !child.has("M")) {
-                // Path doesn't exist, nothing to remove
-                return;
-            }
-
-            JsonNode mapContent = child.get("M");
-            if (mapContent instanceof ObjectNode) {
-                current = (ObjectNode) mapContent;
-            } else {
-                return;
+            if (tok instanceof String attrName) {
+                if (!(container instanceof ObjectNode obj)) return;
+                JsonNode child = obj.get(attrName);
+                if (last) {
+                    if (nextTok instanceof String finalAttr) {
+                        if (child == null || !child.has("M")) return;
+                        ((ObjectNode) child.get("M")).remove(finalAttr);
+                    } else if (nextTok instanceof Integer finalIdx) {
+                        if (child == null || !child.has("L")) return;
+                        com.fasterxml.jackson.databind.node.ArrayNode lArr =
+                                (com.fasterxml.jackson.databind.node.ArrayNode) child.get("L");
+                        if (finalIdx < lArr.size()) lArr.remove(finalIdx);
+                    }
+                    return;
+                }
+                if (nextTok instanceof String) {
+                    if (child == null || !child.has("M")) return;
+                    container = child.get("M");
+                } else if (nextTok instanceof Integer) {
+                    if (child == null || !child.has("L")) return;
+                    container = child.get("L");
+                }
+            } else if (tok instanceof Integer listIdx) {
+                if (!(container instanceof com.fasterxml.jackson.databind.node.ArrayNode arr)) return;
+                if (listIdx >= arr.size()) return;
+                JsonNode element = arr.get(listIdx);
+                if (last) {
+                    if (nextTok instanceof String finalAttr) {
+                        if (!element.has("M")) return;
+                        ((ObjectNode) element.get("M")).remove(finalAttr);
+                    } else if (nextTok instanceof Integer finalIdx) {
+                        if (!element.has("L")) return;
+                        com.fasterxml.jackson.databind.node.ArrayNode lArr =
+                                (com.fasterxml.jackson.databind.node.ArrayNode) element.get("L");
+                        if (finalIdx < lArr.size()) lArr.remove(finalIdx);
+                    }
+                    return;
+                }
+                if (nextTok instanceof String) {
+                    if (!element.has("M")) return;
+                    container = element.get("M");
+                } else if (nextTok instanceof Integer) {
+                    if (!element.has("L")) return;
+                    container = element.get("L");
+                }
             }
         }
-
-        current.remove(segments[segments.length - 1]);
     }
 
     private int findNextComma(String s) {
@@ -1808,24 +2323,46 @@ public class DynamoDbService {
     }
 
     String buildItemKey(TableDefinition table, JsonNode item) {
+        return buildItemKey(table, item, false);
+    }
+
+    String buildItemKey(TableDefinition table, JsonNode item, boolean isKeyArg) {
         String pkName = table.getPartitionKeyName();
         JsonNode pkAttr = item.get(pkName);
         if (pkAttr == null) {
+            if (isKeyArg) {
+                throw new AwsException("ValidationException",
+                        "The provided key element does not match the schema", 400);
+            }
             throw new AwsException("ValidationException",
                     "One of the required keys was not given a value", 400);
         }
+        validateKeyAttributeValue(pkAttr, pkName);
 
         String pk = extractScalarValue(pkAttr);
         String skName = table.getSortKeyName();
         if (skName != null) {
             JsonNode skAttr = item.get(skName);
             if (skAttr == null) {
+                if (isKeyArg) {
+                    throw new AwsException("ValidationException",
+                            "The provided key element does not match the schema", 400);
+                }
                 throw new AwsException("ValidationException",
                         "One of the required keys was not given a value", 400);
             }
+            validateKeyAttributeValue(skAttr, skName);
             return pk + "#" + extractScalarValue(skAttr);
         }
         return pk;
+    }
+
+    private void validateKeyAttributeValue(JsonNode attr, String keyName) {
+        if (attr != null && attr.has("S") && attr.get("S").asText().isEmpty()) {
+            throw new AwsException("ValidationException",
+                    "One or more parameter values were invalid: "
+                    + "The AttributeValue for a key attribute cannot contain an empty string value. Key: " + keyName, 400);
+        }
     }
 
     private String buildItemKeyFromNode(JsonNode item, String pkName, String skName) {
@@ -1875,7 +2412,11 @@ public class DynamoDbService {
     private String extractScalarValue(JsonNode attrValue) {
         if (attrValue == null) return null;
         if (attrValue.has("S")) return attrValue.get("S").asText();
-        if (attrValue.has("N")) return attrValue.get("N").asText();
+        if (attrValue.has("N")) {
+            String raw = attrValue.get("N").asText();
+            try { return DynamoDbNumberUtils.validateAndNormalize(raw); }
+            catch (Exception e) { return raw; }
+        }
         if (attrValue.has("B")) return attrValue.get("B").asText();
         if (attrValue.has("BOOL")) return attrValue.get("BOOL").asText();
         return attrValue.asText();
@@ -1896,29 +2437,73 @@ public class DynamoDbService {
         return null;
     }
 
-    // NE, CONTAINS, NOT_CONTAINS, IN, NULL, NOT_NULL not yet supported
     private boolean matchesKeyCondition(JsonNode attrValue, JsonNode condition) {
         if (condition == null) return true;
         String op = condition.has("ComparisonOperator") ? condition.get("ComparisonOperator").asText() : "EQ";
-        String compareValue = extractComparisonValue(condition);
+        JsonNode avl = condition.get("AttributeValueList");
+        JsonNode compareAttr = avl != null && avl.isArray() && !avl.isEmpty() ? avl.get(0) : null;
+        String compareValue = extractScalarValue(compareAttr);
         String actual = extractScalarValue(attrValue);
-        if (actual == null) return false;
 
         return switch (op) {
-            case "EQ" -> actual.equals(compareValue);
-            case "BEGINS_WITH" -> actual.startsWith(compareValue);
-            case "GT" -> actual.compareTo(compareValue) > 0;
-            case "GE" -> actual.compareTo(compareValue) >= 0;
-            case "LT" -> actual.compareTo(compareValue) < 0;
-            case "LE" -> actual.compareTo(compareValue) <= 0;
-            case "BETWEEN" -> {
-                JsonNode list = condition.get("AttributeValueList");
-                if (list.size() >= 2) {
-                    String low = extractScalarValue(list.get(0));
-                    String high = extractScalarValue(list.get(1));
-                    yield actual.compareTo(low) >= 0 && actual.compareTo(high) <= 0;
+            case "EQ" -> {
+                if (attrValue == null) yield false;
+                yield ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr != null ? compareAttr : attrValue) == 0
+                        && actual != null && actual.equals(compareValue);
+            }
+            case "NE" -> {
+                if (attrValue == null) yield true;
+                if (actual == null || compareValue == null) yield true;
+                yield !actual.equals(compareValue);
+            }
+            case "NULL" -> attrValue == null;
+            case "NOT_NULL" -> attrValue != null;
+            case "BEGINS_WITH" -> actual != null && compareValue != null && actual.startsWith(compareValue);
+            case "CONTAINS" -> {
+                if (attrValue == null || compareAttr == null) yield false;
+                if (attrValue.has("S") && compareAttr.has("S")) {
+                    yield attrValue.get("S").asText().contains(compareAttr.get("S").asText());
+                }
+                if (attrValue.has("SS") && compareAttr.has("S")) {
+                    String target = compareAttr.get("S").asText();
+                    for (JsonNode elem : attrValue.get("SS")) { if (target.equals(elem.asText())) yield true; }
+                    yield false;
+                }
+                if (attrValue.has("NS") && compareAttr.has("N")) {
+                    String target = compareAttr.get("N").asText();
+                    for (JsonNode elem : attrValue.get("NS")) { if (target.equals(elem.asText())) yield true; }
+                    yield false;
                 }
                 yield false;
+            }
+            case "NOT_CONTAINS" -> {
+                if (attrValue == null || compareAttr == null) yield true;
+                if (attrValue.has("S") && compareAttr.has("S"))
+                    yield !attrValue.get("S").asText().contains(compareAttr.get("S").asText());
+                if (attrValue.has("SS") && compareAttr.has("S")) {
+                    String target = compareAttr.get("S").asText();
+                    for (JsonNode elem : attrValue.get("SS")) { if (target.equals(elem.asText())) yield false; }
+                    yield true;
+                }
+                yield true;
+            }
+            case "IN" -> {
+                if (actual == null || avl == null) yield false;
+                for (JsonNode v : avl) { if (actual.equals(extractScalarValue(v))) yield true; }
+                yield false;
+            }
+            case "GT" -> actual != null && compareValue != null
+                    && ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr) > 0;
+            case "GE" -> actual != null && compareValue != null
+                    && ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr) >= 0;
+            case "LT" -> actual != null && compareValue != null
+                    && ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr) < 0;
+            case "LE" -> actual != null && compareValue != null
+                    && ExpressionEvaluator.compareAttributeValues(attrValue, compareAttr) <= 0;
+            case "BETWEEN" -> {
+                if (actual == null || avl == null || avl.size() < 2) yield false;
+                yield ExpressionEvaluator.compareAttributeValues(attrValue, avl.get(0)) >= 0
+                        && ExpressionEvaluator.compareAttributeValues(attrValue, avl.get(1)) <= 0;
             }
             default -> true;
         };
@@ -1944,6 +2529,12 @@ public class DynamoDbService {
         }
         String pkAttrInExpr = pkExprStripped.split("\\s*=\\s*")[0].trim();
         String resolvedPkName = resolveAttributeName(pkAttrInExpr, exprAttrNames);
+
+        // Validate the PK attribute in the expression matches the actual table/index PK
+        if (!resolvedPkName.equals(pkName)) {
+            throw new AwsException("ValidationException",
+                    "Query condition missed key schema element: " + pkName, 400);
+        }
 
         // Extract pk value placeholder
         int colonIdx = pkExprStripped.indexOf(':');
@@ -1978,8 +2569,7 @@ public class DynamoDbService {
     }
 
     private AwsException resourceNotFoundException(String tableName) {
-        return new AwsException("ResourceNotFoundException",
-                "Requested resource not found: Table: " + tableName + " not found", 400);
+        return new AwsException("ResourceNotFoundException", "Requested resource not found", 400);
     }
 
     public record UpdateResult(JsonNode newItem, JsonNode oldItem) {}
@@ -2013,8 +2603,7 @@ public class DynamoDbService {
         String storageKey = regionKey(tableRegion, tableName);
 
         TableDefinition table = tableStore.get(storageKey)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Requested resource not found: Table: " + tableName + " not found", 400));
+                .orElseThrow(() -> resourceNotFoundException(tableName));
 
         long now = Instant.now().getEpochSecond();
         String exportId = System.currentTimeMillis() + "-" + UUID.randomUUID().toString().replace("-", "");
@@ -2143,6 +2732,23 @@ public class DynamoDbService {
             return HexFormat.of().formatHex(digest);
         } catch (NoSuchAlgorithmException e) {
             return "unknown";
+        }
+    }
+
+    /**
+     * SHA-256 hex digest of a string, used by ClientRequestToken idempotency to compare
+     * request bodies. SHA-256 is required (not MD5) for the dedup contract because a
+     * collision would allow a request with different parameters to be silently treated
+     * as a replay; SHA-256 is supported on every JVM via {@link MessageDigest}.
+     */
+    private static String sha256(String input) {
+        try {
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] digest = md.digest(input.getBytes(StandardCharsets.UTF_8));
+            return HexFormat.of().formatHex(digest);
+        } catch (NoSuchAlgorithmException e) {
+            // SHA-256 is mandated by the JLS to be available on every JVM; this should never trigger.
+            throw new IllegalStateException("SHA-256 is required but not available on this JVM", e);
         }
     }
 

@@ -182,9 +182,15 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/configuration-sets` | `ListConfigurationSets` |
 | `GET` | `/v2/email/configuration-sets/{name}` | `GetConfigurationSet` |
 | `DELETE` | `/v2/email/configuration-sets/{name}` | `DeleteConfigurationSet` |
+| `PUT` | `/v2/email/suppression/addresses` | `PutSuppressedDestination` |
+| `GET` | `/v2/email/suppression/addresses/{EmailAddress}` | `GetSuppressedDestination` |
+| `DELETE` | `/v2/email/suppression/addresses/{EmailAddress}` | `DeleteSuppressedDestination` |
+| `GET` | `/v2/email/suppression/addresses` | `ListSuppressedDestinations` (optional `Reason` query filter) |
 | `POST` | `/v2/email/tags` | `TagResource` |
 | `DELETE` | `/v2/email/tags?ResourceArn=...&TagKeys=...` | `UntagResource` |
 | `GET` | `/v2/email/tags?ResourceArn=...` | `ListTagsForResource` |
+
+Suppression list entries are stored per region. `Reason` is `BOUNCE` or `COMPLAINT`. `SendEmail` is not yet integrated with the suppression list, so suppressed addresses are still delivered locally.
 
 Tag operations support these ARN forms: `arn:aws:ses:<region>:<account>:configuration-set/<name>`, `arn:aws:ses:<region>:<account>:template/<name>`, and `arn:aws:ses:<region>:<account>:identity/<email-or-domain>`. Tags supplied to `CreateConfigurationSet`, `CreateEmailTemplate`, and `CreateEmailIdentity` are reachable through `ListTagsForResource`; `UpdateEmailTemplate` does not modify tags. Other resource types return `NotFoundException`.
 
