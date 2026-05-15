@@ -271,3 +271,10 @@ floci:
     ce:
       enabled: true
       credit-usd-monthly: 0.0
+    cur:
+      enabled: true
+      emit-mode: synchronous
+      staging-bucket: floci-cur-staging
+    bcm-data-exports:
+      enabled: true
+      emit-mode: synchronous

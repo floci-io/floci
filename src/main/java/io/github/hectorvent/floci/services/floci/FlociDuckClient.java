@@ -64,9 +64,21 @@ public class FlociDuckClient {
      * @param outputS3Path the S3 path where the result CSV will be written
      */
     public void execute(String sql, String setupDdl, String outputS3Path) {
+        execute(sql, setupDdl, outputS3Path, null);
+    }
+
+    /**
+     * Variant of {@link #execute(String, String, String)} that authenticates
+     * the DuckDB-side S3 client as a specific Floci account. Pass a 12-digit
+     * AWS account ID as {@code accessKeyId} so that {@link
+     * io.github.hectorvent.floci.core.common.AccountResolver} routes the
+     * subsequent reads/writes to that account's S3 partition rather than the
+     * default account.
+     */
+    public void execute(String sql, String setupDdl, String outputS3Path, String accessKeyId) {
         String duckUrl = duckManager.ensureReady();
 
-        Map<String, Object> body = buildBaseBody(sql, setupDdl);
+        Map<String, Object> body = buildBaseBody(sql, setupDdl, accessKeyId);
         body.put("output_s3_path", outputS3Path);
 
         post(duckUrl + "/execute", body, "execute");
@@ -81,9 +93,18 @@ public class FlociDuckClient {
      * @return result rows; empty list if the query matched no rows
      */
     public List<Map<String, Object>> query(String sql, String setupDdl) {
+        return query(sql, setupDdl, null);
+    }
+
+    /**
+     * Variant of {@link #query(String, String)} that authenticates the
+     * DuckDB-side S3 client as a specific Floci account. See
+     * {@link #execute(String, String, String, String)} for details.
+     */
+    public List<Map<String, Object>> query(String sql, String setupDdl, String accessKeyId) {
         String duckUrl = duckManager.ensureReady();
 
-        Map<String, Object> body = buildBaseBody(sql, setupDdl);
+        Map<String, Object> body = buildBaseBody(sql, setupDdl, accessKeyId);
 
         String responseBody = post(duckUrl + "/query", body, "query");
         return parseQueryRows(responseBody);
@@ -92,6 +113,10 @@ public class FlociDuckClient {
     // ── internals ─────────────────────────────────────────────────────────────
 
     private Map<String, Object> buildBaseBody(String sql, String setupDdl) {
+        return buildBaseBody(sql, setupDdl, null);
+    }
+
+    private Map<String, Object> buildBaseBody(String sql, String setupDdl, String accessKeyId) {
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sql", sql);
         if (setupDdl != null && !setupDdl.isBlank()) {
@@ -99,7 +124,10 @@ public class FlociDuckClient {
         }
         body.put("s3_endpoint", resolveFlociEndpoint());
         body.put("s3_region", config.defaultRegion());
-        body.put("s3_access_key", "test");
+        // A 12-digit access key flows through AccountResolver and selects the
+        // matching account partition for any S3 read/write the SQL performs.
+        // Anything else falls back to the configured default account.
+        body.put("s3_access_key", accessKeyId == null || accessKeyId.isEmpty() ? "test" : accessKeyId);
         body.put("s3_secret_key", "test");
         body.put("s3_url_style", "path");
         return body;
