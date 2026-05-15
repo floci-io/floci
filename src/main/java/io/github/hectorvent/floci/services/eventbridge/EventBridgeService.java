@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -154,7 +155,7 @@ public class EventBridgeService {
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "EventBus name is required.", 400);
         }
-        String effectiveName = extractBusNameFromArn(name);
+        String effectiveName = resolvedBusName(name);
         if ("default".equals(effectiveName)) {
             throw new AwsException("ValidationException", "Cannot delete the default event bus.", 400);
         }
@@ -174,7 +175,7 @@ public class EventBridgeService {
 
     public EventBus describeEventBus(String name, String region) {
         // Handle both name and ARN format
-        String effectiveName = (name == null || name.isBlank()) ? "default" : extractBusNameFromArn(name);
+        String effectiveName = (name == null || name.isBlank()) ? "default" : resolvedBusName(name);
         if ("default".equals(effectiveName)) {
             return getOrCreateDefaultBus(region);
         }
@@ -888,7 +889,11 @@ public class EventBridgeService {
         }
         // Handle ARN format: arn:aws:events:region:account-id:event-bus/bus-name
         if (busName.startsWith("arn:aws:events:")) {
-            return extractBusNameFromArn(busName);
+            try {
+                return extractBusNameFromArn(busName);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("ValidationException", "Invalid EventBridge event bus ARN: " + busName, 400);
+            }
         }
         return busName;
     }
@@ -896,15 +901,15 @@ public class EventBridgeService {
     private static String extractBusNameFromArn(String arn) {
         // ARN format: arn:aws:events:region:account-id:event-bus/bus-name
         if (arn == null) return null;
-        if (!arn.startsWith("arn:aws:events:")) {
-            return arn;
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!"events".equals(parsed.service())) {
+            throw new IllegalArgumentException("Expected EventBridge ARN but found service: " + parsed.service());
         }
         String prefix = "event-bus/";
-        int prefixIndex = arn.indexOf(prefix);
-        if (prefixIndex != -1) {
-            return arn.substring(prefixIndex + prefix.length());
+        if (parsed.resource() != null && parsed.resource().startsWith(prefix)) {
+            return parsed.resource().substring(prefix.length());
         }
-        return arn;
+        throw new IllegalArgumentException("Expected EventBridge event bus ARN but found resource: " + parsed.resource());
     }
 
     private static String busKey(String region, String name) {
