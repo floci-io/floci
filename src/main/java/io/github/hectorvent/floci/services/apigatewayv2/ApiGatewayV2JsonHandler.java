@@ -569,6 +569,10 @@ public class ApiGatewayV2JsonHandler {
             ObjectNode responseTemplates = node.putObject("ResponseTemplates");
             i.getResponseTemplates().forEach(responseTemplates::put);
         }
+        if (i.getRequestParameters() != null) {
+            ObjectNode requestParameters = node.putObject("RequestParameters");
+            i.getRequestParameters().forEach(requestParameters::put);
+        }
         if (i.getTemplateSelectionExpression() != null) {
             node.put("TemplateSelectionExpression", i.getTemplateSelectionExpression());
         }

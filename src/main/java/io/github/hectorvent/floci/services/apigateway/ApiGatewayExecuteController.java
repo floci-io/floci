@@ -981,6 +981,13 @@ public class ApiGatewayExecuteController {
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
+        String integrationType = integration.getIntegrationType();
+        if (integrationType == null || integrationType.isEmpty()) integrationType = "AWS_PROXY";
+
+        if ("HTTP_PROXY".equalsIgnoreCase(integrationType)) {
+            return dispatchHttpProxyV2(integration, route, httpMethod, path, headers, uriInfo, body, apiId, stageName);
+        }
+
         String functionName = functionNameFromUri(integration.getIntegrationUri());
         if (functionName == null) {
             return Response.status(500)
@@ -1006,6 +1013,100 @@ public class ApiGatewayExecuteController {
             }
             throw e;
         }
+    }
+
+    private final io.github.hectorvent.floci.services.apigatewayv2.proxy.HttpProxyInvoker httpProxyInvoker =
+            new io.github.hectorvent.floci.services.apigatewayv2.proxy.HttpProxyInvoker();
+
+    private Response dispatchHttpProxyV2(io.github.hectorvent.floci.services.apigatewayv2.model.Integration integration,
+                                          Route route, String httpMethod, String path,
+                                          HttpHeaders headers, UriInfo uriInfo, byte[] body,
+                                          String apiId, String stageName) {
+        Map<String, String> requestHeaders = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : headers.getRequestHeaders().entrySet()) {
+            requestHeaders.put(e.getKey(), String.join(",", e.getValue()));
+        }
+        Map<String, String> queryParams = new java.util.LinkedHashMap<>();
+        for (Map.Entry<String, List<String>> e : uriInfo.getQueryParameters().entrySet()) {
+            queryParams.put(e.getKey(), String.join(",", e.getValue()));
+        }
+        Map<String, String> pathParams = extractV2PathParams(route.getRouteKey(), path);
+
+        Map<String, Object> claims = Map.of();
+        if ("JWT".equalsIgnoreCase(route.getAuthorizationType())) {
+            String token = extractBearerToken(headers);
+            if (token != null) {
+                Map<String, Object> parsed = parseAllJwtClaims(token);
+                if (parsed != null) claims = parsed;
+            }
+        }
+
+        String sourceIp = requestHeaders.getOrDefault("X-Forwarded-For", "127.0.0.1");
+        io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext ctx =
+                new io.github.hectorvent.floci.services.apigatewayv2.proxy.RequestContext(
+                        apiId, stageName, httpMethod, path,
+                        pathParams.getOrDefault("proxy", ""), route.getRouteKey(),
+                        UUID.randomUUID().toString(), sourceIp,
+                        requestHeaders, queryParams, pathParams, body,
+                        claims, Map.of());
+
+        LOG.debugv("execute-api v2: {0} {1}/{2}{3} → HTTP_PROXY {4}",
+                httpMethod, apiId, stageName, path, integration.getIntegrationUri());
+
+        io.github.hectorvent.floci.services.apigatewayv2.proxy.ProxyResult result =
+                httpProxyInvoker.invoke(integration, ctx);
+
+        Response.ResponseBuilder rb = Response.status(result.statusCode());
+        if (result.body() != null) rb.entity(result.body());
+        if (result.headers() != null) {
+            for (Map.Entry<String, String> e : result.headers().entrySet()) {
+                rb.header(e.getKey(), e.getValue());
+            }
+        }
+        return rb.build();
+    }
+
+    private static String extractBearerToken(HttpHeaders headers) {
+        String auth = headers.getHeaderString("Authorization");
+        if (auth == null) return null;
+        if (auth.startsWith("Bearer ")) return auth.substring("Bearer ".length()).trim();
+        return null;
+    }
+
+    /** Extracts ALL JWT claims as a Map<String,Object> for use as $context.authorizer.claims.X source values. */
+    private Map<String, Object> parseAllJwtClaims(String token) {
+        try {
+            String[] parts = token.split("\\.");
+            if (parts.length < 2) return null;
+            byte[] payloadBytes = Base64.getUrlDecoder().decode(padBase64(parts[1]));
+            String payload = new String(payloadBytes, StandardCharsets.UTF_8);
+            JsonNode root = objectMapper.readTree(payload);
+            return objectMapper.convertValue(root, MAP_TYPE);
+        } catch (Exception e) {
+            LOG.debugv("JWT full-claims parse error: {0}", e.getMessage());
+            return null;
+        }
+    }
+
+    /** Captures path parameters from a route key like "ANY /wallet/{proxy+}" matched against an actual path. */
+    static Map<String, String> extractV2PathParams(String routeKey, String actualPath) {
+        if (routeKey == null) return Map.of();
+        String[] parts = routeKey.split("\\s+", 2);
+        if (parts.length != 2) return Map.of();
+        String template = parts[1];
+
+        String regex = template.replaceAll("\\{([a-zA-Z_]+)\\+\\}", "(?<$1>.+)")
+                                .replaceAll("\\{([a-zA-Z_]+)\\}", "(?<$1>[^/]+)");
+        java.util.regex.Pattern p = java.util.regex.Pattern.compile("^" + regex + "$");
+        java.util.regex.Matcher m = p.matcher(actualPath);
+        if (!m.matches()) return Map.of();
+
+        Map<String, String> result = new java.util.LinkedHashMap<>();
+        java.util.regex.Matcher names = java.util.regex.Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}").matcher(template);
+        while (names.find()) {
+            try { result.put(names.group(1), m.group(names.group(1))); } catch (Exception ignored) {}
+        }
+        return result;
     }
 
     private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers) {
@@ -1048,7 +1149,10 @@ public class ApiGatewayExecuteController {
 
             List<String> audiences = authorizer.getJwtConfiguration().audience();
             if (audiences != null && !audiences.isEmpty()) {
-                boolean audMatch = audiences.stream().anyMatch(a -> a.equals(claims.aud));
+                // Cognito access tokens omit `aud` and use `client_id` instead.
+                // Match either to support both ID tokens and access tokens.
+                boolean audMatch = audiences.stream().anyMatch(a ->
+                        a.equals(claims.aud) || a.equals(claims.clientId));
                 if (!audMatch) {
                     return Response.status(401)
                             .entity(jsonMessage("Unauthorized"))
@@ -1083,7 +1187,7 @@ public class ApiGatewayExecuteController {
         return value;
     }
 
-    private record JwtClaims(String iss, String aud, long exp) {}
+    private record JwtClaims(String iss, String aud, String clientId, long exp) {}
 
     private JwtClaims parseJwtClaims(String token) {
         try {
@@ -1094,8 +1198,11 @@ public class ApiGatewayExecuteController {
             JsonNode claims = objectMapper.readTree(payload);
             String iss = claims.path("iss").asText(null);
             String aud = claims.path("aud").asText(null);
+            // Cognito access tokens omit `aud` and use `client_id` instead. AWS HTTP API
+            // JWT authorizers accept either when matching the configured audience list.
+            String clientId = claims.path("client_id").asText(null);
             long exp = claims.path("exp").asLong(0);
-            return new JwtClaims(iss, aud, exp);
+            return new JwtClaims(iss, aud, clientId, exp);
         } catch (Exception e) {
             LOG.debugv("JWT parse error: {0}", e.getMessage());
             return null;

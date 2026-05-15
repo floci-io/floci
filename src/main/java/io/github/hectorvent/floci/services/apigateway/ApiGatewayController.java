@@ -1586,6 +1586,10 @@ public class ApiGatewayController {
             ObjectNode responseTemplates = node.putObject("responseTemplates");
             i.getResponseTemplates().forEach(responseTemplates::put);
         }
+        if (i.getRequestParameters() != null) {
+            ObjectNode requestParameters = node.putObject("requestParameters");
+            i.getRequestParameters().forEach(requestParameters::put);
+        }
         if (i.getTemplateSelectionExpression() != null) {
             node.put("templateSelectionExpression", i.getTemplateSelectionExpression());
         }
