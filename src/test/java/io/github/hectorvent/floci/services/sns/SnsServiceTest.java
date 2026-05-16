@@ -263,4 +263,25 @@ class SnsServiceTest {
         Map<String, String> attrs = snsService.getTopicAttributes(topic.getTopicArn(), REGION);
         assertEquals("2", attrs.get("SubscriptionsConfirmed"));
     }
+
+    @Test
+    void publish_withHttpSubscriber_doesNotThrow() {
+        Topic topic = snsService.createTopic("http-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "http",
+                "http://localhost:19999/webhook", REGION, Map.of());
+        // HTTP subscription should be auto-confirmed
+        assertEquals("false", sub.getAttributes().get("PendingConfirmation"));
+        // Publish should succeed — HTTP POST will fail (no server) but exception is caught internally
+        String messageId = snsService.publish(topic.getTopicArn(), null, "Hello HTTP!", null, REGION);
+        assertNotNull(messageId);
+    }
+
+    @Test
+    void subscribe_httpAutoConfirmed() {
+        Topic topic = snsService.createTopic("http-topic2", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "https",
+                "https://example.com/hook", REGION, Map.of());
+        assertEquals("false", sub.getAttributes().get("PendingConfirmation"));
+        assertNull(sub.getAttributes().get("ConfirmationToken"));
+    }
 }

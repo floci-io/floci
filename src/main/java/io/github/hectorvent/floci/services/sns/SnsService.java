@@ -21,6 +21,10 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -52,6 +56,7 @@ public class SnsService {
     private final LambdaService lambdaService;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
+    private final HttpClient httpClient;
     private final Map<String, Instant> fifoDeduplicationCache = new ConcurrentHashMap<>();
     private static final HexFormat HEX = HexFormat.of();
     
@@ -96,6 +101,7 @@ public class SnsService {
         this.lambdaService = lambdaService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
+        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
     public Topic createTopic(String name, Map<String, String> attributes,
@@ -205,12 +211,18 @@ public class SnsService {
         if (attributes != null) subscription.getAttributes().putAll(attributes);
 
         if (PENDING_CONFIRMATION_PROTOCOLS.contains(protocol)) {
-            String token = UUID.randomUUID().toString().replace("-", "")
-                    + UUID.randomUUID().toString().replace("-", "");
-            subscription.getAttributes().put("PendingConfirmation", "true");
-            subscription.getAttributes().put("ConfirmationToken", token);
-            LOG.infov("Subscription pending confirmation for {0} ({1}) to topic {2} in {3}",
-                    endpoint, protocol, topicArn, region);
+            if ("http".equals(protocol) || "https".equals(protocol)) {
+                subscription.getAttributes().put("PendingConfirmation", "false");
+                LOG.infov("Auto-confirmed HTTP(S) subscription for {0} ({1}) to topic {2} in {3}",
+                        endpoint, protocol, topicArn, region);
+            } else {
+                String token = UUID.randomUUID().toString().replace("-", "")
+                        + UUID.randomUUID().toString().replace("-", "");
+                subscription.getAttributes().put("PendingConfirmation", "true");
+                subscription.getAttributes().put("ConfirmationToken", token);
+                LOG.infov("Subscription pending confirmation for {0} ({1}) to topic {2} in {3}",
+                        endpoint, protocol, topicArn, region);
+            }
         }
 
         subscriptionStore.put(subKey(region, subscriptionArn), subscription);
@@ -682,6 +694,24 @@ public class SnsService {
                     lambdaService.invoke(region, fnName, eventJson.getBytes(), InvocationType.Event);
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
                 }
+                case "http", "https" -> {
+                    boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
+                    String body = rawDelivery
+                            ? message
+                            : buildSnsHttpNotification(message, subject, messageAttributes, topicArn, messageId, sub.getSubscriptionArn());
+                    HttpRequest request = HttpRequest.newBuilder()
+                            .uri(URI.create(sub.getEndpoint()))
+                            .timeout(Duration.ofSeconds(5))
+                            .header("Content-Type", "text/plain; charset=UTF-8")
+                            .header("x-amz-sns-message-type", "Notification")
+                            .header("x-amz-sns-message-id", messageId)
+                            .header("x-amz-sns-topic-arn", topicArn)
+                            .header("x-amz-sns-subscription-arn", sub.getSubscriptionArn())
+                            .POST(HttpRequest.BodyPublishers.ofString(body))
+                            .build();
+                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+                    LOG.debugv("Delivered SNS message to HTTP endpoint {0}, status={1}", sub.getEndpoint(), response.statusCode());
+                }
                 case "email", "email-json" -> LOG.infov("SNS email delivery (stub): to={0}, subject={1}, message={2}",
                         sub.getEndpoint(), subject, message);
                 case "sms" -> LOG.infov("SNS SMS delivery (stub): to={0}, message={1}", sub.getEndpoint(), message);
@@ -769,6 +799,38 @@ public class SnsService {
                 node.put("Subject", subject);
             }
             node.put("Message", message);
+            ObjectNode attrs = node.putObject("MessageAttributes");
+            if (messageAttributes != null) {
+                for (var entry : messageAttributes.entrySet()) {
+                    ObjectNode attr = attrs.putObject(entry.getKey());
+                    attr.put("Type", entry.getValue().getDataType());
+                    attr.put("Value", entry.getValue().getStringValue());
+                }
+            }
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    private String buildSnsHttpNotification(String message, String subject,
+                                             Map<String, MessageAttributeValue> messageAttributes,
+                                             String topicArn, String messageId, String subscriptionArn) {
+        try {
+            String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("Type", "Notification");
+            node.put("MessageId", messageId);
+            node.put("TopicArn", topicArn);
+            node.put("Timestamp", timestamp);
+            if (subject != null) {
+                node.put("Subject", subject);
+            }
+            node.put("Message", message);
+            node.put("SignatureVersion", "1");
+            node.put("Signature", "EXAMPLE");
+            node.put("SigningCertUrl", "EXAMPLE");
+            node.put("UnsubscribeURL", baseUrl + "/?Action=Unsubscribe&SubscriptionArn=" + subscriptionArn);
             ObjectNode attrs = node.putObject("MessageAttributes");
             if (messageAttributes != null) {
                 for (var entry : messageAttributes.entrySet()) {
