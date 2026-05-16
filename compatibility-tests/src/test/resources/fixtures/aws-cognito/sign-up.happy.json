@@ -1,0 +1,43 @@
+{
+  "name": "sign-up.happy",
+  "capturedAt": "2026-05-16T05:10:18.457Z",
+  "request": {
+    "ClientId": "6h89qn2bfglbmvfebq9aaknqk0",
+    "Username": "fixture@example.com",
+    "Password": "Fixture1!Aa",
+    "UserAttributes": [
+      {
+        "Name": "email",
+        "Value": "fixture@example.com"
+      },
+      {
+        "Name": "phone_number",
+        "Value": "+5215555555555"
+      },
+      {
+        "Name": "given_name",
+        "Value": "Fixture"
+      },
+      {
+        "Name": "family_name",
+        "Value": "User"
+      }
+    ]
+  },
+  "response": {
+    "UserConfirmed": false,
+    "UserSub": "34c84488-e0e1-70ae-d2ee-991ad1a898c8",
+    "CodeDeliveryDetails": {
+      "Destination": "f***@e***",
+      "DeliveryMedium": "EMAIL",
+      "AttributeName": "email"
+    },
+    "$metadata": {
+      "httpStatusCode": 200,
+      "requestId": "e2953a5e-cd31-49f9-a9e0-fac9c689740d",
+      "attempts": 1,
+      "totalRetryDelay": 0
+    }
+  },
+  "error": null
+}
