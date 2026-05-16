@@ -1,0 +1,22 @@
+{
+  "name": "resend-confirmation.error.rate-limit",
+  "capturedAt": "2026-05-16T05:10:22.703Z",
+  "request": {
+    "ClientId": "6h89qn2bfglbmvfebq9aaknqk0",
+    "Username": "fixture@example.com"
+  },
+  "response": {
+    "CodeDeliveryDetails": {
+      "Destination": "f***@e***",
+      "DeliveryMedium": "EMAIL",
+      "AttributeName": "email"
+    },
+    "$metadata": {
+      "httpStatusCode": 200,
+      "requestId": "845f89fd-de84-46b3-8de3-fa85980d4a8f",
+      "attempts": 1,
+      "totalRetryDelay": 0
+    }
+  },
+  "error": null
+}

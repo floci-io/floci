@@ -1,0 +1,21 @@
+{
+  "name": "initiate-auth.srp.unknown-user",
+  "capturedAt": "2026-05-16T05:10:23.019Z",
+  "request": {
+    "AuthFlow": "USER_SRP_AUTH",
+    "ClientId": "6h89qn2bfglbmvfebq9aaknqk0",
+    "AuthParameters": {
+      "USERNAME": "fixture@example.com",
+      "SRP_A": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  "response": null,
+  "error": {
+    "name": "UserNotFoundException",
+    "message": "User does not exist.",
+    "$metadata": {
+      "httpStatusCode": 400,
+      "requestId": "c4459718-f2a4-48f8-8377-d56a06828f46"
+    }
+  }
+}
