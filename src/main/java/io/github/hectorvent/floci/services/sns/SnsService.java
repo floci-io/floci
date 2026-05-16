@@ -8,9 +8,11 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.model.PlatformApplication;
 import io.github.hectorvent.floci.services.sns.model.PlatformEndpoint;
 import io.github.hectorvent.floci.services.sns.model.PushNotification;
+import io.github.hectorvent.floci.services.sns.model.SentSms;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -67,6 +69,7 @@ public class SnsService {
     private final StorageBackend<String, PlatformApplication> platformAppStore;
     private final StorageBackend<String, PlatformEndpoint> platformEndpointStore;
     private final Deque<PushNotification> pushCapture = new ConcurrentLinkedDeque<>();
+    private final StorageBackend<String, SentSms> smsStore;
     private final RegionResolver regionResolver;
     private final SqsService sqsService;
     private final LambdaService lambdaService;
@@ -93,6 +96,9 @@ public class SnsService {
                 storageFactory.create("sns", "sns-platform-endpoints.json",
                         new TypeReference<Map<String, PlatformEndpoint>>() {
                         }),
+                storageFactory.create("sns", "sns-sms.json",
+                        new TypeReference<Map<String, SentSms>>() {
+                        }),
                 regionResolver,
                 sqsService,
                 lambdaService,
@@ -109,8 +115,8 @@ public class SnsService {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
         this(topicStore, subscriptionStore,
-                new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
-                new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, sqsService, lambdaService);
     }
 
@@ -124,6 +130,7 @@ public class SnsService {
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
+        this.smsStore = new InMemoryStorage<>();
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -136,12 +143,14 @@ public class SnsService {
                StorageBackend<String, Subscription> subscriptionStore,
                StorageBackend<String, PlatformApplication> platformAppStore,
                StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               StorageBackend<String, SentSms> smsStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, String baseUrl, ObjectMapper objectMapper) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
+        this.smsStore = smsStore;
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -357,7 +366,13 @@ public class SnsService {
 
         // Send SMS
         if (phoneNumber != null) {
-            return UUID.randomUUID().toString();
+            String messageId = UUID.randomUUID().toString();
+            String effectiveRegion = region != null ? region : "us-east-1";
+            SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber,
+                    message, subject, Instant.now());
+            smsStore.put("sms::" + effectiveRegion + "::" + messageId, sms);
+            LOG.infov("SNS SMS published: messageId={0} phone={1}", messageId, phoneNumber);
+            return messageId;
         }
 
         // Send a message to topic or directly to a target ARN
@@ -1501,5 +1516,20 @@ public class SnsService {
 
     private static String subKey(String region, String subscriptionArn) {
         return "sub::" + region + "::" + subscriptionArn;
+    }
+
+    /** All SMS messages published since last clear. Used by SnsInspectionController. */
+    public List<SentSms> getSentMessages() {
+        return smsStore.scan(k -> k.startsWith("sms::"));
+    }
+
+    /** Drop all stored SMS records. Used by SnsInspectionController. */
+    public void clearSentMessages() {
+        for (String key : smsStore.keys()) {
+            if (key.startsWith("sms::")) {
+                smsStore.delete(key);
+            }
+        }
+        LOG.info("Cleared all SNS SMS records");
     }
 }
