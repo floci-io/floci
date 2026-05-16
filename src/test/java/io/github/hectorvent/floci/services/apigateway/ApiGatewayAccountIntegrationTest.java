@@ -21,8 +21,8 @@ class ApiGatewayAccountIntegrationTest {
                 .statusCode(200)
                 .body("apiKeyVersion", notNullValue())
           .body("features", hasItem("UsagePlans"))
-                .body("throttleSettings.burstLimit", notNullValue())
-                .body("throttleSettings.rateLimit", notNullValue());
+            .body("throttleSettings.burstLimit", equalTo(5000))
+            .body("throttleSettings.rateLimit", equalTo(10000.0f));
     }
 
     @Test
@@ -133,6 +133,38 @@ class ApiGatewayAccountIntegrationTest {
                 .then()
                 .statusCode(400);
     }
+
+                @Test
+                void updateAccount_rejectsNullPatchOperation() {
+              String patch = """
+                {
+                  "patchOperations": [null]
+                }
+                """;
+
+              given()
+                .contentType(ContentType.JSON)
+                .body(patch)
+                .when().patch("/account")
+                .then()
+                .statusCode(400);
+                }
+
+                @Test
+                void updateAccount_rejectsNonObjectPatchOperation() {
+              String patch = """
+                {
+                  "patchOperations": ["invalid"]
+                }
+                """;
+
+              given()
+                .contentType(ContentType.JSON)
+                .body(patch)
+                .when().patch("/account")
+                .then()
+                .statusCode(400);
+                }
 
           @Test
           void updateAccount_rejectsEmptyBody() {

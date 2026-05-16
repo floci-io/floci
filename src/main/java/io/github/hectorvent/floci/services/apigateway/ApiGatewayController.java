@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.apigateway;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -188,12 +190,32 @@ public class ApiGatewayController {
                 throw new AwsException("BadRequestException", "Request body is required", 400);
             }
             com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
-            @SuppressWarnings("unchecked")
-            List<Map<String, String>> patchOperations = objectMapper.convertValue(node, List.class);
+            if (!node.isArray()) {
+                throw new AwsException("BadRequestException", "patchOperations must be an array", 400);
+            }
+
+            List<Map<String, String>> patchOperations = new ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode operationNode : node) {
+                if (operationNode == null || operationNode.isNull() || !operationNode.isObject()) {
+                    throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
+                }
+                try {
+                    Map<String, String> operation = objectMapper.convertValue(operationNode,
+                            new TypeReference<Map<String, String>>() {
+                            });
+                    if (operation == null) {
+                        throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
+                    }
+                    patchOperations.add(operation);
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+            }
+
             return Response.ok(toAccountNode(service.updateAccount(region, patchOperations)).toString())
                     .type(MediaType.APPLICATION_JSON)
                     .build();
-        } catch (IOException e) {
+        } catch (IOException | IllegalArgumentException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }

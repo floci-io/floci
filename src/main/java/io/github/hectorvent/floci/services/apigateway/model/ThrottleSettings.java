@@ -5,8 +5,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 @JsonIgnoreProperties(ignoreUnknown = true)
 public class ThrottleSettings {
 
-    private Integer burstLimit = 1000;
-    private Double rateLimit = 500.0;
+    private Integer burstLimit = 5000;
+    private Double rateLimit = 10000.0;
 
     public Integer getBurstLimit() {
         return burstLimit;
