@@ -61,7 +61,7 @@ public class EventBridgeInvoker {
                 String queueUrl = AwsArnUtils.arnToQueueUrl(arn, baseUrl);
                 String messageGroupId = target.getSqsParameters() != null
                         ? target.getSqsParameters().getMessageGroupId() : null;
-                sqsService.sendMessage(queueUrl, payload, 0, messageGroupId, null);
+                sqsService.sendMessage(queueUrl, payload, 0, messageGroupId, null, region);
                 LOG.debugv("EventBridge delivered to SQS: {0}", arn);
             } else if (arn.contains(":sns:")) {
                 String topicRegion = extractRegionFromArn(arn, region);
