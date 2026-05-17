@@ -597,6 +597,28 @@ class SqsServiceTest {
     }
 
     @Test
+    void fifoDedup_scopedToMessageGroup_acceptsSameDedupIdAcrossGroups() {
+        Queue fifo = sqsService.createQueue("fair.fifo",
+                Map.of("FifoQueue", "true",
+                        "DeduplicationScope", "messageGroup",
+                        "FifoThroughputLimit", "perMessageGroupId"));
+        sqsService.sendMessage(fifo.getQueueUrl(), "A", 0, "groupA", "sameDedup");
+        sqsService.sendMessage(fifo.getQueueUrl(), "B", 0, "groupB", "sameDedup");
+        List<Message> received = sqsService.receiveMessage(fifo.getQueueUrl(), 10, 30, 0);
+        assertEquals(2, received.size());
+    }
+
+    @Test
+    void fifoDedup_queueScope_rejectsSameDedupIdAcrossGroups() {
+        Queue fifo = sqsService.createQueue("queue-scoped.fifo",
+                Map.of("FifoQueue", "true"));
+        sqsService.sendMessage(fifo.getQueueUrl(), "A", 0, "groupA", "sameDedup");
+        sqsService.sendMessage(fifo.getQueueUrl(), "B", 0, "groupB", "sameDedup");
+        List<Message> received = sqsService.receiveMessage(fifo.getQueueUrl(), 10, 30, 0);
+        assertEquals(1, received.size());
+    }
+
+    @Test
     void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
         final var sns = mock(SnsService.class);
         final var service = new SqsService(

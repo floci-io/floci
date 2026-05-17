@@ -217,8 +217,15 @@ class GuardedMessageQueue {
     }
 
     Message findByDeduplicationId(String dedupId) {
+        return findByDeduplicationId(dedupId, null);
+    }
+
+    Message findByDeduplicationId(String dedupId, String messageGroupId) {
         try (var _ = hold()) {
-            return messages.stream().filter(msg -> dedupId.equals(msg.getMessageDeduplicationId()))
+            return messages.stream()
+                    .filter(msg -> dedupId.equals(msg.getMessageDeduplicationId()))
+                    .filter(msg -> messageGroupId == null
+                            || messageGroupId.equals(msg.getMessageGroupId()))
                     .findFirst().orElse(null);
         }
     }

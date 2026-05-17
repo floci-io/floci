@@ -400,18 +400,25 @@ public class SqsService {
                 }
             }
 
-            // Check deduplication window — atomic putIfAbsent to avoid race condition
+            // Check deduplication window — atomic putIfAbsent to avoid race condition.
+            // When DeduplicationScope=messageGroup, dedup is scoped per MessageGroupId,
+            // so two messages with the same MessageDeduplicationId in different groups
+            // are not duplicates and must both be accepted.
+            boolean groupScoped = "messageGroup".equalsIgnoreCase(
+                    queue.getAttributes().get("DeduplicationScope"));
+            String dedupCacheKey = groupScoped ? messageGroupId + "|" + dedupId : dedupId;
             cleanupDeduplicationCache(storageKey);
             var dedupMap = deduplicationCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>());
             Instant expiry = Instant.now().plusSeconds(DEDUP_WINDOW_SECONDS);
-            Instant previous = dedupMap.putIfAbsent(dedupId, expiry);
+            Instant previous = dedupMap.putIfAbsent(dedupCacheKey, expiry);
             persistDedup(storageKey);
             if (previous != null && Instant.now().isBefore(previous)) {
                 // Duplicate within window — keep the original messageId and
                 // sequenceNumber but compute response MD5s from this request's
                 // body and attributes, otherwise SDK clients (which validate
                 // MD5 against what they sent) reject the response.
-                Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(dedupId);
+                Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(
+                        dedupId, groupScoped ? messageGroupId : null);
                 if (existing != null) {
                     Message response = new Message(body);
                     response.setMessageId(existing.getMessageId());
