@@ -1,14 +1,9 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/a49ddb99-3ab5-4d7e-8334-6b5118f4ce6e" width="400" alt="Floci" />
-</p>
-
-<h1 align="center" style="border-bottom: none">
-    <b><a href="https://floci.io/">Floci</a></b>
-</h1>
-
-<p align="center">
-  <strong>A free, open-source local AWS emulator.</strong><br />
-  No account. No auth token. No feature gates. Just <code>docker compose up</code>.
+  <img src="https://github.com/user-attachments/assets/2a47dcc5-5eea-4503-a13c-405680932a11" width="400" alt="Floci" />
+  <p align="center">
+    <strong>A free, open-source local AWS emulator.</strong><br />
+    No account. No auth token. No feature gates. Just <code>docker compose up</code>.
+  </p>
 </p>
 
 <p align="center">
