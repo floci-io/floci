@@ -21,6 +21,8 @@ public class InstanceNetworkInterface {
     private String privateDnsName;
     private boolean sourceDestCheck = true;
     private List<GroupIdentifier> groups = new ArrayList<>();
+    private String attachmentId;
+    private int deviceIndex;
 
     public InstanceNetworkInterface() {}
 
@@ -56,4 +58,10 @@ public class InstanceNetworkInterface {
 
     public List<GroupIdentifier> getGroups() { return groups; }
     public void setGroups(List<GroupIdentifier> groups) { this.groups = groups; }
+
+    public String getAttachmentId() { return attachmentId; }
+    public void setAttachmentId(String attachmentId) { this.attachmentId = attachmentId; }
+
+    public int getDeviceIndex() { return deviceIndex; }
+    public void setDeviceIndex(int deviceIndex) { this.deviceIndex = deviceIndex; }
 }

@@ -267,6 +267,8 @@ public class Ec2Service {
             eni.setPrivateIpAddress(privateIp);
             eni.setPrivateDnsName(inst.getPrivateDnsName());
             eni.setGroups(new ArrayList<>(sgIdentifiers));
+            eni.setAttachmentId("eni-attach-" + randomHex(17));
+            eni.setDeviceIndex(0);
             inst.getNetworkInterfaces().add(eni);
 
             instances.put(key(region, instanceId), inst);
