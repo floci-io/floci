@@ -11,7 +11,7 @@ import java.util.zip.CRC32C;
 @RegisterForReflection
 public class S3Checksum {
 
-    private static final long CRC64_NVME_POLY = 0xad93d23594c935a9L;
+    private static final long CRC64_NVME_POLY = 0x9a6c9329ac4bc9b5L;
     private static final long[] CRC64_TABLE = buildCrc64Table();
 
     private String checksumCRC32;
