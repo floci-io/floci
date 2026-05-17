@@ -313,6 +313,11 @@ public class SqsQueryHandler {
         String queueUrl = getParam(params, "QueueUrl");
         var xml = new XmlBuilder();
 
+        record ParsedEntry(String id, String body, int delay, String groupId, String dedupId,
+                           Map<String, MessageAttributeValue> attributes) {}
+
+        List<ParsedEntry> parsedEntries = new ArrayList<>();
+        int totalSize = 0;
         for (int i = 1; ; i++) {
             String id = getParam(params, "SendMessageBatchRequestEntry." + i + ".Id");
             if (id == null) break;
@@ -338,8 +343,18 @@ public class SqsQueryHandler {
                 }
             }
 
+            totalSize += SqsService.computeMessageSize(body, messageAttributes);
+            parsedEntries.add(new ParsedEntry(id, body, delaySeconds, messageGroupId,
+                    messageDeduplicationId, messageAttributes));
+        }
+
+        sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
+
+        for (ParsedEntry parsed : parsedEntries) {
+            String id = parsed.id();
             try {
-                var msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, messageAttributes, region);
+                var msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
+                        parsed.groupId(), parsed.dedupId(), parsed.attributes(), region);
                 xml.start("SendMessageBatchResultEntry")
                    .elem("Id", id)
                    .elem("MessageId", msg.getMessageId())

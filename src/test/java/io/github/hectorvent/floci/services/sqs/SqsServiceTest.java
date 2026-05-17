@@ -597,6 +597,31 @@ class SqsServiceTest {
     }
 
     @Test
+    void validateBatchPayloadSize_underQueueLimit_succeeds() {
+        Queue queue = sqsService.createQueue("batch-q", null);
+        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 100_000);
+    }
+
+    @Test
+    void validateBatchPayloadSize_overQueueLimit_throwsBatchRequestTooLong() {
+        Queue queue = sqsService.createQueue("batch-q", null);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 300_000));
+        assertEquals("BatchRequestTooLong", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("262144"));
+    }
+
+    @Test
+    void validateBatchPayloadSize_respectsCustomMaximumMessageSize() {
+        Queue queue = sqsService.createQueue("batch-q",
+                Map.of("MaximumMessageSize", "1048576"));
+        sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_000_000);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_048_577));
+        assertEquals("BatchRequestTooLong", ex.getErrorCode());
+    }
+
+    @Test
     void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
         final var sns = mock(SnsService.class);
         final var service = new SqsService(

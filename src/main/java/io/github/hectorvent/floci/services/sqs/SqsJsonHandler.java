@@ -338,6 +338,11 @@ public class SqsJsonHandler {
         ArrayNode successful = objectMapper.createArrayNode();
         ArrayNode failed = objectMapper.createArrayNode();
 
+        record ParsedEntry(String id, String body, int delay, String groupId, String dedupId,
+                           Map<String, MessageAttributeValue> attributes) {}
+
+        List<ParsedEntry> parsedEntries = new ArrayList<>();
+        int totalSize = 0;
         if (entries.isArray()) {
             for (JsonNode entry : entries) {
                 String id = entry.path("Id").asText();
@@ -365,9 +370,19 @@ public class SqsJsonHandler {
                     });
                 }
 
+                totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
+                parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
+                        messageGroupId, messageDeduplicationId, messageAttributes));
+            }
+        }
+
+        sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
+
+        for (ParsedEntry parsed : parsedEntries) {
+                String id = parsed.id();
                 try {
-                    Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
-                            messageGroupId, messageDeduplicationId, messageAttributes, region);
+                    Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
+                            parsed.groupId(), parsed.dedupId(), parsed.attributes(), region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     success.put("MessageId", msg.getMessageId());
@@ -387,7 +402,6 @@ public class SqsJsonHandler {
                     fail.put("SenderFault", true);
                     failed.add(fail);
                 }
-            }
         }
 
         ObjectNode response = objectMapper.createObjectNode();

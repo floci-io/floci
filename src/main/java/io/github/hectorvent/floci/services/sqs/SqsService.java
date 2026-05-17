@@ -477,10 +477,29 @@ public class SqsService {
     }
 
     /**
+     * Validate that the combined payload of a {@code SendMessageBatch} call fits within
+     * the queue's {@code MaximumMessageSize}. AWS counts the batch limit as the sum of
+     * all entries (body + attributes) and returns {@code BatchRequestTooLong} as a
+     * top-level error -- not as per-entry failures -- when the total exceeds the limit.
+     */
+    public void validateBatchPayloadSize(String queueUrl, String region, int totalBytes) {
+        String storageKey = regionKey(region, queueUrl);
+        Queue queue = getQueueByUrl(storageKey, queueUrl)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
+        int max = parseMaxMessageSize(queue.getAttributes().get("MaximumMessageSize"));
+        if (totalBytes > max) {
+            throw new AwsException("BatchRequestTooLong",
+                    "Batch requests cannot be longer than " + max + " bytes. "
+                            + "You have sent " + totalBytes + " bytes.", 400);
+        }
+    }
+
+    /**
      * Total wire-level message size, in bytes, matching AWS SQS accounting:
      * UTF-8 body bytes + per-attribute (name UTF-8 + type UTF-8 + value bytes).
      */
-    private static int computeMessageSize(String body, Map<String, MessageAttributeValue> attributes) {
+    public static int computeMessageSize(String body, Map<String, MessageAttributeValue> attributes) {
         int total = body == null ? 0 : body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         if (attributes == null || attributes.isEmpty()) {
             return total;
