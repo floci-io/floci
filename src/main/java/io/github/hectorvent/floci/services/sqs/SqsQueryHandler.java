@@ -118,6 +118,10 @@ public class SqsQueryHandler {
             xml.start("Attribute").elem("Name", "MessageDeduplicationId")
                     .elem("Value", msg.getMessageDeduplicationId()).end("Attribute");
         }
+        if (msg.getAwsTraceHeader() != null && (all || requested.contains("AWSTraceHeader"))) {
+            xml.start("Attribute").elem("Name", "AWSTraceHeader")
+                    .elem("Value", msg.getAwsTraceHeader()).end("Attribute");
+        }
     }
 
     private List<String> collectIndexed(MultivaluedMap<String, String> params, String prefix) {
@@ -213,7 +217,20 @@ public class SqsQueryHandler {
             }
         }
 
-        Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, messageAttributes, region);
+        // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
+        // capture it (if present) so ReceiveMessage can return it as a system attribute.
+        String awsTraceHeader = null;
+        for (int i = 1; ; i++) {
+            String name = getParam(params, "MessageSystemAttribute." + i + ".Name");
+            if (name == null) break;
+            if ("AWSTraceHeader".equals(name)) {
+                awsTraceHeader = getParam(params, "MessageSystemAttribute." + i + ".Value.StringValue");
+                break;
+            }
+        }
+
+        Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId,
+                messageDeduplicationId, messageAttributes, awsTraceHeader, region);
 
         var xml = new XmlBuilder()
                 .elem("MessageId", msg.getMessageId())

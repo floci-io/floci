@@ -374,6 +374,15 @@ public class SqsService {
                                String messageGroupId, String messageDeduplicationId,
                                Map<String, MessageAttributeValue> messageAttributes,
                                String region) {
+        return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId,
+                messageAttributes, null, region);
+    }
+
+    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+                               String messageGroupId, String messageDeduplicationId,
+                               Map<String, MessageAttributeValue> messageAttributes,
+                               String awsTraceHeader,
+                               String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -459,6 +468,7 @@ public class SqsService {
             message.setMessageGroupId(messageGroupId);
             message.setMessageDeduplicationId(dedupId);
             message.setSequenceNumber(sequenceCounter.incrementAndGet());
+            message.setAwsTraceHeader(awsTraceHeader);
             if (effectiveDelaySeconds > 0) {
                 message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
             }
@@ -478,6 +488,7 @@ public class SqsService {
 
         // Standard queue
         Message message = new Message(body);
+        message.setAwsTraceHeader(awsTraceHeader);
         if (effectiveDelaySeconds > 0) {
             message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
         }

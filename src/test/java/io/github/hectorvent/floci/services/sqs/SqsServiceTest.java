@@ -793,6 +793,16 @@ class SqsServiceTest {
     }
 
     @Test
+    void sendMessage_withAwsTraceHeader_isStoredAndReturnedOnReceive() {
+        Queue q = sqsService.createQueue("traced", null);
+        sqsService.sendMessage(q.getQueueUrl(), "hi", 0, null, null, null,
+                "Root=1-abc-def", "us-east-1");
+        var received = sqsService.receiveMessage(q.getQueueUrl(), 1, 30, 0);
+        assertEquals(1, received.size());
+        assertEquals("Root=1-abc-def", received.get(0).getAwsTraceHeader());
+    }
+
+    @Test
     void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
         final var sns = mock(SnsService.class);
         final var service = new SqsService(

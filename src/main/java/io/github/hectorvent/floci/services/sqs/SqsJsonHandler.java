@@ -113,6 +113,9 @@ public class SqsJsonHandler {
                 && (all || requested.contains("MessageDeduplicationId"))) {
             attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
         }
+        if (msg.getAwsTraceHeader() != null && (all || requested.contains("AWSTraceHeader"))) {
+            attrs.put("AWSTraceHeader", msg.getAwsTraceHeader());
+        }
         if (!attrs.isEmpty()) {
             msgNode.set("Attributes", attrs);
         }
@@ -215,8 +218,13 @@ public class SqsJsonHandler {
             });
         }
 
+        // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
+        // capture it (if present) so ReceiveMessage can return it as a system attribute.
+        String awsTraceHeader = request.path("MessageSystemAttributes")
+                .path("AWSTraceHeader").path("StringValue").asText(null);
+
         Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
-                messageGroupId, messageDeduplicationId, messageAttributes, region);
+                messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("MessageId", msg.getMessageId());
