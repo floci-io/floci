@@ -223,17 +223,17 @@ class SnsServiceTest {
     }
 
     @Test
-    void publish_messageExceedsSizeLimit_throwsInvalidParameterException() {
+    void publish_messageExceedsSizeLimit_throwsInvalidParameter() {
         Topic topic = snsService.createTopic("size-topic", null, null, REGION);
         String tooBig = "x".repeat(262_145);
         AwsException ex = assertThrows(AwsException.class, () ->
                 snsService.publish(topic.getTopicArn(), null, tooBig, null, REGION));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("InvalidParameter", ex.getErrorCode());
         assertTrue(ex.getMessage().toLowerCase().contains("too long"));
     }
 
     @Test
-    void publish_messagePlusAttributesExceedsLimit_throws() {
+    void publish_messagePlusAttributesExceedsLimit_throwsInvalidParameterValue() {
         Topic topic = snsService.createTopic("size-topic", null, null, REGION);
         String body = "x".repeat(262_100);
         Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> attrs = Map.of(
@@ -241,7 +241,7 @@ class SnsServiceTest {
                         "y".repeat(200), "String"));
         AwsException ex = assertThrows(AwsException.class, () ->
                 snsService.publish(topic.getTopicArn(), null, null, body, null, attrs, REGION));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
     }
 
     @Test
