@@ -12,6 +12,7 @@ import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.TimeUnit;
 import java.util.List;
 import java.util.Map;
 
@@ -30,7 +31,6 @@ class SnsHttpDeliveryIntegrationTest {
     private static int httpPort;
     private static final List<ReceivedRequest> receivedRequests = new CopyOnWriteArrayList<>();
     private static final ObjectMapper objectMapper = new ObjectMapper();
-
     record ReceivedRequest(String body, Map<String, List<String>> headers) {}
 
     @BeforeAll
@@ -55,6 +55,40 @@ class SnsHttpDeliveryIntegrationTest {
         }
     }
 
+    /**
+     * Waits until the expected number of requests have been received, with a timeout.
+     */
+    private static void awaitRequests(int expectedCount) throws InterruptedException {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5);
+        while (receivedRequests.size() < expectedCount && System.nanoTime() < deadline) {
+            Thread.sleep(50);
+        }
+    }
+
+    /**
+     * Extracts the Token and TopicArn from the SubscriptionConfirmation message
+     * and calls ConfirmSubscription via POST (matching how the SDK confirms).
+     */
+    private static void confirmSubscription(ReceivedRequest confirmationRequest) throws Exception {
+        JsonNode node = objectMapper.readTree(confirmationRequest.body());
+        assertEquals("SubscriptionConfirmation", node.get("Type").asText());
+        String token = node.get("Token").asText();
+        String topicArn = node.get("TopicArn").asText();
+        assertNotNull(token);
+        assertNotNull(topicArn);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ConfirmSubscription")
+            .formParam("TopicArn", topicArn)
+            .formParam("Token", token)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SubscriptionArn>"));
+    }
+
     @Test
     void publish_toHttpSubscriber_deliversNotificationEnvelope() throws Exception {
         receivedRequests.clear();
@@ -71,8 +105,8 @@ class SnsHttpDeliveryIntegrationTest {
             .statusCode(200)
             .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
 
-        // Subscribe HTTP endpoint
-        String subscriptionArn = given()
+        // Subscribe HTTP endpoint — this sends SubscriptionConfirmation to the endpoint
+        given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "Subscribe")
             .formParam("TopicArn", topicArn)
@@ -82,26 +116,36 @@ class SnsHttpDeliveryIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body(containsString("<SubscriptionArn>"))
-            .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+            .body(containsString("<SubscriptionArn>"));
 
-        // Subscription should be auto-confirmed (not pending)
-        assertFalse(subscriptionArn.contains("pending"));
+        // The webhook should have received the SubscriptionConfirmation
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        ReceivedRequest confirmReq = receivedRequests.get(0);
+        assertEquals("SubscriptionConfirmation", confirmReq.headers().get("X-amz-sns-message-type").get(0));
 
-        // Publish message
+        // Confirm the subscription
+        confirmSubscription(confirmReq);
+        receivedRequests.clear();
+
+        // Publish message with message attributes
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "Publish")
             .formParam("TopicArn", topicArn)
             .formParam("Message", "Hello HTTP endpoint!")
             .formParam("Subject", "Test Subject")
+            .formParam("MessageAttributes.entry.1.Name", "env")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "String")
+            .formParam("MessageAttributes.entry.1.Value.StringValue", "production")
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body(containsString("<MessageId>"));
 
-        // Verify webhook received the POST
+        // Verify webhook received the notification POST
+        awaitRequests(1);
         assertEquals(1, receivedRequests.size());
         ReceivedRequest req = receivedRequests.get(0);
 
@@ -121,10 +165,17 @@ class SnsHttpDeliveryIntegrationTest {
         assertEquals("Test Subject", envelope.get("Subject").asText());
         assertEquals("1", envelope.get("SignatureVersion").asText());
         assertEquals("EXAMPLE", envelope.get("Signature").asText());
-        assertEquals("EXAMPLE", envelope.get("SigningCertUrl").asText());
+        assertEquals("EXAMPLE", envelope.get("SigningCertURL").asText());
         assertTrue(envelope.get("UnsubscribeURL").asText().contains("Action=Unsubscribe"));
         assertNotNull(envelope.get("MessageId").asText());
         assertNotNull(envelope.get("Timestamp").asText());
+
+        // Verify message attributes in envelope
+        JsonNode msgAttrs = envelope.get("MessageAttributes");
+        assertNotNull(msgAttrs);
+        assertTrue(msgAttrs.has("env"));
+        assertEquals("String", msgAttrs.get("env").get("Type").asText());
+        assertEquals("production", msgAttrs.get("env").get("Value").asText());
     }
 
     @Test
@@ -144,7 +195,7 @@ class SnsHttpDeliveryIntegrationTest {
             .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
 
         // Subscribe HTTP endpoint
-        String subscriptionArn = given()
+        given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "Subscribe")
             .formParam("TopicArn", topicArn)
@@ -155,6 +206,23 @@ class SnsHttpDeliveryIntegrationTest {
         .then()
             .statusCode(200)
             .extract().xmlPath().getString("SubscribeResponse.SubscribeResult.SubscriptionArn");
+
+        // Confirm subscription
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        confirmSubscription(receivedRequests.get(0));
+        receivedRequests.clear();
+
+        // Get the subscription ARN to set attributes
+        String subscriptionArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListSubscriptionsByTopic")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("**.find { it.Protocol == 'http' }.SubscriptionArn");
 
         // Set RawMessageDelivery attribute
         given()
@@ -181,6 +249,7 @@ class SnsHttpDeliveryIntegrationTest {
             .body(containsString("<MessageId>"));
 
         // Verify webhook received raw message
+        awaitRequests(1);
         assertEquals(1, receivedRequests.size());
         ReceivedRequest req = receivedRequests.get(0);
         assertEquals("Raw message body", req.body());
@@ -188,11 +257,14 @@ class SnsHttpDeliveryIntegrationTest {
         // SNS headers should still be present
         assertNotNull(req.headers().get("X-amz-sns-message-type"));
         assertEquals("Notification", req.headers().get("X-amz-sns-message-type").get(0));
+        // Raw delivery marker header
+        assertNotNull(req.headers().get("X-amz-sns-rawdelivery"));
+        assertEquals("true", req.headers().get("X-amz-sns-rawdelivery").get(0));
     }
 
     @Test
     void publish_toUnreachableHttpEndpoint_doesNotFail() {
-        // Subscribe to unreachable endpoint
+        // Subscribe to unreachable endpoint — SubscriptionConfirmation will fail but that's OK
         String topicArn = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateTopic")
@@ -214,16 +286,58 @@ class SnsHttpDeliveryIntegrationTest {
         .then()
             .statusCode(200);
 
-        // Publish should still succeed (delivery failure is caught internally)
+        // Publish should still succeed (subscription is pending so delivery is skipped)
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "Publish")
             .formParam("TopicArn", topicArn)
-            .formParam("Message", "This will fail delivery but not the publish")
+            .formParam("Message", "This will not be delivered because subscription is unconfirmed")
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body(containsString("<MessageId>"));
+    }
+
+    @Test
+    void subscribe_sendsSubscriptionConfirmation_withCorrectFields() throws Exception {
+        receivedRequests.clear();
+        String endpoint = "http://localhost:" + httpPort + "/webhook";
+
+        String topicArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "http-confirm-fields-test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "http")
+            .formParam("Endpoint", endpoint)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify SubscriptionConfirmation message fields
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        ReceivedRequest req = receivedRequests.get(0);
+        JsonNode body = objectMapper.readTree(req.body());
+        assertEquals("SubscriptionConfirmation", body.get("Type").asText());
+        assertEquals(topicArn, body.get("TopicArn").asText());
+        assertNotNull(body.get("Token").asText());
+        assertFalse(body.get("Token").asText().isBlank());
+        assertTrue(body.get("SubscribeURL").asText().contains("Action=ConfirmSubscription"));
+        assertTrue(body.get("SubscribeURL").asText().contains("Token="));
+        assertEquals("1", body.get("SignatureVersion").asText());
+        assertNotNull(body.get("MessageId").asText());
+        assertNotNull(body.get("Timestamp").asText());
     }
 }

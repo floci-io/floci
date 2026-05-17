@@ -80,14 +80,20 @@ public class SnsService {
     }
 
     /**
-     * Package-private constructor for testing.
+     * Package-private constructor for testing (no HTTP client — HTTP delivery is skipped).
      */
     SnsService(StorageBackend<String, Topic> topicStore,
                StorageBackend<String, Subscription> subscriptionStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
-        this(topicStore, subscriptionStore, regionResolver, sqsService, lambdaService, "http://localhost:4566",
-                new ObjectMapper());
+        this.topicStore = topicStore;
+        this.subscriptionStore = subscriptionStore;
+        this.regionResolver = regionResolver;
+        this.sqsService = sqsService;
+        this.lambdaService = lambdaService;
+        this.baseUrl = "http://localhost:4566";
+        this.objectMapper = new ObjectMapper();
+        this.httpClient = null;
     }
 
     SnsService(StorageBackend<String, Topic> topicStore,
@@ -196,6 +202,11 @@ public class SnsService {
         if (protocol == null || protocol.isBlank()) {
             throw new AwsException("InvalidParameter", "Protocol is required.", 400);
         }
+        if (("http".equals(protocol) && endpoint != null && !endpoint.startsWith("http://"))
+                || ("https".equals(protocol) && endpoint != null && !endpoint.startsWith("https://"))) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Endpoint scheme does not match protocol '" + protocol + "'.", 400);
+        }
 
         for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
             if (protocol.equals(existing.getProtocol())
@@ -211,18 +222,12 @@ public class SnsService {
         if (attributes != null) subscription.getAttributes().putAll(attributes);
 
         if (PENDING_CONFIRMATION_PROTOCOLS.contains(protocol)) {
-            if ("http".equals(protocol) || "https".equals(protocol)) {
-                subscription.getAttributes().put("PendingConfirmation", "false");
-                LOG.infov("Auto-confirmed HTTP(S) subscription for {0} ({1}) to topic {2} in {3}",
-                        endpoint, protocol, topicArn, region);
-            } else {
-                String token = UUID.randomUUID().toString().replace("-", "")
-                        + UUID.randomUUID().toString().replace("-", "");
-                subscription.getAttributes().put("PendingConfirmation", "true");
-                subscription.getAttributes().put("ConfirmationToken", token);
-                LOG.infov("Subscription pending confirmation for {0} ({1}) to topic {2} in {3}",
-                        endpoint, protocol, topicArn, region);
-            }
+            String token = UUID.randomUUID().toString().replace("-", "")
+                    + UUID.randomUUID().toString().replace("-", "");
+            subscription.getAttributes().put("PendingConfirmation", "true");
+            subscription.getAttributes().put("ConfirmationToken", token);
+            LOG.infov("Subscription pending confirmation for {0} ({1}) to topic {2} in {3}",
+                    endpoint, protocol, topicArn, region);
         }
 
         subscriptionStore.put(subKey(region, subscriptionArn), subscription);
@@ -231,6 +236,11 @@ public class SnsService {
         } else {
             LOG.infov("Subscribed {0} ({1}) to topic {2} in {3} with attributes: {4}", endpoint, protocol, topicArn, region, attributes);
         }
+
+        if (("http".equals(protocol) || "https".equals(protocol)) && endpoint != null) {
+            sendSubscriptionConfirmation(subscription, topicArn, region);
+        }
+
         return subscription;
     }
 
@@ -695,22 +705,29 @@ public class SnsService {
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
                 }
                 case "http", "https" -> {
+                    if (httpClient == null) break;
                     boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
                     String body = rawDelivery
                             ? message
                             : buildSnsHttpNotification(message, subject, messageAttributes, topicArn, messageId, sub.getSubscriptionArn());
-                    HttpRequest request = HttpRequest.newBuilder()
+                    var requestBuilder = HttpRequest.newBuilder()
                             .uri(URI.create(sub.getEndpoint()))
                             .timeout(Duration.ofSeconds(5))
                             .header("Content-Type", "text/plain; charset=UTF-8")
                             .header("x-amz-sns-message-type", "Notification")
                             .header("x-amz-sns-message-id", messageId)
                             .header("x-amz-sns-topic-arn", topicArn)
-                            .header("x-amz-sns-subscription-arn", sub.getSubscriptionArn())
+                            .header("x-amz-sns-subscription-arn", sub.getSubscriptionArn());
+                    if (rawDelivery) {
+                        requestBuilder.header("x-amz-sns-rawdelivery", "true");
+                    }
+                    HttpRequest request = requestBuilder
                             .POST(HttpRequest.BodyPublishers.ofString(body))
                             .build();
-                    HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-                    LOG.debugv("Delivered SNS message to HTTP endpoint {0}, status={1}", sub.getEndpoint(), response.statusCode());
+                    String endpoint = sub.getEndpoint();
+                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                            .thenAccept(response -> logHttpResult("Delivered SNS notification", endpoint, response.statusCode()))
+                            .exceptionally(ex -> { LOG.warnv("Failed to deliver SNS message to {0}: {1}", endpoint, ex.getMessage()); return null; });
                 }
                 case "email", "email-json" -> LOG.infov("SNS email delivery (stub): to={0}, subject={1}, message={2}",
                         sub.getEndpoint(), subject, message);
@@ -829,7 +846,7 @@ public class SnsService {
             node.put("Message", message);
             node.put("SignatureVersion", "1");
             node.put("Signature", "EXAMPLE");
-            node.put("SigningCertUrl", "EXAMPLE");
+            node.put("SigningCertURL", "EXAMPLE");
             node.put("UnsubscribeURL", baseUrl + "/?Action=Unsubscribe&SubscriptionArn=" + subscriptionArn);
             ObjectNode attrs = node.putObject("MessageAttributes");
             if (messageAttributes != null) {
@@ -842,6 +859,51 @@ public class SnsService {
             return objectMapper.writeValueAsString(node);
         } catch (Exception e) {
             return "{}";
+        }
+    }
+
+    private void logHttpResult(String action, String endpoint, int statusCode) {
+        if (statusCode >= 200 && statusCode < 300) {
+            LOG.debugv("{0} to {1}, status={2}", action, endpoint, statusCode);
+        } else {
+            LOG.warnv("{0} to {1} returned non-success status {2}", action, endpoint, statusCode);
+        }
+    }
+
+    private void sendSubscriptionConfirmation(Subscription subscription, String topicArn, String region) {
+        if (httpClient == null) return;
+        try {
+            String token = subscription.getAttributes().get("ConfirmationToken");
+            String subscribeUrl = baseUrl + "/?Action=ConfirmSubscription&TopicArn=" + topicArn + "&Token=" + token;
+            String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("Type", "SubscriptionConfirmation");
+            node.put("MessageId", UUID.randomUUID().toString());
+            node.put("TopicArn", topicArn);
+            node.put("Timestamp", timestamp);
+            node.put("Message", "You have chosen to subscribe to the topic " + topicArn + ".\nTo confirm the subscription, visit the SubscribeURL included in this message.");
+            node.put("SubscribeURL", subscribeUrl);
+            node.put("Token", token);
+            node.put("SignatureVersion", "1");
+            node.put("Signature", "EXAMPLE");
+            node.put("SigningCertURL", "EXAMPLE");
+            String body = objectMapper.writeValueAsString(node);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(subscription.getEndpoint()))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "text/plain; charset=UTF-8")
+                    .header("x-amz-sns-message-type", "SubscriptionConfirmation")
+                    .header("x-amz-sns-topic-arn", topicArn)
+                    .header("x-amz-sns-subscription-arn", subscription.getSubscriptionArn())
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            String endpoint = subscription.getEndpoint();
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                    .thenAccept(response -> logHttpResult("Sent SubscriptionConfirmation", endpoint, response.statusCode()))
+                    .exceptionally(ex -> { LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", endpoint, ex.getMessage()); return null; });
+        } catch (Exception e) {
+            LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", subscription.getEndpoint(), e.getMessage());
         }
     }
 
