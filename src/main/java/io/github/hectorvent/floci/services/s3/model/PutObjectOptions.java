@@ -43,4 +43,8 @@ public class PutObjectOptions {
 
     public String getChecksumAlgorithm() { return checksumAlgorithm; }
     public PutObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }
+
+    private S3Checksum clientChecksum;
+    public S3Checksum getClientChecksum() { return clientChecksum; }
+    public PutObjectOptions withClientChecksum(S3Checksum clientChecksum) { this.clientChecksum = clientChecksum; return this; }
 }

@@ -286,7 +286,10 @@ public class S3Service {
             object.getMetadata().putAll(metadata);
         }
         object.setStorageClass(ObjectAttributeName.normalizeStorageClass(effectiveOptions.getStorageClass()));
-        object.setChecksum(checksum != null ? copyChecksum(checksum) : buildChecksum(data, parts, false, effectiveOptions.getChecksumAlgorithm()));
+        S3Checksum resolvedChecksum = checksum != null ? copyChecksum(checksum)
+                : effectiveOptions.getClientChecksum() != null ? copyChecksum(effectiveOptions.getClientChecksum())
+                : buildChecksum(data, parts, false, effectiveOptions.getChecksumAlgorithm());
+        object.setChecksum(resolvedChecksum);
         object.setParts(copyParts(parts));
         object.setContentEncoding(effectiveOptions.getContentEncoding());
         object.setContentDisposition(effectiveOptions.getContentDisposition());

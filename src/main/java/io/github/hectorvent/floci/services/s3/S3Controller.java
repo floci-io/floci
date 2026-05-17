@@ -487,7 +487,8 @@ public class S3Controller {
                             .withCacheControl(cacheControl)
                             .withServerSideEncryption(serverSideEncryption)
                             .withAcl(cannedAcl)
-                            .withChecksumAlgorithm(checksumAlgorithm));
+                            .withChecksumAlgorithm(checksumAlgorithm)
+                            .withClientChecksum(extractChecksumFromHeaders(httpHeaders)));
             var resp = Response.ok().header("ETag", obj.getETag());
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
@@ -1677,6 +1678,25 @@ public class S3Controller {
             }
         }
         return metadata;
+    }
+
+    private S3Checksum extractChecksumFromHeaders(HttpHeaders httpHeaders) {
+        String crc32 = httpHeaders.getHeaderString("x-amz-checksum-crc32");
+        String crc32c = httpHeaders.getHeaderString("x-amz-checksum-crc32c");
+        String crc64nvme = httpHeaders.getHeaderString("x-amz-checksum-crc64nvme");
+        String sha1 = httpHeaders.getHeaderString("x-amz-checksum-sha1");
+        String sha256 = httpHeaders.getHeaderString("x-amz-checksum-sha256");
+        if (crc32 == null && crc32c == null && crc64nvme == null && sha1 == null && sha256 == null) {
+            return null;
+        }
+        S3Checksum checksum = new S3Checksum();
+        checksum.setChecksumCRC32(crc32);
+        checksum.setChecksumCRC32C(crc32c);
+        checksum.setChecksumCRC64NVME(crc64nvme);
+        checksum.setChecksumSHA1(sha1);
+        checksum.setChecksumSHA256(sha256);
+        checksum.setChecksumType("FULL_OBJECT");
+        return checksum;
     }
 
     private void validateChecksumHeaders(HttpHeaders httpHeaders, byte[] data, String algorithm) {
