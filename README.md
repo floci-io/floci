@@ -1,13 +1,10 @@
 <p align="center">
-  <img src="floci_banner.svg" alt="Floci" />
+  <img src="https://github.com/user-attachments/assets/a49ddb99-3ab5-4d7e-8334-6b5118f4ce6e" width="400" alt="Floci" />
 </p>
 
-<p align="center">
-  <a href="https://github.com/floci-io/floci/releases/latest"><img src="https://img.shields.io/github/v/release/floci-io/floci?label=release&color=blue" alt="Latest Release"></a>
-  <a href="https://github.com/floci-io/floci/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/floci-io/floci/release.yml?label=build" alt="Build Status"></a>
-  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
-  <a href="https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw"><img src="https://img.shields.io/badge/Slack-Join-4A154B?logo=slack&logoColor=white" alt="Join Slack"></a>
-</p>
+<h1 align="center" style="border-bottom: none">
+    <b><a href="https://floci.io/">Floci</a></b>
+</h1>
 
 <p align="center">
   <strong>A free, open-source local AWS emulator.</strong><br />
