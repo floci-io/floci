@@ -684,7 +684,7 @@ All settings are overridable through environment variables with the `FLOCI_` pre
 | `FLOCI_STORAGE_PERSISTENT_PATH` | `./data` | Directory used for persisted state |
 | `FLOCI_ECR_BASE_URI` | `public.ecr.aws` | ECR base URI used when pulling container images |
 
-Full reference: [configuration docs](https://floci.io/floci/configuration/application-yml/)
+Full reference: [configuration docs](https://floci.io/floci/configuration/advanced/application-yml)
 
 ### Multi-container Docker Compose
 
