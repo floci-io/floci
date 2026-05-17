@@ -35,6 +35,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -1088,26 +1090,38 @@ public class ApiGatewayExecuteController {
         }
     }
 
-    /** Captures path parameters from a route key like "ANY /wallet/{proxy+}" matched against an actual path. */
+    /**
+     * Captures path parameters from a route key like {@code "ANY /wallet/{proxy+}"} matched
+     * against an actual path. Compiled regexes are cached per route key so the regex is
+     * built once and reused on every subsequent request to that route.
+     */
     static Map<String, String> extractV2PathParams(String routeKey, String actualPath) {
         if (routeKey == null) return Map.of();
         String[] parts = routeKey.split("\\s+", 2);
         if (parts.length != 2) return Map.of();
         String template = parts[1];
 
-        String regex = template.replaceAll("\\{([a-zA-Z_]+)\\+\\}", "(?<$1>.+)")
-                                .replaceAll("\\{([a-zA-Z_]+)\\}", "(?<$1>[^/]+)");
-        java.util.regex.Pattern p = java.util.regex.Pattern.compile("^" + regex + "$");
-        java.util.regex.Matcher m = p.matcher(actualPath);
+        Pattern p = ROUTE_TEMPLATE_PATTERNS.computeIfAbsent(template, t -> {
+            String regex = t.replaceAll("\\{([a-zA-Z_]+)\\+\\}", "(?<$1>.+)")
+                            .replaceAll("\\{([a-zA-Z_]+)\\}", "(?<$1>[^/]+)");
+            return Pattern.compile("^" + regex + "$");
+        });
+        Matcher m = p.matcher(actualPath);
         if (!m.matches()) return Map.of();
 
         Map<String, String> result = new java.util.LinkedHashMap<>();
-        java.util.regex.Matcher names = java.util.regex.Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}").matcher(template);
+        Matcher names = ROUTE_PARAM_NAMES.matcher(template);
         while (names.find()) {
             try { result.put(names.group(1), m.group(names.group(1))); } catch (Exception ignored) {}
         }
         return result;
     }
+
+    /** Cache of compiled route-template patterns keyed by the raw template (e.g. {@code "/wallet/{proxy+}"}). */
+    private static final ConcurrentHashMap<String, Pattern> ROUTE_TEMPLATE_PATTERNS = new ConcurrentHashMap<>();
+
+    /** Extracts parameter names from a route template; the pattern itself is constant. */
+    private static final Pattern ROUTE_PARAM_NAMES = Pattern.compile("\\{([a-zA-Z_]+)\\+?\\}");
 
     private Response enforceJwtAuthorizer(String region, String apiId, Route route, HttpHeaders headers) {
         Authorizer authorizer;
