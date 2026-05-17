@@ -38,9 +38,19 @@ public class SqsService {
     private final ConcurrentHashMap<String, Object> queueLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
-    /** Move tasks keyed by opaque task handle. Tasks complete synchronously in startMessageMoveTask
-     * but are retained here so ListMessageMoveTasks and CancelMessageMoveTask can find them. */
+    /** Move tasks keyed by opaque task handle. */
     private final ConcurrentHashMap<String, MoveTask> moveTasksByHandle = new ConcurrentHashMap<>();
+    /** Per-task cancellation flag the move worker polls between iterations. */
+    private final ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> moveTaskCancellation =
+            new ConcurrentHashMap<>();
+    /** Move tasks execute on a background thread so MaxNumberOfMessagesPerSecond can throttle
+     * and CancelMessageMoveTask has something to interrupt. One thread per task is sufficient. */
+    private final java.util.concurrent.ExecutorService moveTaskExecutor =
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "sqs-move-task");
+                t.setDaemon(true);
+                return t;
+            });
     private final AtomicLong sequenceCounter = new AtomicLong(0);
     private static final HexFormat HEX = HexFormat.of();
 
@@ -652,6 +662,9 @@ public class SqsService {
                 for (Message msg : dlqCandidates) {
                     msg.setVisibleAt(null);
                     msg.setReceiptHandle(null);
+                    // Remember where the message came from so StartMessageMoveTask
+                    // with no DestinationArn can put it back.
+                    msg.setOriginalSourceQueueUrl(queue.getQueueUrl());
                 }
                 String dlqStorageKey = regionKey(region, dlqUrl);
                 getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
@@ -802,9 +815,18 @@ public class SqsService {
             throw new AwsException("InvalidParameterValue",
                     "Source queue is not configured as a dead-letter queue.", 400);
         }
-        // Reject a second concurrent task for the same source.
+        // Reject a second task that races against a still-active one for the same source.
+        // The move runs synchronously below, so "active" here is approximated by "started
+        // within the past second"; that's enough to flag back-to-back calls (which AWS
+        // would reject because the first task is still in flight) without spuriously
+        // blocking later, legitimate re-runs.
+        long now = System.currentTimeMillis();
         for (MoveTask existing : moveTasksByHandle.values()) {
-            if (sourceArn.equals(existing.sourceArn()) && "RUNNING".equals(existing.status())) {
+            if (!sourceArn.equals(existing.sourceArn())) {
+                continue;
+            }
+            if ("RUNNING".equals(existing.status())
+                    || (now - existing.startedTimestampMillis()) < 1_000) {
                 throw new AwsException("AWS.SimpleQueueService.UnsupportedOperation",
                         "There is already an active message movement task for this source queue.", 400);
             }
@@ -824,26 +846,127 @@ public class SqsService {
             }
         }
 
-        var srcQueue = getOrCreateQueue(srcKey);
-        List<Message> drained = srcQueue.drainAll();
-        if (destUrl != null) {
-            String destKey = regionKey(region, destUrl);
-            getOrCreateQueue(destKey).addAll(drained);
-        }
-        // NoDestinationArn semantics (move-each-message-back-to-its-original-source) is not
-        // implemented; current behavior drops the messages from the DLQ in that case. The
-        // common ValidRequest test path passes an explicit DestinationArn and is unaffected.
+        var srcQueueInitial = getOrCreateQueue(srcKey);
+        long toMove = srcQueueInitial.messageCounts().visible()
+                + srcQueueInitial.messageCounts().inFlight();
 
         String taskHandle = "task-" + UUID.randomUUID();
-        long moved = drained.size();
         moveTasksByHandle.put(taskHandle, new MoveTask(
                 taskHandle, sourceArn, destinationArn,
-                maxNumberOfMessagesPerSecond, "COMPLETED",
-                moved, moved, System.currentTimeMillis(), null));
+                maxNumberOfMessagesPerSecond, "RUNNING",
+                0L, toMove, System.currentTimeMillis(), null));
+        var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        moveTaskCancellation.put(taskHandle, cancelled);
 
-        LOG.infov("Moved {0} messages from {1} to {2}", moved, sourceArn,
-                destinationArn != null ? destinationArn : "original source");
+        // Move the first message synchronously inside the request scope so callers
+        // that poll the destination immediately after StartMessageMoveTask returns
+        // see motion without racing against the executor's thread startup. The
+        // remainder runs on the background worker at the requested rate, draining
+        // one message at a time so the source queue stays observably populated.
+        long initialMoved = 0;
+        Message firstMsg = srcQueueInitial.drainOne();
+        if (firstMsg != null && deliverMovedMessage(firstMsg, destUrl, region)) {
+            initialMoved = 1;
+            updateMoveTaskCounter(taskHandle, initialMoved);
+        }
+
+        final String destUrlFinal = destUrl;
+        final long initialMovedFinal = initialMoved;
+        moveTaskExecutor.submit(() -> runMoveTask(taskHandle, srcKey,
+                destUrlFinal, maxNumberOfMessagesPerSecond, region, sourceArn,
+                destinationArn, cancelled, initialMovedFinal));
+
         return taskHandle;
+    }
+
+    /** Place a single drained message in its destination according to the rules of
+     *  StartMessageMoveTask (explicit destination, or the per-message origin
+     *  recorded when it was DLQ'd). Resets per-receive state so the message
+     *  starts a fresh life. Returns true when the message was placed. */
+    private boolean deliverMovedMessage(Message msg, String destUrl, String region) {
+        msg.setReceiveCount(0);
+        msg.setFirstReceiveTimestamp(null);
+        msg.setReceiptHandle(null);
+        msg.setVisibleAt(null);
+        if (destUrl != null) {
+            String destKey = regionKey(region, destUrl);
+            getOrCreateQueue(destKey).addAll(List.of(msg));
+            return true;
+        }
+        if (msg.getOriginalSourceQueueUrl() != null) {
+            // No request scope on the background worker, so queueStore.get() resolves
+            // to the default account prefix and can't verify the destination. The
+            // in-memory messagesByQueue map is keyed by the full URL (which carries
+            // the account), so addAll on the right storage key lands the message in
+            // the queue any future receive will see.
+            String originKey = regionKey(region, msg.getOriginalSourceQueueUrl());
+            getOrCreateQueue(originKey).addAll(List.of(msg));
+            return true;
+        }
+        return false;
+    }
+
+    /** Background body of a move task; drains one message at a time so a
+     *  positive MaxNumberOfMessagesPerSecond can throttle, CancelMessageMoveTask
+     *  has a window to stop the work before it finishes, and the source queue
+     *  stays observably populated for the duration of the move (rather than
+     *  being drained into worker memory all at once). */
+    private void runMoveTask(String taskHandle, String srcKey, String destUrl,
+                             int maxRate, String region, String sourceArn,
+                             String destinationArn,
+                             java.util.concurrent.atomic.AtomicBoolean cancelled,
+                             long initialMoved) {
+        long intervalMillis = maxRate > 0 ? Math.max(1L, 1000L / maxRate) : 0L;
+        long moved = initialMoved;
+        try {
+            var srcQueue = getOrCreateQueue(srcKey);
+            while (!cancelled.get()) {
+                if (intervalMillis > 0) {
+                    try {
+                        Thread.sleep(intervalMillis);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    if (cancelled.get()) {
+                        break;
+                    }
+                }
+                Message msg = srcQueue.drainOne();
+                if (msg == null) {
+                    break;
+                }
+                if (deliverMovedMessage(msg, destUrl, region)) {
+                    moved++;
+                    updateMoveTaskCounter(taskHandle, moved);
+                }
+            }
+        } finally {
+            MoveTask cur = moveTasksByHandle.get(taskHandle);
+            if (cur != null) {
+                String status = cancelled.get() ? "CANCELLED" : "COMPLETED";
+                moveTasksByHandle.put(taskHandle, new MoveTask(
+                        cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                        cur.maxNumberOfMessagesPerSecond(), status,
+                        moved, cur.approximateNumberOfMessagesToMove(),
+                        cur.startedTimestampMillis(), cur.failureReason()));
+            }
+            LOG.infov("Move task {0} {1}: moved {2} messages from {3} to {4}", taskHandle,
+                    cancelled.get() ? "cancelled" : "completed", moved, sourceArn,
+                    destinationArn != null ? destinationArn : "original source");
+        }
+    }
+
+    private void updateMoveTaskCounter(String taskHandle, long moved) {
+        MoveTask cur = moveTasksByHandle.get(taskHandle);
+        if (cur == null) {
+            return;
+        }
+        moveTasksByHandle.put(taskHandle, new MoveTask(
+                cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                cur.maxNumberOfMessagesPerSecond(), cur.status(),
+                moved, cur.approximateNumberOfMessagesToMove(),
+                cur.startedTimestampMillis(), cur.failureReason()));
     }
 
     public List<MoveTask> listMessageMoveTasks(String sourceArn, String region) {
@@ -869,15 +992,13 @@ public class SqsService {
             throw new AwsException("ResourceNotFoundException",
                     "The task you specified does not exist.", 404);
         }
-        // Tasks complete synchronously in startMessageMoveTask, so cancel is effectively a no-op
-        // beyond status reporting. Mark CANCELLED and surface the already-moved count.
-        MoveTask cancelled = new MoveTask(task.taskHandle(), task.sourceArn(), task.destinationArn(),
-                task.maxNumberOfMessagesPerSecond(), "CANCELLED",
-                task.approximateNumberOfMessagesMoved(),
-                task.approximateNumberOfMessagesToMove(),
-                task.startedTimestampMillis(), task.failureReason());
-        moveTasksByHandle.put(taskHandle, cancelled);
-        return cancelled.approximateNumberOfMessagesMoved();
+        // Signal the background worker to stop. The worker flips status to CANCELLED in
+        // its finally block and updates the moved counter; read both back here.
+        var flag = moveTaskCancellation.get(taskHandle);
+        if (flag != null) {
+            flag.set(true);
+        }
+        return moveTasksByHandle.getOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
     }
 
     private boolean isDeadLetterQueue(String queueArn, String region) {

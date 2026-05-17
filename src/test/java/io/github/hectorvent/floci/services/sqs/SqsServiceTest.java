@@ -653,8 +653,8 @@ class SqsServiceTest {
     }
 
     @Test
-    void cancelMessageMoveTask_knownHandle_returnsMovedCount_andMarksCancelled() {
-        sqsService.createQueue("d", null);
+    void cancelMessageMoveTask_knownHandle_stopsBackgroundWorker() throws Exception {
+        Queue dlq = sqsService.createQueue("d", null);
         String dlqArn = queueArn("d");
         sqsService.createQueue("p",
                 Map.of("RedrivePolicy",
@@ -662,12 +662,24 @@ class SqsServiceTest {
         sqsService.createQueue("dest", null);
         String destArn = queueArn("dest");
 
-        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destArn, 0, "us-east-1");
-        long moved = sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
-        assertEquals(0L, moved);
+        // Load enough messages that, at the throttled rate, the worker can't possibly
+        // drain the queue before cancel is observed.
+        for (int i = 0; i < 50; i++) {
+            sqsService.sendMessage(dlq.getQueueUrl(), "msg-" + i, 0, null, null);
+        }
 
-        var tasks = sqsService.listMessageMoveTasks(dlqArn, "us-east-1");
-        assertEquals("CANCELLED", tasks.get(0).status());
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destArn, 1, "us-east-1");
+        sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+
+        // Give the worker a moment to observe the cancel and write the terminal status.
+        for (int i = 0; i < 50; i++) {
+            var status = sqsService.listMessageMoveTasks(dlqArn, "us-east-1").get(0).status();
+            if ("CANCELLED".equals(status)) {
+                return;
+            }
+            Thread.sleep(50);
+        }
+        fail("Move task did not transition to CANCELLED within timeout");
     }
 
     @Test
