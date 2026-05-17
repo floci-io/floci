@@ -52,4 +52,30 @@ class PathTemplateResolverTest {
     void nullPathParamsTreatedAsEmpty() {
         assertEquals("/x/", PathTemplateResolver.resolve("/x/{anything}", null));
     }
+
+    @Test
+    void substitutesGreedyProxyPlaceholder() {
+        // AWS-style {proxy+} (greedy) in IntegrationUri resolves against the same
+        // "proxy" key extracted from a "ANY /wallet/{proxy+}" route key.
+        assertEquals("http://x/users/123",
+                PathTemplateResolver.resolve("http://x/{proxy+}", Map.of("proxy", "users/123")));
+    }
+
+    @Test
+    void substitutesGreedyNamedPlaceholder() {
+        assertEquals("/v1/path/a/b/c",
+                PathTemplateResolver.resolve("/v1/path/{tail+}", Map.of("tail", "a/b/c")));
+    }
+
+    @Test
+    void mixesGreedyAndNonGreedyPlaceholders() {
+        assertEquals("/users/u-1/files/a/b",
+                PathTemplateResolver.resolve("/users/{user}/files/{path+}",
+                        Map.of("user", "u-1", "path", "a/b")));
+    }
+
+    @Test
+    void missingGreedyPlaceholderBecomesEmpty() {
+        assertEquals("/x/", PathTemplateResolver.resolve("/x/{missing+}", Map.of()));
+    }
 }
