@@ -290,6 +290,35 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    @Order(7)
+    void tagQueueWithJsonNullValueDoesNotStoreLiteralNullString() {
+        String tagBody = "{\"QueueUrl\":\"" + queueUrl + "\","
+                + "\"Tags\":{\"NullTag\":null,\"RealTag\":\"value\"}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.TagQueue")
+            .body(tagBody)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String listBody = "{\"QueueUrl\":\"" + queueUrl + "\"}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ListQueueTags")
+            .body(listBody)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.RealTag", equalTo("value"))
+            .body("Tags.NullTag", nullValue());
+    }
+
+    @Test
     @Order(8)
     void deleteQueueViaQueueUrlPath() {
         String body = "{\"QueueUrl\":\"" + queueUrl + "\"}";
