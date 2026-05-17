@@ -596,6 +596,80 @@ class SqsServiceTest {
         assertEquals("msg3", third.get(0).getBody());
     }
 
+    private static String queueArn(String name) {
+        return "arn:aws:sqs:us-east-1:000000000000:" + name;
+    }
+
+    @Test
+    void startMessageMoveTask_storesTaskRetrievableByListMessageMoveTasks() {
+        sqsService.createQueue("orders-dlq", null);
+        String dlqArn = queueArn("orders-dlq");
+        sqsService.createQueue("orders",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"));
+        sqsService.createQueue("orders-replay", null);
+        String destArn = queueArn("orders-replay");
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destArn, 25, "us-east-1");
+
+        assertNotNull(taskHandle);
+        List<SqsService.MoveTask> tasks = sqsService.listMessageMoveTasks(dlqArn, "us-east-1");
+        SqsService.MoveTask task = tasks.get(0);
+        assertEquals(taskHandle, task.taskHandle());
+        assertEquals(dlqArn, task.sourceArn());
+        assertEquals(destArn, task.destinationArn());
+        assertEquals(25, task.maxNumberOfMessagesPerSecond());
+    }
+
+    @Test
+    void startMessageMoveTask_destinationDoesNotExist_throwsResourceNotFound() {
+        sqsService.createQueue("a-dlq", null);
+        String dlqArn = queueArn("a-dlq");
+        sqsService.createQueue("a",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.startMessageMoveTask(dlqArn, queueArn("nope"), 0, "us-east-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void startMessageMoveTask_sourceIsNotDeadLetterQueue_throwsInvalidParameterValue() {
+        sqsService.createQueue("just-a-queue", null);
+        sqsService.createQueue("dest", null);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.startMessageMoveTask(queueArn("just-a-queue"),
+                        queueArn("dest"), 0, "us-east-1"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+    }
+
+    @Test
+    void cancelMessageMoveTask_unknownHandle_throwsResourceNotFound() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.cancelMessageMoveTask("task-does-not-exist", "us-east-1"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void cancelMessageMoveTask_knownHandle_returnsMovedCount_andMarksCancelled() {
+        sqsService.createQueue("d", null);
+        String dlqArn = queueArn("d");
+        sqsService.createQueue("p",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"));
+        sqsService.createQueue("dest", null);
+        String destArn = queueArn("dest");
+
+        String taskHandle = sqsService.startMessageMoveTask(dlqArn, destArn, 0, "us-east-1");
+        long moved = sqsService.cancelMessageMoveTask(taskHandle, "us-east-1");
+        assertEquals(0L, moved);
+
+        var tasks = sqsService.listMessageMoveTasks(dlqArn, "us-east-1");
+        assertEquals("CANCELLED", tasks.get(0).status());
+    }
+
     @Test
     void purgeQueueWithClearFifoDelegatesToSnsForFifoDedupOnSubscribedTopics() {
         final var sns = mock(SnsService.class);

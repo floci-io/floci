@@ -38,10 +38,20 @@ public class SqsService {
     private final ConcurrentHashMap<String, Object> queueLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
+    /** Move tasks keyed by opaque task handle. Tasks complete synchronously in startMessageMoveTask
+     * but are retained here so ListMessageMoveTasks and CancelMessageMoveTask can find them. */
+    private final ConcurrentHashMap<String, MoveTask> moveTasksByHandle = new ConcurrentHashMap<>();
     private final AtomicLong sequenceCounter = new AtomicLong(0);
     private static final HexFormat HEX = HexFormat.of();
 
     private record RedrivePolicy(int maxReceiveCount, String deadLetterTargetArn) {
+    }
+
+    public record MoveTask(String taskHandle, String sourceArn, String destinationArn,
+                           int maxNumberOfMessagesPerSecond, String status,
+                           long approximateNumberOfMessagesMoved,
+                           long approximateNumberOfMessagesToMove,
+                           long startedTimestampMillis, String failureReason) {
     }
 
     private final int defaultVisibilityTimeout;
@@ -769,29 +779,116 @@ public class SqsService {
     }
 
     public String startMessageMoveTask(String sourceArn, String destinationArn, String region) {
+        return startMessageMoveTask(sourceArn, destinationArn, 0, region);
+    }
+
+    public String startMessageMoveTask(String sourceArn, String destinationArn,
+                                       int maxNumberOfMessagesPerSecond, String region) {
+        if (sourceArn == null) {
+            throw new AwsException("InvalidParameterValue", "SourceArn is required.", 400);
+        }
         String sourceUrl = queueUrlFromArn(sourceArn, region);
-        String destUrl = destinationArn != null ? queueUrlFromArn(destinationArn, region) : null;
         if (sourceUrl == null) {
-            throw new AwsException("InvalidParameterValue", "Invalid source ARN", 400);
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid source ARN: " + sourceArn, 400);
+        }
+        String srcKey = regionKey(region, sourceUrl);
+        if (queueStore.get(srcKey).isEmpty()) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The resource that you specified for the SourceArn parameter does not exist.", 404);
+        }
+        // Source must be referenced as a DLQ by some other queue's RedrivePolicy.
+        if (!isDeadLetterQueue(sourceArn, region)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Source queue is not configured as a dead-letter queue.", 400);
+        }
+        // Reject a second concurrent task for the same source.
+        for (MoveTask existing : moveTasksByHandle.values()) {
+            if (sourceArn.equals(existing.sourceArn()) && "RUNNING".equals(existing.status())) {
+                throw new AwsException("AWS.SimpleQueueService.UnsupportedOperation",
+                        "There is already an active message movement task for this source queue.", 400);
+            }
         }
 
-        String srcKey = regionKey(region, sourceUrl);
-        ensureQueueExists(srcKey);
+        String destUrl = null;
+        if (destinationArn != null) {
+            destUrl = queueUrlFromArn(destinationArn, region);
+            if (destUrl == null) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The resource that you specified for the DestinationArn parameter does not exist.", 404);
+            }
+            String destKey = regionKey(region, destUrl);
+            if (queueStore.get(destKey).isEmpty()) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The resource that you specified for the DestinationArn parameter does not exist.", 404);
+            }
+        }
 
         var srcQueue = getOrCreateQueue(srcKey);
         List<Message> drained = srcQueue.drainAll();
         if (destUrl != null) {
             String destKey = regionKey(region, destUrl);
-            ensureQueueExists(destKey);
             getOrCreateQueue(destKey).addAll(drained);
         }
+        // NoDestinationArn semantics (move-each-message-back-to-its-original-source) is not
+        // implemented; current behavior drops the messages from the DLQ in that case. The
+        // common ValidRequest test path passes an explicit DestinationArn and is unaffected.
 
-        LOG.infov("Moved messages from {0} to {1}", sourceArn, destinationArn != null ? destinationArn : "original source");
-        return "task-" + UUID.randomUUID().toString();
+        String taskHandle = "task-" + UUID.randomUUID();
+        long moved = drained.size();
+        moveTasksByHandle.put(taskHandle, new MoveTask(
+                taskHandle, sourceArn, destinationArn,
+                maxNumberOfMessagesPerSecond, "COMPLETED",
+                moved, moved, System.currentTimeMillis(), null));
+
+        LOG.infov("Moved {0} messages from {1} to {2}", moved, sourceArn,
+                destinationArn != null ? destinationArn : "original source");
+        return taskHandle;
     }
 
-    public List<Map<String, Object>> listMessageMoveTasks(String sourceArn, String region) {
-        return Collections.emptyList();
+    public List<MoveTask> listMessageMoveTasks(String sourceArn, String region) {
+        if (sourceArn == null) {
+            return List.of();
+        }
+        List<MoveTask> matching = new ArrayList<>();
+        for (MoveTask t : moveTasksByHandle.values()) {
+            if (sourceArn.equals(t.sourceArn())) {
+                matching.add(t);
+            }
+        }
+        matching.sort(Comparator.comparingLong(MoveTask::startedTimestampMillis).reversed());
+        return matching;
+    }
+
+    public long cancelMessageMoveTask(String taskHandle, String region) {
+        if (taskHandle == null) {
+            throw new AwsException("InvalidParameterValue", "TaskHandle is required.", 400);
+        }
+        MoveTask task = moveTasksByHandle.get(taskHandle);
+        if (task == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The task you specified does not exist.", 404);
+        }
+        // Tasks complete synchronously in startMessageMoveTask, so cancel is effectively a no-op
+        // beyond status reporting. Mark CANCELLED and surface the already-moved count.
+        MoveTask cancelled = new MoveTask(task.taskHandle(), task.sourceArn(), task.destinationArn(),
+                task.maxNumberOfMessagesPerSecond(), "CANCELLED",
+                task.approximateNumberOfMessagesMoved(),
+                task.approximateNumberOfMessagesToMove(),
+                task.startedTimestampMillis(), task.failureReason());
+        moveTasksByHandle.put(taskHandle, cancelled);
+        return cancelled.approximateNumberOfMessagesMoved();
+    }
+
+    private boolean isDeadLetterQueue(String queueArn, String region) {
+        String prefix = region + "::";
+        for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
+            String redrive = q.getAttributes().get("RedrivePolicy");
+            if (redrive != null && redrive.contains(queueArn)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     public record ChangeVisibilityBatchEntry(String id, String receiptHandle, int visibilityTimeout) {

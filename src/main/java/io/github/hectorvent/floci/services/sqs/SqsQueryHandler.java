@@ -56,6 +56,7 @@ public class SqsQueryHandler {
             case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(params, region);
             case "StartMessageMoveTask" -> handleStartMessageMoveTask(params, region);
             case "ListMessageMoveTasks" -> handleListMessageMoveTasks(params, region);
+            case "CancelMessageMoveTask" -> handleCancelMessageMoveTask(params, region);
             case "AddPermission" -> handleAddPermission(params, region);
             case "RemovePermission" -> handleRemovePermission(params, region);
             default -> AwsQueryResponse.error("UnsupportedOperation",
@@ -377,16 +378,44 @@ public class SqsQueryHandler {
     private Response handleStartMessageMoveTask(MultivaluedMap<String, String> params, String region) {
         String sourceArn = getParam(params, "SourceArn");
         String destinationArn = getParam(params, "DestinationArn");
-        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, region);
+        int maxRate = getIntParam(params, "MaxNumberOfMessagesPerSecond", 0);
+        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, maxRate, region);
         var xml = new XmlBuilder().elem("TaskHandle", taskHandle);
         return Response.ok(AwsQueryResponse.envelope("StartMessageMoveTask", null, xml.build())).build();
     }
 
     private Response handleListMessageMoveTasks(MultivaluedMap<String, String> params, String region) {
         String sourceArn = getParam(params, "SourceArn");
-        sqsService.listMessageMoveTasks(sourceArn, region);
-        var xml = new XmlBuilder(); // Empty list for mock
+        int maxResults = getIntParam(params, "MaxResults", 10);
+        List<SqsService.MoveTask> tasks = sqsService.listMessageMoveTasks(sourceArn, region);
+        var xml = new XmlBuilder();
+        int count = 0;
+        for (SqsService.MoveTask t : tasks) {
+            if (count++ >= maxResults) break;
+            xml.start("member")
+               .elem("TaskHandle", t.taskHandle())
+               .elem("SourceArn", t.sourceArn());
+            if (t.destinationArn() != null) {
+                xml.elem("DestinationArn", t.destinationArn());
+            }
+            xml.elem("MaxNumberOfMessagesPerSecond", t.maxNumberOfMessagesPerSecond())
+               .elem("Status", t.status())
+               .elem("ApproximateNumberOfMessagesMoved", t.approximateNumberOfMessagesMoved())
+               .elem("ApproximateNumberOfMessagesToMove", t.approximateNumberOfMessagesToMove())
+               .elem("StartedTimestamp", t.startedTimestampMillis());
+            if (t.failureReason() != null) {
+                xml.elem("FailureReason", t.failureReason());
+            }
+            xml.end("member");
+        }
         return Response.ok(AwsQueryResponse.envelope("ListMessageMoveTasks", null, xml.build())).build();
+    }
+
+    private Response handleCancelMessageMoveTask(MultivaluedMap<String, String> params, String region) {
+        String taskHandle = getParam(params, "TaskHandle");
+        long moved = sqsService.cancelMessageMoveTask(taskHandle, region);
+        var xml = new XmlBuilder().elem("ApproximateNumberOfMessagesMoved", moved);
+        return Response.ok(AwsQueryResponse.envelope("CancelMessageMoveTask", null, xml.build())).build();
     }
 
     private Response handlePurgeQueue(MultivaluedMap<String, String> params, String region) {

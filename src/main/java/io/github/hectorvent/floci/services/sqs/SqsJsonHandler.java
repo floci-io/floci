@@ -57,6 +57,7 @@ public class SqsJsonHandler {
             case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(request, region);
             case "StartMessageMoveTask" -> handleStartMessageMoveTask(request, region);
             case "ListMessageMoveTasks" -> handleListMessageMoveTasks(request, region);
+            case "CancelMessageMoveTask" -> handleCancelMessageMoveTask(request, region);
             case "AddPermission" -> handleAddPermission(request, region);
             case "RemovePermission" -> handleRemovePermission(request, region);
             default -> Response.status(400)
@@ -412,7 +413,8 @@ public class SqsJsonHandler {
     private Response handleStartMessageMoveTask(JsonNode request, String region) {
         String sourceArn = request.path("SourceArn").asText(null);
         String destinationArn = request.path("DestinationArn").asText(null);
-        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, region);
+        int maxRate = request.path("MaxNumberOfMessagesPerSecond").asInt(0);
+        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, maxRate, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("TaskHandle", taskHandle);
         return Response.ok(response).build();
@@ -420,9 +422,36 @@ public class SqsJsonHandler {
 
     private Response handleListMessageMoveTasks(JsonNode request, String region) {
         String sourceArn = request.path("SourceArn").asText(null);
-        sqsService.listMessageMoveTasks(sourceArn, region);
+        int maxResults = request.path("MaxResults").asInt(10);
+        List<SqsService.MoveTask> tasks = sqsService.listMessageMoveTasks(sourceArn, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.putArray("Results");
+        ArrayNode results = response.putArray("Results");
+        int count = 0;
+        for (SqsService.MoveTask t : tasks) {
+            if (count++ >= maxResults) break;
+            ObjectNode node = results.addObject();
+            node.put("TaskHandle", t.taskHandle());
+            node.put("SourceArn", t.sourceArn());
+            if (t.destinationArn() != null) {
+                node.put("DestinationArn", t.destinationArn());
+            }
+            node.put("MaxNumberOfMessagesPerSecond", t.maxNumberOfMessagesPerSecond());
+            node.put("Status", t.status());
+            node.put("ApproximateNumberOfMessagesMoved", t.approximateNumberOfMessagesMoved());
+            node.put("ApproximateNumberOfMessagesToMove", t.approximateNumberOfMessagesToMove());
+            node.put("StartedTimestamp", t.startedTimestampMillis());
+            if (t.failureReason() != null) {
+                node.put("FailureReason", t.failureReason());
+            }
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleCancelMessageMoveTask(JsonNode request, String region) {
+        String taskHandle = request.path("TaskHandle").asText(null);
+        long moved = sqsService.cancelMessageMoveTask(taskHandle, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ApproximateNumberOfMessagesMoved", moved);
         return Response.ok(response).build();
     }
 
