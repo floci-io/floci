@@ -362,7 +362,7 @@ class S3ServiceTest {
         assertEquals("STANDARD_IA", head.getStorageClass());
         assertEquals("team-a", head.getMetadata().get("owner"));
         assertNotNull(head.getChecksum());
-        assertNotNull(head.getChecksum().getChecksumSHA256());
+        assertNotNull(head.getChecksum().getChecksumCRC64NVME());
         assertEquals("FULL_OBJECT", head.getChecksum().getChecksumType());
         assertEquals(stored.getETag(), head.getETag());
     }
@@ -382,7 +382,7 @@ class S3ServiceTest {
         assertEquals(7L, attributes.getObjectSize());
         assertEquals("GLACIER", attributes.getStorageClass());
         assertNotNull(attributes.getChecksum());
-        assertNotNull(attributes.getChecksum().getChecksumSHA256());
+        assertNotNull(attributes.getChecksum().getChecksumCRC64NVME());
         assertNull(attributes.getObjectParts());
     }
 

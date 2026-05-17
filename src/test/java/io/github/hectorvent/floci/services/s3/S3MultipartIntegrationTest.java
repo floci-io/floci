@@ -148,7 +148,7 @@ class S3MultipartIntegrationTest {
             .body(containsString("<StorageClass>STANDARD_IA</StorageClass>"))
             .body(containsString("<ObjectParts>"))
             .body(containsString("<PartsCount>2</PartsCount>"))
-            .body(containsString("<ChecksumSHA256>"));
+            .body(containsString("<ChecksumCRC64NVME>"));
     }
 
     @Test

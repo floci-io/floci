@@ -12,6 +12,7 @@ public class PutObjectOptions {
     private String cacheControl;
     private String serverSideEncryption;
     private String acl;
+    private String checksumAlgorithm;
 
     public String getStorageClass() { return storageClass; }
     public PutObjectOptions withStorageClass(String storageClass) { this.storageClass = storageClass; return this; }
@@ -39,4 +40,7 @@ public class PutObjectOptions {
 
     public String getAcl() { return acl; }
     public PutObjectOptions withAcl(String acl) { this.acl = acl; return this; }
+
+    public String getChecksumAlgorithm() { return checksumAlgorithm; }
+    public PutObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }
 }

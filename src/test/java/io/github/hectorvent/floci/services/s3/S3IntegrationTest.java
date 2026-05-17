@@ -77,7 +77,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-sha256", notNullValue())
+            .header("x-amz-checksum-crc64nvme", notNullValue())
             .body(equalTo("Hello World from S3!"));
     }
 
@@ -93,7 +93,7 @@ class S3IntegrationTest {
             .body(containsString("<GetObjectAttributesResponse"))
             .body(containsString("<StorageClass>STANDARD_IA</StorageClass>"))
             .body(containsString("<ObjectSize>20</ObjectSize>"))
-            .body(containsString("<ChecksumSHA256>"));
+            .body(containsString("<ChecksumCRC64NVME>"));
     }
 
     @Test
@@ -108,7 +108,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-sha256", notNullValue());
+            .header("x-amz-checksum-crc64nvme", notNullValue());
     }
 
     @Test

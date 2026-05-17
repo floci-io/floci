@@ -286,7 +286,7 @@ public class S3Service {
             object.getMetadata().putAll(metadata);
         }
         object.setStorageClass(ObjectAttributeName.normalizeStorageClass(effectiveOptions.getStorageClass()));
-        object.setChecksum(checksum != null ? copyChecksum(checksum) : buildChecksum(data, parts, false));
+        object.setChecksum(checksum != null ? copyChecksum(checksum) : buildChecksum(data, parts, false, effectiveOptions.getChecksumAlgorithm()));
         object.setParts(copyParts(parts));
         object.setContentEncoding(effectiveOptions.getContentEncoding());
         object.setContentDisposition(effectiveOptions.getContentDisposition());
@@ -1812,9 +1812,19 @@ public class S3Service {
     }
 
     private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload) {
+        return buildChecksum(data, parts, multipartUpload, null);
+    }
+
+    private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload, String algorithm) {
         S3Checksum checksum = new S3Checksum();
-        checksum.setChecksumSHA1(S3Checksum.sha1Base64(data));
-        checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
+        String algo = (algorithm != null) ? algorithm.toUpperCase() : "CRC64NVME";
+        switch (algo) {
+            case "CRC32"     -> checksum.setChecksumCRC32(S3Checksum.crc32Base64(data));
+            case "CRC32C"    -> checksum.setChecksumCRC32C(S3Checksum.crc32cBase64(data));
+            case "SHA1"      -> checksum.setChecksumSHA1(S3Checksum.sha1Base64(data));
+            case "SHA256"    -> checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
+            default          -> checksum.setChecksumCRC64NVME(S3Checksum.crc64NvmeBase64(data));
+        }
         checksum.setChecksumType(multipartUpload || (parts != null && parts.size() > 1)
                 ? "COMPOSITE"
                 : "FULL_OBJECT");
