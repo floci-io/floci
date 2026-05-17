@@ -130,6 +130,10 @@ jobs:
       - name: Make binaries executable
         run: chmod +x native/amd64/*-runner native/arm64/*-runner
 
+      - name: Set created timestamp
+        id: created
+        run: echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd # v4.0.0
 
       - uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
@@ -147,6 +151,10 @@ jobs:
           tags: |
             floci/floci:nightly
             floci/floci:nightly-${{ needs.prepare.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=nightly-${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.created.outputs.created }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -162,5 +170,9 @@ jobs:
             floci/floci:nightly-${{ needs.prepare.outputs.version }}-compat
           build-args: |
             VERSION=nightly-${{ needs.prepare.outputs.version }}
+          labels: |
+            org.opencontainers.image.version=nightly-${{ needs.prepare.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.created.outputs.created }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

@@ -40,6 +40,13 @@ COPY --chmod=755 docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chmod=755 docker/localstack-parity.sh /usr/local/bin/localstack-parity.sh
 COPY --chown=1001:root target/quarkus-app quarkus-app/
 
+LABEL org.opencontainers.image.title="Floci" \
+      org.opencontainers.image.description="Local AWS emulator — open-source alternative to LocalStack Community" \
+      org.opencontainers.image.url="https://floci.io" \
+      org.opencontainers.image.source="https://github.com/floci-io/floci" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Floci"
+
 EXPOSE 4566 6379-6399
 
 HEALTHCHECK --interval=5s --timeout=3s --retries=5 \
