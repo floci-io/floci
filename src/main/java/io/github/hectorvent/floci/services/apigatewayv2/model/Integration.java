@@ -17,6 +17,7 @@ public class Integration {
     private Map<String, String> requestTemplates;
     private Map<String, String> responseTemplates;
     private String templateSelectionExpression;
+    private Map<String, String> requestParameters;
 
     public Integration() {}
 
@@ -46,4 +47,7 @@ public class Integration {
 
     public String getTemplateSelectionExpression() { return templateSelectionExpression; }
     public void setTemplateSelectionExpression(String templateSelectionExpression) { this.templateSelectionExpression = templateSelectionExpression; }
+
+    public Map<String, String> getRequestParameters() { return requestParameters; }
+    public void setRequestParameters(Map<String, String> requestParameters) { this.requestParameters = requestParameters; }
 }

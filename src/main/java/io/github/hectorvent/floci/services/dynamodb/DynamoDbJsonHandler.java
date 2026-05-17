@@ -27,6 +27,7 @@ public class DynamoDbJsonHandler {
     private final DynamoDbStreamService dynamoDbStreamService;
     private final KinesisService kinesisService;
     private final ObjectMapper objectMapper;
+    private final DynamoDbPartiQLHandler partiQLHandler;
 
     @Inject
     public DynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
@@ -35,6 +36,7 @@ public class DynamoDbJsonHandler {
         this.dynamoDbStreamService = dynamoDbStreamService;
         this.kinesisService = kinesisService;
         this.objectMapper = objectMapper;
+        this.partiQLHandler = new DynamoDbPartiQLHandler(dynamoDbService, objectMapper);
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -67,6 +69,9 @@ public class DynamoDbJsonHandler {
             case "ExportTableToPointInTime" -> handleExportTable(request, region);
             case "DescribeExport" -> handleDescribeExport(request, region);
             case "ListExports" -> handleListExports(request, region);
+            case "ExecuteStatement" -> handleExecuteStatement(request, region);
+            case "ExecuteTransaction" -> handleExecuteTransaction(request, region);
+            case "BatchExecuteStatement" -> handleBatchExecuteStatement(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException", "Operation " + action + " is not supported."))
                     .build();
@@ -1876,5 +1881,87 @@ public class DynamoDbJsonHandler {
             response.put("NextToken", result.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    private Response handleExecuteStatement(JsonNode request, String region) {
+        String statement = request.path("Statement").asText();
+        List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
+        DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
+        JsonNode result = partiQLHandler.execute(stmt, region);
+        return Response.ok(result).build();
+    }
+
+    private Response handleExecuteTransaction(JsonNode request, String region) {
+        JsonNode stmts = request.path("TransactStatements");
+        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
+            throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
+        }
+        List<JsonNode> transactItems = new ArrayList<>();
+        for (JsonNode s : stmts) {
+            DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
+                    s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
+            transactItems.add(partiQLHandler.toTransactItem(stmt, region));
+        }
+        try {
+            dynamoDbService.transactWriteItems(transactItems, region);
+            ObjectNode resp = objectMapper.createObjectNode();
+            resp.set("Responses", objectMapper.createArrayNode());
+            return Response.ok(resp).build();
+        } catch (TransactionCanceledException e) {
+            ObjectNode body = objectMapper.createObjectNode();
+            body.put("__type", "TransactionCanceledException");
+            body.put("message", e.getMessage());
+            ArrayNode reasons = body.putArray("CancellationReasons");
+            for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
+                ObjectNode r = objectMapper.createObjectNode();
+                r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
+                r.put("Message", reason.code().isEmpty() ? "" : "The conditional request failed");
+                if (reason.item() != null) {
+                    r.set("Item", reason.item());
+                }
+                reasons.add(r);
+            }
+            return Response.status(400).entity(body).build();
+        }
+    }
+
+    private Response handleBatchExecuteStatement(JsonNode request, String region) {
+        JsonNode stmts = request.path("Statements");
+        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
+            throw new AwsException("ValidationException", "Statements must not be empty", 400);
+        }
+        ArrayNode responses = objectMapper.createArrayNode();
+        for (JsonNode s : stmts) {
+            try {
+                DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
+                        s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
+                JsonNode result = partiQLHandler.execute(stmt, region);
+                ObjectNode slot = objectMapper.createObjectNode();
+                JsonNode firstItem = result.path("Items").path(0);
+                if (!firstItem.isMissingNode()) {
+                    slot.set("Item", firstItem);
+                }
+                responses.add(slot);
+            } catch (AwsException e) {
+                ObjectNode slot = objectMapper.createObjectNode();
+                ObjectNode err = objectMapper.createObjectNode();
+                err.put("Code", e.getErrorCode());
+                err.put("Message", e.getMessage());
+                slot.set("Error", err);
+                responses.add(slot);
+            }
+        }
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.set("Responses", responses);
+        return Response.ok(resp).build();
+    }
+
+    private List<JsonNode> toPartiQLParams(JsonNode node) {
+        if (node == null || node.isMissingNode() || !node.isArray()) {
+            return Collections.emptyList();
+        }
+        List<JsonNode> params = new ArrayList<>();
+        node.forEach(params::add);
+        return params;
     }
 }

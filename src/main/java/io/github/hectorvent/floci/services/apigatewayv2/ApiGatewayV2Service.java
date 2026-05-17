@@ -338,7 +338,8 @@ public class ApiGatewayV2Service {
         if (space < 0) return false;
         String method = routeKey.substring(0, space);
         String pattern = routeKey.substring(space + 1);
-        if (!method.equalsIgnoreCase(httpMethod)) return false;
+        // ANY is the AWS wildcard method — matches any inbound HTTP method.
+        if (!"ANY".equalsIgnoreCase(method) && !method.equalsIgnoreCase(httpMethod)) return false;
 
         // Build regex from path template: {proxy+} -> .+, {param} -> [^/]+
         // Quote literal segments to avoid regex injection from path patterns
@@ -378,6 +379,10 @@ public class ApiGatewayV2Service {
         @SuppressWarnings("unchecked")
         Map<String, String> responseTemplates = (Map<String, String>) request.get("responseTemplates");
         integration.setResponseTemplates(responseTemplates);
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
+        integration.setRequestParameters(requestParameters);
 
         integrationStore.put(integrationKey(region, apiId, integration.getIntegrationId()), integration);
         return integration;
@@ -429,6 +434,11 @@ public class ApiGatewayV2Service {
             @SuppressWarnings("unchecked")
             Map<String, String> responseTemplates = (Map<String, String>) request.get("responseTemplates");
             integration.setResponseTemplates(responseTemplates);
+        }
+        if (request.containsKey("requestParameters") && request.get("requestParameters") != null) {
+            @SuppressWarnings("unchecked")
+            Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
+            integration.setRequestParameters(requestParameters);
         }
 
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);

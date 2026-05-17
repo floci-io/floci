@@ -167,6 +167,167 @@ class CognitoLambdaTriggersTest {
     }
 
     // =========================================================================
+    // PostConfirmation
+    // =========================================================================
+
+    @Test
+    void postConfirmationFiresOnConfirmSignUp() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PostConfirmation", "arn:aws:lambda:::post-confirm"));
+        UserPoolClient client = createClient(pool);
+
+        // SignUp creates an UNCONFIRMED user
+        service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("email", "alice@example.com"));
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        service.confirmSignUp(client.getClientId(), "alice");
+
+        verify(lambdaService, atLeastOnce())
+                .invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                        any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void postConfirmationLambdaErrorDoesNotBlockConfirm() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PostConfirmation", "arn:aws:lambda:::post-confirm"));
+        UserPoolClient client = createClient(pool);
+
+        service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("email", "alice@example.com"));
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled"));
+
+        // confirmSignUp must succeed even if the trigger errors (Cognito semantics)
+        service.confirmSignUp(client.getClientId(), "alice");
+        // Test passes if no exception was thrown.
+    }
+
+    @Test
+    void postConfirmationDoesNotFireWhenNotConfigured() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        UserPoolClient client = createClient(pool);
+
+        service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("email", "alice@example.com"));
+        service.confirmSignUp(client.getClientId(), "alice");
+
+        verify(lambdaService, never())
+                .invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    // =========================================================================
+    // PreSignUp
+    // =========================================================================
+
+    @Test
+    void preSignUpFiresOnSignUp() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(ok(Map.of()));
+
+        service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("email", "alice@example.com"));
+
+        verify(lambdaService, atLeastOnce())
+                .invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                        any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void preSignUpLambdaErrorBlocksSignUp() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenReturn(lambdaError("Unhandled"));
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.signUp(client.getClientId(), "alice", "Perm1234!",
+                        Map.of("email", "alice@example.com")));
+        assertEquals("NotAuthorizedException", ex.getErrorCode());
+    }
+
+    @Test
+    void preSignUpAutoConfirmUserResponseSkipsConfirmStep() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenReturn(ok(Map.of(
+                        "autoConfirmUser", true,
+                        "autoVerifyEmail", true)));
+
+        var user = service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("email", "alice@example.com"));
+
+        assertEquals("CONFIRMED", user.getUserStatus(),
+                "autoConfirmUser=true should set status to CONFIRMED at signup");
+        assertEquals("true", user.getAttributes().get("email_verified"),
+                "autoVerifyEmail=true should set email_verified attribute");
+    }
+
+    @Test
+    void preSignUpAutoVerifyPhoneSetsPhoneVerifiedAttribute() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("PreSignUp", "arn:aws:lambda:::pre-signup"));
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenReturn(ok(Map.of("autoVerifyPhone", true)));
+
+        var user = service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("phone_number", "+15551234567"));
+
+        assertEquals("true", user.getAttributes().get("phone_number_verified"),
+                "autoVerifyPhone=true should set phone_number_verified attribute");
+    }
+
+    @Test
+    void preSignUpAutoConfirmAlsoFiresPostConfirmation() {
+        // AWS docs: when PreSignUp returns autoConfirmUser=true, PostConfirmation is also invoked.
+        UserPool pool = createPoolWithLambdaConfig(Map.of(
+                "PreSignUp", "arn:aws:lambda:::pre-signup",
+                "PostConfirmation", "arn:aws:lambda:::post-confirm"));
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::pre-signup"),
+                any(byte[].class), any()))
+                .thenReturn(ok(Map.of("autoConfirmUser", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                any(byte[].class), any()))
+                .thenReturn(ok(Map.of()));
+
+        service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("email", "alice@example.com"));
+
+        verify(lambdaService, atLeastOnce())
+                .invoke(anyString(), eq("arn:aws:lambda:::post-confirm"),
+                        any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void preSignUpDoesNotFireWhenNotConfigured() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of());
+        UserPoolClient client = createClient(pool);
+
+        service.signUp(client.getClientId(), "alice", "Perm1234!",
+                Map.of("email", "alice@example.com"));
+
+        verify(lambdaService, never())
+                .invoke(anyString(), anyString(), any(byte[].class), any());
+    }
+
+    // =========================================================================
     // PreTokenGeneration
     // =========================================================================
 

@@ -732,6 +732,39 @@ final class CognitoAuthFlowHandler {
         invokeTrigger(pool, client, user, "PostAuthentication", "PostAuthentication_Authentication", req);
     }
 
+    void firePostConfirmation(UserPool pool, UserPoolClient client, CognitoUser user,
+                               Map<String, String> clientMetadata, String triggerSource) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
+        // PostConfirmation is fire-and-forget per AWS Cognito semantics:
+        // trigger errors are logged but never block the confirm operation.
+        invokeTrigger(pool, client, user, "PostConfirmation", triggerSource, req);
+    }
+
+    record PreSignUpResponse(boolean autoConfirmUser, boolean autoVerifyEmail, boolean autoVerifyPhone) {
+        static PreSignUpResponse empty() { return new PreSignUpResponse(false, false, false); }
+    }
+
+    PreSignUpResponse firePreSignUp(UserPool pool, UserPoolClient client, CognitoUser user,
+                                     Map<String, String> validationData,
+                                     Map<String, String> clientMetadata,
+                                     String triggerSource) {
+        Map<String, Object> req = new HashMap<>();
+        req.put("validationData", validationData == null ? Map.of() : validationData);
+        req.put("clientMetadata", clientMetadata == null ? Map.of() : clientMetadata);
+        TriggerResult result = invokeTrigger(pool, client, user, "PreSignUp", triggerSource, req);
+        if (result.errored()) {
+            throw new AwsException("NotAuthorizedException",
+                    "PreSignUp trigger denied signup: " + result.errorMessage(), 400);
+        }
+        if (!result.configured() || result.response() == null) return PreSignUpResponse.empty();
+        Map<String, Object> resp = result.response();
+        return new PreSignUpResponse(
+                Boolean.TRUE.equals(resp.get("autoConfirmUser")),
+                Boolean.TRUE.equals(resp.get("autoVerifyEmail")),
+                Boolean.TRUE.equals(resp.get("autoVerifyPhone")));
+    }
+
     @SuppressWarnings("unchecked")
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
                                                                   Map<String, String> clientMetadata, String triggerSource) {

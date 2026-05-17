@@ -367,4 +367,122 @@ class SnsTest {
         sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
                 .queueUrl(cbdQueueUrl).build());
     }
+
+    @Test
+    @Order(14)
+    void filterPolicyScope_messageBody_topLevelMatch() throws InterruptedException {
+        long stamp = System.currentTimeMillis();
+        String mbQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+                .queueName("sns-mb-filter-" + stamp).build()).queueUrl();
+        String mbQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+                .queueUrl(mbQueueUrl)
+                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .build())
+                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+
+        String mbTopicArn = sns.createTopic(CreateTopicRequest.builder()
+                .name("sns-mb-filter-" + stamp).build()).topicArn();
+
+        String mbSubArn = sns.subscribe(SubscribeRequest.builder()
+                .topicArn(mbTopicArn)
+                .protocol("sqs")
+                .endpoint(mbQueueArn)
+                .build()).subscriptionArn();
+
+        sns.setSubscriptionAttributes(SetSubscriptionAttributesRequest.builder()
+                .subscriptionArn(mbSubArn)
+                .attributeName("FilterPolicyScope")
+                .attributeValue("MessageBody")
+                .build());
+        sns.setSubscriptionAttributes(SetSubscriptionAttributesRequest.builder()
+                .subscriptionArn(mbSubArn)
+                .attributeName("FilterPolicy")
+                .attributeValue("{\"event\":[\"order\"]}")
+                .build());
+
+        sns.publish(PublishRequest.builder()
+                .topicArn(mbTopicArn)
+                .message("{\"event\":\"refund\"}")
+                .build());
+        sns.publish(PublishRequest.builder()
+                .topicArn(mbTopicArn)
+                .message("{\"event\":\"order\"}")
+                .build());
+
+        Thread.sleep(500);
+
+        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
+                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+                        .queueUrl(mbQueueUrl)
+                        .maxNumberOfMessages(10)
+                        .waitTimeSeconds(2)
+                        .build());
+
+        assertThat(recv.messages()).hasSize(1);
+        assertThat(recv.messages().get(0).body()).contains("order").doesNotContain("refund");
+
+        sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(mbSubArn).build());
+        sns.deleteTopic(DeleteTopicRequest.builder().topicArn(mbTopicArn).build());
+        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+                .queueUrl(mbQueueUrl).build());
+    }
+
+    @Test
+    @Order(15)
+    void filterPolicyScope_messageBody_nestedKeyDescent() throws InterruptedException {
+        long stamp = System.currentTimeMillis();
+        String nestedQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+                .queueName("sns-mb-nested-" + stamp).build()).queueUrl();
+        String nestedQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+                .queueUrl(nestedQueueUrl)
+                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .build())
+                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+
+        String nestedTopicArn = sns.createTopic(CreateTopicRequest.builder()
+                .name("sns-mb-nested-" + stamp).build()).topicArn();
+
+        String nestedSubArn = sns.subscribe(SubscribeRequest.builder()
+                .topicArn(nestedTopicArn)
+                .protocol("sqs")
+                .endpoint(nestedQueueArn)
+                .build()).subscriptionArn();
+
+        sns.setSubscriptionAttributes(SetSubscriptionAttributesRequest.builder()
+                .subscriptionArn(nestedSubArn)
+                .attributeName("FilterPolicyScope")
+                .attributeValue("MessageBody")
+                .build());
+        sns.setSubscriptionAttributes(SetSubscriptionAttributesRequest.builder()
+                .subscriptionArn(nestedSubArn)
+                .attributeName("FilterPolicy")
+                .attributeValue("{\"store\":{\"city\":[\"seattle\"]}}")
+                .build());
+
+        sns.publish(PublishRequest.builder()
+                .topicArn(nestedTopicArn)
+                .message("{\"store\":{\"city\":\"boston\"}}")
+                .build());
+        sns.publish(PublishRequest.builder()
+                .topicArn(nestedTopicArn)
+                .message("{\"store\":{\"city\":\"seattle\"}}")
+                .build());
+
+        Thread.sleep(500);
+
+        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse recv = sqs.receiveMessage(
+                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+                        .queueUrl(nestedQueueUrl)
+                        .maxNumberOfMessages(10)
+                        .waitTimeSeconds(2)
+                        .build());
+
+        assertThat(recv.messages()).hasSize(1);
+        assertThat(recv.messages().get(0).body()).contains("seattle").doesNotContain("boston");
+
+        sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(nestedSubArn).build());
+        sns.deleteTopic(DeleteTopicRequest.builder().topicArn(nestedTopicArn).build());
+        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+                .queueUrl(nestedQueueUrl).build());
+    }
 }

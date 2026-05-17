@@ -59,24 +59,65 @@ Floci uses a **tag-driven release model**. Docker images are never published on 
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) — semantic-release reads these to generate the changelog and version bumps automatically.
 
-| Prefix | When to use | Version bump |
-|--------|-------------|--------------|
-| `feat:` | New AWS API action or service | minor |
-| `fix:` | Bug fix or AWS compatibility correction | patch |
-| `perf:` | Performance improvement | patch |
-| `docs:` | Documentation only | none |
-| `chore:` | Build, CI, dependencies | none |
-| `BREAKING CHANGE:` | Footer or `!` suffix — incompatible change | major |
+> **The PR title is validated automatically by CI** and must follow this format, since it becomes the squash-merge commit message that semantic-release reads.
+
+### Format
+
+```
+<type>[optional scope]: <description>
+```
+
+- **type** — one of the values in the table below (lowercase)
+- **scope** — optional, in parentheses, identifies the service or area (e.g. `s3`, `dynamodb`, `core`)
+- **description** — short summary in the imperative mood, no trailing period
+- Append `!` before the colon to signal a breaking change: `feat(api)!:`
+
+| Type | When to use | Version bump |
+|------|-------------|--------------|
+| `feat` | New AWS API action or service | minor |
+| `fix` | Bug fix or AWS compatibility correction | patch |
+| `perf` | Performance improvement | patch |
+| `revert` | Reverts a previous commit | patch |
+| `docs` | Documentation only | none |
+| `style` | Formatting, whitespace — no logic change | none |
+| `chore` | Build, CI, dependencies, housekeeping | none |
+| `refactor` | Code restructure without behavior change | none |
+| `test` | Adding or updating tests | none |
+| `build` | Build system or tooling changes | none |
+| `ci` | CI workflow changes | none |
+| `BREAKING CHANGE` | Footer or `!` suffix — incompatible change | major |
+
+### Valid examples ✅
+
+```
+feat(dynamodb): add PartiQL ExecuteStatement support
+fix(s3): make us-east-1 bucket creation idempotent
+perf(kinesis): reduce lock contention in shard iterator
+chore: release 1.5.16
+docs: update README with new configuration options
+refactor(sqs): extract message visibility logic
+test(kms): add encrypt/decrypt round-trip test
+feat!: remove legacy v1 endpoint
+fix(dynamodb)!: correct TransactWriteItems error shape
+ci: add conventional commits lint workflow
+build: bump Quarkus to 3.32.3
+```
+
+### Invalid examples ❌
+
+```
+Add PartiQL support                  # missing type
+Feature: add something               # "Feature" is not a valid type
+feat : space before colon            # space before colon
+feat(dynamodb)add missing colon      # missing colon
+FIX(s3): uppercase type              # type must be lowercase
+feat(my scope): scope has spaces     # scope cannot contain spaces
+fix(): empty scope                   # empty scope
+feat(s3):no space after colon        # missing space after colon
+wip: still working on this          # "wip" is not a recognised type
+```
 
 Do not include `Co-Authored-By` trailers for AI tools in commit messages. Attribution should be limited to human contributors.
-
-**Examples:**
-
-```
-feat: add SQS SendMessageBatch action
-fix: correct DynamoDB QueryFilter comparison operators
-feat!: change default storage mode to persistent
-```
 
 ## Architecture
 

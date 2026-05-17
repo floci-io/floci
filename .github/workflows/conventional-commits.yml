@@ -1,0 +1,51 @@
+name: Conventional Commits
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  pull-requests: read
+
+jobs:
+  lint-pr-title:
+    name: PR title follows Conventional Commits
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          # Conventional Commits pattern:
+          #   <type>[optional scope]: <description>
+          #
+          # Types recognised by semantic-release (commit-analyzer defaults):
+          #   feat, fix, perf, revert, docs, style, chore, refactor, test, build, ci
+          #
+          # Breaking changes are signalled by appending ! before the colon:
+          #   feat!: or feat(scope)!:
+          #
+          # References:
+          #   https://www.conventionalcommits.org/en/v1.0.0/
+          #   https://github.com/conventional-changelog/conventional-changelog/tree/master/packages/conventional-changelog-angular
+
+          PATTERN='^(feat|fix|perf|revert|docs|style|chore|refactor|test|build|ci)(\([a-zA-Z0-9_\-\.]+\))?!?: .{1,}'
+
+          if echo "$PR_TITLE" | grep -qE "$PATTERN"; then
+            echo "PR title is valid: $PR_TITLE"
+          else
+            echo "::error::PR title does not follow Conventional Commits."
+            echo ""
+            echo "  Got: $PR_TITLE"
+            echo ""
+            echo "  Expected format: <type>[optional scope]: <description>"
+            echo "  Examples:"
+            echo "    feat(dynamodb): add PartiQL ExecuteStatement support"
+            echo "    fix(s3): make us-east-1 bucket creation idempotent"
+            echo "    chore: release 1.5.16"
+            echo "    feat!: remove legacy endpoint"
+            echo ""
+            echo "  Valid types: feat, fix, perf, revert, docs, style, chore, refactor, test, build, ci"
+            echo "  See: https://www.conventionalcommits.org/en/v1.0.0/"
+            exit 1
+          fi

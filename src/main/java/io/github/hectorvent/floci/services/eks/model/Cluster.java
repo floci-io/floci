@@ -56,6 +56,9 @@ public class Cluster {
     @JsonIgnore
     private String accountId;
 
+    @JsonIgnore
+    private String internalEndpoint;
+
     public Cluster() {}
 
     public String getName() { return name; }
@@ -99,4 +102,7 @@ public class Cluster {
 
     public String getAccountId() { return accountId; }
     public void setAccountId(String accountId) { this.accountId = accountId; }
+
+    public String getInternalEndpoint() { return internalEndpoint; }
+    public void setInternalEndpoint(String internalEndpoint) { this.internalEndpoint = internalEndpoint; }
 }
