@@ -707,6 +707,18 @@ Without this, services may return URLs using `localhost`, which points to the wr
 
 Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design tradeoffs, and rough proposals are welcome.
 
+## Star History
+
+<p align="center">
+  <a href="https://www.star-history.com/?repos=floci-io%2Ffloci&type=date&legend=top-left">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/chart?repos=floci-io/floci&type=date&theme=dark&legend=top-left" />
+      <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/chart?repos=floci-io/floci&type=date&legend=top-left" />
+      <img width="600" alt="Star History Chart" src="https://api.star-history.com/chart?repos=floci-io/floci&type=date&legend=top-left" />
+    </picture>
+  </a>
+</p>
+
 ## Contributors
 
 <a href="https://github.com/floci-io/floci/graphs/contributors">
