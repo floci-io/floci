@@ -251,7 +251,19 @@ public class ResolvedServiceCatalog {
                 descriptor("transcribe", "transcribe", config.services().transcribe().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("Transcribe."), Set.of("transcribe"), Set.of(), Set.of())
+                        Set.of("Transcribe."), Set.of("transcribe"), Set.of(), Set.of()),
+                descriptor("ce", "ce", config.services().ce().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSInsightsIndexService."), Set.of("ce"), Set.of(), Set.of()),
+                descriptor("cur", "cur", config.services().cur().enabled(), true,
+                        "cur", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSOrigamiServiceGatewayService."), Set.of("cur"), Set.of(), Set.of()),
+                descriptor("bcm-data-exports", "bcmdataexports", config.services().bcmDataExports().enabled(), true,
+                        "bcmdataexports", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSBillingAndCostManagementDataExports."), Set.of("bcm-data-exports"), Set.of(), Set.of())
         ));
     }
 

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.16] - 2026-05-15
+
+### Added
+
+- **stepfunctions:** `ValidateStateMachineDefinition` — validates ASL definitions and returns structured diagnostics with `/States/<state>/<field>` paths for precise error location ([#845](https://github.com/floci-io/floci/pull/845))
+- **stepfunctions:** `ListTagsForResource`, `TagResource`, `UntagResource` for state machines and activities; covers both the AWS SDK (JSON 1.0) and Terraform (REST) wire paths ([#767](https://github.com/floci-io/floci/pull/767))
+- **rds:** cluster parameter group actions — `CreateDBClusterParameterGroup`, `DescribeDBClusterParameterGroups`, `DeleteDBClusterParameterGroup`, `ModifyDBClusterParameterGroup`, `DescribeDBClusterParameters`; mirrors the existing instance-level parameter group shape and unblocks IaC stacks that define Aurora `ClusterParameterGroup` resources ([#838](https://github.com/floci-io/floci/pull/838))
+- **s3:** full `SelectObjectContent` evaluator with floci-duck integration — recursive WHERE (AND, OR, NOT, LIKE, BETWEEN, IN, IS NULL, comparisons), JSON Lines and JSON array input formats, cross-format output (CSV→JSON, JSON→CSV), real `BytesScanned`/`BytesReturned` stats; routes CSV and JSON through floci-duck when available with a pure-Java fallback for standalone mode ([#835](https://github.com/floci-io/floci/pull/835))
+- **eventbridge:** `UpdateEventBus` — update event bus description, KMS key, dead-letter config, or log config ([#834](https://github.com/floci-io/floci/pull/834))
+- **ce:** AWS Cost Explorer service — `GetCostAndUsage`, `GetCostAndUsageWithResources`, `GetDimensionValues`, `GetTags`, `GetReservationCoverage`, `GetReservationUtilization`, `GetSavingsPlansCoverage`, `GetSavingsPlansUtilization`, `GetCostCategories`; cost is synthesized from existing resource state multiplied by the bundled pricing snapshot; supports `DAILY`/`MONTHLY`/`HOURLY` granularity, all standard metrics, and `GroupBy` on `DIMENSION`, `TAG`, and `COST_CATEGORY` ([#832](https://github.com/floci-io/floci/pull/832))
+- **transcribe:** AWS Transcribe service — `StartTranscriptionJob`, `GetTranscriptionJob`, `ListTranscriptionJobs`, `DeleteTranscriptionJob`, `CreateVocabulary`, `GetVocabulary`, `ListVocabularies`, `UpdateVocabulary`, `DeleteVocabulary` ([#827](https://github.com/floci-io/floci/pull/827))
+
+### Fixed
+
+- **core:** remove AWS SDK from Floci's runtime classpath to eliminate version conflicts with user-bundled SDKs ([#846](https://github.com/floci-io/floci/pull/846))
+- **core:** improve log level structure and reduce noise in hot paths ([#847](https://github.com/floci-io/floci/pull/847))
+- **s3:** make `us-east-1` bucket creation idempotent — repeated `CreateBucket` calls for the same bucket in `us-east-1` no longer raise `BucketAlreadyOwnedByYou` ([#844](https://github.com/floci-io/floci/pull/844))
+- **ec2:** support wildcard (`*`, `?`) filter values across all EC2 resources (VPCs, Subnets, Security Groups, Instances, Internet Gateways, Route Tables, Volumes), matching real AWS filter behavior ([#837](https://github.com/floci-io/floci/pull/837))
+- **pricing:** bundle pricing snapshot resources into the native image — the Price List service was unavailable in GraalVM native builds ([#836](https://github.com/floci-io/floci/pull/836))
+- **kms:** `Encrypt` now derives a fresh AES-GCM nonce per call (was deterministic, leaking plaintext equality); `Decrypt` now validates `EncryptionContext` as AAD and raises `InvalidCiphertextException` on any mismatch ([#825](https://github.com/floci-io/floci/pull/825))
+- **s3:** strip `charset` parameter from `Content-Type` in XML responses ([#809](https://github.com/floci-io/floci/pull/809))
+- **sqs:** FIFO `ReceiveMessage` now returns messages from multiple distinct message groups in a single call ([#785](https://github.com/floci-io/floci/pull/785))
+- **sqs:** honor `AttributeNames` and `MessageSystemAttributeNames` on `ReceiveMessage` ([#784](https://github.com/floci-io/floci/pull/784))
+- **sqs:** implement `AddPermission` and `RemovePermission` ([#781](https://github.com/floci-io/floci/pull/781))
+- **stepfunctions:** honor `TimeoutSeconds` on `Parallel` state ([#771](https://github.com/floci-io/floci/pull/771))
+
+### Documentation
+
+- Improve README readability ([#831](https://github.com/floci-io/floci/pull/831))
+
 ## [1.5.15] - 2026-05-13
 
 ### Added
@@ -609,7 +639,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.15...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.16...HEAD
+[1.5.16]: https://github.com/floci-io/floci/compare/1.5.15...1.5.16
 [1.5.15]: https://github.com/floci-io/floci/compare/1.5.14...1.5.15
 [1.5.14]: https://github.com/floci-io/floci/compare/1.5.13...1.5.14
 [1.5.13]: https://github.com/floci-io/floci/compare/1.5.12...1.5.13

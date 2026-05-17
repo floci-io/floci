@@ -172,6 +172,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `POST` | `/v2/email/outbound-bulk-emails` | `SendBulkEmail` (templated, multiple destinations) |
 | `GET` | `/v2/email/account` | `GetAccount` |
 | `PUT` | `/v2/email/account/sending` | `PutAccountSendingAttributes` |
+| `PUT` | `/v2/email/account/suppression` | `PutAccountSuppressionAttributes` |
 | `POST` | `/v2/email/templates` | `CreateEmailTemplate` |
 | `GET` | `/v2/email/templates` | `ListEmailTemplates` |
 | `GET` | `/v2/email/templates/{templateName}` | `GetEmailTemplate` |

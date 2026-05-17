@@ -34,7 +34,7 @@ public class ServiceRegistry {
         List<String> enabled = new ArrayList<>();
         for (ServiceDescriptor descriptor : catalog.allStatusDescriptors()) {
             if (descriptor.enabled()) {
-                enabled.add(descriptor.externalKey());
+                enabled.add(descriptor.configKey());
             }
         }
         return enabled;

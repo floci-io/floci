@@ -18,8 +18,10 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.SequencedSet;
 
 /**
  * Embedded UDP/53 DNS server that runs inside the Floci container and is injected
@@ -53,7 +55,7 @@ public class EmbeddedDnsServer {
     static final List<String> BUILTIN_SUFFIXES = List.of(DEFAULT_SUFFIX, LOCALSTACK_SUFFIX);
 
     private volatile String serverIp;
-    private final List<String> suffixes = new ArrayList<>();
+    private final SequencedSet<String> suffixes = new LinkedHashSet<>();
     private String upstreamDns;
 
     EmbeddedDnsServer(List<String> suffixes) {

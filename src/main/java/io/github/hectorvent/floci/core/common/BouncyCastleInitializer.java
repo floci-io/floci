@@ -21,9 +21,9 @@ public class BouncyCastleInitializer {
     static {
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
             Security.addProvider(new BouncyCastleProvider());
-            LOG.info("Registered BouncyCastle security provider (manual fallback)");
+            LOG.debug("Registered BouncyCastle security provider (manual fallback)");
         } else {
-            LOG.info("BouncyCastle provider already registered by Quarkus");
+            LOG.debug("BouncyCastle provider already registered by Quarkus");
         }
     }
 

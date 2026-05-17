@@ -41,8 +41,8 @@ The DuckDB read function is chosen from the Glue table's `StorageDescriptor`:
 | Property | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_ATHENA_MOCK` | `false` | Set to `true` to disable DuckDB execution — queries immediately succeed with empty results |
-| `FLOCI_SERVICES_ATHENA_DEFAULT_IMAGE` | `floci/floci-duck:latest` | DuckDB sidecar image |
-| `FLOCI_SERVICES_ATHENA_DUCK_URL` | *(unset)* | Point to an existing floci-duck instance and skip container management |
+| `FLOCI_SERVICES_DUCK_DEFAULT_IMAGE` | `floci/floci-duck:latest` | DuckDB sidecar image pulled on first use |
+| `FLOCI_SERVICES_DUCK_URL` | *(unset)* | Point to an existing floci-duck instance and skip container management |
 
 ## Example — simple query
 
@@ -116,6 +116,14 @@ done
 aws athena get-query-results --query-execution-id $QUERY_ID
 ```
 
+## Shared sidecar with S3 Select
+
+The floci-duck sidecar is shared between Athena and S3 Select. Once started by the first Athena query, it is also used by `SelectObjectContent` for CSV (with `FileHeaderInfo=USE`), JSON, and Parquet inputs. If Athena has not yet executed a query, S3 Select falls back to the built-in Java evaluator for CSV and JSON — Parquet always requires the sidecar.
+
+See [S3 Select](s3.md#s3-select) for details on execution modes and supported SQL operators.
+
 ## Mock mode
 
-Set `FLOCI_SERVICES_ATHENA_MOCK=true` to skip DuckDB entirely. In this mode queries transition to `SUCCEEDED` immediately with an empty result set — useful for unit tests that only exercise the Athena state machine, not the query results.
+Set `FLOCI_SERVICES_ATHENA_MOCK=true` to skip DuckDB entirely for Athena. In this mode queries transition to `SUCCEEDED` immediately with an empty result set — useful for unit tests that only exercise the Athena state machine, not the query results.
+
+When mock mode is enabled the sidecar does **not** start. S3 Select will use the Java evaluator for CSV and JSON. Parquet queries will fail unless `FLOCI_SERVICES_DUCK_URL` points to an already-running floci-duck instance.

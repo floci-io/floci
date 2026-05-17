@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -36,6 +37,7 @@ public class StepFunctionsJsonHandler {
             case "DescribeStateMachine" -> handleDescribeStateMachine(request);
             case "ListStateMachines" -> handleListStateMachines(request, region);
             case "DeleteStateMachine" -> handleDeleteStateMachine(request);
+            case "ValidateStateMachineDefinition" -> handleValidateStateMachineDefinition(request);
             case "StartExecution" -> handleStartExecution(request, region);
             case "StartSyncExecution" -> handleStartSyncExecution(request, region);
             case "DescribeExecution" -> handleDescribeExecution(request);
@@ -104,6 +106,32 @@ public class StepFunctionsJsonHandler {
     private Response handleDeleteStateMachine(JsonNode request) {
         service.deleteStateMachine(request.path("stateMachineArn").asText());
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleValidateStateMachineDefinition(JsonNode request) {
+        String definition = request.path("definition").asText(null);
+        String type = request.path("type").asText(null);
+        String severity = request.path("severity").asText(null);
+        Integer maxResults = parseOptionalInt(request, "maxResults");
+
+        StepFunctionsService.ValidationResult result =
+                service.validateStateMachineDefinition(definition, type, severity, maxResults);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("result", result.valid() ? "OK" : "FAIL");
+        ArrayNode diags = response.putArray("diagnostics");
+        for (StepFunctionsService.Diagnostic d : result.diagnostics()) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("severity", d.severity());
+            node.put("code", d.code());
+            node.put("message", d.message());
+            if (d.location() != null) {
+                node.put("location", d.location());
+            }
+            diags.add(node);
+        }
+        response.put("truncated", result.truncated());
+        return Response.ok(response).build();
     }
 
     private Response handleStartExecution(JsonNode request, String region) {
@@ -314,6 +342,26 @@ public class StepFunctionsJsonHandler {
             }
         }
         return tags;
+    }
+
+    /**
+     * Reads an optional integer field from the JSON request, rejecting wrong types
+     * with a typed ValidationException. JsonNode.asInt() silently coerces strings,
+     * fractional numbers, and explicit nulls to 0, which would let invalid payloads
+     * slip through as 0 (and thus be treated as "use default" by the service).
+     * Returns null when the field is absent or explicitly null in the JSON.
+     */
+    private static Integer parseOptionalInt(JsonNode request, String fieldName) {
+        JsonNode node = request.get(fieldName);
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        if (!node.isIntegralNumber()) {
+            throw new AwsException("ValidationException",
+                    "Value '" + node + "' at '" + fieldName
+                            + "' failed to satisfy constraint: Member must be an integer.", 400);
+        }
+        return node.intValue();
     }
 
 }

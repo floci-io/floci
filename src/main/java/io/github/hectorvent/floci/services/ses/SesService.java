@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
@@ -56,6 +57,7 @@ public class SesService {
     private final StorageBackend<String, EmailTemplate> templateStore;
     private final StorageBackend<String, ConfigurationSet> configSetStore;
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
+    private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
 
@@ -73,6 +75,8 @@ public class SesService {
                 new TypeReference<Map<String, ConfigurationSet>>() {});
         this.suppressionStore = storageFactory.create("ses", "ses-suppression.json",
                 new TypeReference<Map<String, SuppressedDestination>>() {});
+        this.accountSuppressionStore = storageFactory.create("ses", "ses-account-suppression.json",
+                new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
     }
@@ -83,6 +87,7 @@ public class SesService {
                StorageBackend<String, EmailTemplate> templateStore,
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
+               StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper) {
         this.identityStore = identityStore;
@@ -91,6 +96,7 @@ public class SesService {
         this.templateStore = templateStore;
         this.configSetStore = configSetStore;
         this.suppressionStore = suppressionStore;
+        this.accountSuppressionStore = accountSuppressionStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
     }
@@ -693,6 +699,39 @@ public class SesService {
             throw new AwsException("BadRequestException", "Invalid ARN: " + arn, 400);
         }
         return new ResourceRef(parsed.region(), resource.substring(0, slash), resource.substring(slash + 1));
+    }
+
+    // ──────────────────── Account-level suppression attributes ────────────────────
+
+    public AccountSuppressionAttributes getAccountSuppressionAttributes(String region) {
+        return accountSuppressionStore.get(accountSuppressionKey(region))
+                .orElseGet(SesService::defaultAccountSuppressionAttributes);
+    }
+
+    private static AccountSuppressionAttributes defaultAccountSuppressionAttributes() {
+        // Fresh SES accounts default to auto-suppression on both BOUNCE and COMPLAINT;
+        // an explicit PUT (including an empty list) overrides this.
+        AccountSuppressionAttributes attrs = new AccountSuppressionAttributes();
+        attrs.setSuppressedReasons(new ArrayList<>(List.of("BOUNCE", "COMPLAINT")));
+        return attrs;
+    }
+
+    public void putAccountSuppressionAttributes(String region, List<String> suppressedReasons) {
+        List<String> sanitized = new ArrayList<>();
+        if (suppressedReasons != null) {
+            for (String r : suppressedReasons) {
+                validateSuppressionReason(r, "suppressedReasons", true);
+                sanitized.add(r);
+            }
+        }
+        AccountSuppressionAttributes attrs = new AccountSuppressionAttributes();
+        attrs.setSuppressedReasons(sanitized);
+        accountSuppressionStore.put(accountSuppressionKey(region), attrs);
+        LOG.infov("Updated account suppression attributes for region {0}: {1}", region, sanitized);
+    }
+
+    private static String accountSuppressionKey(String region) {
+        return "account-suppression::" + region;
     }
 
     // ──────────────────────────── Suppression list ────────────────────────────

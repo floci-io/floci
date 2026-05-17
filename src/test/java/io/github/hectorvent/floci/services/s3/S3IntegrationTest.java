@@ -30,13 +30,13 @@ class S3IntegrationTest {
 
     @Test
     @Order(2)
-    void createDuplicateBucketFails() {
+    void createDuplicateBucketInUsEast1IsIdempotent() {
         given()
         .when()
             .put("/test-bucket")
         .then()
-            .statusCode(409)
-            .body(containsString("BucketAlreadyOwnedByYou"));
+            .statusCode(200)
+            .header("Location", equalTo("/test-bucket"));
     }
 
     @Test

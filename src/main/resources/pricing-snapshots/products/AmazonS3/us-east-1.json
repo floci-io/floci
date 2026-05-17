@@ -8,7 +8,8 @@
         "locationType": "AWS Region",
         "storageClass": "General Purpose",
         "volumeType": "Standard",
-        "regionCode": "us-east-1"
+        "regionCode": "us-east-1",
+        "usagetype": "TimedStorage-Standard"
       },
       "sku": "FLOCI-S3-STANDARD-USE1"
     },

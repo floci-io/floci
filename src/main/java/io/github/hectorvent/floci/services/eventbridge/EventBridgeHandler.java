@@ -53,6 +53,7 @@ public class EventBridgeHandler {
                 case "CreateEventBus" -> handleCreateEventBus(request, region);
                 case "DeleteEventBus" -> handleDeleteEventBus(request, region);
                 case "DescribeEventBus" -> handleDescribeEventBus(request, region);
+                case "UpdateEventBus" -> handleUpdateEventBus(request, region);
                 case "ListEventBuses" -> handleListEventBuses(request, region);
                 case "PutRule" -> handlePutRule(request, region);
                 case "DeleteRule" -> handleDeleteRule(request, region);
@@ -114,6 +115,21 @@ public class EventBridgeHandler {
     private Response handleDescribeEventBus(JsonNode request, String region) {
         String name = request.path("Name").asText(null);
         EventBus bus = eventBridgeService.describeEventBus(name, region);
+        return Response.ok(buildBusNode(bus)).build();
+    }
+
+    private Response handleUpdateEventBus(JsonNode request, String region) {
+        String name = request.path("Name").asText(null);
+        String description = request.path("Description").asText(null);
+        String kmsKey = request.path("KmsKeyIdentifier").asText(null);
+        // Empty {} is treated as "no change", matching how omitted/null inputs flow.
+        // Only a populated object triggers a write to the bus's nested config field.
+        JsonNode dlqNode = request.path("DeadLetterConfig");
+        String dlq = (dlqNode.isObject() && !dlqNode.isEmpty()) ? dlqNode.toString() : null;
+        JsonNode logNode = request.path("LogConfig");
+        String logCfg = (logNode.isObject() && !logNode.isEmpty()) ? logNode.toString() : null;
+        EventBus bus = eventBridgeService.updateEventBus(
+                name, description, kmsKey, dlq, logCfg, region);
         return Response.ok(buildBusNode(bus)).build();
     }
 
@@ -505,6 +521,29 @@ public class EventBridgeHandler {
         }
         if (bus.getPolicy() != null) {
             node.put("Policy", bus.getPolicy());
+        }
+        if (bus.getKmsKeyIdentifier() != null) {
+            node.put("KmsKeyIdentifier", bus.getKmsKeyIdentifier());
+        }
+        // Stored as raw JSON strings; emitted as JSON objects so SDK clients
+        // can deserialize them as structs. Do NOT use node.put(...) here.
+        if (bus.getDeadLetterConfig() != null) {
+            try {
+                node.set("DeadLetterConfig", objectMapper.readTree(bus.getDeadLetterConfig()));
+            } catch (Exception e) {
+                LOG.warnv("Failed to parse stored DeadLetterConfig for bus {0} (arn={1}); "
+                        + "field omitted from response. Stored value: {2}. Error: {3}",
+                        bus.getName(), bus.getArn(), bus.getDeadLetterConfig(), e.getMessage());
+            }
+        }
+        if (bus.getLogConfig() != null) {
+            try {
+                node.set("LogConfig", objectMapper.readTree(bus.getLogConfig()));
+            } catch (Exception e) {
+                LOG.warnv("Failed to parse stored LogConfig for bus {0} (arn={1}); "
+                        + "field omitted from response. Stored value: {2}. Error: {3}",
+                        bus.getName(), bus.getArn(), bus.getLogConfig(), e.getMessage());
+            }
         }
         return node;
     }

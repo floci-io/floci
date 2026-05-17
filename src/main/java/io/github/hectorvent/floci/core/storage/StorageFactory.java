@@ -57,7 +57,7 @@ public class StorageFactory {
         Path basePath = Path.of(config.storage().persistentPath());
         Path filePath = basePath.resolve(fileName);
 
-        LOG.infov("Creating {0} storage for service {1} (file: {2})", mode, serviceName, filePath);
+        LOG.debugv("Creating {0} storage for service {1} (file: {2})", mode, serviceName, filePath);
 
         StorageBackend<String, V> inner = switch (mode) {
             case "memory" -> new InMemoryStorage<>();

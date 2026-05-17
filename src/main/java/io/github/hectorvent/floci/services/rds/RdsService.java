@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
+import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
@@ -38,6 +39,7 @@ public class RdsService {
     private final StorageBackend<String, DbInstance> instances;
     private final StorageBackend<String, DbCluster> clusters;
     private final StorageBackend<String, DbParameterGroup> parameterGroups;
+    private final StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     private final RegionResolver regionResolver;
@@ -56,6 +58,7 @@ public class RdsService {
         this.instances = new InMemoryStorage<>();
         this.clusters = new InMemoryStorage<>();
         this.parameterGroups = new InMemoryStorage<>();
+        this.clusterParameterGroups = new InMemoryStorage<>();
     }
 
     // ── DB Instances ──────────────────────────────────────────────────────────
@@ -366,6 +369,49 @@ public class RdsService {
             group.getParameters().putAll(parameters);
         }
         parameterGroups.put(name, group);
+        return group;
+    }
+
+    // ── Cluster Parameter Groups ──────────────────────────────────────────────
+
+    public DbClusterParameterGroup createDbClusterParameterGroup(String name, String family, String description) {
+        if (clusterParameterGroups.get(name).isPresent()) {
+            throw new AwsException("DBParameterGroupAlreadyExists",
+                    "DB cluster parameter group " + name + " already exists.", 400);
+        }
+        DbClusterParameterGroup group = new DbClusterParameterGroup(name, family, description);
+        clusterParameterGroups.put(name, group);
+        return group;
+    }
+
+    public DbClusterParameterGroup getDbClusterParameterGroup(String name) {
+        return clusterParameterGroups.get(name).orElseThrow(() ->
+                new AwsException("DBParameterGroupNotFound",
+                        "DB cluster parameter group " + name + " not found.", 404));
+    }
+
+    public Collection<DbClusterParameterGroup> listDbClusterParameterGroups(String filterName) {
+        if (filterName != null && !filterName.isBlank()) {
+            return clusterParameterGroups.get(filterName).map(List::of).orElse(List.of());
+        }
+        return clusterParameterGroups.scan(k -> true);
+    }
+
+    public void deleteDbClusterParameterGroup(String name) {
+        if (clusterParameterGroups.get(name).isEmpty()) {
+            throw new AwsException("DBParameterGroupNotFound",
+                    "DB cluster parameter group " + name + " not found.", 404);
+        }
+        clusterParameterGroups.delete(name);
+    }
+
+    public DbClusterParameterGroup modifyDbClusterParameterGroup(String name,
+                                                                  java.util.Map<String, String> parameters) {
+        DbClusterParameterGroup group = getDbClusterParameterGroup(name);
+        if (parameters != null) {
+            group.getParameters().putAll(parameters);
+        }
+        clusterParameterGroups.put(name, group);
         return group;
     }
 

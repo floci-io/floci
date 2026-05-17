@@ -1,13 +1,11 @@
 quarkus:
   log:
-    # min-level sets the floor for what can be emitted at runtime. Default is INFO,
-    # which silently filters any TRACE/DEBUG logs even when a category override
-    # asks for them. Lowering the floor to TRACE lets users opt in per-category
-    # (e.g. QUARKUS_LOG_CATEGORY__IO_GITHUB_HECTORVENT_FLOCI_SERVICES_SQS__LEVEL=TRACE)
-    # without also having to raise min-level. Effective level is still INFO by default.
-    min-level: TRACE
     console:
-        color: true
+      format: "%d{yyyy-MM-dd HH:mm:ss,SSS} %-5p [%c{3.}] %s%e%n"
+    category:
+      "io.apicurio":
+        level: WARN
+
   http:
     port: ${floci.port}
     host: 0.0.0.0
@@ -20,6 +18,12 @@ quarkus:
     # No 'delay' value is set - observers run synchronously, no artificial sleep is introduced.
     delay-enabled: true
   native:
+    resources:
+      # The Pricing service reads its bundled snapshot at runtime via
+      # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
+      # cannot detect dynamically-built paths, so the tree is registered
+      # explicitly to ensure GraalVM includes every file in the native image.
+      includes: pricing-snapshots/**
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -38,6 +42,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cognito.CognitoSrpHelper
       - --initialize-at-run-time=io.github.hectorvent.floci.services.ses.SesService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
 
 
 floci:
@@ -187,7 +192,8 @@ floci:
     athena:
       enabled: true
       mock: false
-      # duck-url: http://floci-duck:3000   # set to skip container management
+    duck:
+      # url: http://floci-duck:3000   # set to skip container management
       default-image: "floci/floci-duck:latest"
     glue:
       enabled: true
@@ -262,3 +268,13 @@ floci:
       enabled: true
     transcribe:
       enabled: true
+    ce:
+      enabled: true
+      credit-usd-monthly: 0.0
+    cur:
+      enabled: true
+      emit-mode: synchronous
+      staging-bucket: floci-cur-staging
+    bcm-data-exports:
+      enabled: true
+      emit-mode: synchronous

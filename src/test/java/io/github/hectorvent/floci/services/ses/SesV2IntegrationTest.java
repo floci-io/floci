@@ -220,6 +220,9 @@ class SesV2IntegrationTest {
     @Test
     @Order(11)
     void getAccount() {
+        // SuppressionAttributes defaults to BOUNCE + COMPLAINT on a fresh region,
+        // matching real SES account behaviour. Later @Order(58+) tests overwrite
+        // the stored value, so this assertion only holds before those run.
         given()
             .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
@@ -231,7 +234,9 @@ class SesV2IntegrationTest {
             .body("ProductionAccessEnabled", equalTo(true))
             .body("SendQuota.Max24HourSend", notNullValue())
             .body("SendQuota.MaxSendRate", notNullValue())
-            .body("SendQuota.SentLast24Hours", notNullValue());
+            .body("SendQuota.SentLast24Hours", notNullValue())
+            .body("SuppressionAttributes.SuppressedReasons",
+                  containsInAnyOrder("BOUNCE", "COMPLAINT"));
     }
 
     @Test
@@ -570,6 +575,175 @@ class SesV2IntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(58)
+    void putAccountSuppressionAttributes_storesReasons_visibleViaGetAccount() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SuppressedReasons": ["BOUNCE", "COMPLAINT"]}
+                """)
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/account")
+        .then()
+            .statusCode(200)
+            .body("SuppressionAttributes.SuppressedReasons", containsInAnyOrder("BOUNCE", "COMPLAINT"));
+    }
+
+    @Test
+    @Order(59)
+    void putAccountSuppressionAttributes_emptyArray_clearsReasons() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SuppressedReasons": []}
+                """)
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/account")
+        .then()
+            .statusCode(200)
+            .body("SuppressionAttributes.SuppressedReasons", hasSize(0));
+    }
+
+    @Test
+    @Order(61)
+    void putAccountSuppressionAttributes_missingField_succeedsWithEmptyList() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/account")
+        .then()
+            .statusCode(200)
+            .body("SuppressionAttributes.SuppressedReasons", hasSize(0));
+    }
+
+    @Test
+    @Order(62)
+    void putAccountSuppressionAttributes_invalidReason_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SuppressedReasons": ["BOUNCE", "OTHER"]}
+                """)
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString(
+                    "1 validation error detected: Value at 'suppressedReasons' failed to satisfy constraint: "
+                            + "Member must satisfy constraint: [Member must satisfy enum value set: [BOUNCE, COMPLAINT]]"));
+    }
+
+    @Test
+    @Order(63)
+    void putAccountSuppressionAttributes_reasonsNotArray_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SuppressedReasons": "BOUNCE"}
+                """)
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(64)
+    void putAccountSuppressionAttributes_nullMember_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SuppressedReasons": [null]}
+                """)
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(65)
+    void putAccountSuppressionAttributes_numericMember_returns400() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"SuppressedReasons": [1, 2]}
+                """)
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    @Order(66)
+    void putAccountSuppressionAttributes_acceptsValidationAttributes() {
+        // The optional ValidationAttributes object is accepted but not parsed —
+        // verifying the request shape does not regress to a 400.
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "SuppressedReasons": ["BOUNCE"],
+                    "ValidationAttributes": {
+                        "ConditionThreshold": {
+                            "ConditionThresholdEnabled": "ENABLED",
+                            "OverallConfidenceThreshold": {
+                                "ConfidenceVerdictThreshold": "HIGH"
+                            }
+                        }
+                    }
+                }
+                """)
+        .when()
+            .put("/v2/email/account/suppression")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/account")
+        .then()
+            .statusCode(200)
+            .body("SuppressionAttributes.SuppressedReasons", contains("BOUNCE"));
     }
 
     @Test

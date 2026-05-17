@@ -178,3 +178,11 @@ floci:
       enabled: true
     pricing:
       enabled: true
+    ce:
+      enabled: true
+    cur:
+      enabled: true
+      emit-mode: off
+    bcm-data-exports:
+      enabled: true
+      emit-mode: off

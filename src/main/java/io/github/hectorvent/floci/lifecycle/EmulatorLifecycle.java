@@ -23,15 +23,20 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.event.Observes;
 import jakarta.enterprise.event.ObservesAsync;
 import jakarta.inject.Inject;
+import org.eclipse.microprofile.config.inject.ConfigProperty;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
+import java.util.Optional;
 
 @ApplicationScoped
 public class EmulatorLifecycle {
 
     private static final Logger LOG = Logger.getLogger(EmulatorLifecycle.class);
     private static final int HTTP_PORT = 4566;
+
+    @ConfigProperty(name = "quarkus.application.version", defaultValue = "")
+    Optional<String> appVersion = Optional.empty();
 
     private final StorageFactory storageFactory;
     private final ServiceRegistry serviceRegistry;
@@ -79,10 +84,11 @@ public class EmulatorLifecycle {
     }
 
     void onStart(@Observes StartupEvent ignored) {
-        LOG.info("=== AWS Local Emulator Starting ===");
-        LOG.infov("Storage mode: {0}", config.storage().mode());
-        LOG.infov("Persistent path: {0}", config.storage().persistentPath());
-        LOG.infov("TLS: {0}", config.tls().enabled() ? "enabled (HTTPS + HTTP dual mode)" : "disabled (HTTP only)");
+        LOG.infof("=== AWS Local Emulator %s Starting ===", appVersion.orElse(""));
+        LOG.infof("Endpoint:  http://0.0.0.0:%d", config.port());
+        LOG.infof("Region:    %s  Account: %s", config.defaultRegion(), config.defaultAccountId());
+        LOG.infov("Storage:   {0}  Path: {1}", config.storage().mode(), config.storage().persistentPath());
+        LOG.infov("TLS:       {0}", config.tls().enabled() ? "enabled (HTTPS + HTTP dual mode)" : "disabled (HTTP only)");
 
         // BOOT hooks run before service initialization — scripts cannot use AWS APIs yet.
         try {

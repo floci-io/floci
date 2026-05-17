@@ -289,6 +289,7 @@ public class CloudWatchMetricsQueryHandler {
     // ──────────────────────────── Parsing Helpers ────────────────────────────
 
     private List<MetricDatum> parseMetricData(MultivaluedMap<String, String> params) {
+        LOG.infov("Query PutMetricData params: {0}", params);
         List<MetricDatum> datums = new ArrayList<>();
         for (int i = 1; ; i++) {
             String metricName = params.getFirst("MetricData.member." + i + ".MetricName");

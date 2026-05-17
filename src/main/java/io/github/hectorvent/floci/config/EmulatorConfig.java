@@ -301,7 +301,11 @@ public interface EmulatorConfig {
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
         PricingServiceConfig pricing();
+        DuckConfig duck();
         TranscribeServiceConfig transcribe();
+        CostExplorerServiceConfig ce();
+        CurServiceConfig cur();
+        BcmDataExportsServiceConfig bcmDataExports();
     }
 
     interface TransferServiceConfig {
@@ -551,9 +555,11 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean mock();
+    }
 
+    interface DuckConfig {
         /** When set, Floci uses this URL and skips floci-duck container management. */
-        Optional<String> duckUrl();
+        Optional<String> url();
 
         @WithDefault("floci/floci-duck:latest")
         String defaultImage();
@@ -658,6 +664,55 @@ public interface EmulatorConfig {
     interface TranscribeServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface CostExplorerServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Synthetic monthly USD credit applied as a {@code Credit} {@code RECORD_TYPE}
+         * row in {@code GetCostAndUsage} responses. The emitted credit is capped at
+         * the synthesized monthly usage so net cost never goes below zero.
+         * Defaults to zero (no credit emitted).
+         */
+        @WithDefault("0.0")
+        double creditUsdMonthly();
+    }
+
+    interface CurServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Controls when CUR Parquet artifacts are emitted:
+         * <ul>
+         *   <li>{@code synchronous} — emit on report definition mutations (default; suits tests)</li>
+         *   <li>{@code daily} — emit once per 24h via the CUR-owned scheduled executor</li>
+         *   <li>{@code off} — management plane only, no Parquet emission</li>
+         * </ul>
+         */
+        @WithDefault("synchronous")
+        String emitMode();
+
+        /**
+         * S3 bucket used to stage NDJSON row payloads before DuckDB writes the
+         * final Parquet artifact. Created on first use if it doesn't exist.
+         */
+        @WithDefault("floci-cur-staging")
+        String stagingBucket();
+    }
+
+    interface BcmDataExportsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Same semantics as {@code floci.services.cur.emit-mode} but applied to
+         * BCM Data Exports {@code Export} records.
+         */
+        @WithDefault("synchronous")
+        String emitMode();
     }
 
     interface EcrServiceConfig {

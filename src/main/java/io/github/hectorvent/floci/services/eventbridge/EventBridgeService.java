@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -150,14 +151,19 @@ public class EventBridgeService {
     }
 
     public void deleteEventBus(String name, String region) {
-        if ("default".equals(name)) {
+        // Validate input and handle both name and ARN format
+        if (name == null || name.isBlank()) {
+            throw new AwsException("ValidationException", "EventBus name is required.", 400);
+        }
+        String effectiveName = resolvedBusName(name);
+        if ("default".equals(effectiveName)) {
             throw new AwsException("ValidationException", "Cannot delete the default event bus.", 400);
         }
-        String key = busKey(region, name);
+        String key = busKey(region, effectiveName);
         busStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + name, 404));
-        String rulePrefix = ruleKeyPrefix(region, name);
+                        "EventBus not found: " + effectiveName, 404));
+        String rulePrefix = ruleKeyPrefix(region, effectiveName);
         boolean hasRules = ruleStore.keys().stream().anyMatch(k -> k.startsWith(rulePrefix));
         if (hasRules) {
             throw new AwsException("ValidationException",
@@ -168,13 +174,60 @@ public class EventBridgeService {
     }
 
     public EventBus describeEventBus(String name, String region) {
-        String effectiveName = name == null || name.isBlank() ? "default" : name;
+        // Handle both name and ARN format
+        String effectiveName = (name == null || name.isBlank()) ? "default" : resolvedBusName(name);
         if ("default".equals(effectiveName)) {
             return getOrCreateDefaultBus(region);
         }
         return busStore.get(busKey(region, effectiveName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "EventBus not found: " + effectiveName, 404));
+                        "EventBus not found: " + name, 404));
+    }
+
+    public EventBus updateEventBus(String name,
+                                   String description,
+                                   String kmsKeyIdentifier,
+                                   String deadLetterConfig,
+                                   String logConfig,
+                                   String region) {
+        // Name identifies the bus; never mutated (AWS does not support rename).
+        String effectiveName = name == null || name.isBlank() ? "default" : name;
+        EventBus bus = "default".equals(effectiveName)
+                ? getOrCreateDefaultBus(region)
+                : busStore.get(busKey(region, effectiveName))
+                        .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                                "EventBus not found: " + effectiveName, 404));
+
+        // Only mark dirty when a field is both non-blank AND different from
+        // the value currently on the bus — re-sending the same value is a no-op.
+        boolean dirty = false;
+        if (description != null && !description.isBlank()
+                && !description.equals(bus.getDescription())) {
+            bus.setDescription(description);
+            dirty = true;
+        }
+        if (kmsKeyIdentifier != null && !kmsKeyIdentifier.isBlank()
+                && !kmsKeyIdentifier.equals(bus.getKmsKeyIdentifier())) {
+            bus.setKmsKeyIdentifier(kmsKeyIdentifier);
+            dirty = true;
+        }
+        if (deadLetterConfig != null && !deadLetterConfig.isBlank()
+                && !deadLetterConfig.equals(bus.getDeadLetterConfig())) {
+            bus.setDeadLetterConfig(deadLetterConfig);
+            dirty = true;
+        }
+        if (logConfig != null && !logConfig.isBlank()
+                && !logConfig.equals(bus.getLogConfig())) {
+            bus.setLogConfig(logConfig);
+            dirty = true;
+        }
+
+        if (dirty) {
+            busStore.put(busKey(region, effectiveName), bus);
+            LOG.infov("Updated event bus: {0} (arn={1}) in region {2}",
+                    effectiveName, bus.getArn(), region);
+        }
+        return bus;
     }
 
     public List<EventBus> listEventBuses(String namePrefix, String region) {
@@ -877,7 +930,32 @@ public class EventBridgeService {
     }
 
     private static String resolvedBusName(String busName) {
-        return (busName == null || busName.isBlank()) ? "default" : busName;
+        if (busName == null || busName.isBlank()) {
+            return "default";
+        }
+        // Handle ARN format: arn:aws:events:region:account-id:event-bus/bus-name
+        if (busName.startsWith("arn:aws:events:")) {
+            try {
+                return extractBusNameFromArn(busName);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("ValidationException", "Invalid EventBridge event bus ARN: " + busName, 400);
+            }
+        }
+        return busName;
+    }
+
+    private static String extractBusNameFromArn(String arn) {
+        // ARN format: arn:aws:events:region:account-id:event-bus/bus-name
+        if (arn == null) return null;
+        AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+        if (!"events".equals(parsed.service())) {
+            throw new IllegalArgumentException("Expected EventBridge ARN but found service: " + parsed.service());
+        }
+        String prefix = "event-bus/";
+        if (parsed.resource() != null && parsed.resource().startsWith(prefix)) {
+            return parsed.resource().substring(prefix.length());
+        }
+        throw new IllegalArgumentException("Expected EventBridge event bus ARN but found resource: " + parsed.resource());
     }
 
     private static String busKey(String region, String name) {

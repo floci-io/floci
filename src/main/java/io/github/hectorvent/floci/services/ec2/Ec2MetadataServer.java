@@ -98,10 +98,10 @@ public class Ec2MetadataServer {
         httpServer = vertx.createHttpServer();
         httpServer.requestHandler(router).listen(port, result -> {
             if (result.succeeded()) {
-                LOG.infov("EC2 IMDS server listening on port {0}", port);
+                LOG.infof("EC2 IMDS server listening on port %d", port);
                 future.complete(null);
             } else {
-                LOG.warnv("EC2 IMDS server failed to start on port {0}: {1}", port, result.cause().getMessage());
+                LOG.warnf("EC2 IMDS server failed to start on port %d: %s", port, result.cause().getMessage());
                 future.completeExceptionally(result.cause());
             }
         });
