@@ -138,6 +138,9 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ steps.created.outputs.created }}
+            version=${{ steps.version.outputs.version }}
+            build-date=${{ steps.created.outputs.created }}
+            vcs-ref=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -157,5 +160,8 @@ jobs:
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ steps.created.outputs.created }}
+            version=${{ steps.version.outputs.version }}
+            build-date=${{ steps.created.outputs.created }}
+            vcs-ref=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

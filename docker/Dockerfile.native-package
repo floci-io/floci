@@ -45,7 +45,17 @@ LABEL org.opencontainers.image.title="Floci" \
       org.opencontainers.image.url="https://floci.io" \
       org.opencontainers.image.source="https://github.com/floci-io/floci" \
       org.opencontainers.image.licenses="MIT" \
-      org.opencontainers.image.vendor="Floci"
+      org.opencontainers.image.vendor="Floci" \
+      description="Local AWS emulator — open-source alternative to LocalStack Community" \
+      io.k8s.description="Local AWS emulator — open-source alternative to LocalStack Community" \
+      io.k8s.display-name="Floci" \
+      io.openshift.expose-services="4566:tcp" \
+      io.openshift.tags="floci aws-emulator" \
+      maintainer="Floci <https://github.com/floci-io/floci>" \
+      name="floci/floci" \
+      summary="Local AWS emulator — open-source alternative to LocalStack Community" \
+      url="https://floci.io" \
+      vendor="Floci"
 
 EXPOSE 4566
 
