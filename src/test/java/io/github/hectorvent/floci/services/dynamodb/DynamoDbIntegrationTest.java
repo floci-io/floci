@@ -1336,6 +1336,240 @@ given()
     }
 
     @Test
+    void updateItemLegacyExpectedAttributeMissing() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable1",
+                    "KeySchema": [
+                        {"AttributeName": "PK", "KeyType": "HASH"},
+                        {"AttributeName": "SK", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "PK", "AttributeType": "S"},
+                        {"AttributeName": "SK", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // UpdateItem with Expected on a non-existent item → ConditionalCheckFailedException
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable1",
+                    "Key": {"PK": {"S": "k1"}, "SK": {"S": "s1"}},
+                    "Expected": {"MEM_NO": {"ComparisonOperator": "EQ", "Value": {"N": "1"}}},
+                    "AttributeUpdates": {
+                        "SESSION_DATA": {"Action": "PUT", "Value": {"S": "{}"}},
+                        "VERSION":      {"Action": "ADD", "Value": {"N": "1"}}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"))
+            .body("message", equalTo("The conditional request failed"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable1"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateItemLegacyExpectedValueMismatch() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "KeySchema": [
+                        {"AttributeName": "PK", "KeyType": "HASH"},
+                        {"AttributeName": "SK", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "PK", "AttributeType": "S"},
+                        {"AttributeName": "SK", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Put an item with MEM_NO = 2
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "Item": {"PK": {"S": "k2"}, "SK": {"S": "s1"}, "MEM_NO": {"N": "2"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // UpdateItem expecting MEM_NO == 1, but actual is 2 → ConditionalCheckFailedException
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "Key": {"PK": {"S": "k2"}, "SK": {"S": "s1"}},
+                    "Expected": {"MEM_NO": {"ComparisonOperator": "EQ", "Value": {"N": "1"}}},
+                    "AttributeUpdates": {
+                        "SESSION_DATA": {"Action": "PUT", "Value": {"S": "{}"}},
+                        "VERSION":      {"Action": "ADD", "Value": {"N": "1"}}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"))
+            .body("message", equalTo("The conditional request failed"));
+
+        // Item must be unmodified
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "Key": {"PK": {"S": "k2"}, "SK": {"S": "s1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.MEM_NO.N", equalTo("2"))
+            .body("Item.SESSION_DATA", is(nullValue()));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable2"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateItemLegacyExpectedMatchSucceeds() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "KeySchema": [
+                        {"AttributeName": "PK", "KeyType": "HASH"},
+                        {"AttributeName": "SK", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "PK", "AttributeType": "S"},
+                        {"AttributeName": "SK", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "Item": {"PK": {"S": "k3"}, "SK": {"S": "s1"}, "MEM_NO": {"N": "1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // UpdateItem with Expected MEM_NO == 1 (matches) → success
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "Key": {"PK": {"S": "k3"}, "SK": {"S": "s1"}},
+                    "Expected": {"MEM_NO": {"ComparisonOperator": "EQ", "Value": {"N": "1"}}},
+                    "AttributeUpdates": {
+                        "SESSION_DATA": {"Action": "PUT", "Value": {"S": "{}"}}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify the update was applied
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "Key": {"PK": {"S": "k3"}, "SK": {"S": "s1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.SESSION_DATA.S", equalTo("{}"))
+            .body("Item.MEM_NO.N", equalTo("1"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable3"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
     void updateAndDescribeContinuousBackups() {
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
