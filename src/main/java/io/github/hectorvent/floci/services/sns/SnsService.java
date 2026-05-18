@@ -279,7 +279,7 @@ public class SnsService {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Message too long", 400);
         }
-        int payloadSize = computePublishSize(message, subject, messageAttributes);
+        int payloadSize = computePublishSize(messageBytes, subject, messageAttributes);
         if (payloadSize > MAX_PUBLISH_SIZE) {
             throw new AwsException("InvalidParameterValue",
                     "Invalid parameter: MessageAttributes Reason: total size of attributes "
@@ -383,7 +383,8 @@ public class SnsService {
             @SuppressWarnings("unchecked")
             Map<String, MessageAttributeValue> attrs =
                     (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
-            batchSize += computePublishSize(message, subject, attrs);
+            int entryMessageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
+            batchSize += computePublishSize(entryMessageBytes, subject, attrs);
         }
         if (batchSize > MAX_PUBLISH_SIZE) {
             throw new AwsException("BatchRequestTooLong",
@@ -981,9 +982,9 @@ public class SnsService {
         return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
     }
 
-    private static int computePublishSize(String message, String subject,
+    private static int computePublishSize(int messageBytes, String subject,
                                           Map<String, MessageAttributeValue> attributes) {
-        int total = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
+        int total = messageBytes;
         if (subject != null) {
             total += subject.getBytes(StandardCharsets.UTF_8).length;
         }
