@@ -1,0 +1,8 @@
+{
+  "name": "floci-scripts",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.700.0"
+  }
+}

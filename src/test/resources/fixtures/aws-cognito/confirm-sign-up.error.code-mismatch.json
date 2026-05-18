@@ -1,0 +1,18 @@
+{
+  "name": "confirm-sign-up.error.code-mismatch",
+  "capturedAt": "2026-05-16T05:10:20.553Z",
+  "request": {
+    "ClientId": "6h89qn2bfglbmvfebq9aaknqk0",
+    "Username": "fixture@example.com",
+    "ConfirmationCode": "000000"
+  },
+  "response": null,
+  "error": {
+    "name": "CodeMismatchException",
+    "message": "Invalid verification code provided, please try again.",
+    "$metadata": {
+      "httpStatusCode": 400,
+      "requestId": "73626b75-683d-4630-99c1-05f736ed86f7"
+    }
+  }
+}
