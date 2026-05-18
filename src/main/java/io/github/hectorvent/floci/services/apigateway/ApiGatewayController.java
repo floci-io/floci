@@ -222,6 +222,7 @@ public class ApiGatewayController {
 
     @POST
     @Path("/restapis")
+    @Consumes(MediaType.WILDCARD)
     public Response createRestApi(@Context HttpHeaders headers,
                                   @QueryParam("mode") String mode,
                                   String body) {
@@ -242,6 +243,7 @@ public class ApiGatewayController {
 
     @PUT
     @Path("/restapis/{apiId}")
+    @Consumes(MediaType.WILDCARD)
     public Response putRestApi(@Context HttpHeaders headers,
                                @PathParam("apiId") String apiId,
                                @QueryParam("mode") String mode,
