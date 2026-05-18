@@ -343,7 +343,7 @@ AWS_ACCESS_KEY_ID=111111111111 aws sqs create-queue --queue-name orders
 AWS_ACCESS_KEY_ID=222222222222 aws sqs create-queue --queue-name orders
 ```
 
-Any other key format, such as `test` or `AKIA...`, falls back to `FLOCI_DEFAULT_ACCOUNT_ID`, which defaults to `000000000000`.
+Any other key format, such as `test` or `AKIA...`, causes Floci to fall back to `FLOCI_DEFAULT_ACCOUNT_ID`, which defaults to `000000000000`.
 
 See the [Multi-Account Isolation docs](https://floci.io/floci/configuration/multi-account/).
 
@@ -647,7 +647,7 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 
 ## Migrating from LocalStack
 
-Floci is a drop-in replacement for LocalStack Community. The port, credentials, SDK configuration, and CLI endpoint pattern work the same. Swap the image and keep going.
+Floci is a drop-in replacement for LocalStack Community. The port, credentials, SDK configuration, and CLI endpoint pattern work the same way. Swap the image and keep going.
 
 ```yaml
 # Before
