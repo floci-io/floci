@@ -609,6 +609,22 @@ class SqsServiceTest {
     }
 
     @Test
+    void fifoDedup_scopedToMessageGroup_dedupKeyHasNoCollisionFromDelimiterInIds() {
+        // AWS allows '|' (and other punctuation) in both MessageGroupId and
+        // MessageDeduplicationId, so a naive "group|dedup" cache key could collide:
+        // (group="a",   dedup="b|c") and (group="a|b", dedup="c") both yield "a|b|c".
+        // Both pairs must be treated as distinct messages.
+        Queue fifo = sqsService.createQueue("collision.fifo",
+                Map.of("FifoQueue", "true",
+                        "DeduplicationScope", "messageGroup",
+                        "FifoThroughputLimit", "perMessageGroupId"));
+        sqsService.sendMessage(fifo.getQueueUrl(), "A", 0, "a", "b|c");
+        sqsService.sendMessage(fifo.getQueueUrl(), "B", 0, "a|b", "c");
+        List<Message> received = sqsService.receiveMessage(fifo.getQueueUrl(), 10, 30, 0);
+        assertEquals(2, received.size());
+    }
+
+    @Test
     void fifoDedup_queueScope_rejectsSameDedupIdAcrossGroups() {
         Queue fifo = sqsService.createQueue("queue-scoped.fifo",
                 Map.of("FifoQueue", "true"));

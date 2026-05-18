@@ -406,7 +406,9 @@ public class SqsService {
             // are not duplicates and must both be accepted.
             boolean groupScoped = "messageGroup".equalsIgnoreCase(
                     queue.getAttributes().get("DeduplicationScope"));
-            String dedupCacheKey = groupScoped ? messageGroupId + "|" + dedupId : dedupId;
+            // Use NUL as the delimiter — it is outside the SQS-allowed character set for
+            // MessageGroupId/MessageDeduplicationId, so the composite key is unambiguous.
+            String dedupCacheKey = groupScoped ? messageGroupId + "\0" + dedupId : dedupId;
             cleanupDeduplicationCache(storageKey);
             var dedupMap = deduplicationCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>());
             Instant expiry = Instant.now().plusSeconds(DEDUP_WINDOW_SECONDS);
