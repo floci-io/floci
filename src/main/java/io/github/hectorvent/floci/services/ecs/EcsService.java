@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ecs.container.EcsTaskHandle;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
+import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
@@ -100,6 +101,7 @@ public class EcsService {
     @PostConstruct
     void init() {
         reconciler.scheduleAtFixedRate(this::reconcileServices, 5, 5, TimeUnit.SECONDS);
+        reconciler.scheduleAtFixedRate(this::reconcileTasks, 2, 2, TimeUnit.SECONDS);
     }
 
     @PreDestroy
@@ -328,14 +330,23 @@ public class EcsService {
 
         if (dockerMode) {
             EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
-            containerManager.stopTask(handle);
+            if (handle != null) {
+                containerManager.stopTask(handle);
+                for (Container container : task.getContainers()) {
+                    String dockerId = container.getDockerId();
+                    if (dockerId != null && container.getExitCode() == null) {
+                        var exitStatus = containerManager.checkContainerExitStatus(dockerId);
+                        if (exitStatus != null && exitStatus.exitCode() != null) {
+                            container.setExitCode(exitStatus.exitCode());
+                        }
+                    }
+                    container.setLastStatus("STOPPED");
+                }
+            }
         }
 
         task.setLastStatus(TaskStatus.STOPPED.name());
         task.setStoppedAt(Instant.now());
-        if (task.getContainers() != null) {
-            task.getContainers().forEach(c -> c.setLastStatus("STOPPED"));
-        }
 
         EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
         if (cluster != null && cluster.getRunningTasksCount() > 0) {
@@ -1027,6 +1038,76 @@ public class EcsService {
                                     t.getTaskArn(), e.getMessage());
                         }
                     });
+        }
+    }
+
+    // ── Task Reconciliation ───────────────────────────────────────────────────
+
+    void reconcileTasks() {
+        if (!dockerMode) {
+            return;
+        }
+        for (EcsTask task : tasks.values()) {
+            if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
+                continue;
+            }
+            try {
+                reconcileTask(task);
+            } catch (Exception e) {
+                LOG.debugv("Error reconciling ECS task {0}: {1}", task.getTaskArn(), e.getMessage());
+            }
+        }
+    }
+
+    private void reconcileTask(EcsTask task) {
+        EcsTaskHandle handle = taskHandles.get(task.getTaskArn());
+        if (handle == null) {
+            return;
+        }
+
+        List<Container> containers = task.getContainers();
+        if (containers == null || containers.isEmpty()) {
+            return;
+        }
+
+        boolean allStopped = true;
+        boolean hasChanges = false;
+
+        for (Container container : containers) {
+            String dockerId = container.getDockerId();
+            if (dockerId == null) {
+                continue;
+            }
+
+            var exitStatus = containerManager.checkContainerExitStatus(dockerId);
+            if (exitStatus == null) {
+                allStopped = false;
+                continue;
+            }
+
+            if (container.getExitCode() == null) {
+                container.setExitCode(exitStatus.exitCode());
+                container.setLastStatus("STOPPED");
+                hasChanges = true;
+                LOG.infov("Container {0} exited with code {1}", dockerId, exitStatus.exitCode());
+            }
+        }
+
+        if (allStopped && hasChanges) {
+            task.setLastStatus(TaskStatus.STOPPED.name());
+            task.setDesiredStatus(TaskStatus.STOPPED.name());
+            task.setStoppedAt(Instant.now());
+            if (task.getContainers() != null) {
+                for (Container c : task.getContainers()) {
+                    c.setLastStatus("STOPPED");
+                }
+            }
+            EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
+            if (cluster != null && cluster.getRunningTasksCount() > 0) {
+                cluster.setRunningTasksCount(cluster.getRunningTasksCount() - 1);
+            }
+            taskHandles.remove(task.getTaskArn());
+            LOG.infov("Task {0} reconciled to STOPPED", task.getTaskArn());
         }
     }
 

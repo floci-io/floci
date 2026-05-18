@@ -202,7 +202,7 @@ public class EcsContainerManager {
     }
 
     private Container buildContainer(String taskArn, ContainerDefinition def, String dockerId,
-                                     List<NetworkBinding> networkBindings, String region) {
+                                      List<NetworkBinding> networkBindings, String region) {
         Container container = new Container();
         container.setTaskArn(taskArn);
         container.setName(def.getName());
@@ -213,6 +213,37 @@ public class EcsContainerManager {
         container.setContainerArn(regionResolver.buildArn("ecs", region,
                 "container/" + extractTaskId(taskArn) + "/" + def.getName()));
         return container;
+    }
+
+    /**
+     * Checks if a container has exited and returns its exit status.
+     *
+     * @param dockerId the Docker container ID
+     * @return an ExitStatus containing exitCode and exitTime, or null if container is still running
+     */
+    public ExitStatus checkContainerExitStatus(String dockerId) {
+        if (dockerId == null) {
+            return null;
+        }
+        try {
+            var inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            var state = inspect.getState();
+            if (Boolean.TRUE.equals(state.getRunning())) {
+                return null;
+            }
+            Integer exitCode = state.getExitCode();
+            String finishedAt = state.getFinishedAt();
+            return new ExitStatus(exitCode, finishedAt);
+        } catch (Exception e) {
+            LOG.debugv("Error checking container {0} exit status: {1}", dockerId, e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Exit status information for a container that has stopped.
+     */
+    public record ExitStatus(Integer exitCode, String finishedAt) {
     }
 
     private static String extractTaskId(String taskArn) {
