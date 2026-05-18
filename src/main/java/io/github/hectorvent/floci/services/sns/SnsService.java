@@ -275,16 +275,10 @@ public class SnsService {
                           String subject, Map<String, MessageAttributeValue> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
         int messageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
-        if (messageBytes > MAX_PUBLISH_SIZE) {
-            throw new AwsException("InvalidParameter",
-                    "Invalid parameter: Message too long", 400);
-        }
         int payloadSize = computePublishSize(messageBytes, subject, messageAttributes);
         if (payloadSize > MAX_PUBLISH_SIZE) {
-            throw new AwsException("InvalidParameterValue",
-                    "Invalid parameter: MessageAttributes Reason: total size of attributes "
-                            + "and subject plus message exceeds the maximum of "
-                            + MAX_PUBLISH_SIZE + " bytes", 400);
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Message too long", 400);
         }
 
         // Send SMS
