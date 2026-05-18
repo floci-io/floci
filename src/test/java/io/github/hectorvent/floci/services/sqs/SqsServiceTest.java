@@ -646,6 +646,53 @@ class SqsServiceTest {
     }
 
     @Test
+    void startMessageMoveTask_doesNotMatchSubstringOfAnotherQueueArn() {
+        // Regression: isDeadLetterQueue / listDeadLetterSourceQueues used to
+        // substring-match the raw RedrivePolicy JSON, so a queue named "foo"
+        // would be falsely treated as a DLQ when another queue's redrive policy
+        // referenced ":foo-bar". Now both look at the parsed deadLetterTargetArn.
+        sqsService.createQueue("dlq-real", null);
+        String realDlqArn = queueArn("dlq-real");
+        sqsService.createQueue("main-real",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + realDlqArn + "\",\"maxReceiveCount\":\"1\"}"));
+
+        // Create a queue whose ARN is a strict prefix of realDlqArn.
+        sqsService.createQueue("dlq", null);
+        String prefixArn = queueArn("dlq");
+        sqsService.createQueue("dest", null);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.startMessageMoveTask(prefixArn, queueArn("dest"), 0, "us-east-1"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+
+        // listDeadLetterSourceQueues should also only return source queues whose
+        // redrive policy references the exact ARN, not a substring match.
+        assertEquals(0, sqsService.listDeadLetterSourceQueues(
+                sqsService.getQueueUrl("dlq", "us-east-1"), "us-east-1").size());
+        assertEquals(1, sqsService.listDeadLetterSourceQueues(
+                sqsService.getQueueUrl("dlq-real", "us-east-1"), "us-east-1").size());
+    }
+
+    @Test
+    void startMessageMoveTask_concurrentSecondTaskOnSameSource_throwsInvalidParameterValue() {
+        sqsService.createQueue("d-concurrent", null);
+        String dlqArn = queueArn("d-concurrent");
+        sqsService.createQueue("p-concurrent",
+                Map.of("RedrivePolicy",
+                        "{\"deadLetterTargetArn\":\"" + dlqArn + "\",\"maxReceiveCount\":\"1\"}"));
+        sqsService.createQueue("dest-concurrent", null);
+        String destArn = queueArn("dest-concurrent");
+
+        sqsService.startMessageMoveTask(dlqArn, destArn, 0, "us-east-1");
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                sqsService.startMessageMoveTask(dlqArn, destArn, 0, "us-east-1"));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
+        assertTrue(ex.getMessage().toLowerCase().contains("already a task running"));
+    }
+
+    @Test
     void cancelMessageMoveTask_unknownHandle_throwsResourceNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
                 sqsService.cancelMessageMoveTask("task-does-not-exist", "us-east-1"));

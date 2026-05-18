@@ -783,8 +783,7 @@ public class SqsService {
         List<String> sourceQueues = new ArrayList<>();
         String prefix = region + "::";
         for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
-            String redrive = q.getAttributes().get("RedrivePolicy");
-            if (redrive != null && redrive.contains(targetArn)) {
+            if (targetArn.equals(redriveDlqArn(q))) {
                 sourceQueues.add(q.getQueueUrl());
             }
         }
@@ -816,10 +815,10 @@ public class SqsService {
                     "Source queue is not configured as a dead-letter queue.", 400);
         }
         // Reject a second task that races against a still-active one for the same source.
-        // The move runs synchronously below, so "active" here is approximated by "started
-        // within the past second"; that's enough to flag back-to-back calls (which AWS
-        // would reject because the first task is still in flight) without spuriously
-        // blocking later, legitimate re-runs.
+        // The move runs on a background worker, so RUNNING is the canonical "active" check;
+        // the additional 1-second window covers the small gap between StartMessageMoveTask
+        // returning and the worker flipping the task to RUNNING (so back-to-back start
+        // calls that AWS would reject can't slip through).
         long now = System.currentTimeMillis();
         for (MoveTask existing : moveTasksByHandle.values()) {
             if (!sourceArn.equals(existing.sourceArn())) {
@@ -827,8 +826,9 @@ public class SqsService {
             }
             if ("RUNNING".equals(existing.status())
                     || (now - existing.startedTimestampMillis()) < 1_000) {
-                throw new AwsException("AWS.SimpleQueueService.UnsupportedOperation",
-                        "There is already an active message movement task for this source queue.", 400);
+                throw new AwsException("InvalidParameterValue",
+                        "There is already a task running. Only one active task is allowed for a source queue arn at a given time.",
+                        400);
             }
         }
 
@@ -1004,12 +1004,25 @@ public class SqsService {
     private boolean isDeadLetterQueue(String queueArn, String region) {
         String prefix = region + "::";
         for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
-            String redrive = q.getAttributes().get("RedrivePolicy");
-            if (redrive != null && redrive.contains(queueArn)) {
+            if (queueArn.equals(redriveDlqArn(q))) {
                 return true;
             }
         }
         return false;
+    }
+
+    private static String redriveDlqArn(Queue queue) {
+        String raw = queue.getAttributes().get("RedrivePolicy");
+        if (raw == null) {
+            return null;
+        }
+        try {
+            JsonNode policy = new com.fasterxml.jackson.databind.ObjectMapper().readTree(raw);
+            JsonNode dlqArn = policy.get("deadLetterTargetArn");
+            return dlqArn != null && !dlqArn.isNull() ? dlqArn.asText() : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public record ChangeVisibilityBatchEntry(String id, String receiptHandle, int visibilityTimeout) {
