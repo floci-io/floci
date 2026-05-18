@@ -28,6 +28,43 @@ Floci is named after [floccus](https://en.wikipedia.org/wiki/Cirrocumulus_floccu
 
 ## Quick Start
 
+The fastest way to run Floci is with the official [CLI](https://github.com/floci-io/floci-cli)
+
+```bash
+floci start
+```
+
+Export the AWS environment variables:
+
+```bash
+eval $(floci env)
+```
+
+Use your existing AWS tools normally:
+
+```bash
+aws s3 mb s3://my-bucket
+
+aws dynamodb create-table \
+  --table-name demo-table \
+  --attribute-definitions AttributeName=pk,AttributeType=S \
+  --key-schema AttributeName=pk,KeyType=HASH \
+  --billing-mode PAY_PER_REQUEST
+
+aws dynamodb list-tables
+```
+
+### Watch it run
+
+This short demo shows the CLI flow: start Floci, export the local AWS environment, run standard AWS CLI commands, and stop the emulator.
+
+https://github.com/user-attachments/assets/02dbd96a-cd5c-40f8-ad74-a41055e73e8b
+
+All AWS services are available at `http://localhost:4566`. Any region works. Credentials can be any non-empty values.
+
+<details>
+<summary>Prefer Docker Compose?</summary>
+
 Create a `docker-compose.yml` file:
 
 ```yaml
@@ -46,29 +83,16 @@ Start Floci:
 docker compose up
 ```
 
-All services are available at `http://localhost:4566`. Any region works. Credentials can be any non-empty values.
+Then configure your AWS environment manually:
 
 ```bash
 export AWS_ENDPOINT_URL=http://localhost:4566
 export AWS_DEFAULT_REGION=us-east-1
 export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
-
-aws s3 mb s3://my-bucket
-aws sqs create-queue --queue-name my-queue
-aws dynamodb list-tables
 ```
 
-Run directly with Docker when you need Docker-backed services such as Lambda, RDS, ElastiCache, MSK, ECS, EC2, EKS, OpenSearch, or CodeBuild:
-
-```bash
-docker run -d --name floci \
-  -p 4566:4566 \
-  -v /var/run/docker.sock:/var/run/docker.sock \
-  -e FLOCI_DEFAULT_REGION=us-east-1 \
-  -u root \
-  floci/floci:latest
-```
+</details>
 
 <details>
 <summary>Using the old <code>hectorvent/floci</code> image?</summary>
@@ -89,25 +113,40 @@ The old `hectorvent/floci` repository no longer receives updates.
 
 ## Features
 
-**Local AWS without the cloud account**
+<details open>
+<summary><strong>Local AWS without the cloud account</strong></summary>
 
-Run AWS-compatible services locally with no account, no auth token, and no paid feature gates.
+Run AWS-compatible services locally without an AWS account, auth token, or paid feature gates.
 
-**Real containers where fidelity matters**
+</details>
+
+<details>
+<summary><strong>Real Docker where fidelity matters</strong></summary>
 
 Lambda, RDS, ElastiCache, MSK, ECS, EC2, EKS, OpenSearch, and CodeBuild use real Docker-backed execution instead of shallow mocks.
 
-**Drop-in SDK compatibility**
+</details>
 
-Use standard AWS clients by changing the endpoint to `http://localhost:4566`. Existing credentials, regions, SDKs, CLI commands, and IaC workflows stay familiar.
+<details>
+<summary><strong>Drop-in AWS compatibility</strong></summary>
 
-**Fast by default**
+Point standard AWS clients at `http://localhost:4566`. Existing credentials, regions, SDKs, CLI commands, and IaC workflows stay familiar.
 
-The native image starts in milliseconds and keeps idle memory low, which makes it practical for local development and CI pipelines.
+</details>
 
-**Flexible persistence**
+<details>
+<summary><strong>Fast enough for CI</strong></summary>
 
-Choose from in-memory, persistent, hybrid, and write-ahead log storage modes depending on how much durability you need.
+The native image starts in milliseconds and keeps idle memory low, making it practical for local development and test pipelines.
+
+</details>
+
+<details>
+<summary><strong>Configurable persistence</strong></summary>
+
+Choose from in-memory, persistent, hybrid, and write-ahead log storage depending on the durability profile you need.
+
+</details>
 
 ## Why Floci?
 
