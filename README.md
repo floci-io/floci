@@ -326,7 +326,7 @@ Floci can trade speed for durability depending on the workflow. Configure the de
 | Mode | Behavior | Best for | Durability |
 |---|---|---|:---:|
 | `memory` | Entirely in RAM. Data is lost when the container stops. | CI and ephemeral tests | None |
-| `persistent` | Loaded at startup, flushed on graceful shutdown. | Simple local state preservation | Medium |
+| `persistent` | Loaded at startup and flushed to disk immediately on every write operation. | Simple local state preservation with immediate persistence | Medium |
 | `hybrid` | In-memory performance with periodic async flushing every 5 seconds. | Local development | Good |
 | `wal` | Write-ahead log. Every mutation is logged before responding. | Maximum durability | Highest |
 
