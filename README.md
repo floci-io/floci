@@ -1,7 +1,7 @@
 <p align="center">
   <img src="https://github.com/user-attachments/assets/7f95c191-d457-44f9-bb42-17da438c5320" width="400" alt="Floci" />
   <p align="center">
-    <strong>A free, open-source local AWS emulator.</strong><br />
+    <strong>Light, fluffy, and always free</strong><br />
     No account. No auth token. No feature gates. Just <code>docker compose up</code>.
   </p>
 </p>
