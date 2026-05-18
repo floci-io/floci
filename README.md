@@ -58,7 +58,7 @@ aws dynamodb list-tables
 
 This short demo shows the CLI flow: start Floci, export the local AWS environment, run standard AWS CLI commands, and stop the emulator.
 
-https://github.com/user-attachments/assets/02dbd96a-cd5c-40f8-ad74-a41055e73e8b
+https://github.com/user-attachments/assets/b55714dc-ef36-40ae-a734-cd2cadc288a8
 
 All AWS services are available at `http://localhost:4566`. Any region works. Credentials can be any non-empty values.
 
