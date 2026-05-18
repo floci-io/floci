@@ -223,6 +223,27 @@ class RuntimeApiServerTest {
         assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
     }
 
+    @Test
+    @Timeout(10)
+    void stopReleasesPortSynchronously() throws Exception {
+        server.stop();
+        new ServerSocket(port).close();
+    }
+
+    @Test
+    @Timeout(10)
+    void newServerOnSamePortAcceptsTrafficAfterStop() throws Exception {
+        server.stop();
+
+        server = new RuntimeApiServer(vertx, port);
+        server.start();
+
+        HttpResponse<String> resp = httpClient.send(
+                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/x")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, resp.statusCode());
+    }
+
     private static int findFreePort() throws IOException {
         try (ServerSocket socket = new ServerSocket(0)) {
             return socket.getLocalPort();
