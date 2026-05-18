@@ -65,7 +65,7 @@ All AWS services are available at `http://localhost:4566`. Any region works. Cre
 <details>
 <summary>Prefer Docker Compose?</summary>
 
-Create a `docker-compose.yml` file:
+Create a `compose.yaml` file:
 
 ```yaml
 services:
@@ -73,8 +73,6 @@ services:
     image: floci/floci:latest
     ports:
       - "4566:4566"
-    volumes:
-      - ./data:/app/data
 ```
 
 Start Floci:
