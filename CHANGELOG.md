@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.17] - 2026-05-18
+
+### Added
+
+- **neptune:** Neptune control plane — `CreateDBCluster`, `DescribeDBClusters`, `ModifyDBCluster`, `DeleteDBCluster`, `CreateDBInstance`, `DescribeDBInstances`, `ModifyDBInstance`, `DeleteDBInstance`; each cluster is backed by a real TinkerPop Gremlin Server Docker container behind a transparent TCP proxy ([#881](https://github.com/floci-io/floci/pull/881))
+- **apigateway:** `GetAccount` and `UpdateAccount` — account-level configuration including throttle settings and CloudWatch log role ARN; enables Terraform and CDK stacks that call `aws_api_gateway_account` ([#867](https://github.com/floci-io/floci/pull/867))
+- **apigatewayv2:** `HTTP_PROXY` integration type — forwards inbound requests to the configured `IntegrationUri` with `RequestParameters` transformations matching AWS-faithful semantics ([#860](https://github.com/floci-io/floci/pull/860))
+- **dynamodb:** `ExecuteStatement`, `ExecuteTransaction`, `BatchExecuteStatement` — hand-rolled PartiQL tokenizer and recursive-descent parser supporting SELECT/INSERT/UPDATE/DELETE, `?` positional placeholders, `begins_with`, and `BETWEEN`; translates to existing service calls with no new storage ([#864](https://github.com/floci-io/floci/pull/864))
+- **sns:** `FilterPolicyScope=MessageBody` — filter policies scoped to the message body are now evaluated at publish time; previously the scope was persisted but ignored, delivering all messages regardless of the policy ([#863](https://github.com/floci-io/floci/pull/863))
+- **cognito:** `PostConfirmation` and `PreSignUp` Lambda triggers — `PostConfirmation_ConfirmSignUp` fires after `ConfirmSignUp`; `PreSignUp_SignUp` fires before user persistence on `SignUp`; `autoConfirmUser=true` in the PreSignUp response auto-confirms and chains into PostConfirmation ([#859](https://github.com/floci-io/floci/pull/859))
+- **ses:** `PutAccountSuppressionAttributes` (`PUT /v2/email/account/suppression`) — set account-level suppression list reasons (`BOUNCE`/`COMPLAINT`); `GetAccount` response now includes a `SuppressionAttributes` object reflecting the stored setting ([#853](https://github.com/floci-io/floci/pull/853))
+- **cur / bcm-data-exports:** Cost and Usage Reports (`AWSOrigamiServiceGatewayService.*`) and BCM Data Exports (`AWSBillingAndCostManagementDataExports.*`) management planes sharing one underlying export pipeline ([#850](https://github.com/floci-io/floci/pull/850))
+
+### Fixed
+
+- **dynamodb:** honor legacy `Expected` condition in `UpdateItem` — `handleUpdateItem` now reads the `Expected` field, and `evaluateLegacyExpected` normalizes the legacy `{"Value": x}` shape to `{"AttributeValueList": [x]}` before evaluation; conditional writes that should fail were silently succeeding ([#888](https://github.com/floci-io/floci/pull/888))
+- **apigatewayv2:** `Route` responses now include `authorizerId` — the field was persisted and used at dispatch time but never emitted by `toV2RouteNode`, breaking SDK and Terraform reads ([#887](https://github.com/floci-io/floci/pull/887))
+- **eventbridge:** persisted rules no longer disappear on reload — `Rule.getRegion()` is a derived getter with no setter; `ObjectMapper` wrote `"region"` into `eventbridge-rules.json` and then threw `UnrecognizedPropertyException` on startup, causing all persisted rules to be silently dropped ([#878](https://github.com/floci-io/floci/pull/878))
+- **s3:** `PutObject` now returns the checksum for the algorithm actually specified by the caller; previously always returned `ChecksumSHA1` + `ChecksumSHA256` regardless of `--checksum-algorithm` ([#877](https://github.com/floci-io/floci/pull/877))
+- **eks:** cluster readiness polling now uses the container's bridge IP instead of the container hostname, fixing clusters stuck in `CREATING` when Floci runs inside Docker; startup failures are handled gracefully instead of returning 500 ([#873](https://github.com/floci-io/floci/pull/873))
+- **eventbridge:** region is now correctly propagated through rule dispatch so SQS queue lookup uses the rule's region rather than the primary region ([#870](https://github.com/floci-io/floci/pull/870))
+- **eventbridge:** `EventBusName` is now accepted as a full ARN (`arn:aws:events:…:event-bus/my-bus`) in addition to a plain name across all EventBridge operations ([#843](https://github.com/floci-io/floci/pull/843))
+
 ## [1.5.16] - 2026-05-15
 
 ### Added
@@ -639,7 +662,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.16...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.17...HEAD
+[1.5.17]: https://github.com/floci-io/floci/compare/1.5.16...1.5.17
 [1.5.16]: https://github.com/floci-io/floci/compare/1.5.15...1.5.16
 [1.5.15]: https://github.com/floci-io/floci/compare/1.5.14...1.5.15
 [1.5.14]: https://github.com/floci-io/floci/compare/1.5.13...1.5.14

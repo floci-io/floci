@@ -12,6 +12,7 @@ import software.amazon.awssdk.services.dynamodb.model.BillingMode;
 import software.amazon.awssdk.services.dynamodb.model.ComparisonOperator;
 import software.amazon.awssdk.services.dynamodb.model.Condition;
 import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedException;
+import software.amazon.awssdk.services.dynamodb.model.ExpectedAttributeValue;
 import software.amazon.awssdk.services.dynamodb.model.DynamoDbException;
 import software.amazon.awssdk.services.dynamodb.model.GetItemRequest;
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse;
@@ -570,6 +571,83 @@ class DynamoDbConformanceChangesTest {
 
         assertThat(resp.items()).hasSize(1);
         assertThat(resp.items().get(0).get("name").s()).isEqualTo("Item-2");
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 10 — Legacy API: Expected (issue #848)
+    // -----------------------------------------------------------------------
+
+    @Test @Order(85)
+    @SuppressWarnings("deprecation")
+    void updateItemLegacyExpectedAttributeMissing() {
+        // Item does not exist; expecting a specific attribute value should fail
+        assertThatThrownBy(() -> ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-missing"), "sk", av("s")))
+                .attributeUpdates(Map.of(
+                        "val", AttributeValueUpdate.builder().value(av("updated")).action(AttributeAction.PUT).build()))
+                .expected(Map.of("val", ExpectedAttributeValue.builder()
+                        .comparisonOperator(ComparisonOperator.EQ)
+                        .attributeValueList(av("original"))
+                        .build()))
+                .build()))
+                .isInstanceOf(ConditionalCheckFailedException.class);
+    }
+
+    @Test @Order(86)
+    @SuppressWarnings("deprecation")
+    void updateItemLegacyExpectedValueMismatch() {
+        ddb.putItem(r -> r.tableName(TABLE).item(Map.of(
+                "pk", av("legacy-exp-mismatch"), "sk", av("s"),
+                "count", AttributeValue.builder().n("2").build())));
+
+        assertThatThrownBy(() -> ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-mismatch"), "sk", av("s")))
+                .attributeUpdates(Map.of(
+                        "count", AttributeValueUpdate.builder()
+                                .value(AttributeValue.builder().n("99").build())
+                                .action(AttributeAction.PUT)
+                                .build()))
+                .expected(Map.of("count", ExpectedAttributeValue.builder()
+                        .comparisonOperator(ComparisonOperator.EQ)
+                        .attributeValueList(AttributeValue.builder().n("1").build())
+                        .build()))
+                .build()))
+                .isInstanceOf(ConditionalCheckFailedException.class);
+
+        // Verify item was not updated
+        GetItemResponse resp = ddb.getItem(r -> r
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-mismatch"), "sk", av("s"))));
+        assertThat(resp.item().get("count").n()).isEqualTo("2");
+    }
+
+    @Test @Order(87)
+    @SuppressWarnings("deprecation")
+    void updateItemLegacyExpectedMatchSucceeds() {
+        ddb.putItem(r -> r.tableName(TABLE).item(Map.of(
+                "pk", av("legacy-exp-match"), "sk", av("s"),
+                "count", AttributeValue.builder().n("1").build())));
+
+        ddb.updateItem(UpdateItemRequest.builder()
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-match"), "sk", av("s")))
+                .attributeUpdates(Map.of(
+                        "count", AttributeValueUpdate.builder()
+                                .value(AttributeValue.builder().n("99").build())
+                                .action(AttributeAction.PUT)
+                                .build()))
+                .expected(Map.of("count", ExpectedAttributeValue.builder()
+                        .comparisonOperator(ComparisonOperator.EQ)
+                        .attributeValueList(AttributeValue.builder().n("1").build())
+                        .build()))
+                .build());
+
+        GetItemResponse resp = ddb.getItem(r -> r
+                .tableName(TABLE)
+                .key(Map.of("pk", av("legacy-exp-match"), "sk", av("s"))));
+        assertThat(resp.item().get("count").n()).isEqualTo("99");
     }
 
     // -----------------------------------------------------------------------

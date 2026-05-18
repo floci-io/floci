@@ -463,11 +463,20 @@ public class DynamoDbJsonHandler {
         }
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
+        JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
+        String conditionalOperatorUpd = request.has("ConditionalOperator")
+                ? request.get("ConditionalOperator").asText() : "AND";
 
         if (updateData != null && updateExpression != null) {
             throw new AwsException("ValidationException",
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
+        }
+
+        if (conditionExpression != null && expectedUpd != null) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
         }
 
         // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
@@ -497,6 +506,11 @@ public class DynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, hashTokens);
             Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
             checkUnusedEav(exprAttrValues, colonTokensAll);
+        }
+
+        if (expectedUpd != null) {
+            JsonNode existingForUpd = dynamoDbService.getItem(tableName, key, region);
+            evaluateLegacyExpected(existingForUpd, expectedUpd, conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
         }
 
         DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
@@ -538,7 +552,7 @@ public class DynamoDbJsonHandler {
                 boolean exists = condition.get("Exists").asBoolean();
                 condResult = exists ? attrValue != null : attrValue == null;
             } else {
-                condResult = dynamoDbService.matchesKeyConditionPublic(attrValue, condition);
+                condResult = dynamoDbService.matchesKeyConditionPublic(attrValue, normalizeLegacyCondition(condition));
             }
             if (useOr) overall = overall || condResult;
             else overall = overall && condResult;
@@ -550,6 +564,27 @@ public class DynamoDbJsonHandler {
                 throw new ConditionalCheckFailedException(null);
             }
         }
+    }
+
+    /**
+     * Converts a legacy Expected condition from the {"Value": {...}} form to the
+     * {"AttributeValueList": [{...}]} form expected by matchesKeyCondition.
+     * Operators that already use AttributeValueList (IN, BETWEEN) pass through unchanged.
+     */
+    private JsonNode normalizeLegacyCondition(JsonNode condition) {
+        if (!condition.has("Value") || condition.has("AttributeValueList")) {
+            return condition;
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode normalized = objectMapper.createObjectNode();
+        condition.fields().forEachRemaining(e -> {
+            if (!"Value".equals(e.getKey())) {
+                normalized.set(e.getKey(), e.getValue());
+            }
+        });
+        com.fasterxml.jackson.databind.node.ArrayNode avl = objectMapper.createArrayNode();
+        avl.add(condition.get("Value"));
+        normalized.set("AttributeValueList", avl);
+        return normalized;
     }
 
     private void addItemCollectionMetrics(ObjectNode response, JsonNode request, String tableName,

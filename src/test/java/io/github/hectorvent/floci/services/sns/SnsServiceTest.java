@@ -266,6 +266,49 @@ class SnsServiceTest {
         assertEquals("2", attrs.get("SubscriptionsConfirmed"));
     }
 
+    @Test
+    void publish_withHttpSubscriber_pendingConfirmation_skipsDelivery() {
+        Topic topic = snsService.createTopic("http-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "http",
+                "http://localhost:9999/webhook", REGION, Map.of());
+        // HTTP subscription should be pending confirmation
+        assertEquals("true", sub.getAttributes().get("PendingConfirmation"));
+        assertNotNull(sub.getAttributes().get("ConfirmationToken"));
+        // Publish should succeed but skip delivery to pending subscription
+        String messageId = snsService.publish(topic.getTopicArn(), null, "Hello HTTP!", null, REGION);
+        assertNotNull(messageId);
+    }
+
+    @Test
+    void subscribe_httpPendingConfirmation_canBeConfirmed() {
+        Topic topic = snsService.createTopic("http-topic2", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "http",
+                "http://localhost:9999/webhook", REGION, Map.of());
+        assertEquals("true", sub.getAttributes().get("PendingConfirmation"));
+        String token = sub.getAttributes().get("ConfirmationToken");
+        assertNotNull(token);
+
+        // Confirm the subscription
+        String confirmedArn = snsService.confirmSubscription(topic.getTopicArn(), token, REGION);
+        assertEquals(sub.getSubscriptionArn(), confirmedArn);
+    }
+
+    @Test
+    void subscribe_httpProtocol_rejectsHttpsEndpoint() {
+        Topic topic = snsService.createTopic("scheme-topic", null, null, REGION);
+        assertThrows(AwsException.class,
+            () -> snsService.subscribe(topic.getTopicArn(), "http",
+                    "https://example.com/hook", REGION, Map.of()));
+    }
+
+    @Test
+    void subscribe_httpsProtocol_rejectsHttpEndpoint() {
+        Topic topic = snsService.createTopic("scheme-topic2", null, null, REGION);
+        assertThrows(AwsException.class,
+            () -> snsService.subscribe(topic.getTopicArn(), "https",
+                    "http://example.com/hook", REGION, Map.of()));
+    }
+
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private Subscription subscriptionWithPolicy(String filterPolicy, String scope) {
