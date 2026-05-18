@@ -252,9 +252,8 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
         String algorithm = request.path("MacAlgorithm").asText();
-        String messageType = request.path("MessageType").asText("RAW");
 
-        byte[] mac = service.generateMac(keyId, message, algorithm, messageType, region);
+        byte[] mac = service.generateMac(keyId, message, algorithm, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("KeyId", service.describeKey(keyId, region).getArn());
@@ -268,9 +267,8 @@ public class KmsJsonHandler {
         byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
         byte[] mac = Base64.getDecoder().decode(request.path("Mac").asText());
         String algorithm = request.path("MacAlgorithm").asText();
-        String messageType = request.path("MessageType").asText("RAW");
 
-        service.verifyMac(keyId, message, mac, algorithm, messageType, region);
+        service.verifyMac(keyId, message, mac, algorithm, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("KeyId", service.describeKey(keyId, region).getArn());

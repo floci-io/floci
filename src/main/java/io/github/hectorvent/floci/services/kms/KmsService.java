@@ -513,10 +513,6 @@ public class KmsService {
     }
 
     public byte[] generateMac(String keyId, byte[] message, String algorithm, String region) {
-        return generateMac(keyId, message, algorithm, "RAW", region);
-    }
-
-    public byte[] generateMac(String keyId, byte[] message, String algorithm, String messageType, String region) {
         KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
         validateMacMessageLength(message);
 
@@ -535,12 +531,8 @@ public class KmsService {
     }
 
     public void verifyMac(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
-        verifyMac(keyId, message, mac, algorithm, "RAW", region);
-    }
-
-    public void verifyMac(String keyId, byte[] message, byte[] mac, String algorithm, String messageType, String region) {
         validateMacLength(mac);
-        byte[] expected = generateMac(keyId, message, algorithm, messageType, region);
+        byte[] expected = generateMac(keyId, message, algorithm, region);
         if (!MessageDigest.isEqual(expected, mac)) {
             throw new AwsException("KMSInvalidMacException", "The MAC is not valid.", 400);
         }
