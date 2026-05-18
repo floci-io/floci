@@ -348,7 +348,7 @@ public class SqsJsonHandler {
         ArrayNode failed = objectMapper.createArrayNode();
 
         record ParsedEntry(String id, String body, int delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -379,9 +379,13 @@ public class SqsJsonHandler {
                     });
                 }
 
+                String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
+                        .path("AWSTraceHeader").path("StringValue").asText(null);
+
                 totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
                 parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
-                        messageGroupId, messageDeduplicationId, messageAttributes));
+                        messageGroupId, messageDeduplicationId, messageAttributes,
+                        entryAwsTraceHeader));
             }
         }
 
@@ -391,7 +395,8 @@ public class SqsJsonHandler {
                 String id = parsed.id();
                 try {
                     Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
-                            parsed.groupId(), parsed.dedupId(), parsed.attributes(), region);
+                            parsed.groupId(), parsed.dedupId(), parsed.attributes(),
+                            parsed.awsTraceHeader(), region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     success.put("MessageId", msg.getMessageId());

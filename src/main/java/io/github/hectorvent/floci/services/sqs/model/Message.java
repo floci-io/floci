@@ -33,7 +33,9 @@ public class Message {
     // surface.
     private String originalSourceQueueUrl;
 
-    // Server-side system attribute callers may set via MessageSystemAttributes on SendMessage
+    // Caller-supplied system attribute (the only entry AWS allows under
+    // MessageSystemAttributes on SendMessage). Returned under Attributes.AWSTraceHeader
+    // on ReceiveMessage when requested.
     private String awsTraceHeader;
 
     // Transient fields for visibility timeout tracking
