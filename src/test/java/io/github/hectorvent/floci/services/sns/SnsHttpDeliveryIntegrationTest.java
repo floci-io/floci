@@ -339,5 +339,9 @@ class SnsHttpDeliveryIntegrationTest {
         assertEquals("1", body.get("SignatureVersion").asText());
         assertNotNull(body.get("MessageId").asText());
         assertNotNull(body.get("Timestamp").asText());
+
+        // Subscription ARN header must be "PendingConfirmation" for confirmation requests
+        assertNotNull(req.headers().get("X-amz-sns-subscription-arn"));
+        assertEquals("PendingConfirmation", req.headers().get("X-amz-sns-subscription-arn").get(0));
     }
 }
