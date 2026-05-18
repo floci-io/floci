@@ -1,12 +1,28 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.apigateway.model.*;
-import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
+import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
+import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
+import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
+import io.github.hectorvent.floci.services.apigateway.model.RestApi;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Deployment;
@@ -17,16 +33,20 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.model.RouteResponse;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Stage;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.PATCH;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.jboss.logging.Logger;
-
-import java.io.IOException;
-import java.util.List;
-import java.util.Map;
 
 /**
  * Unified AWS API Gateway management endpoints (v1 REST and v2 HTTP).
@@ -35,8 +55,6 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes({MediaType.APPLICATION_JSON, "application/json-patch+json"})
 public class ApiGatewayController {
-
-    private static final Logger LOG = Logger.getLogger(ApiGatewayController.class);
 
     private final ApiGatewayService service;
     private final ApiGatewayV2Service v2Service;
@@ -155,6 +173,52 @@ public class ApiGatewayController {
     }
 
     // ──────────────────────────── General REST APIs (v1) ────────────────────────────
+
+    @GET
+    @Path("/account")
+    public Response getAccount(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(toAccountNode(service.getAccount(region)).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/account")
+    public Response updateAccount(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            if (body == null || body.isBlank()) {
+                throw new AwsException("BadRequestException", "Request body is required", 400);
+            }
+            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            if (!node.isArray()) {
+                throw new AwsException("BadRequestException", "patchOperations must be an array", 400);
+            }
+
+            List<Map<String, String>> patchOperations = new ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode operationNode : node) {
+                if (operationNode == null || operationNode.isNull() || !operationNode.isObject()) {
+                    throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
+                }
+                try {
+                    Map<String, String> operation = objectMapper.convertValue(operationNode,
+                            new TypeReference<Map<String, String>>() {
+                            });
+                    if (operation == null) {
+                        throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
+                    }
+                    patchOperations.add(operation);
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+            }
+
+            return Response.ok(toAccountNode(service.updateAccount(region, patchOperations)).toString())
+                    .type(MediaType.APPLICATION_JSON)
+                    .build();
+        } catch (IOException | IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
 
     @POST
     @Path("/restapis")
@@ -1544,6 +1608,30 @@ public class ApiGatewayController {
         return node;
     }
 
+    private ObjectNode toAccountNode(io.github.hectorvent.floci.services.apigateway.model.Account account) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (account.getApiKeyVersion() != null) {
+            node.put("apiKeyVersion", account.getApiKeyVersion());
+        }
+        if (account.getCloudwatchRoleArn() != null) {
+            node.put("cloudwatchRoleArn", account.getCloudwatchRoleArn());
+        }
+        if (account.getFeatures() != null) {
+            ArrayNode features = node.putArray("features");
+            account.getFeatures().forEach(features::add);
+        }
+        if (account.getThrottleSettings() != null) {
+            ObjectNode throttle = node.putObject("throttleSettings");
+            if (account.getThrottleSettings().getBurstLimit() != null) {
+                throttle.put("burstLimit", account.getThrottleSettings().getBurstLimit());
+            }
+            if (account.getThrottleSettings().getRateLimit() != null) {
+                throttle.put("rateLimit", account.getThrottleSettings().getRateLimit());
+            }
+        }
+        return node;
+    }
+
     private ObjectNode toV2ApiNode(Api api) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("apiId", api.getApiId());
@@ -1567,6 +1655,7 @@ public class ApiGatewayController {
         node.put("routeId", r.getRouteId());
         node.put("routeKey", r.getRouteKey());
         node.put("authorizationType", r.getAuthorizationType());
+        if (r.getAuthorizerId() != null) node.put("authorizerId", r.getAuthorizerId());
         if (r.getTarget() != null) node.put("target", r.getTarget());
         if (r.getRouteResponseSelectionExpression() != null) node.put("routeResponseSelectionExpression", r.getRouteResponseSelectionExpression());
         return node;

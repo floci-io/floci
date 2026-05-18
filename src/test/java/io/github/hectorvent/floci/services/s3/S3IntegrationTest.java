@@ -77,7 +77,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-sha256", notNullValue())
+            .header("x-amz-checksum-crc64nvme", notNullValue())
             .body(equalTo("Hello World from S3!"));
     }
 
@@ -93,7 +93,7 @@ class S3IntegrationTest {
             .body(containsString("<GetObjectAttributesResponse"))
             .body(containsString("<StorageClass>STANDARD_IA</StorageClass>"))
             .body(containsString("<ObjectSize>20</ObjectSize>"))
-            .body(containsString("<ChecksumSHA256>"));
+            .body(containsString("<ChecksumCRC64NVME>"));
     }
 
     @Test
@@ -108,7 +108,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-sha256", notNullValue());
+            .header("x-amz-checksum-crc64nvme", notNullValue());
     }
 
     @Test
@@ -1624,5 +1624,44 @@ class S3IntegrationTest {
         .then()
                 .statusCode(400)
                 .body(containsString("InvalidKey"));
+    }
+
+    @Test
+    @Order(150)
+    void putObjectRejectsMismatchedCRC32() {
+        given()
+            .body("hello")
+            .header("x-amz-checksum-crc32", "INVALID==")
+        .when()
+            .put("/test-bucket/checksum-crc32-test.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("BadDigest"));
+    }
+
+    @Test
+    @Order(151)
+    void putObjectRejectsMismatchedCRC32C() {
+        given()
+            .body("hello")
+            .header("x-amz-checksum-crc32c", "INVALID==")
+        .when()
+            .put("/test-bucket/checksum-crc32c-test.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("BadDigest"));
+    }
+
+    @Test
+    @Order(152)
+    void putObjectRejectsMismatchedCRC64NVME() {
+        given()
+            .body("hello")
+            .header("x-amz-checksum-crc64nvme", "INVALID==")
+        .when()
+            .put("/test-bucket/checksum-crc64nvme-test.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("BadDigest"));
     }
 }

@@ -102,6 +102,10 @@ jobs:
         id: created
         run: echo "created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" >> "$GITHUB_OUTPUT"
 
+      - name: Set SOURCE_DATE_EPOCH
+        id: source_date
+        run: echo "epoch=$(git log -1 --pretty=%ct)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/download-artifact@v8
         with:
           name: native-amd64
@@ -124,6 +128,8 @@ jobs:
 
       - name: Build and push native multi-arch image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
         with:
           context: .
           file: docker/Dockerfile.native-package
@@ -146,6 +152,8 @@ jobs:
 
       - name: Build and push compat multi-arch image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
+        env:
+          SOURCE_DATE_EPOCH: ${{ steps.source_date.outputs.epoch }}
         with:
           context: .
           file: docker/Dockerfile.compat

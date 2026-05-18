@@ -95,6 +95,11 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    neptune:
+      enabled: true
+      proxy-base-port: 8182
+      proxy-max-port: 8282
+      default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
       enabled: true
     scheduler:

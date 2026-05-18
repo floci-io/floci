@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.eventbridge.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
@@ -8,6 +10,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 @RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class Rule {
 
     private String name;
@@ -57,6 +60,7 @@ public class Rule {
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
 
+    @JsonIgnore
     public String getRegion() {
         return AwsArnUtils.regionOrDefault(arn, null);
     }

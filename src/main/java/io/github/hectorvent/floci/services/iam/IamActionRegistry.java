@@ -1,10 +1,5 @@
 package io.github.hectorvent.floci.services.iam;
 
-import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.ws.rs.container.ContainerRequestContext;
-import jakarta.ws.rs.core.MediaType;
-import org.jboss.logging.Logger;
-
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
@@ -13,6 +8,12 @@ import java.nio.charset.Charset;
 import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.regex.Pattern;
+
+import org.jboss.logging.Logger;
+
+import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.ws.rs.container.ContainerRequestContext;
+import jakarta.ws.rs.core.MediaType;
 
 /**
  * Maps (credentialScope, httpMethod, requestPath) → IAM action string.
@@ -69,6 +70,8 @@ public class IamActionRegistry {
         // Handled via Query-style action extraction in the filter
 
         // ── API Gateway ────────────────────────────────────────────────────────
+        rule("apigateway", "GET",    ".*/account$",                       "apigateway:GET"),
+        rule("apigateway", "PATCH",  ".*/account$",                       "apigateway:PATCH"),
         rule("apigateway", "GET",    ".*/restapis$",                        "apigateway:GET"),
         rule("apigateway", "POST",   ".*/restapis$",                        "apigateway:POST"),
         rule("apigateway", "GET",    ".*/restapis/.+",                      "apigateway:GET"),

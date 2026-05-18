@@ -131,6 +131,7 @@ public interface EmulatorConfig {
         AppConfigDataStorageConfig appconfigdata();
         ElastiCacheStorageConfig elasticache();
         RdsStorageConfig rds();
+        NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
     }
 
@@ -230,6 +231,10 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface NeptuneStorageConfig {
+        Optional<String> mode();
+    }
+
     interface BackupStorageConfig {
         Optional<String> mode();
 
@@ -297,6 +302,7 @@ public interface EmulatorConfig {
         CodeDeployServiceConfig codedeploy();
         AutoScalingServiceConfig autoscaling();
         BackupServiceConfig backup();
+        NeptuneServiceConfig neptune();
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
@@ -456,6 +462,24 @@ public interface EmulatorConfig {
         String defaultMariadbImage();
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+    }
+
+    interface NeptuneServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** Base port of the proxy port range. First cluster gets this port. */
+        @WithDefault("8182")
+        int proxyBasePort();
+
+        /** Inclusive upper bound of the proxy port range. */
+        @WithDefault("8282")
+        int proxyMaxPort();
+
+        @WithDefault("tinkerpop/gremlin-server:3.7.3")
+        String defaultImage();
+
         Optional<String> dockerNetwork();
     }
 

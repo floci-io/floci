@@ -1,20 +1,40 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import org.jboss.logging.Logger;
+
 import com.fasterxml.jackson.core.type.TypeReference;
+
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.apigateway.model.*;
+import io.github.hectorvent.floci.services.apigateway.model.Account;
+import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
+import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
+import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
+import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.Integration;
+import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
+import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.Model;
+import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
+import io.github.hectorvent.floci.services.apigateway.model.RestApi;
+import io.github.hectorvent.floci.services.apigateway.model.Stage;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
-
-import java.util.*;
 
 @ApplicationScoped
 public class ApiGatewayService {
@@ -31,12 +51,12 @@ public class ApiGatewayService {
     private final StorageBackend<String, UsagePlanKey> usagePlanKeyStore;
     private final StorageBackend<String, RequestValidator> requestValidatorStore;
     private final StorageBackend<String, Model> modelStore;
+    private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
-    private final RegionResolver regionResolver;
 
     @Inject
-    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config) {
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -67,13 +87,70 @@ public class ApiGatewayService {
         this.modelStore = storageFactory.create("apigateway", "apigateway-models.json",
                 new TypeReference<>() {
                 });
+        this.accountStore = storageFactory.create("apigateway", "apigateway-account.json",
+            new TypeReference<>() {
+            });
         this.domainStore = storageFactory.create("apigateway", "apigateway-domains.json",
                 new TypeReference<>() {
                 });
         this.basePathMappingStore = storageFactory.create("apigateway", "apigateway-mappings.json",
                 new TypeReference<>() {
                 });
-        this.regionResolver = regionResolver;
+    }
+
+    // ──────────────────────────── Account ────────────────────────────
+
+    public Account getAccount(String region) {
+        String key = accountKey(region);
+        // GET must be read-only: return default account without persisting.
+        return accountStore.get(key).orElse(new Account());
+    }
+
+    public Account updateAccount(String region, List<Map<String, String>> patchOperations) {
+        Account existing = getAccount(region);
+
+        // Work on a defensive copy so updates are atomic: validate/apply all
+        // operations first and only persist after success.
+        Account copy = new Account();
+        copy.setApiKeyVersion(existing.getApiKeyVersion());
+        copy.setCloudwatchRoleArn(existing.getCloudwatchRoleArn());
+        copy.setFeatures(existing.getFeatures() == null ? null : List.copyOf(existing.getFeatures()));
+        // ThrottleSettings are immutable for our purposes here — reuse existing instance.
+        copy.setThrottleSettings(existing.getThrottleSettings());
+
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                String opType = op.get("op");
+                String path = op.getOrDefault("path", "");
+                String value = op.get("value");
+
+                if (!"replace".equals(opType) && !"add".equals(opType) && !"remove".equals(opType)) {
+                    throw new AwsException("BadRequestException",
+                            "Unsupported patch operation: " + opType, 400);
+                }
+
+                switch (path) {
+                    case "/cloudwatchRoleArn" -> {
+                        if ("remove".equals(opType)) {
+                            copy.setCloudwatchRoleArn(null);
+                        } else {
+                            copy.setCloudwatchRoleArn(value);
+                        }
+                    }
+                    default -> {
+                        if (path.startsWith("/throttleSettings")) {
+                            throw new AwsException("BadRequestException",
+                                    "/throttleSettings value cannot be changed this way", 400);
+                        }
+                        throw new AwsException("BadRequestException",
+                                "Unsupported patch path: " + path, 400);
+                    }
+                }
+            }
+        }
+
+        accountStore.put(accountKey(region), copy);
+        return copy;
     }
 
     // ──────────────────────────── REST API CRUD ────────────────────────────
@@ -717,9 +794,11 @@ public class ApiGatewayService {
                 if (!"replace" .equals(op.get("op"))) continue;
                 String path = op.getOrDefault("path", "");
                 String value = op.get("value");
-                if ("/type" .equals(path)) integration.setType(value);
-                else if ("/httpMethod" .equals(path)) integration.setHttpMethod(value);
-                else if ("/uri" .equals(path)) integration.setUri(value);
+                switch (path) {
+                    case "/type" -> integration.setType(value);
+                    case "/httpMethod" -> integration.setHttpMethod(value);
+                    case "/uri" -> integration.setUri(value);
+                }
             }
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
@@ -821,7 +900,7 @@ public class ApiGatewayService {
                 try {
                     // Use swagger's own JSON serializer to produce clean JSON Schema
                     modelReq.put("schema", io.swagger.v3.core.util.Json.mapper().writeValueAsString(schema));
-                } catch (Exception e) {
+                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                     modelReq.put("schema", "{}");
                 }
                 createModel(region, apiId, modelReq);
@@ -1049,6 +1128,10 @@ public class ApiGatewayService {
 
     private String modelKey(String region, String apiId, String modelName) {
         return region + "::" + apiId + "::" + modelName;
+    }
+
+    private String accountKey(String region) {
+        return region + "::account";
     }
 
     private String apiKeyGlobalKey(String region, String apiKeyId) {

@@ -27,6 +27,7 @@ Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 | **Models** | CreateModel, GetModel, GetModels, DeleteModel |
 | **Domain Names** | CreateDomainName, GetDomainName, GetDomainNames, DeleteDomainName |
 | **Base Path Mappings** | CreateBasePathMapping, GetBasePathMapping, GetBasePathMappings, DeleteBasePathMapping |
+| **Account** | GetAccount, UpdateAccount |
 | **Tags** | TagResource, UntagResource, GetTags (ListTagsForResource) |
 
 ### Not Implemented
@@ -42,7 +43,6 @@ These management-plane operations have no handler in v1. Calls will return `404`
 - Documentation parts and versions (the entire family, 10 operations)
 - VPC Links (5 operations)
 - Client Certificates (5 operations)
-- Account: `GetAccount`, `UpdateAccount`
 - `GetExport` / `ImportDocumentationParts`
 
 The execute plane (actual proxied HTTP traffic via `/restapis/{id}/{stage}/_user_request_/…`) is implemented separately and is not counted as management-plane operations.
