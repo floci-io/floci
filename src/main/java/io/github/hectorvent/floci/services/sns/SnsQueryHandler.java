@@ -207,14 +207,26 @@ public class SnsQueryHandler {
         String topicArn = getParam(params, "TopicArn");
         List<Map<String, Object>> entries = new ArrayList<>();
         for (int i = 1; ; i++) {
-            String id = getParam(params, "PublishBatchRequestEntries.member." + i + ".Id");
+            String entryPrefix = "PublishBatchRequestEntries.member." + i;
+            String id = getParam(params, entryPrefix + ".Id");
             if (id == null) break;
             Map<String, Object> entry = new java.util.HashMap<>();
             entry.put("Id", id);
-            entry.put("Message", getParam(params, "PublishBatchRequestEntries.member." + i + ".Message"));
-            entry.put("Subject", getParam(params, "PublishBatchRequestEntries.member." + i + ".Subject"));
-            entry.put("MessageGroupId", getParam(params, "PublishBatchRequestEntries.member." + i + ".MessageGroupId"));
-            entry.put("MessageDeduplicationId", getParam(params, "PublishBatchRequestEntries.member." + i + ".MessageDeduplicationId"));
+            entry.put("Message", getParam(params, entryPrefix + ".Message"));
+            entry.put("Subject", getParam(params, entryPrefix + ".Subject"));
+            entry.put("MessageGroupId", getParam(params, entryPrefix + ".MessageGroupId"));
+            entry.put("MessageDeduplicationId", getParam(params, entryPrefix + ".MessageDeduplicationId"));
+
+            Map<String, MessageAttributeValue> attributes = new HashMap<>();
+            for (int j = 1; ; j++) {
+                String attrPrefix = entryPrefix + ".MessageAttributes.entry." + j;
+                String name = params.getFirst(attrPrefix + ".Name");
+                if (name == null) break;
+                String value = params.getFirst(attrPrefix + ".Value.StringValue");
+                String dataType = params.getFirst(attrPrefix + ".Value.DataType");
+                if (value != null) attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+            }
+            if (!attributes.isEmpty()) entry.put("MessageAttributes", attributes);
             entries.add(entry);
         }
         try {

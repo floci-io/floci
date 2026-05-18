@@ -11,6 +11,9 @@ import software.amazon.awssdk.services.sns.model.ListSubscriptionsByTopicRequest
 import software.amazon.awssdk.services.sns.model.ListSubscriptionsByTopicResponse;
 import software.amazon.awssdk.services.sns.model.ListTopicsResponse;
 import software.amazon.awssdk.services.sns.model.MessageAttributeValue;
+import software.amazon.awssdk.services.sns.model.PublishBatchRequest;
+import software.amazon.awssdk.services.sns.model.PublishBatchRequestEntry;
+import software.amazon.awssdk.services.sns.model.PublishBatchResponse;
 import software.amazon.awssdk.services.sns.model.PublishRequest;
 import software.amazon.awssdk.services.sns.model.PublishResponse;
 import software.amazon.awssdk.services.sns.model.SetSubscriptionAttributesRequest;
@@ -484,5 +487,93 @@ class SnsTest {
         sns.deleteTopic(DeleteTopicRequest.builder().topicArn(nestedTopicArn).build());
         sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
                 .queueUrl(nestedQueueUrl).build());
+    }
+
+    @Test
+    @Order(16)
+    void publishBatchPreservesPerEntryMessageAttributes() throws InterruptedException {
+        long stamp = System.currentTimeMillis();
+        String batchQueueUrl = sqs.createQueue(software.amazon.awssdk.services.sqs.model.CreateQueueRequest.builder()
+                .queueName("sns-batch-attrs-" + stamp).build()).queueUrl();
+        String batchQueueArn = sqs.getQueueAttributes(software.amazon.awssdk.services.sqs.model.GetQueueAttributesRequest.builder()
+                .queueUrl(batchQueueUrl)
+                .attributeNames(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN)
+                .build())
+                .attributes().get(software.amazon.awssdk.services.sqs.model.QueueAttributeName.QUEUE_ARN);
+
+        String batchTopicArn = sns.createTopic(CreateTopicRequest.builder()
+                .name("sns-batch-attrs-" + stamp).build()).topicArn();
+
+        String batchSubArn = sns.subscribe(SubscribeRequest.builder()
+                .topicArn(batchTopicArn)
+                .protocol("sqs")
+                .endpoint(batchQueueArn)
+                .build()).subscriptionArn();
+
+        sns.setSubscriptionAttributes(SetSubscriptionAttributesRequest.builder()
+                .subscriptionArn(batchSubArn)
+                .attributeName("RawMessageDelivery")
+                .attributeValue("true")
+                .build());
+
+        PublishBatchResponse batchResponse = sns.publishBatch(PublishBatchRequest.builder()
+                .topicArn(batchTopicArn)
+                .publishBatchRequestEntries(
+                        PublishBatchRequestEntry.builder()
+                                .id("e1")
+                                .message("batch-msg-a")
+                                .messageAttributes(Map.of(
+                                        "ce-type", MessageAttributeValue.builder()
+                                                .dataType("String").stringValue("com.example.test").build(),
+                                        "ce-id", MessageAttributeValue.builder()
+                                                .dataType("String").stringValue("id-a").build()))
+                                .build(),
+                        PublishBatchRequestEntry.builder()
+                                .id("e2")
+                                .message("batch-msg-b")
+                                .messageAttributes(Map.of(
+                                        "ce-type", MessageAttributeValue.builder()
+                                                .dataType("String").stringValue("com.example.test").build(),
+                                        "ce-id", MessageAttributeValue.builder()
+                                                .dataType("String").stringValue("id-b").build(),
+                                        "count", MessageAttributeValue.builder()
+                                                .dataType("Number").stringValue("42").build()))
+                                .build())
+                .build());
+
+        assertThat(batchResponse.successful()).hasSize(2);
+        assertThat(batchResponse.failed()).isEmpty();
+
+        Thread.sleep(500);
+
+        software.amazon.awssdk.services.sqs.model.ReceiveMessageResponse batchRecv = sqs.receiveMessage(
+                software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest.builder()
+                        .queueUrl(batchQueueUrl)
+                        .maxNumberOfMessages(10)
+                        .waitTimeSeconds(2)
+                        .messageAttributeNames("All")
+                        .build());
+
+        assertThat(batchRecv.messages()).hasSize(2);
+
+        var byBody = batchRecv.messages().stream()
+                .collect(java.util.stream.Collectors.toMap(
+                        software.amazon.awssdk.services.sqs.model.Message::body, m -> m));
+
+        var attrsA = byBody.get("batch-msg-a").messageAttributes();
+        assertThat(attrsA).containsKeys("ce-type", "ce-id");
+        assertThat(attrsA.get("ce-id").stringValue()).isEqualTo("id-a");
+        assertThat(attrsA.get("ce-type").stringValue()).isEqualTo("com.example.test");
+
+        var attrsB = byBody.get("batch-msg-b").messageAttributes();
+        assertThat(attrsB).containsKeys("ce-type", "ce-id", "count");
+        assertThat(attrsB.get("ce-id").stringValue()).isEqualTo("id-b");
+        assertThat(attrsB.get("count").dataType()).isEqualTo("Number");
+        assertThat(attrsB.get("count").stringValue()).isEqualTo("42");
+
+        sns.unsubscribe(UnsubscribeRequest.builder().subscriptionArn(batchSubArn).build());
+        sns.deleteTopic(DeleteTopicRequest.builder().topicArn(batchTopicArn).build());
+        sqs.deleteQueue(software.amazon.awssdk.services.sqs.model.DeleteQueueRequest.builder()
+                .queueUrl(batchQueueUrl).build());
     }
 }
