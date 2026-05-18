@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.core.common.port;
 
 import org.junit.jupiter.api.Test;
 
+import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
@@ -38,5 +39,19 @@ class PortAllocatorTest {
         latch.await();
         executor.shutdown();
         assertEquals(threads, ports.size(), "All allocated ports must be unique");
+    }
+
+    @Test
+    void allocateNeverReturnsPortAlreadyHandedOut() {
+        PortAllocator allocator = new PortAllocator(9200, 9209);
+        Set<Integer> handed = new HashSet<>();
+        for (int i = 0; i < 11; i++) {
+            try {
+                int p = allocator.allocate();
+                assertTrue(handed.add(p), "allocate() returned port " + p + " already in use");
+            } catch (RuntimeException exhausted) {
+                return;
+            }
+        }
     }
 }
