@@ -23,6 +23,7 @@ class Ec2InstanceResponseShapeTest {
 
     private static Ec2Client ec2;
     private static String instanceId;
+    private static String instanceIdForCleanup;
     private static Instance instance;
 
     @BeforeAll
@@ -37,6 +38,7 @@ class Ec2InstanceResponseShapeTest {
                 .build());
 
         instanceId = run.instances().get(0).instanceId();
+        instanceIdForCleanup = instanceId;
 
         DescribeInstancesResponse describe = ec2.describeInstances(
                 DescribeInstancesRequest.builder().instanceIds(instanceId).build());
@@ -51,6 +53,17 @@ class Ec2InstanceResponseShapeTest {
                 if (instanceId != null) {
                     ec2.terminateInstances(TerminateInstancesRequest.builder()
                             .instanceIds(instanceId).build());
+                }
+                if (instanceIdForCleanup != null) {
+                    for (int i = 0; i < 30; i++) {
+                        Thread.sleep(1000);
+                        DescribeInstancesResponse r = ec2.describeInstances(
+                                DescribeInstancesRequest.builder().instanceIds(instanceIdForCleanup).build());
+                        if (!r.reservations().isEmpty() && !r.reservations().get(0).instances().isEmpty()) {
+                            InstanceStateName state = r.reservations().get(0).instances().get(0).state().name();
+                            if (state == InstanceStateName.TERMINATED) break;
+                        }
+                    }
                 }
             } catch (Exception ignored) {}
             ec2.close();
