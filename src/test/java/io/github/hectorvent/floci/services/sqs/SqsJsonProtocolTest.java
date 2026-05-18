@@ -291,7 +291,7 @@ class SqsJsonProtocolTest {
 
     @Test
     @Order(7)
-    void tagQueueWithJsonNullValueDoesNotStoreLiteralNullString() {
+    void tagQueueWithJsonNullValueIsRejected() {
         String tagBody = "{\"QueueUrl\":\"" + queueUrl + "\","
                 + "\"Tags\":{\"NullTag\":null,\"RealTag\":\"value\"}}";
 
@@ -302,7 +302,9 @@ class SqsJsonProtocolTest {
         .when()
             .post("/")
         .then()
-            .statusCode(200);
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
 
         String listBody = "{\"QueueUrl\":\"" + queueUrl + "\"}";
 
@@ -314,8 +316,62 @@ class SqsJsonProtocolTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Tags.RealTag", equalTo("value"))
-            .body("Tags.NullTag", nullValue());
+            .body("Tags.NullTag", nullValue())
+            .body("Tags.RealTag", nullValue());
+    }
+
+    @Test
+    @Order(7)
+    void createQueueWithJsonNullTagValueIsRejected() {
+        String body = "{\"QueueName\":\"" + QUEUE_NAME + "-null-tag\","
+                + "\"tags\":{\"NullTag\":null}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
+    }
+
+    @Test
+    @Order(7)
+    void createQueueWithJsonNullAttributeValueIsRejected() {
+        String body = "{\"QueueName\":\"" + QUEUE_NAME + "-null-attr\","
+                + "\"Attributes\":{\"DelaySeconds\":null}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
+    }
+
+    @Test
+    @Order(7)
+    void setQueueAttributesWithJsonNullValueIsRejected() {
+        String body = "{\"QueueUrl\":\"" + queueUrl + "\","
+                + "\"Attributes\":{\"DelaySeconds\":null}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SetQueueAttributes")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
     }
 
     @Test

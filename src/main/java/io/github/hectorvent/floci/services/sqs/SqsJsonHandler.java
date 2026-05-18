@@ -519,7 +519,8 @@ public class SqsJsonHandler {
             node.fields().forEachRemaining(entry -> {
                 JsonNode value = entry.getValue();
                 if (value == null || value.isNull() || value.isMissingNode()) {
-                    return;
+                    throw new AwsException("InvalidParameterValue",
+                            "the parameter 'value' may not be null", 400);
                 }
                 map.put(entry.getKey(), value.asText());
             });
