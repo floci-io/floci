@@ -686,6 +686,13 @@ public class ApiGatewayService {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
 
+        // AWS enforces global uniqueness of custom domain names across all regions
+        boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
+        if (exists) {
+            throw new AwsException("ConflictException",
+                    "The domain name you provided already exists.", 409);
+        }
+
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(domainName);
         domain.setCertificateName((String) request.get("certificateName"));
@@ -752,29 +759,28 @@ public class ApiGatewayService {
 
     /**
      * Resolves a custom domain by its regionalDomainName (e.g., "my-domain.regional.local").
-     * Scans all regions to find the matching domain.
+     * Derives the domain name from the regionalDomainName and performs a key-based lookup.
      *
      * @return the CustomDomain if found, or null if no domain matches
      */
     public CustomDomain findDomainByRegionalHostname(String regionalDomainName) {
-        List<CustomDomain> allDomains = domainStore.scan(k -> true);
-        for (CustomDomain domain : allDomains) {
-            if (regionalDomainName.equals(domain.getRegionalDomainName())) {
-                return domain;
-            }
+        if (!regionalDomainName.endsWith(".regional.local")) {
+            return null;
         }
-        return null;
+        String domainName = regionalDomainName.substring(0,
+                regionalDomainName.length() - ".regional.local".length());
+        return findDomainByName(domainName);
     }
 
     /**
      * Resolves a custom domain by its actual domain name (e.g., "api.example.com").
-     * Scans all regions to find the matching domain.
+     * Domain names are globally unique across regions.
      *
      * @return the CustomDomain if found, or null if no domain matches
      */
     public CustomDomain findDomainByName(String domainName) {
-        List<CustomDomain> allDomains = domainStore.scan(k -> k.endsWith("::" + domainName));
-        return allDomains.isEmpty() ? null : allDomains.get(0);
+        List<CustomDomain> results = domainStore.scan(k -> k.endsWith("::" + domainName));
+        return results.isEmpty() ? null : results.get(0);
     }
 
     /**

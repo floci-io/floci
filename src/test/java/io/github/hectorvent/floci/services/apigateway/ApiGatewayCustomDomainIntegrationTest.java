@@ -208,6 +208,18 @@ class ApiGatewayCustomDomainIntegrationTest {
     }
 
     @Test @Order(14)
+    void createDuplicateDomainName_rejected() {
+        // Domain names are globally unique across regions — creating the same
+        // domain name again (even implicitly in the same region) must fail
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"domainName\":\"api.example.com\",\"certificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/dup\"}")
+                .when().post("/domainnames")
+                .then()
+                .statusCode(409);
+    }
+
+    @Test @Order(15)
     void mappingWithoutStage_isNotRouted() {
         // Create a domain with a mapping that has no stage configured
         given()
@@ -232,7 +244,7 @@ class ApiGatewayCustomDomainIntegrationTest {
                 .statusCode(anyOf(is(403), is(404)));
     }
 
-    @Test @Order(15)
+    @Test @Order(16)
     void cleanup() {
         given().when().delete("/domainnames/api.example.com/basepathmappings/v1").then().statusCode(anyOf(is(200), is(202), is(204)));
         given().when().delete("/domainnames/api.example.com/basepathmappings/(none)").then().statusCode(anyOf(is(200), is(202), is(204)));
