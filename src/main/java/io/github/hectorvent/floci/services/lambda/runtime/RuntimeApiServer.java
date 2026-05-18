@@ -49,6 +49,7 @@ public class RuntimeApiServer {
 
     private volatile HttpServer httpServer;
     private volatile boolean stopped;
+    private volatile CompletableFuture<Void> closeFuture;
 
     RuntimeApiServer(Vertx vertx, int port) {
         this.vertx = vertx;
@@ -136,9 +137,10 @@ public class RuntimeApiServer {
                 .setMaxFormAttributeSize(-1));
         httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
             if (result.succeeded()) {
-                LOG.debugv("RuntimeApiServer started on port {0}", port);
+                LOG.infov("RuntimeApiServer started on port {0}", port);
                 started.complete(null);
             } else {
+                LOG.errorv(result.cause(), "RuntimeApiServer failed to bind on port {0}", port);
                 started.completeExceptionally(result.cause());
             }
         });
@@ -146,10 +148,25 @@ public class RuntimeApiServer {
         return started;
     }
 
-    public void stop() {
+    public synchronized CompletableFuture<Void> stop() {
+        if (closeFuture != null) {
+            return closeFuture;
+        }
         stopped = true;
+        CompletableFuture<Void> closed = new CompletableFuture<>();
+        closeFuture = closed;
         if (httpServer != null) {
-            httpServer.close();
+            httpServer.close(ar -> {
+                if (ar.succeeded()) {
+                    LOG.debugv("RuntimeApiServer on port {0} closed", port);
+                    closed.complete(null);
+                } else {
+                    LOG.warnv(ar.cause(), "RuntimeApiServer on port {0} failed to close cleanly", port);
+                    closed.completeExceptionally(ar.cause());
+                }
+            });
+        } else {
+            closed.complete(null);
         }
 
         // Wake any parked /next pollers with 204 (container shutting down — runtime will exit).
@@ -175,6 +192,8 @@ public class RuntimeApiServer {
                 inv.getResultFuture().complete(
                         new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, inv.getRequestId())));
         inFlight.clear();
+
+        return closed;
     }
 
     public CompletableFuture<InvokeResult> enqueue(PendingInvocation invocation) {

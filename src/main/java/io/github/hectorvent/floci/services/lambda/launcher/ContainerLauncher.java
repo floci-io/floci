@@ -30,6 +30,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 /**
  * Starts and stops Docker containers for Lambda function execution.
@@ -276,7 +279,14 @@ public class ContainerLauncher {
         LOG.infov("Stopping container {0}", handle.getContainerId());
         handle.setState(ContainerState.STOPPED);
 
-        handle.getRuntimeApiServer().stop();
+        try {
+            handle.getRuntimeApiServer().stop().get(5, TimeUnit.SECONDS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (ExecutionException | TimeoutException e) {
+            LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
+                    handle.getContainerId());
+        }
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
     }
 
