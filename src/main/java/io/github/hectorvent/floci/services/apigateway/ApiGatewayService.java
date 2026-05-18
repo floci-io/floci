@@ -748,6 +748,92 @@ public class ApiGatewayService {
         basePathMappingStore.delete(mappingKey(region, domainName, path));
     }
 
+    // ──────────────────────────── Custom Domain Resolution ────────────────────────────
+
+    /**
+     * Resolves a custom domain by its regionalDomainName (e.g., "my-domain.regional.local").
+     * Scans all regions to find the matching domain.
+     *
+     * @return the CustomDomain if found, or null if no domain matches
+     */
+    public CustomDomain findDomainByRegionalHostname(String regionalDomainName) {
+        List<CustomDomain> allDomains = domainStore.scan(k -> true);
+        for (CustomDomain domain : allDomains) {
+            if (regionalDomainName.equals(domain.getRegionalDomainName())) {
+                return domain;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Resolves a custom domain by its actual domain name (e.g., "api.example.com").
+     * Scans all regions to find the matching domain.
+     *
+     * @return the CustomDomain if found, or null if no domain matches
+     */
+    public CustomDomain findDomainByName(String domainName) {
+        List<CustomDomain> allDomains = domainStore.scan(k -> k.endsWith("::" + domainName));
+        return allDomains.isEmpty() ? null : allDomains.get(0);
+    }
+
+    /**
+     * Resolves the base path mapping for a given domain and request path.
+     * Uses longest-prefix matching on the base path.
+     *
+     * @param domainName the custom domain name
+     * @param requestPath the incoming request path (e.g., "/v1/items/123")
+     * @return the matching BasePathMapping, or null if none matches
+     */
+    public BasePathMapping resolveBasePathMapping(String domainName, String requestPath) {
+        // Get all mappings across all regions for this domain
+        List<BasePathMapping> allMappings = basePathMappingStore.scan(k -> k.contains("::" + domainName + "::"));
+
+        if (allMappings.isEmpty()) {
+            return null;
+        }
+
+        // Find the best match using longest-prefix matching
+        BasePathMapping bestMatch = null;
+        int bestLength = -1;
+
+        for (BasePathMapping mapping : allMappings) {
+            String basePath = mapping.getBasePath();
+            if ("(none)".equals(basePath)) {
+                // Catch-all mapping — matches if no better mapping exists
+                if (bestLength < 0) {
+                    bestMatch = mapping;
+                    bestLength = 0;
+                }
+            } else {
+                String prefix = "/" + basePath;
+                if (requestPath.equals(prefix) || requestPath.startsWith(prefix + "/")) {
+                    if (basePath.length() > bestLength) {
+                        bestMatch = mapping;
+                        bestLength = basePath.length();
+                    }
+                }
+            }
+        }
+
+        return bestMatch;
+    }
+
+    /**
+     * Returns the remaining path after stripping the matched base path prefix.
+     */
+    public String stripBasePath(String requestPath, BasePathMapping mapping) {
+        String basePath = mapping.getBasePath();
+        if ("(none)".equals(basePath)) {
+            return requestPath;
+        }
+        String prefix = "/" + basePath;
+        if (requestPath.equals(prefix)) {
+            return "/";
+        }
+        return requestPath.substring(prefix.length());
+    }
+
     // ──────────────────────────── Update Methods ────────────────────────────
 
     public RestApi updateRestApi(String region, String apiId, List<Map<String, String>> patchOperations) {
