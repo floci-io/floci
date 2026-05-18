@@ -208,10 +208,37 @@ class ApiGatewayCustomDomainIntegrationTest {
     }
 
     @Test @Order(14)
+    void mappingWithoutStage_isNotRouted() {
+        // Create a domain with a mapping that has no stage configured
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"domainName\":\"nostage.example.com\",\"certificateArn\":\"arn:aws:acm:us-east-1:123456789012:certificate/xyz\"}")
+                .when().post("/domainnames")
+                .then()
+                .statusCode(201);
+
+        given()
+                .contentType(ContentType.JSON)
+                .body("{\"basePath\":\"(none)\",\"restApiId\":\"" + apiId + "\"}")
+                .when().post("/domainnames/nostage.example.com/basepathmappings")
+                .then()
+                .statusCode(201);
+
+        // Filter should not route this — no stage means early return
+        given()
+                .header("Host", "nostage.example.com")
+                .when().get("/prod/items")
+                .then()
+                .statusCode(anyOf(is(403), is(404)));
+    }
+
+    @Test @Order(15)
     void cleanup() {
         given().when().delete("/domainnames/api.example.com/basepathmappings/v1").then().statusCode(anyOf(is(200), is(202), is(204)));
         given().when().delete("/domainnames/api.example.com/basepathmappings/(none)").then().statusCode(anyOf(is(200), is(202), is(204)));
         given().when().delete("/domainnames/api.example.com").then().statusCode(anyOf(is(200), is(202), is(204)));
+        given().when().delete("/domainnames/nostage.example.com/basepathmappings/(none)").then().statusCode(anyOf(is(200), is(202), is(204)));
+        given().when().delete("/domainnames/nostage.example.com").then().statusCode(anyOf(is(200), is(202), is(204)));
         given().when().delete("/restapis/" + apiId).then().statusCode(202);
     }
 }

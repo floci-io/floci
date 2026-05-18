@@ -74,7 +74,6 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
         }
 
         String restApiId = mapping.getRestApiId();
-        String stage = mapping.getStage();
 
         if (restApiId == null) {
             return;
@@ -82,15 +81,15 @@ public class ApiGatewayCustomDomainFilter implements ContainerRequestFilter {
 
         // Strip the base path from the request path to get the remaining path
         String remainingPath = apiGatewayService.stripBasePath(path, mapping);
+
+        String effectiveStage = mapping.getStage();
+        if (effectiveStage == null || effectiveStage.isEmpty()) {
+            return;
+        }
+
         if (remainingPath.startsWith("/")) {
             remainingPath = remainingPath.substring(1);
         }
-
-        // Build the stage suffix — if no stage is configured on the mapping,
-        // the request path's first segment after stripping the base path is NOT treated
-        // as a stage name. In real AWS, a mapping without a stage means the API's
-        // default stage is used. We use "$default" as the stage name to indicate this.
-        String effectiveStage = (stage != null && !stage.isEmpty()) ? stage : "$default";
 
         // Rewrite to the standard execute-api path
         String newPath = "/execute-api/" + restApiId + "/" + effectiveStage + "/" + remainingPath;
