@@ -1567,6 +1567,7 @@ public class ApiGatewayController {
         node.put("routeId", r.getRouteId());
         node.put("routeKey", r.getRouteKey());
         node.put("authorizationType", r.getAuthorizationType());
+        if (r.getAuthorizerId() != null) node.put("authorizerId", r.getAuthorizerId());
         if (r.getTarget() != null) node.put("target", r.getTarget());
         if (r.getRouteResponseSelectionExpression() != null) node.put("routeResponseSelectionExpression", r.getRouteResponseSelectionExpression());
         return node;
