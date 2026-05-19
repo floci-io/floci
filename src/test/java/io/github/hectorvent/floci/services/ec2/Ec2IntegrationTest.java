@@ -618,7 +618,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("RunInstancesResponse.instancesSet.item.instanceId", startsWith("i-"))
-            .body("RunInstancesResponse.instancesSet.item.instanceState.name", equalTo("running"))
+            .body("RunInstancesResponse.instancesSet.item.instanceState.name", equalTo("pending"))
             .body("RunInstancesResponse.instancesSet.item.instanceType", equalTo("t2.micro"))
             .body("RunInstancesResponse.instancesSet.item.keyName", equalTo("test-key"))
             .extract().path("RunInstancesResponse.instancesSet.item.instanceId");

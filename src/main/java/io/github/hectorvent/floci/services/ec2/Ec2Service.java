@@ -237,7 +237,7 @@ public class Ec2Service {
             Instance inst = new Instance();
             inst.setInstanceId(instanceId);
             inst.setImageId(imageId != null ? imageId : "ami-default");
-            inst.setState(InstanceState.running());
+            inst.setState(InstanceState.pending());
             inst.setInstanceType(instanceType != null ? instanceType : "t2.micro");
             inst.setPlacement(new Placement(az));
             inst.setSubnetId(finalSubnetId);
@@ -317,6 +317,11 @@ public class Ec2Service {
                 }
             }
         }
+        if (config.services().ec2().mock()) {
+            instances.values().stream()
+                    .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
+                    .forEach(i -> i.setState(InstanceState.running()));
+        }
         List<Instance> matched = instances.values().stream()
                 .filter(i -> i.getRegion().equals(region))
                 .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
@@ -343,6 +348,9 @@ public class Ec2Service {
             if (inst == null) {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
+            if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
+                inst.setState(InstanceState.running());
+            }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
                 inst.setState(InstanceState.terminated());
@@ -368,6 +376,9 @@ public class Ec2Service {
             Instance inst = instances.get(key(region, id));
             if (inst == null) {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
+            }
+            if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
+                inst.setState(InstanceState.running());
             }
             InstanceState prev = inst.getState();
             if (config.services().ec2().mock()) {
@@ -441,6 +452,12 @@ public class Ec2Service {
 
     public List<Instance> describeInstanceStatus(String region, List<String> instanceIds) {
         ensureDefaultResources(region);
+        if (config.services().ec2().mock()) {
+            instances.values().stream()
+                    .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
+                    .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
+                    .forEach(i -> i.setState(InstanceState.running()));
+        }
         return instances.values().stream()
                 .filter(i -> i.getRegion().equals(region))
                 .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
