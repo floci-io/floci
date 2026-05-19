@@ -280,6 +280,7 @@ public class S3Controller {
                                 @QueryParam("start-after") String startAfter,
                                 @QueryParam("encoding-type") String encodingType,
                                 @QueryParam("key-marker") String keyMarker,
+                                @QueryParam("marker") String marker,
                                 @Context UriInfo uriInfo) {
         validateRawUri();
         try {
@@ -355,8 +356,11 @@ public class S3Controller {
             }
 
             int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+            boolean v1 = !"2".equals(listType);
+            String effectiveStartAfter = v1 && marker != null ? marker : startAfter;
+            String effectiveContinuationToken = v1 ? null : continuationToken;
             S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
-                    bucket, prefix, delimiter, max, continuationToken, startAfter);
+                    bucket, prefix, delimiter, max, effectiveContinuationToken, effectiveStartAfter);
             List<S3Object> objects = result.objects();
             List<String> commonPrefixes = result.commonPrefixes();
             boolean v2 = "2".equals(listType);
@@ -398,6 +402,11 @@ public class S3Controller {
                 }
                 if (startAfter != null) {
                     xml.elem("StartAfter", startAfter);
+                }
+            } else {
+                xml.elem("Marker", marker != null ? marker : "");
+                if (result.isTruncated() && result.nextContinuationToken() != null) {
+                    xml.elem("NextMarker", result.nextContinuationToken());
                 }
             }
             xml.end("ListBucketResult");
