@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
+import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
@@ -42,6 +43,7 @@ public class EmulatorLifecycle {
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
     private final ElastiCacheContainerManager elastiCacheContainerManager;
+    private final ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager;
     private final ElastiCacheProxyManager elastiCacheProxyManager;
     private final RdsContainerManager rdsContainerManager;
     private final RdsProxyManager rdsProxyManager;
@@ -57,6 +59,7 @@ public class EmulatorLifecycle {
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
                              EmulatorConfig config,
                              ElastiCacheContainerManager elastiCacheContainerManager,
+                             ElastiCacheMemcachedContainerManager elastiCacheMemcachedContainerManager,
                              ElastiCacheProxyManager elastiCacheProxyManager,
                              RdsContainerManager rdsContainerManager,
                              RdsProxyManager rdsProxyManager,
@@ -71,6 +74,7 @@ public class EmulatorLifecycle {
         this.serviceRegistry = serviceRegistry;
         this.config = config;
         this.elastiCacheContainerManager = elastiCacheContainerManager;
+        this.elastiCacheMemcachedContainerManager = elastiCacheMemcachedContainerManager;
         this.elastiCacheProxyManager = elastiCacheProxyManager;
         this.rdsContainerManager = rdsContainerManager;
         this.rdsProxyManager = rdsProxyManager;
@@ -178,6 +182,7 @@ public class EmulatorLifecycle {
         elastiCacheProxyManager.stopAll();
         rdsProxyManager.stopAll();
         elastiCacheContainerManager.stopAll();
+        elastiCacheMemcachedContainerManager.stopAll();
         rdsContainerManager.stopAll();
         storageFactory.shutdownAll();
 
