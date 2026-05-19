@@ -1649,6 +1649,32 @@ public class ApiGatewayController {
             api.getTags().forEach(tagsNode::put);
             node.set("tags", tagsNode);
         }
+        if (api.getCorsConfiguration() != null) {
+            node.set("corsConfiguration", toV2CorsNode(api.getCorsConfiguration()));
+        }
+        return node;
+    }
+
+    private ObjectNode toV2CorsNode(Api.Cors cors) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (cors.allowOrigins() != null) {
+            ArrayNode arr = node.putArray("allowOrigins");
+            cors.allowOrigins().forEach(arr::add);
+        }
+        if (cors.allowMethods() != null) {
+            ArrayNode arr = node.putArray("allowMethods");
+            cors.allowMethods().forEach(arr::add);
+        }
+        if (cors.allowHeaders() != null) {
+            ArrayNode arr = node.putArray("allowHeaders");
+            cors.allowHeaders().forEach(arr::add);
+        }
+        if (cors.exposeHeaders() != null) {
+            ArrayNode arr = node.putArray("exposeHeaders");
+            cors.exposeHeaders().forEach(arr::add);
+        }
+        if (cors.maxAge() != null) node.put("maxAge", cors.maxAge());
+        if (cors.allowCredentials() != null) node.put("allowCredentials", cors.allowCredentials());
         return node;
     }
 

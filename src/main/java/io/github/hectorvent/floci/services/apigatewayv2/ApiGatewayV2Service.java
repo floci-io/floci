@@ -98,6 +98,12 @@ public class ApiGatewayV2Service {
             api.setTags(tags);
         }
 
+        @SuppressWarnings("unchecked")
+        Map<String, Object> corsConfig = (Map<String, Object>) request.get("corsConfiguration");
+        if (corsConfig != null) {
+            api.setCorsConfiguration(toCors(corsConfig));
+        }
+
         apiStore.put(apiKey(region, api.getApiId()), api);
         LOG.infov("Created {0} API: {1} ({2}) in {3}", protocolType, api.getName(), api.getApiId(), region);
         return api;
@@ -138,9 +144,30 @@ public class ApiGatewayV2Service {
             Map<String, String> tags = (Map<String, String>) request.get("tags");
             api.setTags(tags);
         }
+        if (request.containsKey("corsConfiguration")) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> corsConfig = (Map<String, Object>) request.get("corsConfiguration");
+            api.setCorsConfiguration(corsConfig == null ? null : toCors(corsConfig));
+        }
 
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    private static Api.Cors toCors(Map<String, Object> m) {
+        @SuppressWarnings("unchecked")
+        List<String> allowOrigins = (List<String>) m.get("allowOrigins");
+        @SuppressWarnings("unchecked")
+        List<String> allowMethods = (List<String>) m.get("allowMethods");
+        @SuppressWarnings("unchecked")
+        List<String> allowHeaders = (List<String>) m.get("allowHeaders");
+        @SuppressWarnings("unchecked")
+        List<String> exposeHeaders = (List<String>) m.get("exposeHeaders");
+        Integer maxAge = m.get("maxAge") == null ? null : ((Number) m.get("maxAge")).intValue();
+        Boolean allowCredentials = m.get("allowCredentials") == null
+                ? null
+                : Boolean.parseBoolean(String.valueOf(m.get("allowCredentials")));
+        return new Api.Cors(allowOrigins, allowMethods, allowHeaders, exposeHeaders, maxAge, allowCredentials);
     }
 
     // ──────────────────────────── Authorizer CRUD ────────────────────────────
