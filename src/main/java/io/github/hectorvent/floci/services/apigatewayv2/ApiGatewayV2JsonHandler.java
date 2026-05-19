@@ -539,6 +539,9 @@ public class ApiGatewayV2JsonHandler {
         if (auth.getAuthorizerResultTtlInSeconds() != null) {
             node.put("AuthorizerResultTtlInSeconds", auth.getAuthorizerResultTtlInSeconds());
         }
+        if (auth.getEnableSimpleResponses() != null) {
+            node.put("EnableSimpleResponses", auth.getEnableSimpleResponses());
+        }
         return node;
     }
 
@@ -559,6 +562,7 @@ public class ApiGatewayV2JsonHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("IntegrationId", i.getIntegrationId());
         node.put("IntegrationType", i.getIntegrationType());
+        if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getIntegrationUri() != null) node.put("IntegrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {

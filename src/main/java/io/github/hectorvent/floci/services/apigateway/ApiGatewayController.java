@@ -1665,6 +1665,7 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("integrationId", i.getIntegrationId());
         node.put("integrationType", i.getIntegrationType());
+        if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getIntegrationUri() != null) node.put("integrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {
@@ -1741,6 +1742,9 @@ public class ApiGatewayController {
         }
         if (a.getAuthorizerResultTtlInSeconds() != null) {
             node.put("authorizerResultTtlInSeconds", a.getAuthorizerResultTtlInSeconds());
+        }
+        if (a.getEnableSimpleResponses() != null) {
+            node.put("enableSimpleResponses", a.getEnableSimpleResponses());
         }
         return node;
     }

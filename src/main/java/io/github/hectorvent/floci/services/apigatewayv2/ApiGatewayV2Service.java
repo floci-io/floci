@@ -175,6 +175,9 @@ public class ApiGatewayV2Service {
         if (request.get("authorizerResultTtlInSeconds") != null) {
             auth.setAuthorizerResultTtlInSeconds(((Number) request.get("authorizerResultTtlInSeconds")).intValue());
         }
+        if (request.get("enableSimpleResponses") != null) {
+            auth.setEnableSimpleResponses(Boolean.parseBoolean(String.valueOf(request.get("enableSimpleResponses"))));
+        }
 
         authorizerStore.put(authorizerKey(region, apiId, auth.getAuthorizerId()), auth);
         LOG.infov("Created authorizer: {0} ({1}) for API {2}", auth.getName(), auth.getAuthorizerId(), apiId);
@@ -232,6 +235,9 @@ public class ApiGatewayV2Service {
         }
         if (request.containsKey("authorizerResultTtlInSeconds") && request.get("authorizerResultTtlInSeconds") != null) {
             auth.setAuthorizerResultTtlInSeconds(((Number) request.get("authorizerResultTtlInSeconds")).intValue());
+        }
+        if (request.containsKey("enableSimpleResponses") && request.get("enableSimpleResponses") != null) {
+            auth.setEnableSimpleResponses(Boolean.parseBoolean(String.valueOf(request.get("enableSimpleResponses"))));
         }
 
         authorizerStore.put(authorizerKey(region, apiId, authorizerId), auth);
@@ -364,6 +370,7 @@ public class ApiGatewayV2Service {
         integration.setIntegrationId(shortId(8));
         integration.setIntegrationType((String) request.get("integrationType"));
         integration.setIntegrationUri((String) request.get("integrationUri"));
+        integration.setConnectionType((String) request.get("connectionType"));
         integration.setPayloadFormatVersion((String) request.getOrDefault("payloadFormatVersion", "2.0"));
         integration.setIntegrationMethod((String) request.get("integrationMethod"));
         integration.setTemplateSelectionExpression((String) request.get("templateSelectionExpression"));
@@ -412,6 +419,9 @@ public class ApiGatewayV2Service {
         }
         if (request.containsKey("integrationUri") && request.get("integrationUri") != null) {
             integration.setIntegrationUri((String) request.get("integrationUri"));
+        }
+        if (request.containsKey("connectionType") && request.get("connectionType") != null) {
+            integration.setConnectionType((String) request.get("connectionType"));
         }
         if (request.containsKey("payloadFormatVersion") && request.get("payloadFormatVersion") != null) {
             integration.setPayloadFormatVersion((String) request.get("payloadFormatVersion"));
