@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
@@ -387,11 +388,38 @@ public class EcsJsonHandler {
             return result;
         }
         for (JsonNode lb : node) {
+            String targetGroupArn = lb.hasNonNull("targetGroupArn")
+                    ? lb.path("targetGroupArn").asText() : null;
+            String loadBalancerName = lb.hasNonNull("loadBalancerName")
+                    ? lb.path("loadBalancerName").asText() : null;
+            String containerName = lb.hasNonNull("containerName")
+                    ? lb.path("containerName").asText() : null;
+            Integer containerPort = lb.hasNonNull("containerPort")
+                    ? lb.path("containerPort").asInt() : null;
+
+            // AWS rejects malformed loadBalancers entries with InvalidParameterException.
+            // containerName + containerPort are always required; an entry must target
+            // either a target group (ALB/NLB) or a classic load balancer by name.
+            if (containerName == null || containerName.isBlank()) {
+                throw new AwsException("InvalidParameterException",
+                        "loadBalancers entry is missing the required containerName.", 400);
+            }
+            if (containerPort == null) {
+                throw new AwsException("InvalidParameterException",
+                        "loadBalancers entry is missing the required containerPort.", 400);
+            }
+            boolean hasTargetGroup = targetGroupArn != null && !targetGroupArn.isBlank();
+            boolean hasLoadBalancerName = loadBalancerName != null && !loadBalancerName.isBlank();
+            if (!hasTargetGroup && !hasLoadBalancerName) {
+                throw new AwsException("InvalidParameterException",
+                        "loadBalancers entry must specify either targetGroupArn or loadBalancerName.", 400);
+            }
+
             EcsLoadBalancer m = new EcsLoadBalancer();
-            if (lb.hasNonNull("targetGroupArn")) { m.setTargetGroupArn(lb.path("targetGroupArn").asText()); }
-            if (lb.hasNonNull("loadBalancerName")) { m.setLoadBalancerName(lb.path("loadBalancerName").asText()); }
-            if (lb.hasNonNull("containerName")) { m.setContainerName(lb.path("containerName").asText()); }
-            if (lb.hasNonNull("containerPort")) { m.setContainerPort(lb.path("containerPort").asInt()); }
+            m.setTargetGroupArn(targetGroupArn);
+            m.setLoadBalancerName(loadBalancerName);
+            m.setContainerName(containerName);
+            m.setContainerPort(containerPort);
             result.add(m);
         }
         return result;

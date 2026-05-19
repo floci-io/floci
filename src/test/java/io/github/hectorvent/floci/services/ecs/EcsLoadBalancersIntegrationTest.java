@@ -91,6 +91,32 @@ class EcsLoadBalancersIntegrationTest {
     }
 
     @Test
+    void createServiceRejectsLoadBalancerEntryMissingRequiredFields() {
+        seedClusterAndTaskDef("lb-cluster-5", "lb-td-5");
+        // entry has containerName but no containerPort and no targetGroupArn/loadBalancerName
+        given().contentType(CT).header("X-Amz-Target", TARGET + "CreateService")
+                .body("{\"cluster\":\"lb-cluster-5\",\"serviceName\":\"lb-svc-5\","
+                        + "\"taskDefinition\":\"lb-td-5\",\"desiredCount\":1,"
+                        + "\"loadBalancers\":[{\"containerName\":\"web\"}]}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", org.hamcrest.Matchers.containsString("InvalidParameterException"));
+    }
+
+    @Test
+    void createServiceRejectsLoadBalancerEntryWithoutTargetGroup() {
+        seedClusterAndTaskDef("lb-cluster-6", "lb-td-6");
+        // containerName + containerPort present, but neither targetGroupArn nor loadBalancerName
+        given().contentType(CT).header("X-Amz-Target", TARGET + "CreateService")
+                .body("{\"cluster\":\"lb-cluster-6\",\"serviceName\":\"lb-svc-6\","
+                        + "\"taskDefinition\":\"lb-td-6\",\"desiredCount\":1,"
+                        + "\"loadBalancers\":[{\"containerName\":\"web\",\"containerPort\":8080}]}")
+                .when().post("/")
+                .then().statusCode(400)
+                .body("__type", org.hamcrest.Matchers.containsString("InvalidParameterException"));
+    }
+
+    @Test
     void serviceWithLoadBalancersIsStableInMockMode() {
         // Mock mode launches no real containers; the registrar must no-op cleanly.
         seedClusterAndTaskDef("lb-cluster-4", "lb-td-4");
