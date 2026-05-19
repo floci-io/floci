@@ -45,13 +45,20 @@ class PortAllocatorTest {
     void allocateNeverReturnsPortAlreadyHandedOut() {
         PortAllocator allocator = new PortAllocator(9200, 9209);
         Set<Integer> handed = new HashSet<>();
-        for (int i = 0; i < 11; i++) {
-            try {
-                int p = allocator.allocate();
-                assertTrue(handed.add(p), "allocate() returned port " + p + " already in use");
-            } catch (RuntimeException exhausted) {
-                return;
-            }
+        for (int i = 0; i < 10; i++) {
+            assertTrue(handed.add(allocator.allocate()));
         }
+        assertThrows(IllegalStateException.class, allocator::allocate);
+    }
+
+    @Test
+    void releasedPortBecomesAvailableAgain() {
+        PortAllocator allocator = new PortAllocator(9200, 9201);
+        int first = allocator.allocate();
+        allocator.allocate();
+        assertThrows(IllegalStateException.class, allocator::allocate);
+
+        allocator.release(first);
+        assertEquals(first, allocator.allocate());
     }
 }

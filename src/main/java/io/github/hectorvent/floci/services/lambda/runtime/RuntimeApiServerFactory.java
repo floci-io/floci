@@ -29,16 +29,22 @@ public class RuntimeApiServerFactory {
 
     public RuntimeApiServer create() {
         int port = portAllocator.allocate();
-        RuntimeApiServer server = new RuntimeApiServer(vertx, port);
         try {
+            RuntimeApiServer server = new RuntimeApiServer(vertx, port);
             server.start().get(10, TimeUnit.SECONDS);
             LOG.debugv("Created RuntimeApiServer on port {0}", port);
+            return server;
         } catch (InterruptedException e) {
+            portAllocator.release(port);
             Thread.currentThread().interrupt();
             throw new RuntimeException("Interrupted while starting RuntimeApiServer", e);
         } catch (ExecutionException | TimeoutException e) {
+            portAllocator.release(port);
             throw new RuntimeException("Failed to start RuntimeApiServer on port " + port, e);
         }
-        return server;
+    }
+
+    public void release(RuntimeApiServer server) {
+        portAllocator.release(server.getPort());
     }
 }

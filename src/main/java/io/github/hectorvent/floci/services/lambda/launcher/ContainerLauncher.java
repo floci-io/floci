@@ -286,6 +286,8 @@ public class ContainerLauncher {
         } catch (ExecutionException | TimeoutException e) {
             LOG.warnv(e, "RuntimeApiServer did not close cleanly for container {0}",
                     handle.getContainerId());
+        } finally {
+            runtimeApiServerFactory.release(handle.getRuntimeApiServer());
         }
         lifecycleManager.stopAndRemove(handle.getContainerId(), handle.getLogStream());
     }
