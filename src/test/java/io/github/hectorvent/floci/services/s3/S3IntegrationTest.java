@@ -817,7 +817,10 @@ class S3IntegrationTest {
             .put("/encoding-test-bucket/encoded.txt")
         .then()
             .statusCode(200)
-            .header("ETag", notNullValue());
+            .header("ETag", notNullValue())
+            .header("Content-Encoding", nullValue())
+            .header("Content-Disposition", nullValue())
+            .header("Cache-Control", nullValue());
     }
 
     @Test

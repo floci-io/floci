@@ -37,7 +37,10 @@ import software.amazon.awssdk.services.s3.model.PutObjectTaggingRequest;
 import software.amazon.awssdk.services.s3.model.S3Exception;
 import software.amazon.awssdk.services.s3.model.Tagging;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.util.zip.GZIPOutputStream;
 
 import static org.assertj.core.api.Assertions.*;
 
@@ -386,5 +389,42 @@ class S3Test {
     @Order(25)
     void deleteBucket() {
         s3.deleteBucket(DeleteBucketRequest.builder().bucket(BUCKET).build());
+    }
+
+    @Test
+    @Order(26)
+    void putObjectWithContentEncodingDoesNotBreakSdkDecompression() throws IOException {
+        String bucket = TestFixtures.uniqueName("gzip-bucket");
+        String key = "gzipped.json";
+        byte[] body;
+        try (ByteArrayOutputStream baos = new ByteArrayOutputStream();
+             GZIPOutputStream gz = new GZIPOutputStream(baos)) {
+            gz.write("{\"hello\":\"world\"}".getBytes(StandardCharsets.UTF_8));
+            gz.finish();
+            body = baos.toByteArray();
+        }
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        try {
+            var putResponse = s3.putObject(PutObjectRequest.builder()
+                            .bucket(bucket).key(key)
+                            .contentEncoding("gzip")
+                            .contentType("application/json")
+                            .build(),
+                    RequestBody.fromBytes(body));
+
+            assertThat(putResponse.eTag()).isNotBlank();
+
+            // HEAD response has a body, so Content-Encoding belongs there.
+            HeadObjectResponse head = s3.headObject(HeadObjectRequest.builder()
+                    .bucket(bucket).key(key).build());
+            assertThat(head.contentEncoding()).isEqualTo("gzip");
+        } finally {
+            try {
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+            } catch (Exception ignored) {}
+            try {
+                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+            } catch (Exception ignored) {}
+        }
     }
 }

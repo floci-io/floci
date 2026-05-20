@@ -502,7 +502,7 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            appendObjectHeaders(resp, obj);
+            appendPutObjectResponseHeaders(resp, obj);
             return resp.build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1514,6 +1514,19 @@ public class S3Controller {
 
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj) {
         appendObjectHeaders(resp, obj, ResponseHeaderOverrides.NONE);
+    }
+
+    // PutObject's response body is empty — body-describing headers and x-amz-meta-*
+    // must not be emitted, or SDK clients will try to decompress and fail.
+    private void appendPutObjectResponseHeaders(Response.ResponseBuilder resp, S3Object obj) {
+        if (obj.getStorageClass() != null) {
+            resp.header("x-amz-storage-class", obj.getStorageClass());
+        }
+        if (obj.getServerSideEncryption() != null) {
+            resp.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
+        }
+        appendChecksumHeaders(resp, obj.getChecksum());
+        appendLockHeaders(resp, obj);
     }
 
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides) {
