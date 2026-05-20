@@ -312,6 +312,7 @@ public interface EmulatorConfig {
         CostExplorerServiceConfig ce();
         CurServiceConfig cur();
         BcmDataExportsServiceConfig bcmDataExports();
+        ConfigServiceConfig configservice();
     }
 
     interface TransferServiceConfig {
@@ -342,6 +343,11 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
+    }
+
+    interface ConfigServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AutoScalingServiceConfig {

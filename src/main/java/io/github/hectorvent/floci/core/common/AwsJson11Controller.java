@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.glue.GlueJsonHandler;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingJsonHandler;
 import io.github.hectorvent.floci.services.bcmdataexports.BcmDataExportsJsonHandler;
 import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
+import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
 import io.github.hectorvent.floci.services.textract.TextractJsonHandler;
@@ -76,6 +77,7 @@ public class AwsJson11Controller {
     private final CostExplorerJsonHandler costExplorerJsonHandler;
     private final CurJsonHandler curJsonHandler;
     private final BcmDataExportsJsonHandler bcmDataExportsJsonHandler;
+    private final ConfigServiceJsonHandler configServiceJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
@@ -100,7 +102,8 @@ public class AwsJson11Controller {
                                TranscribeJsonHandler transcribeJsonHandler,
                                CostExplorerJsonHandler costExplorerJsonHandler,
                                CurJsonHandler curJsonHandler,
-                               BcmDataExportsJsonHandler bcmDataExportsJsonHandler) {
+                               BcmDataExportsJsonHandler bcmDataExportsJsonHandler,
+                               ConfigServiceJsonHandler configServiceJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
@@ -129,6 +132,7 @@ public class AwsJson11Controller {
         this.costExplorerJsonHandler = costExplorerJsonHandler;
         this.curJsonHandler = curJsonHandler;
         this.bcmDataExportsJsonHandler = bcmDataExportsJsonHandler;
+        this.configServiceJsonHandler = configServiceJsonHandler;
     }
 
     @POST
@@ -182,6 +186,7 @@ public class AwsJson11Controller {
                 case "ce" -> costExplorerJsonHandler.handle(action, request, region);
                 case "cur" -> curJsonHandler.handle(action, request, region);
                 case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
+                case "config" -> configServiceJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

@@ -197,6 +197,48 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    @Order(6)
+    void sendMessageBatchPersistsAwsTraceHeaderPerEntry() {
+        String traceQueueName = "json-batch-trace-queue";
+        String createBody = "{\"QueueName\":\"" + traceQueueName + "\"}";
+        String traceQueueUrl = given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body(createBody)
+        .when().post("/").then().statusCode(200)
+            .extract().jsonPath().getString("QueueUrl");
+
+        String batchBody = "{\"QueueUrl\":\"" + traceQueueUrl + "\","
+                + "\"Entries\":["
+                + "{\"Id\":\"a\",\"MessageBody\":\"first\","
+                + "\"MessageSystemAttributes\":{"
+                + "\"AWSTraceHeader\":{\"DataType\":\"String\",\"StringValue\":\"Root=1-aaa\"}}},"
+                + "{\"Id\":\"b\",\"MessageBody\":\"second\","
+                + "\"MessageSystemAttributes\":{"
+                + "\"AWSTraceHeader\":{\"DataType\":\"String\",\"StringValue\":\"Root=1-bbb\"}}}"
+                + "]}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body(batchBody)
+        .when().post("/").then().statusCode(200)
+            .body("Successful", hasSize(2));
+
+        String receiveBody = "{\"QueueUrl\":\"" + traceQueueUrl + "\","
+                + "\"MaxNumberOfMessages\":10,"
+                + "\"MessageSystemAttributeNames\":[\"AWSTraceHeader\"]}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ReceiveMessage")
+            .body(receiveBody)
+        .when().post("/").then().statusCode(200)
+            .body("Messages", hasSize(2))
+            .body("Messages.Attributes.AWSTraceHeader", hasItems("Root=1-aaa", "Root=1-bbb"));
+    }
+
+    @Test
     @Order(7)
     void receiveMessageOnEmptyQueueOmitsMessagesField() {
         // AWS omits the Messages field entirely when no messages are available.

@@ -33,6 +33,11 @@ public class Message {
     // surface.
     private String originalSourceQueueUrl;
 
+    // Caller-supplied system attribute (the only entry AWS allows under
+    // MessageSystemAttributes on SendMessage). Returned under Attributes.AWSTraceHeader
+    // on ReceiveMessage when requested.
+    private String awsTraceHeader;
+
     // Transient fields for visibility timeout tracking
     @JsonIgnore
     private String receiptHandle;
@@ -93,6 +98,9 @@ public class Message {
 
     public String getOriginalSourceQueueUrl() { return originalSourceQueueUrl; }
     public void setOriginalSourceQueueUrl(String originalSourceQueueUrl) { this.originalSourceQueueUrl = originalSourceQueueUrl; }
+
+    public String getAwsTraceHeader() { return awsTraceHeader; }
+    public void setAwsTraceHeader(String awsTraceHeader) { this.awsTraceHeader = awsTraceHeader; }
 
     @JsonIgnore
     public boolean isVisible() {

@@ -113,6 +113,9 @@ public class SqsJsonHandler {
                 && (all || requested.contains("MessageDeduplicationId"))) {
             attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
         }
+        if (msg.getAwsTraceHeader() != null && (all || requested.contains("AWSTraceHeader"))) {
+            attrs.put("AWSTraceHeader", msg.getAwsTraceHeader());
+        }
         if (!attrs.isEmpty()) {
             msgNode.set("Attributes", attrs);
         }
@@ -215,8 +218,13 @@ public class SqsJsonHandler {
             });
         }
 
+        // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
+        // capture it (if present) so ReceiveMessage can return it as a system attribute.
+        String awsTraceHeader = request.path("MessageSystemAttributes")
+                .path("AWSTraceHeader").path("StringValue").asText(null);
+
         Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
-                messageGroupId, messageDeduplicationId, messageAttributes, region);
+                messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("MessageId", msg.getMessageId());
@@ -340,7 +348,7 @@ public class SqsJsonHandler {
         ArrayNode failed = objectMapper.createArrayNode();
 
         record ParsedEntry(String id, String body, int delay, String groupId, String dedupId,
-                           Map<String, MessageAttributeValue> attributes) {}
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
         int totalSize = 0;
@@ -371,9 +379,13 @@ public class SqsJsonHandler {
                     });
                 }
 
+                String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
+                        .path("AWSTraceHeader").path("StringValue").asText(null);
+
                 totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
                 parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
-                        messageGroupId, messageDeduplicationId, messageAttributes));
+                        messageGroupId, messageDeduplicationId, messageAttributes,
+                        entryAwsTraceHeader));
             }
         }
 
@@ -383,7 +395,8 @@ public class SqsJsonHandler {
                 String id = parsed.id();
                 try {
                     Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
-                            parsed.groupId(), parsed.dedupId(), parsed.attributes(), region);
+                            parsed.groupId(), parsed.dedupId(), parsed.attributes(),
+                            parsed.awsTraceHeader(), region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     success.put("MessageId", msg.getMessageId());
