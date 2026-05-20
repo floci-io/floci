@@ -108,4 +108,28 @@ class KmsIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("KMSInvalidMacException"));
     }
+
+    @Test
+    void rotateKeyOnDemandReturnsKeyId() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"Description\":\"rotate-on-demand\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.RotateKeyOnDemand")
+                .contentType("application/x-amz-json-1.1")
+                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyId", equalTo(keyId));
+    }
 }
