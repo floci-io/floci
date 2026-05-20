@@ -525,19 +525,15 @@ public class Ec2Service {
 
     public void deleteVpc(String region, String vpcId) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = Vpc vpc = getRequiredVpc(region, vpcId);
+
         vpcs.remove(key(region, vpcId));
     }
 
     public void modifyVpcAttribute(String region, String vpcId, String attribute, String value) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = Vpc vpc = getRequiredVpc(region, vpcId);
+        
         switch (attribute) {
             case "enableDnsSupport"                    -> vpc.setEnableDnsSupport(Boolean.parseBoolean(value));
             case "enableDnsHostnames"                  -> vpc.setEnableDnsHostnames(Boolean.parseBoolean(value));
@@ -548,10 +544,8 @@ public class Ec2Service {
 
     public Vpc describeVpcAttribute(String region, String vpcId, String attribute) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = Vpc vpc = getRequiredVpc(region, vpcId);
+
         return vpc;
     }
 
@@ -566,10 +560,8 @@ public class Ec2Service {
 
     public VpcCidrBlockAssociation associateVpcCidrBlock(String region, String vpcId, String cidrBlock) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = Vpc vpc = getRequiredVpc(region, vpcId);
+
         VpcCidrBlockAssociation assoc = new VpcCidrBlockAssociation(
                 "vpc-cidr-assoc-" + randomHex(8), cidrBlock);
         vpc.getCidrBlockAssociationSet().add(assoc);
@@ -589,10 +581,8 @@ public class Ec2Service {
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = Vpc vpc = getRequiredVpc(region, vpcId);
+
         String subnetId = "subnet-" + randomHex(8);
         Subnet subnet = new Subnet();
         subnet.setSubnetId(subnetId);
@@ -1070,10 +1060,8 @@ public class Ec2Service {
 
     public RouteTable createRouteTable(String region, String vpcId) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = getRequiredVpc(region, vpcId); 
+
         String rtId = "rtb-" + randomHex(8);
         RouteTable rt = new RouteTable();
         rt.setRouteTableId(rtId);
@@ -1084,6 +1072,15 @@ public class Ec2Service {
         routeTables.put(key(region, rtId), rt);
         return rt;
     }
+
+    private Vpc getRequiredVpc(String region, String vpcId) {
+        Vpc vpc = vpcs.get(key(region, vpcId));
+
+        if (vpc == null)
+            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
+
+        return vpc;
+    }       
 
     public List<RouteTable> describeRouteTables(String region, List<String> routeTableIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
