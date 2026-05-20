@@ -20,6 +20,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
+	"github.com/aws/aws-sdk-go-v2/service/neptune"
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -131,6 +132,11 @@ func PipesClient() *pipes.Client {
 // RDSClient returns a new RDS client.
 func RDSClient() *rds.Client {
 	return rds.NewFromConfig(Config())
+}
+
+// NeptuneClient returns a new Neptune client.
+func NeptuneClient() *neptune.Client {
+	return neptune.NewFromConfig(Config())
 }
 
 // CognitoClient returns a new Cognito Identity Provider client.

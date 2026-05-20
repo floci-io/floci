@@ -104,6 +104,11 @@ pub async fn pipes_client() -> aws_sdk_pipes::Client {
     aws_sdk_pipes::Client::new(&base_config().await)
 }
 
+/// Returns a Neptune client.
+pub async fn neptune_client() -> aws_sdk_neptune::Client {
+    aws_sdk_neptune::Client::new(&base_config().await)
+}
+
 /// Returns a minimal Lambda deployment zip with a Node.js handler.
 pub fn minimal_zip() -> Vec<u8> {
     use std::io::Write;

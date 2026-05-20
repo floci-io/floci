@@ -26,6 +26,7 @@
     "@aws-sdk/client-sns": "^3.500.0",
     "@aws-sdk/client-sqs": "^3.500.0",
     "@aws-sdk/client-ssm": "^3.500.0",
+    "@aws-sdk/client-neptune": "^3.500.0",
     "@aws-sdk/client-sts": "^3.500.0",
     "selfsigned": "^5.5.0",
     "ws": "^8.0.0"

@@ -121,7 +121,7 @@ Run AWS-compatible services locally without an AWS account, auth token, or paid 
 <details>
 <summary><strong>Real Docker where fidelity matters</strong></summary>
 
-Lambda, RDS, ElastiCache, MSK, ECS, EC2, EKS, OpenSearch, and CodeBuild use real Docker-backed execution instead of shallow mocks.
+Lambda, RDS, Neptune, ElastiCache, MSK, ECS, EC2, EKS, OpenSearch, and CodeBuild use real Docker-backed execution instead of shallow mocks.
 
 </details>
 
@@ -161,11 +161,12 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | API Gateway v2 / HTTP API | Yes | No |
 | Cognito | Yes | No |
 | RDS, ElastiCache, MSK | Real Docker | No |
+| Neptune (graph DB + Gremlin WebSocket) | Real Docker | No |
 | ECS, EC2, EKS | Real Docker | No |
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**47 AWS services. Broad coverage. Free forever.**
+**48 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -185,7 +186,7 @@ flowchart LR
         end
 
         subgraph Containers ["Container Services"]
-            C["Lambda\nElastiCache\nRDS\nECS\nEC2\nMSK\nEKS\nOpenSearch\nCodeBuild"]
+            C["Lambda\nElastiCache\nRDS\nNeptune\nECS\nEC2\nMSK\nEKS\nOpenSearch\nCodeBuild"]
             D["Athena -> floci-duck\nDuckDB sidecar"]
         end
 
@@ -210,6 +211,7 @@ Floci supports local emulation for application services, data services, eventing
 | Events and workflows | EventBridge, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, Cognito, ACM, Route53 |
 | Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
+| Graph database | Neptune |
 | Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract |
 | Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
@@ -246,6 +248,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | CloudWatch Metrics | In-process | Custom metrics, statistics, alarms |
 | ElastiCache | Real Docker | Redis / Valkey protocol, IAM auth, SigV4 validation |
 | RDS | Real Docker | PostgreSQL, MySQL, MariaDB, IAM auth, JDBC-compatible engines |
+| Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server; RDS-shaped control plane; Gremlin WebSocket on port 8182 with SigV4 proxy |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
@@ -287,6 +290,7 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | RDS PostgreSQL | `postgres:16-alpine` | PostgreSQL engine, IAM auth, JDBC-compatible access |
 | RDS MySQL / Aurora | `mysql:8.0` | MySQL engine, IAM auth, JDBC-compatible access |
 | RDS MariaDB | `mariadb:11` | MariaDB engine, IAM auth, JDBC-compatible access |
+| Neptune | `tinkerpop/gremlin-server:3.7.3` | TinkerPop Gremlin Server; Gremlin WebSocket on port 8182; SigV4 auth proxy |
 | MSK | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda |
 | EC2 | AMI-mapped Linux images | Linux containers, SSH key injection, UserData, IMDS, IAM credentials |
 | ECS | User-specified task image | Container lifecycle, start, stop, health checks |
@@ -315,6 +319,7 @@ docker run -d --name floci \
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` |
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` |
 | `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` |
+| `FLOCI_SERVICES_NEPTUNE_DEFAULT_IMAGE` | `tinkerpop/gremlin-server:3.7.3` |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` |
 | `FLOCI_ECR_BASE_URI` | `public.ecr.aws` |
@@ -633,17 +638,17 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 
 | Module | Language / Tool | SDK / Client | Tests |
 |---|---|---|---:|
-| `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 889 |
-| `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 360 |
-| `sdk-test-python` | Python 3 | boto3 | 264 |
-| `sdk-test-go` | Go | AWS SDK for Go v2 | 136 |
-| `sdk-test-awscli` | Bash | AWS CLI v2 | 145 |
-| `sdk-test-rust` | Rust | AWS SDK for Rust | 86 |
+| `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 899 |
+| `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 366 |
+| `sdk-test-python` | Python 3 | boto3 | 272 |
+| `sdk-test-go` | Go | AWS SDK for Go v2 | 144 |
+| `sdk-test-awscli` | Bash | AWS CLI v2 | 152 |
+| `sdk-test-rust` | Rust | AWS SDK for Rust | 90 |
 | `compat-terraform` | Terraform | v1.10+ | 14 |
 | `compat-opentofu` | OpenTofu | v1.9+ | 14 |
 | `compat-cdk` | AWS CDK | v2+ | 17 |
 
-**1,850+ automated compatibility tests across 6 SDKs and 3 IaC tools.**
+**1,968 automated compatibility tests across 6 SDKs and 3 IaC tools.**
 
 ## Migrating from LocalStack
 
