@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.s3.model.RequestContext;
 import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
+import io.github.hectorvent.floci.services.s3.S3Controller.ISO_FORMAT;
 
 public class VersionsHandler implements Handler {
 
@@ -39,7 +40,6 @@ public class VersionsHandler implements Handler {
                         .elem("Key", obj.getKey())
                         .elem("VersionId", obj.getVersionId())
                         .elem("IsLatest", obj.isLatest())
-                        // ISO_FORMAT deve ser uma constante estática compartilhada ou injetada
                         .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                         .end("DeleteMarker");
             } else {

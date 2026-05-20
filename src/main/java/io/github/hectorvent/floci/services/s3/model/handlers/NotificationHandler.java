@@ -4,6 +4,10 @@ import jakarta.ws.rs.core.Response;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+
+import java.util.List;
+
+import io.github.hectorvent.floci.services.s3.model.FilterRule;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.services.s3.model.TopicNotification;
 import io.github.hectorvent.floci.services.s3.model.QueueNotification;
@@ -12,6 +16,19 @@ import io.github.hectorvent.floci.services.s3.model.LambdaNotification;
 import jakarta.ws.rs.core.MediaType;
 
 public class NotificationHandler implements Handler {
+
+    private static void appendFilterRules(XmlBuilder xml, List<FilterRule> rules) {
+        if (rules == null || rules.isEmpty())
+            return;
+        xml.start("Filter").start("S3Key");
+        for (FilterRule rule : rules) {
+            xml.start("FilterRule")
+                    .elem("Name", rule.name())
+                    .elem("Value", rule.value())
+                    .end("FilterRule");
+        }
+        xml.end("S3Key").end("Filter");
+    }
 
     @Override
     public Response handleGet(S3Service service, RequestContext context) {
@@ -28,7 +45,6 @@ public class NotificationHandler implements Handler {
                 for (String event : qn.events()) {
                     xml.elem("Event", event);
                 }
-                // Nota: Certifique-se de expor ou mover appendFilterRules() para utilitários
                 appendFilterRules(xml, qn.filterRules());
                 xml.end("QueueConfiguration");
             }
