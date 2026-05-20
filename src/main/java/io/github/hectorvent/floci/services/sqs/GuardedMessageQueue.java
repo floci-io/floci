@@ -46,23 +46,23 @@ class GuardedMessageQueue {
     }
 
     void addMessage(Message message) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.add(message);
             persist();
         }
     }
 
     void addAll(List<Message> toAdd) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.addAll(toAdd);
             persist();
         }
     }
 
     ClaimResult claimVisibleMessages(int maxMessages, int effectiveTimeout,
-                                     boolean fifo, int maxReceiveCount,
-                                     String deadLetterTargetArn) {
-        try (var _ = hold()) {
+                                      boolean fifo, int maxReceiveCount,
+                                      String deadLetterTargetArn) {
+        try (var guard = hold()) {
             List<Message> claimed = new ArrayList<>();
             List<Message> dlqCandidates = new ArrayList<>();
 
@@ -136,7 +136,7 @@ class GuardedMessageQueue {
     }
 
     Optional<Message> removeByReceiptHandle(String receiptHandle) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             Message removed = null;
             for (Iterator<Message> it = messages.iterator(); it.hasNext(); ) {
                 Message m = it.next();
@@ -154,7 +154,7 @@ class GuardedMessageQueue {
     }
 
     boolean changeVisibility(String receiptHandle, int visibilityTimeout) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             for (Message msg : messages) {
                 if (receiptHandle.equals(msg.getReceiptHandle())) {
                     msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
@@ -167,21 +167,21 @@ class GuardedMessageQueue {
     }
 
     void removeMessages(List<Message> toRemove) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.removeAll(toRemove);
             persist();
         }
     }
 
     void purge() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.clear();
             persist();
         }
     }
 
     List<Message> drainAll() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             List<Message> drained = new ArrayList<>(messages);
             messages.clear();
             persist();
@@ -193,7 +193,7 @@ class GuardedMessageQueue {
     }
 
     MessageCounts messageCounts() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             long visible = 0;
             long inFlight = 0;
             for (Message m : messages) {
@@ -205,19 +205,19 @@ class GuardedMessageQueue {
     }
 
     List<Message> peekAll() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             return new ArrayList<>(messages);
         }
     }
 
     boolean isEmpty() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             return messages.isEmpty();
         }
     }
 
     Message findByDeduplicationId(String dedupId) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             return messages.stream().filter(msg -> dedupId.equals(msg.getMessageDeduplicationId()))
                     .findFirst().orElse(null);
         }

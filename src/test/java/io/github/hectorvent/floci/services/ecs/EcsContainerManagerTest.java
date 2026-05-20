@@ -6,15 +6,17 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.services.ecs.container.EcsContainerManager;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.InspectContainerCmd;
 import com.github.dockerjava.api.command.InspectContainerResponse;
-import com.github.dockerjava.api.model.ContainerState;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
@@ -35,10 +37,6 @@ class EcsContainerManagerTest {
 
     @BeforeEach
     void setUp() {
-        when(config.services()).thenReturn(mock(EmulatorConfig.ServicesConfig.class));
-        when(config.services().ecs()).thenReturn(mock(EmulatorConfig.EcsConfig.class));
-        when(config.services().ecs().dockerNetwork()).thenReturn("bridge");
-
         manager = new EcsContainerManager(
                 containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver);
     }
@@ -48,7 +46,7 @@ class EcsContainerManagerTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         when(dockerClient.inspectContainerCmd("abc123")).thenReturn(inspectContainerCmd);
 
-        ContainerState state = mock(ContainerState.class);
+        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
         when(state.getRunning()).thenReturn(true);
 
         InspectContainerResponse response = mock(InspectContainerResponse.class);
@@ -63,7 +61,7 @@ class EcsContainerManagerTest {
         when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
         when(dockerClient.inspectContainerCmd("abc123")).thenReturn(inspectContainerCmd);
 
-        ContainerState state = mock(ContainerState.class);
+        InspectContainerResponse.ContainerState state = mock(InspectContainerResponse.ContainerState.class);
         when(state.getRunning()).thenReturn(false);
         when(state.getExitCode()).thenReturn(0);
         when(state.getFinishedAt()).thenReturn("2026-01-01T00:00:00Z");
