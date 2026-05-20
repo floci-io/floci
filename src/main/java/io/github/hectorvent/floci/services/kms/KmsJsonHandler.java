@@ -45,6 +45,8 @@ public class KmsJsonHandler {
             case "GenerateDataKeyWithoutPlaintext" -> handleGenerateDataKeyWithoutPlaintext(request, region);
             case "Sign" -> handleSign(request, region);
             case "Verify" -> handleVerify(request, region);
+            case "GenerateMac" -> handleGenerateMac(request, region);
+            case "VerifyMac" -> handleVerifyMac(request, region);
             case "CreateAlias" -> handleCreateAlias(request, region);
             case "DeleteAlias" -> handleDeleteAlias(request, region);
             case "ListAliases" -> handleListAliases(request, region);
@@ -243,6 +245,35 @@ public class KmsJsonHandler {
         response.put("KeyId", service.describeKey(keyId, region).getArn());
         response.put("SignatureValid", valid);
         response.put("SigningAlgorithm", algorithm);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGenerateMac(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText();
+        byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
+        String algorithm = request.path("MacAlgorithm").asText();
+
+        KmsService.GenerateMacResult result = service.generateMacAndResolveKey(keyId, message, algorithm, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("KeyId", result.keyArn());
+        response.put("Mac", Base64.getEncoder().encodeToString(result.mac()));
+        response.put("MacAlgorithm", algorithm);
+        return Response.ok(response).build();
+    }
+
+    private Response handleVerifyMac(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText();
+        byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
+        byte[] mac = Base64.getDecoder().decode(request.path("Mac").asText());
+        String algorithm = request.path("MacAlgorithm").asText();
+
+        KmsService.VerifyMacResult result = service.verifyMacAndResolveKey(keyId, message, mac, algorithm, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("KeyId", result.keyArn());
+        response.put("MacAlgorithm", algorithm);
+        response.put("MacValid", true);
         return Response.ok(response).build();
     }
 

@@ -1288,6 +1288,80 @@ class ApiGatewayOpenApiImportTest {
         given().delete("/restapis/" + apiId);
     }
 
+    // ──────────────────────────── Content-Type Tolerance ────────────────────────────
+
+    @Test
+    @Order(70)
+    void importRestApi_octetStreamContentType() throws Exception {
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "OctetImport", "version": "1.0"}, "paths": {}}
+                """;
+        String body = given()
+                .contentType("application/octet-stream")
+                .queryParam("mode", "import")
+                .body(spec.getBytes())
+                .when()
+                .post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("name", equalTo("OctetImport"))
+                .extract().body().asString();
+
+        String apiId = mapper.readTree(body).get("id").asText();
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(71)
+    void putRestApi_noContentType() throws Exception {
+        String createBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"NoCtype\"}")
+                .post("/restapis")
+                .then().statusCode(201).extract().body().asString();
+        String apiId = mapper.readTree(createBody).get("id").asText();
+
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "NoCtypeOverwritten", "version": "1.0"}, "paths": {}}
+                """;
+        given()
+                .queryParam("mode", "overwrite")
+                .body(spec.getBytes())
+                .when()
+                .put("/restapis/" + apiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("NoCtypeOverwritten"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
+    @Test
+    @Order(72)
+    void putRestApi_octetStreamContentType() throws Exception {
+        String createBody = given()
+                .contentType(ContentType.JSON)
+                .body("{\"name\": \"OctetOverwrite\"}")
+                .post("/restapis")
+                .then().statusCode(201).extract().body().asString();
+        String apiId = mapper.readTree(createBody).get("id").asText();
+
+        String spec = """
+                {"openapi": "3.0.1", "info": {"title": "OctetOverwritten", "version": "1.0"}, "paths": {}}
+                """;
+        given()
+                .contentType("application/octet-stream")
+                .queryParam("mode", "overwrite")
+                .body(spec.getBytes())
+                .when()
+                .put("/restapis/" + apiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("OctetOverwritten"));
+
+        given().delete("/restapis/" + apiId);
+    }
+
     // ──────────────────────────── Cleanup ────────────────────────────
 
     @Test

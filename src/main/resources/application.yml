@@ -155,6 +155,7 @@ floci:
       proxy-base-port: 6379
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
+      default-memcached-image: "memcached:1.6"
     rds:
       enabled: true
       proxy-base-port: 7001

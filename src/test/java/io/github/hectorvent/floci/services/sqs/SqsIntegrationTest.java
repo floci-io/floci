@@ -384,6 +384,42 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void sendMessageBatch_queryProtocol_oversizedBatchReturnsBatchRequestTooLong() {
+        String queueName = "batch-oversize-query-queue";
+        String queueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            String bigBody = "x".repeat(100_000);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.3.Id", "c")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", bigBody)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("BatchRequestTooLong"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", queueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
     void createQueue_idempotent_sameAttributes() {
         String queueName = "idempotent-test-queue";
 

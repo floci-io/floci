@@ -173,6 +173,30 @@ class SqsJsonProtocolTest {
     }
 
     @Test
+    @Order(6)
+    void sendMessageBatchExceedingQueueMaximumMessageSizeReturnsBatchRequestTooLong() {
+        // Default queue MaximumMessageSize is 262144 bytes. Each entry is well under the
+        // per-message limit; the sum is what trips the batch-level check.
+        String bigBody = "x".repeat(100_000);
+        String body = "{\"QueueUrl\":\"" + queueUrl + "\","
+                + "\"Entries\":["
+                + "{\"Id\":\"a\",\"MessageBody\":\"" + bigBody + "\"},"
+                + "{\"Id\":\"b\",\"MessageBody\":\"" + bigBody + "\"},"
+                + "{\"Id\":\"c\",\"MessageBody\":\"" + bigBody + "\"}"
+                + "]}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SendMessageBatch")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("BatchRequestTooLong"));
+    }
+
+    @Test
     @Order(7)
     void receiveMessageOnEmptyQueueOmitsMessagesField() {
         // AWS omits the Messages field entirely when no messages are available.
@@ -287,6 +311,91 @@ class SqsJsonProtocolTest {
             .body("Messages[0].Attributes.SentTimestamp", notNullValue())
             .body("Messages[0].Attributes.ApproximateReceiveCount", notNullValue())
             .body("Messages[0].Attributes.ApproximateFirstReceiveTimestamp", notNullValue());
+    }
+
+    @Test
+    @Order(7)
+    void tagQueueWithJsonNullValueIsRejected() {
+        String tagBody = "{\"QueueUrl\":\"" + queueUrl + "\","
+                + "\"Tags\":{\"NullTag\":null,\"RealTag\":\"value\"}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.TagQueue")
+            .body(tagBody)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
+
+        String listBody = "{\"QueueUrl\":\"" + queueUrl + "\"}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.ListQueueTags")
+            .body(listBody)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags.NullTag", nullValue())
+            .body("Tags.RealTag", nullValue());
+    }
+
+    @Test
+    @Order(7)
+    void createQueueWithJsonNullTagValueIsRejected() {
+        String body = "{\"QueueName\":\"" + QUEUE_NAME + "-null-tag\","
+                + "\"tags\":{\"NullTag\":null}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
+    }
+
+    @Test
+    @Order(7)
+    void createQueueWithJsonNullAttributeValueIsRejected() {
+        String body = "{\"QueueName\":\"" + QUEUE_NAME + "-null-attr\","
+                + "\"Attributes\":{\"DelaySeconds\":null}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.CreateQueue")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
+    }
+
+    @Test
+    @Order(7)
+    void setQueueAttributesWithJsonNullValueIsRejected() {
+        String body = "{\"QueueUrl\":\"" + queueUrl + "\","
+                + "\"Attributes\":{\"DelaySeconds\":null}}";
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AmazonSQS.SetQueueAttributes")
+            .body(body)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidParameterValue"))
+            .body("message", equalTo("the parameter 'value' may not be null"));
     }
 
     @Test

@@ -118,11 +118,127 @@ class PreSignedUrlIntegrationTest {
             .body(equalTo("uploaded via presigned PUT"));
     }
 
+    // --- response-* query parameter overrides on presigned GET/HEAD ---
+
     @Test
-    @Order(6)
+    @Order(10)
+    void uploadObjectWithStoredHeadersForOverrideTests() {
+        given()
+            .body("override-content")
+            .contentType("text/plain")
+            .header("Content-Disposition", "inline")
+            .header("Cache-Control", "max-age=60")
+        .when()
+            .put("/" + BUCKET + "/disposition-file.txt")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
+    void getObjectAppliesResponseContentDispositionOverride() {
+        // Stored disposition is "inline"; override should win.
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22file.txt%22")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("attachment; filename=\"file.txt\""));
+    }
+
+    @Test
+    @Order(12)
+    void getObjectAppliesAllResponseOverrides() {
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/" + BUCKET + "/disposition-file.txt"
+                + "?response-content-type=application%2Fpdf"
+                + "&response-content-language=en-US"
+                + "&response-expires=Thu%2C%2001%20Dec%202099%2016%3A00%3A00%20GMT"
+                + "&response-cache-control=no-store"
+                + "&response-content-disposition=attachment"
+                + "&response-content-encoding=identity")
+        .then()
+            .statusCode(200)
+            .header("Content-Type", equalTo("application/pdf"))
+            .header("Content-Language", equalTo("en-US"))
+            .header("Expires", equalTo("Thu, 01 Dec 2099 16:00:00 GMT"))
+            .header("Cache-Control", equalTo("no-store"))
+            .header("Content-Disposition", equalTo("attachment"))
+            .header("Content-Encoding", equalTo("identity"));
+    }
+
+    @Test
+    @Order(13)
+    void getObjectWithoutOverridesReturnsStoredHeaders() {
+        given()
+        .when()
+            .get("/" + BUCKET + "/disposition-file.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("inline"))
+            .header("Cache-Control", equalTo("max-age=60"));
+    }
+
+    @Test
+    @Order(14)
+    void headObjectAppliesResponseContentDispositionOverride() {
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .head("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22head.txt%22")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("attachment; filename=\"head.txt\""));
+    }
+
+    @Test
+    @Order(15)
+    void emptyResponseOverrideIsIgnoredAndFallsBackToStored() {
+        // `?response-content-disposition=` binds as "" in JAX-RS; real S3 treats it as absent.
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/" + BUCKET + "/disposition-file.txt?response-content-disposition=")
+        .then()
+            .statusCode(200)
+            .header("Content-Disposition", equalTo("inline"));
+    }
+
+    @Test
+    @Order(16)
+    void rangeRequestAppliesResponseContentDispositionOverride() {
+        given()
+            .urlEncodingEnabled(false)
+            .header("Range", "bytes=0-3")
+        .when()
+            .get("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22range.txt%22")
+        .then()
+            .statusCode(206)
+            .header("Content-Disposition", equalTo("attachment; filename=\"range.txt\""));
+    }
+
+    @Test
+    @Order(17)
+    void rangeRequestWithoutOverrideFallsBackToStoredDisposition() {
+        given()
+            .header("Range", "bytes=0-3")
+        .when()
+            .get("/" + BUCKET + "/disposition-file.txt")
+        .then()
+            .statusCode(206)
+            .header("Content-Disposition", equalTo("inline"))
+            .header("Cache-Control", equalTo("max-age=60"));
+    }
+
+    @Test
+    @Order(99)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/secret-file.txt").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/uploaded-via-presign.txt").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/disposition-file.txt").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
     }
 }

@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.ConditionalCheckFailed
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 
 import java.util.*;
+import java.util.Base64;
 
 class DynamoDbPartiQLHandler {
 
@@ -21,9 +22,9 @@ class DynamoDbPartiQLHandler {
         this.mapper = mapper;
     }
 
-    JsonNode execute(Stmt stmt, String region) {
+    JsonNode execute(Stmt stmt, PartiQLExecuteContext ctx, String region) {
         return switch (stmt) {
-            case Stmt.Select s -> executeSelect(s, region);
+            case Stmt.Select s -> executeSelect(s, ctx, region);
             case Stmt.Insert s -> executeInsert(s, region);
             case Stmt.Update s -> executeUpdate(s, region);
             case Stmt.Delete s -> executeDelete(s, region);
@@ -32,7 +33,7 @@ class DynamoDbPartiQLHandler {
 
     // --- SELECT ---
 
-    private JsonNode executeSelect(Stmt.Select stmt, String region) {
+    private JsonNode executeSelect(Stmt.Select stmt, PartiQLExecuteContext ctx, String region) {
         TableDefinition table = service.describeTable(stmt.table(), region);
         String pkName = table.getPartitionKeyName();
         String skName = table.getSortKeyName();
@@ -57,9 +58,15 @@ class DynamoDbPartiQLHandler {
         }
 
         List<JsonNode> items;
-        // Only use GetItem when table has no sort key and we have a pk equality with no other conditions.
-        // When the table has a sort key, always use Query (GetItem requires both pk and sk).
-        if (pkEq != null && skName == null && skCond == null && filterConds.isEmpty()) {
+        JsonNode lastEvaluatedKey = null;
+
+        if (stmt.where().isEmpty()) {
+            JsonNode exclusiveStartKey = decodeNextToken(ctx.nextToken());
+            DynamoDbService.ScanResult result = service.scan(
+                    stmt.table(), null, null, null, null, ctx.limit(), exclusiveStartKey, region);
+            items = result.items();
+            lastEvaluatedKey = result.lastEvaluatedKey();
+        } else if (pkEq != null && skName == null && skCond == null && filterConds.isEmpty()) {
             ObjectNode key = mapper.createObjectNode();
             key.set(pkName, toTypedNode(pkEq.val()));
             JsonNode item = service.getItem(stmt.table(), key, region);
@@ -92,7 +99,27 @@ class DynamoDbPartiQLHandler {
         items.forEach(arr::add);
         ObjectNode resp = mapper.createObjectNode();
         resp.set("Items", arr);
+        if (lastEvaluatedKey != null) {
+            resp.put("NextToken", encodeNextToken(lastEvaluatedKey));
+        }
         return resp;
+    }
+
+    private String encodeNextToken(JsonNode lastEvaluatedKey) {
+        try {
+            return Base64.getEncoder().encodeToString(mapper.writeValueAsBytes(lastEvaluatedKey));
+        } catch (Exception e) {
+            throw new AwsException("InternalServerError", "Failed to encode NextToken", 500);
+        }
+    }
+
+    private JsonNode decodeNextToken(String nextToken) {
+        if (nextToken == null) return null;
+        try {
+            return mapper.readTree(Base64.getDecoder().decode(nextToken));
+        } catch (Exception e) {
+            throw new AwsException("ValidationException", "Invalid NextToken", 400);
+        }
     }
 
     private String buildKce(Cond.Eq pkEq, Cond skCond, String pkName, String skName,

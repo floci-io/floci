@@ -222,6 +222,7 @@ public class ApiGatewayController {
 
     @POST
     @Path("/restapis")
+    @Consumes(MediaType.WILDCARD)
     public Response createRestApi(@Context HttpHeaders headers,
                                   @QueryParam("mode") String mode,
                                   String body) {
@@ -242,6 +243,7 @@ public class ApiGatewayController {
 
     @PUT
     @Path("/restapis/{apiId}")
+    @Consumes(MediaType.WILDCARD)
     public Response putRestApi(@Context HttpHeaders headers,
                                @PathParam("apiId") String apiId,
                                @QueryParam("mode") String mode,
@@ -1647,6 +1649,32 @@ public class ApiGatewayController {
             api.getTags().forEach(tagsNode::put);
             node.set("tags", tagsNode);
         }
+        if (api.getCorsConfiguration() != null) {
+            node.set("corsConfiguration", toV2CorsNode(api.getCorsConfiguration()));
+        }
+        return node;
+    }
+
+    private ObjectNode toV2CorsNode(Api.Cors cors) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (cors.allowOrigins() != null) {
+            ArrayNode arr = node.putArray("allowOrigins");
+            cors.allowOrigins().forEach(arr::add);
+        }
+        if (cors.allowMethods() != null) {
+            ArrayNode arr = node.putArray("allowMethods");
+            cors.allowMethods().forEach(arr::add);
+        }
+        if (cors.allowHeaders() != null) {
+            ArrayNode arr = node.putArray("allowHeaders");
+            cors.allowHeaders().forEach(arr::add);
+        }
+        if (cors.exposeHeaders() != null) {
+            ArrayNode arr = node.putArray("exposeHeaders");
+            cors.exposeHeaders().forEach(arr::add);
+        }
+        if (cors.maxAge() != null) node.put("maxAge", cors.maxAge());
+        if (cors.allowCredentials() != null) node.put("allowCredentials", cors.allowCredentials());
         return node;
     }
 
@@ -1665,6 +1693,7 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("integrationId", i.getIntegrationId());
         node.put("integrationType", i.getIntegrationType());
+        if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getIntegrationUri() != null) node.put("integrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {
@@ -1741,6 +1770,9 @@ public class ApiGatewayController {
         }
         if (a.getAuthorizerResultTtlInSeconds() != null) {
             node.put("authorizerResultTtlInSeconds", a.getAuthorizerResultTtlInSeconds());
+        }
+        if (a.getEnableSimpleResponses() != null) {
+            node.put("enableSimpleResponses", a.getEnableSimpleResponses());
         }
         return node;
     }

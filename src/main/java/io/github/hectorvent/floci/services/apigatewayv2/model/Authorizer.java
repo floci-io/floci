@@ -16,6 +16,7 @@ public class Authorizer {
     private String authorizerUri;
     private String authorizerPayloadFormatVersion;
     private Integer authorizerResultTtlInSeconds;
+    private Boolean enableSimpleResponses;
 
     public Authorizer() {}
 
@@ -42,6 +43,9 @@ public class Authorizer {
 
     public Integer getAuthorizerResultTtlInSeconds() { return authorizerResultTtlInSeconds; }
     public void setAuthorizerResultTtlInSeconds(Integer authorizerResultTtlInSeconds) { this.authorizerResultTtlInSeconds = authorizerResultTtlInSeconds; }
+
+    public Boolean getEnableSimpleResponses() { return enableSimpleResponses; }
+    public void setEnableSimpleResponses(Boolean enableSimpleResponses) { this.enableSimpleResponses = enableSimpleResponses; }
 
     @RegisterForReflection
     public record JwtConfiguration(List<String> audience, String issuer) {}

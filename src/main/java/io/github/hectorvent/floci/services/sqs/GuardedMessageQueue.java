@@ -189,6 +189,20 @@ class GuardedMessageQueue {
         }
     }
 
+    /** Remove and return the first message in insertion order, or null if empty.
+     *  Used by the message-move-task worker so the source queue stays observably
+     *  populated for the duration of a rate-limited move. */
+    Message drainOne() {
+        try (var _ = hold()) {
+            if (messages.isEmpty()) {
+                return null;
+            }
+            Message head = messages.remove(0);
+            persist();
+            return head;
+        }
+    }
+
     record MessageCounts(long visible, long inFlight) {
     }
 
@@ -216,12 +230,6 @@ class GuardedMessageQueue {
         }
     }
 
-    Message findByDeduplicationId(String dedupId) {
-        try (var guard = hold()) {
-            return messages.stream().filter(msg -> dedupId.equals(msg.getMessageDeduplicationId()))
-                    .findFirst().orElse(null);
-        }
-    }
 
     void close() {
         closed = true;

@@ -251,6 +251,12 @@ public class Ec2ContainerManager {
                 } catch (Exception e) {
                     LOG.warnv("Error removing EC2 container {0}: {1}", containerId, e.getMessage());
                 }
+                try {
+                    // iptables/veth teardown lags behind container removal; prevents port-reuse conflicts.
+                    Thread.sleep(500);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                }
             }
             if (sshHostPort > 0) {
                 portAllocator.release(sshHostPort);

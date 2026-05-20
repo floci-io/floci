@@ -265,6 +265,21 @@ public class SecretsManagerService {
         return secret;
     }
 
+    public Secret restoreSecret(String secretId, String region) {
+        Secret secret = resolveSecret(secretId, region);
+        String storageKey = regionKey(region, secret.getName());
+
+        if (secret.getDeletedDate() == null) {
+            throw new AwsException("InvalidRequestException",
+                    "You can't perform this operation on the secret because it was not deleted.", 400);
+        }
+
+        secret.setDeletedDate(null);
+        store.put(storageKey, secret);
+        LOG.infov("Restored secret: {0}", secret.getName());
+        return secret;
+    }
+
     public Secret rotateSecret(String secretId, String rotationLambdaArn, Map<String, Integer> rotationRules,
                                boolean rotateImmediately, String region) {
         Secret secret = resolveSecret(secretId, region);

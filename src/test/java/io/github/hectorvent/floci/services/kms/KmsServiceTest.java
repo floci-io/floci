@@ -657,6 +657,17 @@ class KmsServiceTest {
         assertEquals(spec, found.getCustomerMasterKeySpec());
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"HMAC_224", "HMAC_256", "HMAC_384", "HMAC_512"})
+    void generateMacSupportsAllAdvertisedHmacSpecs(String spec) {
+        KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", spec, null, Map.of(), REGION);
+        byte[] message = "floci-mac-probe".getBytes(StandardCharsets.UTF_8);
+
+        byte[] mac = kmsService.generateMac(key.getKeyId(), message, KmsService.macAlgorithmFor(spec), REGION);
+
+        assertEquals(expectedMacByteLength(spec), mac.length);
+    }
+
     @Test
     void createHmacKey_requiresGenerateVerifyMacUsage() {
         AwsException ex = assertThrows(AwsException.class, () ->
@@ -677,5 +688,96 @@ class KmsServiceTest {
         AwsException ex = assertThrows(AwsException.class, () ->
                 kmsService.getPublicKey(key.getKeyId(), REGION));
         assertEquals("UnsupportedOperationException", ex.getErrorCode());
+    }
+
+    @Test
+    void generateMacWithHmacKeyReturnsDeterministicMac() {
+        KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        byte[] message = "floci-mac-probe".getBytes(StandardCharsets.UTF_8);
+
+        byte[] first = kmsService.generateMac(key.getKeyId(), message, "HMAC_SHA_256", REGION);
+        byte[] second = kmsService.generateMac(key.getKeyId(), message, "HMAC_SHA_256", REGION);
+
+        assertEquals(32, first.length);
+        assertArrayEquals(first, second);
+    }
+
+    @Test
+    void generateMacRejectsAlgorithmThatDoesNotMatchKeySpec() {
+        KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        byte[] message = "floci-mac-probe".getBytes(StandardCharsets.UTF_8);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.generateMac(key.getKeyId(), message, "HMAC_SHA_512", REGION));
+
+        assertEquals("InvalidKeyUsageException", ex.getErrorCode());
+    }
+
+    @Test
+    void generateMacRejectsMessageOutsideAwsLengthBounds() {
+        KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+
+        AwsException empty = assertThrows(AwsException.class, () ->
+                kmsService.generateMac(key.getKeyId(), new byte[0], "HMAC_SHA_256", REGION));
+        AwsException oversized = assertThrows(AwsException.class, () ->
+                kmsService.generateMac(key.getKeyId(), new byte[4097], "HMAC_SHA_256", REGION));
+
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("ValidationException", oversized.getErrorCode());
+    }
+
+    @Test
+    void verifyMacAcceptsMatchingMacAndRejectsMismatch() {
+        KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        byte[] message = "floci-mac-probe".getBytes(StandardCharsets.UTF_8);
+        byte[] mac = kmsService.generateMac(key.getKeyId(), message, "HMAC_SHA_256", REGION);
+
+        assertDoesNotThrow(() -> kmsService.verifyMac(key.getKeyId(), message, mac, "HMAC_SHA_256", REGION));
+
+        byte[] tamperedMac = mac.clone();
+        tamperedMac[0] ^= 1;
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.verifyMac(key.getKeyId(), message, tamperedMac, "HMAC_SHA_256", REGION));
+
+        assertEquals("KMSInvalidMacException", ex.getErrorCode());
+    }
+
+    @Test
+    void verifyMacRejectsMacOutsideAwsLengthBounds() {
+        KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        byte[] message = "floci-mac-probe".getBytes(StandardCharsets.UTF_8);
+
+        AwsException empty = assertThrows(AwsException.class, () ->
+                kmsService.verifyMac(key.getKeyId(), message, new byte[0], "HMAC_SHA_256", REGION));
+        AwsException oversized = assertThrows(AwsException.class, () ->
+                kmsService.verifyMac(key.getKeyId(), message, new byte[6145], "HMAC_SHA_256", REGION));
+
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("ValidationException", oversized.getErrorCode());
+    }
+
+    @Test
+    void verifyMacRejectsMessageOutsideAwsLengthBounds() {
+        KmsKey key = kmsService.createKey("hmac key", "GENERATE_VERIFY_MAC", "HMAC_256", null, Map.of(), REGION);
+        byte[] validMessage = "floci-mac-probe".getBytes(StandardCharsets.UTF_8);
+        byte[] mac = kmsService.generateMac(key.getKeyId(), validMessage, "HMAC_SHA_256", REGION);
+
+        AwsException empty = assertThrows(AwsException.class, () ->
+                kmsService.verifyMac(key.getKeyId(), new byte[0], mac, "HMAC_SHA_256", REGION));
+        AwsException oversized = assertThrows(AwsException.class, () ->
+                kmsService.verifyMac(key.getKeyId(), new byte[4097], mac, "HMAC_SHA_256", REGION));
+
+        assertEquals("ValidationException", empty.getErrorCode());
+        assertEquals("ValidationException", oversized.getErrorCode());
+    }
+
+    private static int expectedMacByteLength(String spec) {
+        return switch (spec) {
+            case "HMAC_224" -> 28;
+            case "HMAC_256" -> 32;
+            case "HMAC_384" -> 48;
+            case "HMAC_512" -> 64;
+            default -> -1;
+        };
     }
 }

@@ -45,8 +45,8 @@ class RuntimeApiServerTest {
     }
 
     @AfterEach
-    void tearDown() {
-        server.stop();
+    void tearDown() throws Exception {
+        server.stop().get(5, TimeUnit.SECONDS);
         scheduler.shutdownNow();
         vertx.close();
     }
@@ -221,6 +221,27 @@ class RuntimeApiServerTest {
         InvokeResult result = invocation.getResultFuture().get(0, TimeUnit.SECONDS);
         assertEquals("Unhandled", result.getFunctionError());
         assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+    }
+
+    @Test
+    @Timeout(10)
+    void stopReleasesPortSynchronously() throws Exception {
+        server.stop().get(5, TimeUnit.SECONDS);
+        new ServerSocket(port).close();
+    }
+
+    @Test
+    @Timeout(10)
+    void newServerOnSamePortAcceptsTrafficAfterStop() throws Exception {
+        server.stop().get(5, TimeUnit.SECONDS);
+
+        server = new RuntimeApiServer(vertx, port);
+        server.start().get(5, TimeUnit.SECONDS);
+
+        HttpResponse<String> resp = httpClient.send(
+                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/x")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, resp.statusCode());
     }
 
     private static int findFreePort() throws IOException {

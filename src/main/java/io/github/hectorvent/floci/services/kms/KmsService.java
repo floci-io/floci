@@ -30,6 +30,8 @@ import org.bouncycastle.jce.ECNamedCurveTable;
 import org.bouncycastle.jce.spec.ECNamedCurveParameterSpec;
 import org.jboss.logging.Logger;
 
+import javax.crypto.Mac;
+import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayOutputStream;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
@@ -333,6 +335,10 @@ public class KmsService {
     private static final String BLOB_PREFIX_V2 = "kms:v2:";
     private static final String BLOB_PREFIX_V1 = "kms:";
     private static final int NONCE_BYTES = 8;
+    private static final int MIN_MAC_MESSAGE_BYTES = 1;
+    private static final int MAX_MAC_MESSAGE_BYTES = 4096;
+    private static final int MIN_MAC_BYTES = 1;
+    private static final int MAX_MAC_BYTES = 6144;
     private static final SecureRandom SECURE_RANDOM = new SecureRandom();
 
     public byte[] encrypt(String keyId, byte[] plaintext, String region) {
@@ -394,6 +400,10 @@ public class KmsService {
     }
 
     public record DecryptResult(byte[] plaintext, String keyArn) {}
+
+    public record GenerateMacResult(byte[] mac, String keyArn) {}
+
+    public record VerifyMacResult(String keyArn) {}
 
     private record ParsedBlob(String keyId, String nonce, String contextFingerprint, String payload) {}
 
@@ -503,6 +513,95 @@ public class KmsService {
         } catch (Exception e) {
             LOG.warnv("Verification failed for key {0}: {1}", keyId, e.getMessage());
             return false;
+        }
+    }
+
+    public byte[] generateMac(String keyId, byte[] message, String algorithm, String region) {
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        return generateMac(kmsKey, message, algorithm);
+    }
+
+    public GenerateMacResult generateMacAndResolveKey(String keyId, byte[] message, String algorithm, String region) {
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        return new GenerateMacResult(generateMac(kmsKey, message, algorithm), kmsKey.getArn());
+    }
+
+    private byte[] generateMac(KmsKey kmsKey, byte[] message, String algorithm) {
+        validateMacMessageLength(message);
+
+        try {
+            byte[] keyBytes = Base64.getDecoder().decode(kmsKey.getPrivateKeyEncoded());
+            String jcaAlgorithm = mapMacAlgorithm(algorithm);
+            Mac mac = Mac.getInstance(jcaAlgorithm);
+            mac.init(new SecretKeySpec(keyBytes, jcaAlgorithm));
+            mac.update(message);
+            return mac.doFinal();
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("InternalFailure", "Failed to generate MAC: " + e.getMessage(), 500);
+        }
+    }
+
+    public void verifyMac(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
+        validateMacLength(mac);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        verifyMac(kmsKey, message, mac, algorithm);
+    }
+
+    public VerifyMacResult verifyMacAndResolveKey(String keyId, byte[] message, byte[] mac, String algorithm, String region) {
+        validateMacLength(mac);
+        KmsKey kmsKey = validateMacOperationKey(keyId, algorithm, region);
+        verifyMac(kmsKey, message, mac, algorithm);
+        return new VerifyMacResult(kmsKey.getArn());
+    }
+
+    private void verifyMac(KmsKey kmsKey, byte[] message, byte[] mac, String algorithm) {
+        byte[] expected = generateMac(kmsKey, message, algorithm);
+        if (!MessageDigest.isEqual(expected, mac)) {
+            throw new AwsException("KMSInvalidMacException", "The MAC is not valid.", 400);
+        }
+    }
+
+    private KmsKey validateMacOperationKey(String keyId, String algorithm, String region) {
+        KmsKey kmsKey = resolveKey(keyId, region);
+        String spec = kmsKey.getCustomerMasterKeySpec();
+        if (!isHmac(spec) || !"GENERATE_VERIFY_MAC".equals(kmsKey.getKeyUsage())) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "MAC operations require an HMAC key with KeyUsage GENERATE_VERIFY_MAC.", 400);
+        }
+
+        String expectedAlgorithm = macAlgorithmFor(spec);
+        if (!Objects.equals(expectedAlgorithm, algorithm)) {
+            throw new AwsException("InvalidKeyUsageException",
+                    "MacAlgorithm " + algorithm + " is not valid for KeySpec " + spec + ".", 400);
+        }
+        return kmsKey;
+    }
+
+    private String mapMacAlgorithm(String awsAlgo) {
+        return switch (awsAlgo) {
+            case "HMAC_SHA_224" -> "HmacSHA224";
+            case "HMAC_SHA_256" -> "HmacSHA256";
+            case "HMAC_SHA_384" -> "HmacSHA384";
+            case "HMAC_SHA_512" -> "HmacSHA512";
+            default -> throw new AwsException("InvalidMacAlgorithmException", "Unsupported MAC algorithm: " + awsAlgo, 400);
+        };
+    }
+
+    private static void validateMacMessageLength(byte[] message) {
+        int length = message == null ? 0 : message.length;
+        if (length < MIN_MAC_MESSAGE_BYTES || length > MAX_MAC_MESSAGE_BYTES) {
+            throw new AwsException("ValidationException",
+                    "Message must be between 1 and 4096 bytes for MAC operations.", 400);
+        }
+    }
+
+    private static void validateMacLength(byte[] mac) {
+        int length = mac == null ? 0 : mac.length;
+        if (length < MIN_MAC_BYTES || length > MAX_MAC_BYTES) {
+            throw new AwsException("ValidationException",
+                    "Mac must be between 1 and 6144 bytes for VerifyMac.", 400);
         }
     }
 

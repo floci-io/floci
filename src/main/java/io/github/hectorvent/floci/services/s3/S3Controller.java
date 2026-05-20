@@ -280,6 +280,7 @@ public class S3Controller {
                                 @QueryParam("start-after") String startAfter,
                                 @QueryParam("encoding-type") String encodingType,
                                 @QueryParam("key-marker") String keyMarker,
+                                @QueryParam("marker") String marker,
                                 @Context UriInfo uriInfo) {
         validateRawUri();
         try {
@@ -355,8 +356,11 @@ public class S3Controller {
             }
 
             int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
+            boolean v1 = !"2".equals(listType);
+            String effectiveStartAfter = v1 && marker != null ? marker : startAfter;
+            String effectiveContinuationToken = v1 ? null : continuationToken;
             S3Service.ListObjectsResult result = s3Service.listObjectsWithPrefixes(
-                    bucket, prefix, delimiter, max, continuationToken, startAfter);
+                    bucket, prefix, delimiter, max, effectiveContinuationToken, effectiveStartAfter);
             List<S3Object> objects = result.objects();
             List<String> commonPrefixes = result.commonPrefixes();
             boolean v2 = "2".equals(listType);
@@ -398,6 +402,11 @@ public class S3Controller {
                 }
                 if (startAfter != null) {
                     xml.elem("StartAfter", startAfter);
+                }
+            } else {
+                xml.elem("Marker", marker != null ? marker : "");
+                if (result.isTruncated() && result.nextContinuationToken() != null) {
+                    xml.elem("NextMarker", result.nextContinuationToken());
                 }
             }
             xml.end("ListBucketResult");
@@ -508,6 +517,12 @@ public class S3Controller {
                               @QueryParam("uploadId") String uploadId,
                               @QueryParam("max-parts") Integer maxPartsQuery,
                               @QueryParam("part-number-marker") String partNumberMarkerQuery,
+                              @QueryParam("response-content-type") String responseContentType,
+                              @QueryParam("response-content-language") String responseContentLanguage,
+                              @QueryParam("response-expires") String responseExpires,
+                              @QueryParam("response-cache-control") String responseCacheControl,
+                              @QueryParam("response-content-disposition") String responseContentDisposition,
+                              @QueryParam("response-content-encoding") String responseContentEncoding,
                               @HeaderParam("x-amz-object-attributes") String objectAttributesHeader,
                               @HeaderParam("x-amz-max-parts") Integer maxParts,
                               @HeaderParam("x-amz-part-number-marker") Integer partNumberMarker,
@@ -552,13 +567,16 @@ public class S3Controller {
                 }
             }
             S3Object obj = s3Service.getObject(bucket, key, versionId);
+            ResponseHeaderOverrides overrides = new ResponseHeaderOverrides(
+                    responseContentType, responseContentLanguage, responseExpires,
+                    responseCacheControl, responseContentDisposition, responseContentEncoding);
 
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(obj, rangeHeader);
+                return handleRangeRequest(obj, rangeHeader, overrides);
             }
 
             var resp = Response.ok(obj.getData())
-                    .header("Content-Type", obj.getContentType())
+                    .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                     .header("Content-Length", obj.getSize())
                     .header("ETag", obj.getETag())
                     .header("Last-Modified", RFC_822.format(obj.getLastModified()))
@@ -566,14 +584,14 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            appendObjectHeaders(resp, obj);
+            appendObjectHeaders(resp, obj, overrides);
             return resp.build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
     }
 
-    private Response handleRangeRequest(S3Object obj, String rangeHeader) {
+    private Response handleRangeRequest(S3Object obj, String rangeHeader, ResponseHeaderOverrides overrides) {
         byte[] data = obj.getData();
         int totalSize = data.length;
         String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
@@ -609,15 +627,19 @@ public class S3Controller {
         }
 
         byte[] rangeData = java.util.Arrays.copyOfRange(data, start, end + 1);
-        return Response.status(206)
+        var resp = Response.status(206)
                 .entity(rangeData)
-                .header("Content-Type", obj.getContentType())
+                .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                 .header("Content-Length", rangeData.length)
                 .header("Content-Range", "bytes " + start + "-" + end + "/" + totalSize)
                 .header("ETag", obj.getETag())
                 .header("Last-Modified", RFC_822.format(obj.getLastModified()))
-                .header("Accept-Ranges", "bytes")
-                .build();
+                .header("Accept-Ranges", "bytes");
+        if (obj.getVersionId() != null) {
+            resp.header("x-amz-version-id", obj.getVersionId());
+        }
+        appendObjectHeaders(resp, obj, overrides);
+        return resp.build();
     }
 
     private Response invalidRangeResponse(int totalSize) {
@@ -641,6 +663,12 @@ public class S3Controller {
     public Response headObject(@PathParam("bucket") String bucket,
                                @PathParam("key") String key,
                                @QueryParam("versionId") String versionId,
+                               @QueryParam("response-content-type") String responseContentType,
+                               @QueryParam("response-content-language") String responseContentLanguage,
+                               @QueryParam("response-expires") String responseExpires,
+                               @QueryParam("response-cache-control") String responseCacheControl,
+                               @QueryParam("response-content-disposition") String responseContentDisposition,
+                               @QueryParam("response-content-encoding") String responseContentEncoding,
                                @HeaderParam("If-Match") String ifMatch,
                                @HeaderParam("If-None-Match") String ifNoneMatch,
                                @HeaderParam("If-Modified-Since") String ifModifiedSince,
@@ -653,8 +681,11 @@ public class S3Controller {
             if (preconditionResponse != null) {
                 return preconditionResponse;
             }
+            ResponseHeaderOverrides overrides = new ResponseHeaderOverrides(
+                    responseContentType, responseContentLanguage, responseExpires,
+                    responseCacheControl, responseContentDisposition, responseContentEncoding);
             var resp = Response.ok()
-                    .header("Content-Type", obj.getContentType())
+                    .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                     .header("Content-Length", obj.getSize())
                     .header("ETag", obj.getETag())
                     .header("Last-Modified", RFC_822.format(obj.getLastModified()))
@@ -662,7 +693,7 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            appendObjectHeaders(resp, obj);
+            appendObjectHeaders(resp, obj, overrides);
             return resp.build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1457,21 +1488,58 @@ public class S3Controller {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
+    private record ResponseHeaderOverrides(
+            String contentType,
+            String contentLanguage,
+            String expires,
+            String cacheControl,
+            String contentDisposition,
+            String contentEncoding) {
+        static final ResponseHeaderOverrides NONE = new ResponseHeaderOverrides(null, null, null, null, null, null);
+
+        ResponseHeaderOverrides {
+            // Real S3 ignores empty `response-*` values; @QueryParam binds "?foo=" as "" rather than null.
+            contentType = emptyToNull(contentType);
+            contentLanguage = emptyToNull(contentLanguage);
+            expires = emptyToNull(expires);
+            cacheControl = emptyToNull(cacheControl);
+            contentDisposition = emptyToNull(contentDisposition);
+            contentEncoding = emptyToNull(contentEncoding);
+        }
+
+        private static String emptyToNull(String s) {
+            return s == null || s.isEmpty() ? null : s;
+        }
+    }
+
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj) {
+        appendObjectHeaders(resp, obj, ResponseHeaderOverrides.NONE);
+    }
+
+    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides) {
         if (obj.getStorageClass() != null) {
             resp.header("x-amz-storage-class", obj.getStorageClass());
         }
-        if (obj.getContentEncoding() != null) {
-            resp.header("Content-Encoding", obj.getContentEncoding());
+        String contentEncoding = overrides.contentEncoding() != null ? overrides.contentEncoding() : obj.getContentEncoding();
+        if (contentEncoding != null) {
+            resp.header("Content-Encoding", contentEncoding);
         }
-        if (obj.getContentDisposition() != null) {
-            resp.header("Content-Disposition", obj.getContentDisposition());
+        String contentDisposition = overrides.contentDisposition() != null ? overrides.contentDisposition() : obj.getContentDisposition();
+        if (contentDisposition != null) {
+            resp.header("Content-Disposition", contentDisposition);
         }
-        if (obj.getCacheControl() != null) {
-            resp.header("Cache-Control", obj.getCacheControl());
+        String cacheControl = overrides.cacheControl() != null ? overrides.cacheControl() : obj.getCacheControl();
+        if (cacheControl != null) {
+            resp.header("Cache-Control", cacheControl);
         }
         if (obj.getServerSideEncryption() != null) {
             resp.header("x-amz-server-side-encryption", obj.getServerSideEncryption());
+        }
+        if (overrides.contentLanguage() != null) {
+            resp.header("Content-Language", overrides.contentLanguage());
+        }
+        if (overrides.expires() != null) {
+            resp.header("Expires", overrides.expires());
         }
         if (obj.getMetadata() != null) {
             for (Map.Entry<String, String> entry : obj.getMetadata().entrySet()) {

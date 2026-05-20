@@ -438,7 +438,10 @@ public interface EmulatorConfig {
         @WithDefault("valkey/valkey:8")
         String defaultImage();
 
-        /** Docker network to attach Valkey containers to. Empty = default bridge. */
+        @WithDefault("memcached:1.6")
+        String defaultMemcachedImage();
+
+        /** Docker network to attach ElastiCache containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
     }
 

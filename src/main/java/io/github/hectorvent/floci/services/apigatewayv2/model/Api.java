@@ -4,6 +4,7 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -18,6 +19,7 @@ public class Api {
     private String routeSelectionExpression;
     private String description;
     private String apiKeySelectionExpression;
+    private Cors corsConfiguration;
 
     public Api() {}
 
@@ -47,4 +49,16 @@ public class Api {
 
     public String getApiKeySelectionExpression() { return apiKeySelectionExpression; }
     public void setApiKeySelectionExpression(String apiKeySelectionExpression) { this.apiKeySelectionExpression = apiKeySelectionExpression; }
+
+    public Cors getCorsConfiguration() { return corsConfiguration; }
+    public void setCorsConfiguration(Cors corsConfiguration) { this.corsConfiguration = corsConfiguration; }
+
+    @RegisterForReflection
+    public record Cors(
+            List<String> allowOrigins,
+            List<String> allowMethods,
+            List<String> allowHeaders,
+            List<String> exposeHeaders,
+            Integer maxAge,
+            Boolean allowCredentials) {}
 }

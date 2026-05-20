@@ -686,6 +686,13 @@ public class ApiGatewayService {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
 
+        // AWS enforces global uniqueness of custom domain names across all regions
+        boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
+        if (exists) {
+            throw new AwsException("ConflictException",
+                    "The domain name you provided already exists.", 409);
+        }
+
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(domainName);
         domain.setCertificateName((String) request.get("certificateName"));
@@ -746,6 +753,91 @@ public class ApiGatewayService {
         getBasePathMapping(region, domainName, basePath);
         String path = (basePath == null || basePath.isEmpty() || "/" .equals(basePath)) ? "(none)" : basePath;
         basePathMappingStore.delete(mappingKey(region, domainName, path));
+    }
+
+    // ──────────────────────────── Custom Domain Resolution ────────────────────────────
+
+    /**
+     * Resolves a custom domain by its regionalDomainName (e.g., "my-domain.regional.local").
+     * Derives the domain name from the regionalDomainName and performs a key-based lookup.
+     *
+     * @return the CustomDomain if found, or null if no domain matches
+     */
+    public CustomDomain findDomainByRegionalHostname(String regionalDomainName) {
+        if (!regionalDomainName.endsWith(".regional.local")) {
+            return null;
+        }
+        String domainName = regionalDomainName.substring(0,
+                regionalDomainName.length() - ".regional.local".length());
+        return findDomainByName(domainName);
+    }
+
+    /**
+     * Resolves a custom domain by its actual domain name (e.g., "api.example.com").
+     * Domain names are globally unique across regions.
+     *
+     * @return the CustomDomain if found, or null if no domain matches
+     */
+    public CustomDomain findDomainByName(String domainName) {
+        List<CustomDomain> results = domainStore.scan(k -> k.endsWith("::" + domainName));
+        return results.isEmpty() ? null : results.get(0);
+    }
+
+    /**
+     * Resolves the base path mapping for a given domain and request path.
+     * Uses longest-prefix matching on the base path.
+     *
+     * @param domainName the custom domain name
+     * @param requestPath the incoming request path (e.g., "/v1/items/123")
+     * @return the matching BasePathMapping, or null if none matches
+     */
+    public BasePathMapping resolveBasePathMapping(String domainName, String requestPath) {
+        // Get all mappings across all regions for this domain
+        List<BasePathMapping> allMappings = basePathMappingStore.scan(k -> k.contains("::" + domainName + "::"));
+
+        if (allMappings.isEmpty()) {
+            return null;
+        }
+
+        // Find the best match using longest-prefix matching
+        BasePathMapping bestMatch = null;
+        int bestLength = -1;
+
+        for (BasePathMapping mapping : allMappings) {
+            String basePath = mapping.getBasePath();
+            if ("(none)".equals(basePath)) {
+                // Catch-all mapping — matches if no better mapping exists
+                if (bestLength < 0) {
+                    bestMatch = mapping;
+                    bestLength = 0;
+                }
+            } else {
+                String prefix = "/" + basePath;
+                if (requestPath.equals(prefix) || requestPath.startsWith(prefix + "/")) {
+                    if (basePath.length() > bestLength) {
+                        bestMatch = mapping;
+                        bestLength = basePath.length();
+                    }
+                }
+            }
+        }
+
+        return bestMatch;
+    }
+
+    /**
+     * Returns the remaining path after stripping the matched base path prefix.
+     */
+    public String stripBasePath(String requestPath, BasePathMapping mapping) {
+        String basePath = mapping.getBasePath();
+        if ("(none)".equals(basePath)) {
+            return requestPath;
+        }
+        String prefix = "/" + basePath;
+        if (requestPath.equals(prefix)) {
+            return "/";
+        }
+        return requestPath.substring(prefix.length());
     }
 
     // ──────────────────────────── Update Methods ────────────────────────────

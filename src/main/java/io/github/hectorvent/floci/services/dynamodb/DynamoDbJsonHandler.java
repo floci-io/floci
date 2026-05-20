@@ -201,11 +201,9 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ResourceInUseException",
                     "Table " + tableName + " can't be deleted while DeletionProtectionEnabled is set to true", 400);
         }
-        dynamoDbService.deleteTable(tableName, region);
-
-        table.setTableStatus("DELETING");
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
+        dynamoDbService.deleteTable(tableName, region);
         return Response.ok(response).build();
     }
 
@@ -1922,7 +1920,10 @@ public class DynamoDbJsonHandler {
         String statement = request.path("Statement").asText();
         List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
         DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
-        JsonNode result = partiQLHandler.execute(stmt, region);
+        PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
+                .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
+                .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null);
+        JsonNode result = partiQLHandler.execute(stmt, ctx, region);
         return Response.ok(result).build();
     }
 
@@ -1970,7 +1971,7 @@ public class DynamoDbJsonHandler {
             try {
                 DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
                         s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
-                JsonNode result = partiQLHandler.execute(stmt, region);
+                JsonNode result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder(), region);
                 ObjectNode slot = objectMapper.createObjectNode();
                 JsonNode firstItem = result.path("Items").path(0);
                 if (!firstItem.isMissingNode()) {

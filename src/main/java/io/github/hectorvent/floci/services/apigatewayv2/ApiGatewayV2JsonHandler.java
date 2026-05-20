@@ -508,6 +508,32 @@ public class ApiGatewayV2JsonHandler {
             ObjectNode tagsNode = node.putObject("Tags");
             api.getTags().forEach(tagsNode::put);
         }
+        if (api.getCorsConfiguration() != null) {
+            node.set("CorsConfiguration", toCorsNode(api.getCorsConfiguration()));
+        }
+        return node;
+    }
+
+    private ObjectNode toCorsNode(Api.Cors cors) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (cors.allowOrigins() != null) {
+            ArrayNode arr = node.putArray("AllowOrigins");
+            cors.allowOrigins().forEach(arr::add);
+        }
+        if (cors.allowMethods() != null) {
+            ArrayNode arr = node.putArray("AllowMethods");
+            cors.allowMethods().forEach(arr::add);
+        }
+        if (cors.allowHeaders() != null) {
+            ArrayNode arr = node.putArray("AllowHeaders");
+            cors.allowHeaders().forEach(arr::add);
+        }
+        if (cors.exposeHeaders() != null) {
+            ArrayNode arr = node.putArray("ExposeHeaders");
+            cors.exposeHeaders().forEach(arr::add);
+        }
+        if (cors.maxAge() != null) node.put("MaxAge", cors.maxAge());
+        if (cors.allowCredentials() != null) node.put("AllowCredentials", cors.allowCredentials());
         return node;
     }
 
@@ -539,6 +565,9 @@ public class ApiGatewayV2JsonHandler {
         if (auth.getAuthorizerResultTtlInSeconds() != null) {
             node.put("AuthorizerResultTtlInSeconds", auth.getAuthorizerResultTtlInSeconds());
         }
+        if (auth.getEnableSimpleResponses() != null) {
+            node.put("EnableSimpleResponses", auth.getEnableSimpleResponses());
+        }
         return node;
     }
 
@@ -559,6 +588,7 @@ public class ApiGatewayV2JsonHandler {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("IntegrationId", i.getIntegrationId());
         node.put("IntegrationType", i.getIntegrationType());
+        if (i.getConnectionType() != null) node.put("ConnectionType", i.getConnectionType());
         node.put("PayloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getIntegrationUri() != null) node.put("IntegrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {

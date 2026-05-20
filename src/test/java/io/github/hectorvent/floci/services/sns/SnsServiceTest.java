@@ -223,17 +223,17 @@ class SnsServiceTest {
     }
 
     @Test
-    void publish_messageExceedsSizeLimit_throwsInvalidParameterException() {
+    void publish_messageExceedsSizeLimit_throwsInvalidParameter() {
         Topic topic = snsService.createTopic("size-topic", null, null, REGION);
         String tooBig = "x".repeat(262_145);
         AwsException ex = assertThrows(AwsException.class, () ->
                 snsService.publish(topic.getTopicArn(), null, tooBig, null, REGION));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("InvalidParameter", ex.getErrorCode());
         assertTrue(ex.getMessage().toLowerCase().contains("too long"));
     }
 
     @Test
-    void publish_messagePlusAttributesExceedsLimit_throws() {
+    void publish_messagePlusAttributesExceedsLimit_throwsInvalidParameter() {
         Topic topic = snsService.createTopic("size-topic", null, null, REGION);
         String body = "x".repeat(262_100);
         Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> attrs = Map.of(
@@ -241,7 +241,8 @@ class SnsServiceTest {
                         "y".repeat(200), "String"));
         AwsException ex = assertThrows(AwsException.class, () ->
                 snsService.publish(topic.getTopicArn(), null, null, body, null, attrs, REGION));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("InvalidParameter", ex.getErrorCode());
+        assertTrue(ex.getMessage().toLowerCase().contains("too long"));
     }
 
     @Test
@@ -264,6 +265,49 @@ class SnsServiceTest {
         snsService.subscribe(topic.getTopicArn(), "sqs", "http://queue2", REGION, Map.of());
         Map<String, String> attrs = snsService.getTopicAttributes(topic.getTopicArn(), REGION);
         assertEquals("2", attrs.get("SubscriptionsConfirmed"));
+    }
+
+    @Test
+    void publish_withHttpSubscriber_pendingConfirmation_skipsDelivery() {
+        Topic topic = snsService.createTopic("http-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "http",
+                "http://localhost:9999/webhook", REGION, Map.of());
+        // HTTP subscription should be pending confirmation
+        assertEquals("true", sub.getAttributes().get("PendingConfirmation"));
+        assertNotNull(sub.getAttributes().get("ConfirmationToken"));
+        // Publish should succeed but skip delivery to pending subscription
+        String messageId = snsService.publish(topic.getTopicArn(), null, "Hello HTTP!", null, REGION);
+        assertNotNull(messageId);
+    }
+
+    @Test
+    void subscribe_httpPendingConfirmation_canBeConfirmed() {
+        Topic topic = snsService.createTopic("http-topic2", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "http",
+                "http://localhost:9999/webhook", REGION, Map.of());
+        assertEquals("true", sub.getAttributes().get("PendingConfirmation"));
+        String token = sub.getAttributes().get("ConfirmationToken");
+        assertNotNull(token);
+
+        // Confirm the subscription
+        String confirmedArn = snsService.confirmSubscription(topic.getTopicArn(), token, REGION);
+        assertEquals(sub.getSubscriptionArn(), confirmedArn);
+    }
+
+    @Test
+    void subscribe_httpProtocol_rejectsHttpsEndpoint() {
+        Topic topic = snsService.createTopic("scheme-topic", null, null, REGION);
+        assertThrows(AwsException.class,
+            () -> snsService.subscribe(topic.getTopicArn(), "http",
+                    "https://example.com/hook", REGION, Map.of()));
+    }
+
+    @Test
+    void subscribe_httpsProtocol_rejectsHttpEndpoint() {
+        Topic topic = snsService.createTopic("scheme-topic2", null, null, REGION);
+        assertThrows(AwsException.class,
+            () -> snsService.subscribe(topic.getTopicArn(), "https",
+                    "http://example.com/hook", REGION, Map.of()));
     }
 
     private static final ObjectMapper MAPPER = new ObjectMapper();

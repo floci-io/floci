@@ -63,11 +63,15 @@ final class CognitoSrpHelper {
 
     static {
         try {
-            byte[] nBytes = padTo(N.toByteArray(), N_BYTES);
-            byte[] gBytes = padTo(G.toByteArray(), N_BYTES);
+            // Amplify computes k as SHA-256(getBytesFromHex(getPaddedHex(N) + getPaddedHex(g)))
+            // which is equivalent to SHA-256(N.toByteArray() || G.toByteArray()) — i.e., minimal
+            // two's-complement representation (sign byte for positive MSB-set N, no left-padding
+            // of g to N_BYTES). Match that byte layout exactly so server-computed k equals the
+            // client's, otherwise client S = (B - k_client·g^x)^… diverges from server S and the
+            // PASSWORD_VERIFIER signature never matches.
             MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-            sha256.update(nBytes);
-            sha256.update(gBytes);
+            sha256.update(N.toByteArray());
+            sha256.update(G.toByteArray());
             K = new BigInteger(1, sha256.digest());
         } catch (Exception e) {
             throw new ExceptionInInitializerError(e);
@@ -144,8 +148,23 @@ final class CognitoSrpHelper {
         BigInteger base = A.multiply(v.modPow(u, N)).mod(N);
         BigInteger S = base.modPow(b, N);
 
-        // Derive key using Caldera interleaved hash
-        return deriveCalderaKey(S);
+        // Cognito's Caldera derivation: HKDF-Expand over 2's-complement(S) with
+        // salt=2's-complement(U), info="Caldera Derived Key"||0x01, output truncated to
+        // 16 bytes (128-bit HMAC key). Byte representations must match Amplify's
+        // getBytesFromHex(getPaddedHex(bi)) — i.e., minimal length with sign byte.
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(u.toByteArray(), "HmacSHA256"));
+            byte[] prk = mac.doFinal(S.toByteArray());
+
+            mac.init(new SecretKeySpec(prk, "HmacSHA256"));
+            mac.update(INFO_BITS);
+            mac.update((byte) 1);
+            byte[] t1 = mac.doFinal();
+            return Arrays.copyOf(t1, 16);
+        } catch (Exception e) {
+            throw new RuntimeException("SRP session key derivation failed", e);
+        }
     }
 
     // ──────────────────────────── HMAC signature ────────────────────────────
@@ -163,9 +182,8 @@ final class CognitoSrpHelper {
     static byte[] computeSignature(byte[] sessionKey, String userPoolId, String username,
                                    byte[] secretBlock, String timestamp) {
         try {
-            byte[] hkdfKey = hkdf(sessionKey, INFO_BITS);
             Mac mac = Mac.getInstance("HmacSHA256");
-            mac.init(new SecretKeySpec(hkdfKey, "HmacSHA256"));
+            mac.init(new SecretKeySpec(sessionKey, "HmacSHA256"));
             mac.update(extractPoolName(userPoolId).getBytes(StandardCharsets.UTF_8));
             mac.update(username.getBytes(StandardCharsets.UTF_8));
             mac.update(secretBlock);
@@ -217,8 +235,11 @@ final class CognitoSrpHelper {
             sha256.update(password.getBytes(StandardCharsets.UTF_8));
             byte[] innerHash = sha256.digest();
 
-            // x = SHA-256(pad(salt) || innerHash)
-            byte[] saltBytes = HexFormat.of().parseHex(saltHex);
+            // x = SHA-256(saltBytes || innerHash)
+            // Amplify treats salt as a BigInteger and emits its 2's-complement byte
+            // representation (sign byte prepended when MSB is set). Mirror that by
+            // round-tripping the hex through BigInteger.
+            byte[] saltBytes = new BigInteger(saltHex, 16).toByteArray();
             sha256.reset();
             sha256.update(saltBytes);
             sha256.update(innerHash);
@@ -231,82 +252,14 @@ final class CognitoSrpHelper {
     private static BigInteger computeU(BigInteger A, BigInteger B) {
         try {
             MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-            sha256.update(padTo(A.toByteArray(), N_BYTES));
-            sha256.update(padTo(B.toByteArray(), N_BYTES));
+            // Use BigInteger.toByteArray() (2's complement, minimal length with sign byte)
+            // — matches Amplify's getBytesFromHex(getPaddedHex(bi)).
+            sha256.update(A.toByteArray());
+            sha256.update(B.toByteArray());
             return new BigInteger(1, sha256.digest());
         } catch (Exception e) {
             throw new RuntimeException("SRP u computation failed", e);
         }
     }
 
-    /**
-     * Caldera interleaved hash to derive session key from S.
-     * SHA-256 is applied to even-indexed and odd-indexed bytes of S separately,
-     * then interleaved.
-     */
-    private static byte[] deriveCalderaKey(BigInteger S) {
-        try {
-            byte[] sBytes = padTo(S.toByteArray(), N_BYTES);
-
-            // Split into even/odd positions
-            byte[] even = new byte[N_BYTES / 2];
-            byte[] odd = new byte[N_BYTES / 2];
-            for (int i = 0; i < N_BYTES / 2; i++) {
-                even[i] = sBytes[i * 2];
-                odd[i] = sBytes[i * 2 + 1];
-            }
-
-            MessageDigest sha256 = MessageDigest.getInstance("SHA-256");
-            byte[] hashEven = sha256.digest(even);
-            sha256.reset();
-            byte[] hashOdd = sha256.digest(odd);
-
-            // Interleave the two hashes
-            byte[] result = new byte[64];
-            for (int i = 0; i < 32; i++) {
-                result[i * 2] = hashEven[i];
-                result[i * 2 + 1] = hashOdd[i];
-            }
-            return result;
-        } catch (Exception e) {
-            throw new RuntimeException("Caldera key derivation failed", e);
-        }
-    }
-
-    /**
-     * HKDF extract-and-expand using SHA-256 (salt = zeroes, no extract step).
-     * Compatible with Cognito's "Caldera Derived Key" derivation.
-     */
-    private static byte[] hkdf(byte[] ikm, byte[] info) throws Exception {
-        // Extract: PRK = HMAC-SHA256(salt=zeroes_32, IKM)
-        byte[] salt = new byte[32];
-        Mac mac = Mac.getInstance("HmacSHA256");
-        mac.init(new SecretKeySpec(salt, "HmacSHA256"));
-        byte[] prk = mac.doFinal(ikm);
-
-        // Expand: T(1) = HMAC-SHA256(PRK, info || 0x01)
-        mac.init(new SecretKeySpec(prk, "HmacSHA256"));
-        mac.update(info);
-        mac.update((byte) 1);
-        byte[] t1 = mac.doFinal();
-        return Arrays.copyOf(t1, 32);
-    }
-
-    /**
-     * Left-pads a byte array to the given length.
-     * If the array has a leading 0x00 sign byte, it is stripped before padding.
-     */
-    static byte[] padTo(byte[] bytes, int length) {
-        // Strip sign byte if present
-        if (bytes.length > length && bytes[0] == 0) {
-            bytes = Arrays.copyOfRange(bytes, 1, bytes.length);
-        }
-        if (bytes.length == length) {
-            return bytes;
-        }
-        byte[] padded = new byte[length];
-        int offset = length - bytes.length;
-        System.arraycopy(bytes, 0, padded, offset, bytes.length);
-        return padded;
-    }
 }
