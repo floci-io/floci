@@ -240,13 +240,13 @@ class ApiGatewayV2AlbIntegrationTest {
     @Order(9)
     void httpProxyToStubDirectlyWorksThroughDispatch() {
         // Baseline: bypass the ALB chain and prove the v2 HTTP_PROXY dispatch path
-        // works when integrationUri is a plain http://localhost URL. If this hangs,
+        // works when integrationUri is a plain http://127.0.0.1 URL. If this hangs,
         // it's a pre-existing pipeline issue independent of the ALB resolver.
         // PATCH the integration to bypass the listener, GET execute-api, then PATCH it back.
         given()
                 .contentType(ContentType.JSON)
                 .body("""
-                        {"integrationUri":"http://localhost:%d/probe"}
+                        {"integrationUri":"http://127.0.0.1:%d/probe"}
                         """.formatted(stubPort))
                 .when().patch("/v2/apis/" + apiId + "/integrations/" + integrationId)
                 .then()
@@ -279,7 +279,7 @@ class ApiGatewayV2AlbIntegrationTest {
                 .connectTimeout(Duration.ofSeconds(2))
                 .build();
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://localhost:" + LISTENER_PORT + "/health"))
+                .uri(URI.create("http://127.0.0.1:" + LISTENER_PORT + "/health"))
                 .timeout(Duration.ofSeconds(3))
                 .GET()
                 .build();

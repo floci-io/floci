@@ -89,7 +89,7 @@ public class ApiGatewayExecuteController {
 
     /**
      * Matches an ELBv2 ALB listener ARN. The CDK {@code HttpAlbIntegration} stores one of
-     * these as the integration URI; we need to resolve it to a real {@code http://localhost:port}
+     * these as the integration URI; we need to resolve it to a real {@code http://127.0.0.1:port}
      * target so the request reaches the listener's data plane and on to the target group.
      */
     private static final Pattern ALB_LISTENER_ARN = Pattern.compile(
@@ -1059,7 +1059,10 @@ public class ApiGatewayExecuteController {
                             .entity(jsonMessage("Bad Gateway: cannot resolve ALB listener: " + integrationUri))
                             .type(MediaType.APPLICATION_JSON).build();
                 }
-                String resolvedUrl = "http://localhost:" + listenerPort + path;
+                // Use 127.0.0.1 explicitly: ElbV2DataPlane binds the listener on 0.0.0.0
+                // (IPv4-only). "localhost" resolves to ::1 first on IPv6-preferred systems,
+                // which would fail to connect.
+                String resolvedUrl = "http://127.0.0.1:" + listenerPort + path;
                 effective = withResolvedUri(integration, resolvedUrl);
                 LOG.debugv("ALB integration: listener {0} → {1}", integrationUri, resolvedUrl);
             }

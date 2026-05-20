@@ -1,7 +1,9 @@
 package io.github.hectorvent.floci.services.apigatewayv2;
 
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import io.restassured.http.ContentType;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -22,6 +24,13 @@ class ApiGatewayV2VpcLinkRestTest {
     private static String vpcLinkId;
     private static String apiId;
     private static String integrationId;
+
+    @BeforeAll
+    static void configureRestAssured() {
+        // Register encoder for application/x-amz-json-1.1 so the JSON 1.1 round-trip
+        // below can post a raw body string.
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     @Order(1)
@@ -143,6 +152,54 @@ class ApiGatewayV2VpcLinkRestTest {
                 .body("integrationMethod", equalTo("GET"))
                 .body("connectionType", equalTo("VPC_LINK"))
                 .body("connectionId", equalTo(vpcLinkId));
+    }
+
+    @Test
+    @Order(14)
+    void connectionIdRoundTripsViaJson11() {
+        // Mirrors IntegrationConnectionTypeAndAuthorizerSimpleResponsesTest#connectionTypeReturnedViaJson11
+        // to make sure the JSON 1.1 (X-Amz-Target) response path also emits ConnectionId.
+        String amzJson = "application/x-amz-json-1.1";
+        String authHeader = "AWS4-HMAC-SHA256 Credential=test/20260520/us-east-1/apigateway/aws4_request";
+        String targetPrefix = "AmazonApiGatewayV2.";
+
+        String localApiId = given()
+                .contentType(amzJson)
+                .header("X-Amz-Target", targetPrefix + "CreateApi")
+                .header("Authorization", authHeader)
+                .body("""
+                        {"Name":"conn-id-json11","ProtocolType":"HTTP"}
+                        """)
+                .when().post("/")
+                .then().statusCode(201)
+                .extract().path("ApiId");
+
+        String localIntegrationId = given()
+                .contentType(amzJson)
+                .header("X-Amz-Target", targetPrefix + "CreateIntegration")
+                .header("Authorization", authHeader)
+                .body("""
+                        {"ApiId":"%s","IntegrationType":"HTTP_PROXY","IntegrationUri":"https://example.com","IntegrationMethod":"GET","ConnectionType":"VPC_LINK","ConnectionId":"%s","PayloadFormatVersion":"1.0"}
+                        """.formatted(localApiId, vpcLinkId))
+                .when().post("/")
+                .then().statusCode(201)
+                .body("ConnectionType", equalTo("VPC_LINK"))
+                .body("ConnectionId", equalTo(vpcLinkId))
+                .extract().path("IntegrationId");
+
+        given()
+                .contentType(amzJson)
+                .header("X-Amz-Target", targetPrefix + "GetIntegration")
+                .header("Authorization", authHeader)
+                .body("""
+                        {"ApiId":"%s","IntegrationId":"%s"}
+                        """.formatted(localApiId, localIntegrationId))
+                .when().post("/")
+                .then().statusCode(200)
+                .body("ConnectionId", equalTo(vpcLinkId));
+
+        // cleanup the locally-scoped api so it doesn't leak into the next test
+        given().when().delete("/v2/apis/" + localApiId).then().statusCode(anyOf(equalTo(204), equalTo(404)));
     }
 
     @Test
