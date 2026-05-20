@@ -154,12 +154,12 @@ public class AwsJsonCborController {
             byte[] cborBytes = nodeToSmithyCbor(responseNode);
             String responseContentType = responseContentType(httpHeaders);
             return Response.status(delegated.getStatus())
-                    .header("Smithy-Protocol", "rpc-v2-cbor")
+                    .header("smithy-protocol", "rpc-v2-cbor")
                     .type(responseContentType)
                     .entity(cborBytes)
                     .build();
         } catch (AwsException e) {
-            return cborErrorResponse(e, "Smithy-Protocol", responseContentType(httpHeaders));
+            return cborErrorResponse(e, "smithy-protocol", responseContentType(httpHeaders));
         } catch (Exception e) {
             LOG.error("Error processing Smithy CBOR request: " + serviceId + "." + operation, e);
             return Response.status(500).build();
