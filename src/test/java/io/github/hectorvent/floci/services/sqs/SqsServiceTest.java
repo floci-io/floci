@@ -813,4 +813,30 @@ class SqsServiceTest {
         verify(sns).clearFifoDeduplicationCacheForSqsQueueSubscriptions(
                 queue.getQueueUrl(), "us-east-1");
     }
+
+    @Test
+    void sendAndReceiveMessage_bareQueueName() {
+        sqsService.createQueue("bare-name-queue", null);
+
+        Message sent = sqsService.sendMessage("bare-name-queue", "hello", 0);
+        assertNotNull(sent.getMessageId());
+
+        List<Message> received = sqsService.receiveMessage("bare-name-queue", 1, 30, 0);
+        assertEquals(1, received.size());
+        assertEquals("hello", received.get(0).getBody());
+    }
+
+    @Test
+    void deleteQueue_bareQueueName() {
+        sqsService.createQueue("delete-bare", null);
+        assertDoesNotThrow(() -> sqsService.deleteQueue("delete-bare"));
+        assertThrows(AwsException.class, () -> sqsService.deleteQueue("delete-bare"));
+    }
+
+    @Test
+    void getQueueAttributes_bareQueueName() {
+        sqsService.createQueue("attrs-bare", Map.of("VisibilityTimeout", "45"));
+        Map<String, String> attrs = sqsService.getQueueAttributes("attrs-bare", List.of("VisibilityTimeout"));
+        assertEquals("45", attrs.get("VisibilityTimeout"));
+    }
 }

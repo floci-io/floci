@@ -1253,12 +1253,29 @@ public class SqsService {
      * default account.
      */
     public String senderIdFor(String queueUrl) {
-        String fromUrl = accountFromQueueUrl(queueUrl);
+        String fromUrl = accountFromQueueUrl(normalizeQueueUrl(queueUrl));
         return fromUrl != null ? fromUrl : regionResolver.getAccountId();
     }
 
-    private static String regionKey(String region, String queueUrl) {
-        return region + "::" + extractQueuePath(queueUrl);
+    /**
+     * Accepts a full queue URL or a bare queue name and returns a canonical
+     * full URL.  AWS SQS allows clients to pass either form in the QueueUrl
+     * field; this mirrors that behavior so lookups succeed regardless of what
+     * the caller supplied.
+     */
+    private String normalizeQueueUrl(String queueUrl) {
+        if (queueUrl == null) {
+            return null;
+        }
+        if (queueUrl.contains("://")) {
+            return queueUrl;
+        }
+        // Bare queue name — construct the full URL the same way createQueue does.
+        return baseUrl + "/" + regionResolver.getAccountId() + "/" + queueUrl;
+    }
+
+    private String regionKey(String region, String queueUrl) {
+        return region + "::" + extractQueuePath(normalizeQueueUrl(queueUrl));
     }
 
     /**
@@ -1295,7 +1312,7 @@ public class SqsService {
      */
     private Optional<Queue> getQueueByUrl(String storageKey, String queueUrl) {
         if (queueStore instanceof AccountAwareStorageBackend<Queue> aware) {
-            String accountId = accountFromQueueUrl(queueUrl);
+            String accountId = accountFromQueueUrl(normalizeQueueUrl(queueUrl));
             if (accountId != null) {
                 return aware.getForAccount(accountId, storageKey);
             }
