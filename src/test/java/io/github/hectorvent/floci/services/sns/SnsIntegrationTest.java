@@ -256,6 +256,24 @@ class SnsIntegrationTest {
     }
 
     @Test
+    @Order(9)
+    void publish_invalidBinaryAttributeReturns400() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "hello")
+            .formParam("MessageAttributes.entry.1.Name", "binarycontent")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "Binary")
+            .formParam("MessageAttributes.entry.1.Value.BinaryValue", "not valid base64!!!")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+    }
+
+    @Test
     @Order(10)
     void publishBatch() {
         given()
