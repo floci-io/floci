@@ -1040,10 +1040,33 @@ public class CognitoService {
         if (!user.getGroupNames().isEmpty()) {
             claims.put("cognito:groups", new ArrayList<>(user.getGroupNames()));
         }
+        if ("id".equals(type)) {
+            addUserAttributeClaims(claims, user);
+        }
 
         applyClaimsOverride(claims, override, type);
 
         return signJwt(header, encodeJsonBase64Url(claims), getSigningPrivateKey(pool));
+    }
+
+    private static void addUserAttributeClaims(Map<String, Object> claims, CognitoUser user) {
+        for (Map.Entry<String, String> e : user.getAttributes().entrySet()) {
+            String name = e.getKey();
+            String value = e.getValue();
+            if (name == null || name.isEmpty() || value == null) continue;
+            if (claims.containsKey(name)) continue;
+            switch (name) {
+                case "email_verified", "phone_number_verified" -> claims.put(name, Boolean.parseBoolean(value));
+                case "updated_at" -> {
+                    try {
+                        claims.put(name, Long.parseLong(value));
+                    } catch (NumberFormatException _) {
+                        // OIDC requires updated_at to be a JSON number; omit invalid values.
+                    }
+                }
+                default -> claims.put(name, value);
+            }
+        }
     }
 
     private static void applyClaimsOverride(Map<String, Object> claims, ClaimsOverride override, String tokenType) {
