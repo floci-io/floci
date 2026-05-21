@@ -795,8 +795,10 @@ public class S3Controller {
                     httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
             S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass);
             var resp = Response.noContent();
-            if (result != null && result.isDeleteMarker()) {
-                resp.header("x-amz-delete-marker", "true");
+            if (result != null) {
+                if (result.isDeleteMarker()) {
+                    resp.header("x-amz-delete-marker", "true");
+                }
                 resp.header("x-amz-version-id", result.getVersionId());
             }
             return resp.build();

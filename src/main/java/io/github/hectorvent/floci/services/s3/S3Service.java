@@ -517,16 +517,33 @@ public class S3Service {
             fireNotifications(bucketName, key, "ObjectRemoved:DeleteMarkerCreated", deleteMarker);
             return deleteMarker;
         } else if (versionId != null) {
-            // Check lock on the specific version before permanent deletion
-            objectStore.get(versionedKey(bucketName, key, versionId)).ifPresent(obj -> {
-                if (!obj.isDeleteMarker()) {
-                    checkLockProtection(obj, bypassGovernance);
-                }
-            });
+            // Get the specific version before permanent deletion
+            S3Object toDelete = objectStore.get(versionedKey(bucketName, key, versionId)).orElse(null);
+            if (toDelete != null && !toDelete.isDeleteMarker()) {
+                checkLockProtection(toDelete, bypassGovernance);
+            }
             // Permanently delete a specific version
             objectStore.delete(versionedKey(bucketName, key, versionId));
             LOG.debugv("Permanently deleted version: {0}/{1} v={2}", bucketName, key, versionId);
-            return null;
+            // Promote the next most-recent version when the deleted one was the latest
+            String latestKey = objectKey(bucketName, key);
+            objectStore.get(latestKey).ifPresent(latest -> {
+                if (versionId.equals(latest.getVersionId())) {
+                    String vPrefix = versionedKey(bucketName, key, "");
+                    List<S3Object> remaining = objectStore.scan(k -> k.startsWith(vPrefix));
+                    if (remaining.isEmpty()) {
+                        objectStore.delete(latestKey);
+                    } else {
+                        S3Object newLatest = remaining.stream()
+                                .max(Comparator.comparing(S3Object::getLastModified))
+                                .orElseThrow();
+                        newLatest.setLatest(true);
+                        objectStore.put(versionedKey(bucketName, key, newLatest.getVersionId()), newLatest);
+                        objectStore.put(latestKey, newLatest);
+                    }
+                }
+            });
+            return toDelete;
         } else {
             // Check lock on the non-versioned object before delete
             objectStore.get(objectKey(bucketName, key)).ifPresent(obj -> {
