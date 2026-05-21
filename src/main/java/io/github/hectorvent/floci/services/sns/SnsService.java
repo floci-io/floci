@@ -127,7 +127,11 @@ public class SnsService {
 
         if (name.endsWith(".fifo")) {
             topic.getAttributes().put("FifoTopic", "true");
-            topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
+                topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "true");
+            } else {
+                topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            }
         }
 
         topicStore.put(key, topic);

@@ -233,6 +233,22 @@ class SqsServiceTest {
     }
 
     @Test
+    void createFifoQueueWithContentBasedDeduplicationFalse() {
+        Queue queue = sqsService.createQueue("test-queue.fifo",
+                Map.of("ContentBasedDeduplication", "false"));
+        assertTrue(queue.isFifo());
+        assertEquals("false", queue.getAttributes().get("ContentBasedDeduplication"));
+    }
+
+    @Test
+    void createFifoQueueWithoutContentBasedDeduplication() {
+        Queue queue = sqsService.createQueue("test-queue.fifo",
+                Map.of("VisibilityTimeout", "60"));
+        assertTrue(queue.isFifo());
+        assertEquals("false", queue.getAttributes().get("ContentBasedDeduplication"));
+    }
+
+    @Test
     void createFifoQueueWithoutSuffixFails() {
         assertThrows(AwsException.class, () ->
                 sqsService.createQueue("test-queue", Map.of("FifoQueue", "true")));

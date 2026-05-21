@@ -4127,4 +4127,180 @@ class CloudFormationIntegrationTest {
             .body("authorizerId", equalTo(secondAuth));
     }
 
+    @Test
+    void createStack_snsSqsFifoWithContentBasedDeduplicationAndSubscription() {
+        String stackName = "cfn-sns-sqs-fifo-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-test-topic.fifo",
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-test-queue.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MySubscription": {
+                  "Type": "AWS::SNS::Subscription",
+                  "Properties": {
+                    "TopicArn": {"Ref": "MyTopic"},
+                    "Protocol": "sqs",
+                    "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]},
+                    "RawMessageDelivery": true
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 1. Verify SNS Topic attributes
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", "arn:aws:sns:us-east-1:000000000000:cfn-test-topic.fifo")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ContentBasedDeduplication"))
+            .body(containsString("<value>true</value>"))
+            .body(containsString("FifoTopic"));
+
+        // 2. Verify SQS Queue attributes
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/cfn-test-queue.fifo")
+            .formParam("AttributeName.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ContentBasedDeduplication"))
+            .body(containsString("<Value>true</Value>"))
+            .body(containsString("FifoQueue"));
+
+        // 3. Verify SNS Subscription attributes
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String subArn = physicalIdByLogicalId(resourcesXml, "MySubscription");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", subArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("RawMessageDelivery"))
+            .body(containsString("<value>true</value>"))
+            .body(containsString("sqs"));
+    }
+
+    @Test
+    void createStack_snsSubscriptionWithFilterPolicyAndRedrivePolicy() {
+        String stackName = "cfn-sns-sub-policies-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-sub-policies-topic"
+                  }
+                },
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-policies-queue"
+                  }
+                },
+                "MyDLQ": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-policies-dlq"
+                  }
+                },
+                "MySubscription": {
+                  "Type": "AWS::SNS::Subscription",
+                  "Properties": {
+                    "TopicArn": {"Ref": "MyTopic"},
+                    "Protocol": "sqs",
+                    "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]},
+                    "FilterPolicy": {
+                      "price_usd": [{"numeric": [">=", 100]}]
+                    },
+                    "RedrivePolicy": {
+                      "deadLetterTargetArn": {"Fn::GetAtt": ["MyDLQ", "Arn"]}
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String subArn = physicalIdByLogicalId(resourcesXml, "MySubscription");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", subArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("FilterPolicy"))
+            .body(containsString("price_usd"))
+            .body(containsString("RedrivePolicy"))
+            .body(containsString("deadLetterTargetArn"))
+            .body(containsString("cfn-sub-policies-dlq"));
+    }
+
 }

@@ -250,7 +250,11 @@ public class SqsService {
         queue.getAttributes().putIfAbsent("DelaySeconds", "0");
         queue.getAttributes().putIfAbsent("MessageRetentionPeriod", "345600");
         if (queue.isFifo()) {
-            queue.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
+                queue.getAttributes().putIfAbsent("ContentBasedDeduplication", "true");
+            } else {
+                queue.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            }
         }
 
         queueStore.put(storageKey, queue);
