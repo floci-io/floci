@@ -296,6 +296,9 @@ public class S3Service {
         object.setCacheControl(effectiveOptions.getCacheControl());
         object.setServerSideEncryption(normalizedServerSideEncryption);
         object.setAcl(cannedObjectAclXml(effectiveOptions.getAcl()));
+        if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
+            object.setTags(new java.util.HashMap<>(effectiveOptions.getTagging()));
+        }
 
         if (bucket.isVersioningEnabled()) {
             String versionId = UUID.randomUUID().toString();

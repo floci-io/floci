@@ -427,4 +427,39 @@ class S3Test {
             } catch (Exception ignored) {}
         }
     }
+
+    @Test
+    @Order(27)
+    void putObjectPersistsInlineTaggingHeader() {
+        String bucket = TestFixtures.uniqueName("inline-tag-bucket");
+        String key = "inline-tagged.txt";
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        try {
+            s3.putObject(PutObjectRequest.builder()
+                            .bucket(bucket).key(key)
+                            .tagging(Tagging.builder()
+                                    .tagSet(
+                                            software.amazon.awssdk.services.s3.model.Tag.builder().key("env").value("test").build(),
+                                            software.amazon.awssdk.services.s3.model.Tag.builder().key("project").value("floci").build()
+                                    )
+                                    .build())
+                            .build(),
+                    RequestBody.fromString("inline-tagged content"));
+
+            GetObjectTaggingResponse response = s3.getObjectTagging(
+                    GetObjectTaggingRequest.builder().bucket(bucket).key(key).build());
+
+            assertThat(response.tagSet()).hasSize(2);
+            assertThat(response.tagSet())
+                    .anyMatch(t -> "env".equals(t.key()) && "test".equals(t.value()))
+                    .anyMatch(t -> "project".equals(t.key()) && "floci".equals(t.value()));
+        } finally {
+            try {
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+            } catch (Exception ignored) {}
+            try {
+                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+            } catch (Exception ignored) {}
+        }
+    }
 }

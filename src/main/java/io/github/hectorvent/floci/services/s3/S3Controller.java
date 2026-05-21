@@ -426,6 +426,7 @@ public class S3Controller {
                               @HeaderParam("Content-Encoding") String contentEncoding,
                               @HeaderParam("x-amz-content-sha256") String contentSha256,
                               @HeaderParam("x-amz-copy-source") String copySource,
+                              @HeaderParam("x-amz-tagging") String tagging,
                               @HeaderParam("If-Match") String ifMatch,
                               @HeaderParam("If-None-Match") String ifNoneMatch,
                               @QueryParam("uploadId") String uploadId,
@@ -472,6 +473,8 @@ public class S3Controller {
                 return preconditionResponse;
             }
 
+            Map<String, String> inlineTags = parseInlineTaggingHeader(tagging);
+
             String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
             String retainUntilStr = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
             String legalHold = httpHeaders.getHeaderString("x-amz-object-lock-legal-hold");
@@ -497,7 +500,8 @@ public class S3Controller {
                             .withServerSideEncryption(serverSideEncryption)
                             .withAcl(cannedAcl)
                             .withChecksumAlgorithm(checksumAlgorithm)
-                            .withClientChecksum(extractChecksumFromHeaders(httpHeaders)));
+                            .withClientChecksum(extractChecksumFromHeaders(httpHeaders))
+                            .withTagging(inlineTags));
             var resp = Response.ok().header("ETag", obj.getETag());
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
@@ -2263,6 +2267,51 @@ public class S3Controller {
         String query = uriInfo.getRequestUri().getQuery();
         if (query == null) return false;
         return query.equals(param) || query.contains(param + "&") || query.contains("&" + param);
+    }
+
+    private static final int MAX_INLINE_TAGS = 10;
+    private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
+
+    /**
+     * Parses an {@code x-amz-tagging} request-header value (URL-encoded
+     * {@code k=v&k=v}) into a tag map. Returns an empty map for null or blank input.
+     */
+    private static Map<String, String> parseInlineTaggingHeader(String header) {
+        if (header == null || header.isEmpty()) {
+            return Map.of();
+        }
+        if (header.getBytes(StandardCharsets.UTF_8).length > MAX_INLINE_TAGGING_HEADER_BYTES) {
+            throw new AwsException("InvalidArgument",
+                    "The x-amz-tagging header exceeds the 8 KB limit.", 400);
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (String pair : header.split("&")) {
+            if (pair.isEmpty()) {
+                continue;
+            }
+            int eq = pair.indexOf('=');
+            if (eq < 0) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-tagging header is malformed: missing '=' in pair.", 400);
+            }
+            String rawKey = pair.substring(0, eq);
+            String rawValue = pair.substring(eq + 1);
+            if (rawKey.isEmpty()) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-tagging header is malformed: empty tag key.", 400);
+            }
+            String tagKey = URLDecoder.decode(rawKey, StandardCharsets.UTF_8);
+            String tagValue = URLDecoder.decode(rawValue, StandardCharsets.UTF_8);
+            if (tags.put(tagKey, tagValue) != null) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-tagging header contains duplicate tag key: " + tagKey, 400);
+            }
+        }
+        if (tags.size() > MAX_INLINE_TAGS) {
+            throw new AwsException("BadRequest",
+                    "Object tags cannot be greater than " + MAX_INLINE_TAGS, 400);
+        }
+        return tags;
     }
 
     /**
