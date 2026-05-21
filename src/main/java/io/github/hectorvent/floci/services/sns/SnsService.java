@@ -951,7 +951,12 @@ public class SnsService {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
-                    attr.put("Value", entry.getValue().getStringValue());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        attr.put("Value", java.util.Base64.getEncoder()
+                                .encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        attr.put("Value", entry.getValue().getStringValue());
+                    }
                 }
             }
             ObjectNode record = objectMapper.createObjectNode();
@@ -1007,7 +1012,12 @@ public class SnsService {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
-                    attr.put("Value", entry.getValue().getStringValue());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        attr.put("Value", java.util.Base64.getEncoder()
+                                .encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        attr.put("Value", entry.getValue().getStringValue());
+                    }
                 }
             }
             return objectMapper.writeValueAsString(node);

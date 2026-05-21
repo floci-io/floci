@@ -188,8 +188,14 @@ public class SnsQueryHandler {
             String name = params.getFirst("MessageAttributes.entry." + i + ".Name");
             if (name == null) break;
             String value = params.getFirst("MessageAttributes.entry." + i + ".Value.StringValue");
+            String binaryValueBase64 = params.getFirst("MessageAttributes.entry." + i + ".Value.BinaryValue");
             String dataType = params.getFirst("MessageAttributes.entry." + i + ".Value.DataType");
-            if (value != null) attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+            if (binaryValueBase64 != null) {
+                byte[] binaryValue = java.util.Base64.getDecoder().decode(binaryValueBase64);
+                attributes.put(name, new MessageAttributeValue(binaryValue, dataType != null ? dataType : "Binary"));
+            } else if (value != null) {
+                attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+            }
         }
 
         try {
@@ -223,8 +229,14 @@ public class SnsQueryHandler {
                 String name = params.getFirst(attrPrefix + ".Name");
                 if (name == null) break;
                 String value = params.getFirst(attrPrefix + ".Value.StringValue");
+                String binaryValueBase64 = params.getFirst(attrPrefix + ".Value.BinaryValue");
                 String dataType = params.getFirst(attrPrefix + ".Value.DataType");
-                if (value != null) attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+                if (binaryValueBase64 != null) {
+                    byte[] binaryValue = java.util.Base64.getDecoder().decode(binaryValueBase64);
+                    attributes.put(name, new MessageAttributeValue(binaryValue, dataType != null ? dataType : "Binary"));
+                } else if (value != null) {
+                    attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+                }
             }
             if (!attributes.isEmpty()) entry.put("MessageAttributes", attributes);
             entries.add(entry);

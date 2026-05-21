@@ -161,8 +161,14 @@ public class SnsJsonHandler {
         if (attrsNode.isObject()) {
             attrsNode.fields().forEachRemaining(entry -> {
                 String dataType = entry.getValue().path("DataType").asText("String");
-                String stringValue = entry.getValue().path("StringValue").asText();
-                attributes.put(entry.getKey(), new MessageAttributeValue(stringValue, dataType));
+                String binaryValueBase64 = entry.getValue().path("BinaryValue").asText(null);
+                if (binaryValueBase64 != null) {
+                    byte[] binaryValue = java.util.Base64.getDecoder().decode(binaryValueBase64);
+                    attributes.put(entry.getKey(), new MessageAttributeValue(binaryValue, dataType));
+                } else {
+                    String stringValue = entry.getValue().path("StringValue").asText();
+                    attributes.put(entry.getKey(), new MessageAttributeValue(stringValue, dataType));
+                }
             });
         }
 
@@ -231,8 +237,14 @@ public class SnsJsonHandler {
                     Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
                     attrsNode.fields().forEachRemaining(field -> {
                         String dataType = field.getValue().path("DataType").asText("String");
-                        String stringValue = field.getValue().path("StringValue").asText();
-                        messageAttributes.put(field.getKey(), new MessageAttributeValue(stringValue, dataType));
+                        String binaryValueBase64 = field.getValue().path("BinaryValue").asText(null);
+                        if (binaryValueBase64 != null) {
+                            byte[] binaryValue = java.util.Base64.getDecoder().decode(binaryValueBase64);
+                            messageAttributes.put(field.getKey(), new MessageAttributeValue(binaryValue, dataType));
+                        } else {
+                            String stringValue = field.getValue().path("StringValue").asText();
+                            messageAttributes.put(field.getKey(), new MessageAttributeValue(stringValue, dataType));
+                        }
                     });
                     entry.put("MessageAttributes", messageAttributes);
                 }
