@@ -622,7 +622,7 @@ public class Ec2Service {
     public SecurityGroup createSecurityGroup(String region, String groupName, String description, String vpcId) {
         ensureDefaultResources(region);
         if (vpcId != null && !vpcId.isEmpty()) {
-            getVpcId(region, vpcId);
+            getRequiredVpc(region, vpcId);
         } else {
             vpcId = "vpc-default";
         }
