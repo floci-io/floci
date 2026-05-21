@@ -109,6 +109,24 @@ class IamIntegrationTest {
                     equalTo("arn:aws:sts::123456789012:assumed-role/TestRole/tenant-session"));
     }
 
+    @Test
+    @Order(6)
+    void stsAssumeRoleUsesAccountFromRoleArnForCrossAccount() {
+        given()
+            .formParam("Action", "AssumeRole")
+            .formParam("RoleArn", "arn:aws:iam::222222222222:role/CrossAccountRole")
+            .formParam("RoleSessionName", "cross-session")
+            .formParam("DurationSeconds", "3600")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=123456789012/20260227/us-east-1/sts/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
+                    equalTo("arn:aws:sts::222222222222:assumed-role/CrossAccountRole/cross-session"));
+    }
+
     // =========================================================================
     // AWS Managed Policies (seeded at startup)
     // =========================================================================

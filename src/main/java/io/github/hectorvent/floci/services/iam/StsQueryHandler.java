@@ -69,7 +69,7 @@ public class StsQueryHandler {
         String roleName = roleArn != null && roleArn.contains("/")
                 ? roleArn.substring(roleArn.lastIndexOf('/') + 1)
                 : "UnknownRole";
-        String accountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
@@ -125,7 +125,7 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String accountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
         String provider = providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com";
@@ -162,7 +162,7 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String accountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
