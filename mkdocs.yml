@@ -101,6 +101,7 @@ nav:
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
+    - Resource Groups Tagging API: services/resource-groups-tagging.md
     - EKS: services/eks.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md
