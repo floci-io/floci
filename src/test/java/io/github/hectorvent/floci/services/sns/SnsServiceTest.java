@@ -45,6 +45,14 @@ class SnsServiceTest {
     }
 
     @Test
+    void createTopic_fifoWithContentBasedDeduplication() {
+        Topic topic = snsService.createTopic("my-topic.fifo",
+                Map.of("ContentBasedDeduplication", "true"), null, REGION);
+        assertEquals("true", topic.getAttributes().get("ContentBasedDeduplication"));
+        assertEquals("true", topic.getAttributes().get("FifoTopic"));
+    }
+
+    @Test
     void createTopic_idempotent() {
         Topic first = snsService.createTopic("my-topic", null, null, REGION);
         Topic second = snsService.createTopic("my-topic", null, null, REGION);

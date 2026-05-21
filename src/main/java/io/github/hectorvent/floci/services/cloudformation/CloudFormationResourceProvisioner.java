@@ -133,6 +133,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::S3::Bucket" -> provisionS3Bucket(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SQS::Queue" -> provisionSqsQueue(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SNS::Topic" -> provisionSnsTopic(resource, properties, engine, region, accountId, stackName);
+                case "AWS::SNS::Subscription" -> provisionSnsSubscription(resource, properties, engine, region);
                 case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" ->
                         provisionDynamoTable(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
@@ -189,6 +190,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::S3::Bucket" -> s3Service.deleteBucket(physicalId);
                 case "AWS::SQS::Queue" -> sqsService.deleteQueue(physicalId, region);
                 case "AWS::SNS::Topic" -> snsService.deleteTopic(physicalId, region);
+                case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
                 case "AWS::DynamoDB::Table" -> dynamoDbService.deleteTable(physicalId, region);
                 case "AWS::Lambda::Function" -> lambdaService.deleteFunction(region, physicalId);
                 case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
@@ -240,8 +242,13 @@ public class CloudFormationResourceProvisioner {
             queueName = generatePhysicalName(stackName, r.getLogicalId(), 80, false);
         }
         Map<String, String> attrs = new HashMap<>();
-        if (props != null && props.has("VisibilityTimeout")) {
-            attrs.put("VisibilityTimeout", engine.resolve(props.get("VisibilityTimeout")));
+        if (props != null) {
+            if(props.has("VisibilityTimeout")) {
+                attrs.put("VisibilityTimeout", engine.resolve(props.get("VisibilityTimeout")));
+            }
+            if(props.has("ContentBasedDeduplication")) {
+                attrs.put("ContentBasedDeduplication", engine.resolve(props.get("ContentBasedDeduplication")));
+            }
         }
         var queue = sqsService.createQueue(queueName, attrs, region);
         // QueueArn is computed on demand in SqsService#getQueueAttributes and is not
@@ -259,13 +266,45 @@ public class CloudFormationResourceProvisioner {
     private void provisionSnsTopic(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                    String region, String accountId, String stackName) {
         String topicName = resolveOptional(props, "TopicName", engine);
+        String contentBasedDedupFlag = resolveOptional(props, "ContentBasedDeduplication", engine);
         if (topicName == null || topicName.isBlank()) {
             topicName = generatePhysicalName(stackName, r.getLogicalId(), 256, false);
         }
-        var topic = snsService.createTopic(topicName, Map.of(), Map.of(), region);
+
+        Map<String, String> attributes = new HashMap<>();
+
+        if (contentBasedDedupFlag != null && !contentBasedDedupFlag.isBlank()) {
+            attributes.put("ContentBasedDeduplication", contentBasedDedupFlag);
+        }
+
+        var topic = snsService.createTopic(topicName, attributes, Map.of(), region);
         r.setPhysicalId(topic.getTopicArn());
         r.getAttributes().put("Arn", topic.getTopicArn());
         r.getAttributes().put("TopicName", topicName);
+    }
+
+    private void provisionSnsSubscription(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String topicArn = engine.resolve(props.path("TopicArn"));
+        String protocol = engine.resolve(props.path("Protocol"));
+        String endpoint = engine.resolve(props.path("Endpoint"));
+
+        Map<String, String> attributes = new HashMap<>();
+        if (props.has("FilterPolicy") && !props.path("FilterPolicy").isNull()) {
+            attributes.put("FilterPolicy", engine.resolveNode(props.path("FilterPolicy")).toString());
+        }
+        if (props.has("FilterPolicyScope")) {
+            attributes.put("FilterPolicyScope", engine.resolve(props.path("FilterPolicyScope")));
+        }
+        if (props.has("RawMessageDelivery")) {
+            attributes.put("RawMessageDelivery", engine.resolve(props.path("RawMessageDelivery")));
+        }
+        if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
+            attributes.put("RedrivePolicy", engine.resolveNode(props.path("RedrivePolicy")).toString());
+        }
+
+        var sub = snsService.subscribe(topicArn, protocol, endpoint, region, attributes);
+        r.setPhysicalId(sub.getSubscriptionArn());
+        r.getAttributes().put("Arn", sub.getSubscriptionArn());
     }
 
     // ── DynamoDB ──────────────────────────────────────────────────────────────
