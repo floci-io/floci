@@ -814,6 +814,14 @@ public class CognitoService {
         authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
     }
 
+    public void adminConfirmSignUp(String userPoolId, String username) {
+        CognitoUser user = adminGetUser(userPoolId, username);
+        user.setUserStatus("CONFIRMED");
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Admin confirmed sign up for user {0} in pool {1}", username, userPoolId);
+    }
+
     // ──────────────────────────── Auth ────────────────────────────
 
     public Map<String, Object> initiateAuth(String clientId, String authFlow, Map<String, String> authParameters) {

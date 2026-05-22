@@ -1080,6 +1080,48 @@ class CognitoIntegrationTest {
                 .statusCode(200);
     }
 
+    @Test
+    @Order(91)
+    void adminConfirmSignUp() throws Exception {
+        String testUser = "unconfirmed+" + UUID.randomUUID() + "@example.com";
+        // SignUp user - initially UNCONFIRMED
+        cognitoJson("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "%s"
+                }
+                """.formatted(clientId, testUser, password));
+
+        // Get user details to verify user status is UNCONFIRMED
+        JsonNode userResp = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, testUser));
+        assertEquals("UNCONFIRMED", userResp.path("UserStatus").asText());
+
+        // Admin confirms user
+        cognitoAction("AdminConfirmSignUp", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, testUser))
+                .then()
+                .statusCode(200);
+
+        // Get user details to verify user status is CONFIRMED
+        JsonNode userRespConfirmed = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(poolId, testUser));
+        assertEquals("CONFIRMED", userRespConfirmed.path("UserStatus").asText());
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────
 
     private static Response oauthToken(String oauthClientId, String oauthClientSecret) {
