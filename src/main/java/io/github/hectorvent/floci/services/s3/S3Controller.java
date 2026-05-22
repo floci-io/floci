@@ -2275,6 +2275,10 @@ public class S3Controller {
     /**
      * Parses an {@code x-amz-tagging} request-header value (URL-encoded
      * {@code k=v&k=v}) into a tag map. Returns an empty map for null or blank input.
+     *
+     * <p>Note: the error codes thrown here ({@code InvalidArgument} for malformed input,
+     * {@code BadRequest} for exceeding the 10-tag limit) match real-AWS S3 behavior
+     * observed in practice but are not in the S3 Smithy service model.
      */
     private static Map<String, String> parseInlineTaggingHeader(String header) {
         if (header == null || header.isEmpty()) {
