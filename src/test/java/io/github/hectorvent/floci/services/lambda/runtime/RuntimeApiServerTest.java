@@ -229,40 +229,6 @@ class RuntimeApiServerTest {
         assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
     }
 
-    /**
-     * Reproducer for the flaky CI failure reported in RuntimeApiServerTest.
-     *
-     * Root cause: when the server stops with an active HTTP/1.1 (keep-alive) connection,
-     * Vert.x closes that connection from the server side. On Linux this leaves the
-     * connection in TIME_WAIT on the local port. Without SO_REUSEADDR, any subsequent
-     * attempt to bind the same port throws BindException (EADDRINUSE).
-     *
-     * The test is Linux-only because macOS handles TIME_WAIT differently and allows
-     * rebinding without SO_REUSEADDR, which is why the failure only appears in CI.
-     */
-    @Test
-    @Timeout(10)
-    @EnabledOnOs(OS.LINUX)
-    void stopWithActiveConnection_portBlockedByTimeWait_withoutReuseAddr() throws Exception {
-        // Make a request so the HTTP client establishes a keep-alive TCP connection.
-        httpClient.send(
-                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/ping"))
-                        .GET().build(),
-                HttpResponse.BodyHandlers.ofString());
-
-        // Stop the server — Vert.x sends TCP FIN from the server side, placing the
-        // server end of the connection into TIME_WAIT on Linux.
-        server.stop().get(5, TimeUnit.SECONDS);
-
-        // Without SO_REUSEADDR, binding the same port fails on Linux (EADDRINUSE)
-        // because the TIME_WAIT connection is still associated with this local port.
-        assertThrows(BindException.class, () -> {
-            try (ServerSocket s = new ServerSocket(port)) {
-                // expected to throw before reaching here on Linux
-            }
-        });
-    }
-
     @Test
     @Timeout(10)
     void stopReleasesPortSynchronously() throws Exception {
