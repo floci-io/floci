@@ -17,6 +17,8 @@ class S3VersioningIntegrationTest {
     private static final String BUCKET = "versioning-int-test";
     private static String versionId1;
     private static String versionId2;
+    private static String headersTestVersionId;
+    private static String headersTestMarkerId;
 
     @Test
     @Order(1)
@@ -193,5 +195,54 @@ class S3VersioningIntegrationTest {
         // Delete specific versions permanently
         given().when().delete("/" + BUCKET + "/test.txt?versionId=" + versionId1).then().statusCode(204);
         given().when().delete("/" + BUCKET + "/test.txt?versionId=" + versionId2).then().statusCode(204);
+    }
+
+    @Test
+    @Order(16)
+    void deleteRegularVersionReturnsVersionIdHeaderOnly() {
+        headersTestVersionId = given()
+            .body("headers-test")
+            .contentType("text/plain")
+        .when()
+            .put("/" + BUCKET + "/headers.txt")
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/headers.txt?versionId=" + headersTestVersionId)
+        .then()
+            .statusCode(204)
+            .header("x-amz-version-id", headersTestVersionId)
+            .header("x-amz-delete-marker", nullValue());
+    }
+
+    @Test
+    @Order(17)
+    void deleteMarkerByVersionIdReturnsBothHeaders() {
+        given()
+            .body("restore-test")
+            .contentType("text/plain")
+        .when()
+            .put("/" + BUCKET + "/restore.txt")
+        .then()
+            .statusCode(200);
+
+        headersTestMarkerId = given()
+        .when()
+            .delete("/" + BUCKET + "/restore.txt")
+        .then()
+            .statusCode(204)
+            .header("x-amz-delete-marker", "true")
+            .extract().header("x-amz-version-id");
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/restore.txt?versionId=" + headersTestMarkerId)
+        .then()
+            .statusCode(204)
+            .header("x-amz-version-id", headersTestMarkerId)
+            .header("x-amz-delete-marker", "true");
     }
 }
