@@ -32,6 +32,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
@@ -952,7 +953,7 @@ public class SnsService {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {
-                        attr.put("Value", java.util.Base64.getEncoder()
+                        attr.put("Value", Base64.getEncoder()
                                 .encodeToString(entry.getValue().getBinaryValue()));
                     } else {
                         attr.put("Value", entry.getValue().getStringValue());
@@ -1013,7 +1014,7 @@ public class SnsService {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {
-                        attr.put("Value", java.util.Base64.getEncoder()
+                        attr.put("Value", Base64.getEncoder()
                                 .encodeToString(entry.getValue().getBinaryValue()));
                     } else {
                         attr.put("Value", entry.getValue().getStringValue());
@@ -1050,7 +1051,7 @@ public class SnsService {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {
-                        attr.put("Value", java.util.Base64.getEncoder()
+                        attr.put("Value", Base64.getEncoder()
                                 .encodeToString(entry.getValue().getBinaryValue()));
                     } else {
                         attr.put("Value", entry.getValue().getStringValue());

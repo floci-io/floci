@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -368,7 +369,7 @@ public class SnsQueryHandler {
             if (binaryValueBase64 != null) {
                 byte[] binaryValue;
                 try {
-                    binaryValue = java.util.Base64.getDecoder().decode(binaryValueBase64);
+                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
                 } catch (IllegalArgumentException e) {
                     throw new AwsException("InvalidParameterValue",
                             "Invalid binary value for message attribute '" + name + "': not valid base64.", 400);

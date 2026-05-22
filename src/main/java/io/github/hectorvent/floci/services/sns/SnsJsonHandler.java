@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -302,7 +303,7 @@ public class SnsJsonHandler {
             if (binaryValueBase64 != null) {
                 byte[] binaryValue;
                 try {
-                    binaryValue = java.util.Base64.getDecoder().decode(binaryValueBase64);
+                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
                 } catch (IllegalArgumentException e) {
                     throw new AwsException("InvalidParameterValue",
                             "Invalid binary value for message attribute '" + entry.getKey() + "': not valid base64.", 400);

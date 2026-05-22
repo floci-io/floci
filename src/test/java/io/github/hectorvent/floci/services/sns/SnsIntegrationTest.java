@@ -212,7 +212,7 @@ class SnsIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(18)
     void publish_fanOutPreservesBinaryMessageAttribute() {
         drainQueue(sqsQueueUrl);
 
@@ -256,7 +256,7 @@ class SnsIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(19)
     void publish_invalidBinaryAttributeReturns400() {
         given()
             .contentType("application/x-www-form-urlencoded")
