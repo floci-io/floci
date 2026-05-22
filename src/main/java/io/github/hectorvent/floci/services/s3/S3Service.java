@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
@@ -1496,6 +1497,46 @@ public class S3Service {
                 .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
         bucket.setOwnershipControlsConfiguration(null);
         bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * Stores the bucket Request Payment configuration. AWS only allows the values
+     * {@code BucketOwner} and {@code Requester}; we accept either and reject anything
+     * else with {@code MalformedXML} to match the real S3 behavior.
+     */
+    public void putBucketRequestPayment(String bucketName, String requestPaymentXml) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        String payer = XmlParser.extractFirst(requestPaymentXml, "Payer", null);
+        if (payer == null) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        payer = payer.trim();
+        if (!"BucketOwner".equals(payer) && !"Requester".equals(payer)) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        bucket.setRequestPaymentPayer(payer);
+        bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * Returns the bucket Request Payment configuration as XML. Buckets that have
+     * never been configured return the AWS default ({@code BucketOwner}); this matches
+     * real S3, which never returns 404 for {@code GetBucketRequestPayment}.
+     */
+    public String getBucketRequestPayment(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        String payer = bucket.getRequestPaymentPayer() != null ? bucket.getRequestPaymentPayer() : "BucketOwner";
+        return new XmlBuilder()
+                .start("RequestPaymentConfiguration", AwsNamespaces.S3)
+                .elem("Payer", payer)
+                .end("RequestPaymentConfiguration")
+                .build();
     }
 
     public void restoreObject(String bucketName, String key, String versionId, String restoreXml) {
