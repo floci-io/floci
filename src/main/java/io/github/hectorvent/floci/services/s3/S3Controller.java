@@ -62,7 +62,9 @@ import org.jboss.logging.Logger;
 public class S3Controller {
 
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
-    private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter.ISO_INSTANT;
+    private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
+            .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            .withZone(ZoneId.of("UTC"));
     private static final DateTimeFormatter RFC_822 = DateTimeFormatter
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));

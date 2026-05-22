@@ -55,7 +55,7 @@ public class S3Object {
         this.data = data;
         this.contentType = contentType != null ? contentType : "application/octet-stream";
         this.size = data.length;
-        this.lastModified = Instant.now().truncatedTo(ChronoUnit.SECONDS);
+        this.lastModified = Instant.now().truncatedTo(ChronoUnit.MILLIS);
         this.eTag = computeETag(data);
         this.metadata = new HashMap<>();
         this.storageClass = "STANDARD";
