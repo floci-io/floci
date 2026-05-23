@@ -295,7 +295,6 @@ public class EcsContainerManager {
         }
     }
 
-    
     public record ExitStatus(Integer exitCode, String finishedAt) {
     }
 
