@@ -96,6 +96,7 @@ nav:
     - Athena: services/athena.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
+    - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
     - ACM: services/acm.md
