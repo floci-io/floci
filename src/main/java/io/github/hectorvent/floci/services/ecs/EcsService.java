@@ -1,5 +1,18 @@
 package io.github.hectorvent.floci.services.ecs;
 
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
+
+import org.jboss.logging.Logger;
+
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -27,18 +40,6 @@ import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
-
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
-import java.util.stream.Stream;
 
 @ApplicationScoped
 public class EcsService {
@@ -1121,24 +1122,30 @@ public class EcsService {
             }
         }
 
-        if (allStopped && hasChanges) {
-            task.setLastStatus(TaskStatus.STOPPED.name());
-            task.setDesiredStatus(TaskStatus.STOPPED.name());
-            task.setStoppedAt(Instant.now());
-            if (task.getContainers() != null) {
-                for (Container c : task.getContainers()) {
-                    c.setLastStatus("STOPPED");
-                }
-            }
-            EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
-            if (cluster != null && cluster.getRunningTasksCount() > 0) {
-                cluster.setRunningTasksCount(cluster.getRunningTasksCount() - 1);
-            }
-            taskHandles.remove(task.getTaskArn());
-            LOG.infov("Task {0} reconciled to STOPPED", task.getTaskArn());
+     if (allStopped && hasChanges) {
+    task.setLastStatus(TaskStatus.STOPPED.name());
+    task.setDesiredStatus(TaskStatus.STOPPED.name());
+    task.setStoppedReason("Essential container in task exited");
+    task.setStoppedAt(task.getContainers().stream()
+            .map(c -> containerManager.checkContainerExitStatus(c.getDockerId()))
+            .filter(e -> e != null && e.finishedAt() != null)
+            .map(e -> { try { return Instant.parse(e.finishedAt()); } catch (Exception ex) { return null; } })
+            .filter(t -> t != null)
+            .max(Instant::compareTo)
+            .orElse(Instant.now()));
+    if (task.getContainers() != null) {
+        for (Container c : task.getContainers()) {
+            c.setLastStatus("STOPPED");
         }
     }
-
+    EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
+    if (cluster != null && cluster.getRunningTasksCount() > 0) {
+        cluster.setRunningTasksCount(cluster.getRunningTasksCount() - 1);
+    }
+    taskHandles.remove(task.getTaskArn());
+    LOG.infov("Task {0} reconciled to STOPPED", task.getTaskArn());
+    }
+}
     // ── Resolution helpers ────────────────────────────────────────────────────
 
     private EcsCluster getOrCreateDefaultCluster(String region) {

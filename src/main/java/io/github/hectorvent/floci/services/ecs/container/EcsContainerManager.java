@@ -1,5 +1,17 @@
 package io.github.hectorvent.floci.services.ecs.container;
 
+import java.io.Closeable;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import org.jboss.logging.Logger;
+
+import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.model.ExposedPort;
+
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
@@ -14,18 +26,8 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
-import com.github.dockerjava.api.DockerClient;
-import com.github.dockerjava.api.model.ExposedPort;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
-
-import java.io.Closeable;
-import java.time.Instant;
-import java.util.ArrayList;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -273,12 +275,7 @@ public class EcsContainerManager {
         return container;
     }
 
-    /**
-     * Checks if a container has exited and returns its exit status.
-     *
-     * @param dockerId the Docker container ID
-     * @return an ExitStatus containing exitCode and exitTime, or null if container is still running
-     */
+    // Returns exit status if the container has stopped, null if still running.
     public ExitStatus checkContainerExitStatus(String dockerId) {
         if (dockerId == null) {
             return null;
@@ -298,9 +295,7 @@ public class EcsContainerManager {
         }
     }
 
-    /**
-     * Exit status information for a container that has stopped.
-     */
+    
     public record ExitStatus(Integer exitCode, String finishedAt) {
     }
 

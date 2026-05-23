@@ -1,12 +1,17 @@
 package io.github.hectorvent.floci.services.sqs;
 
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.services.sqs.model.Message;
-
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
+
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 
 /**
  * Thread-safe wrapper around a per-queue message list. All operations acquire a
@@ -230,6 +235,25 @@ class GuardedMessageQueue {
         }
     }
 
+    Message findByDeduplicationId(String deduplicationId) {
+    try (var guard = hold()) {
+        return messages.stream()
+                .filter(m -> deduplicationId.equals(m.getMessageDeduplicationId()))
+                .findFirst()
+                .orElse(null);
+    }
+}
+
+    Message findByDeduplicationId(String deduplicationId, String messageGroupId) {
+    try (var guard = hold()) {
+        return messages.stream()
+                .filter(m -> deduplicationId.equals(m.getMessageDeduplicationId())
+                        && (messageGroupId == null
+                            || messageGroupId.equals(m.getMessageGroupId())))
+                .findFirst()
+                .orElse(null);
+    }
+}
 
     void close() {
         closed = true;
