@@ -28,6 +28,9 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
+import io.github.hectorvent.floci.services.cognito.CognitoService;
+import io.github.hectorvent.floci.services.cognito.model.UserPool;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -73,6 +76,7 @@ public class CloudFormationResourceProvisioner {
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final EcrService ecrService;
     private final PipesService pipesService;
+    private final CognitoService cognitoService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -84,7 +88,8 @@ public class CloudFormationResourceProvisioner {
                                              ApiGatewayService apiGatewayService,
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
-                                             PipesService pipesService) {
+                                             PipesService pipesService,
+                                             CognitoService cognitoService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -99,6 +104,7 @@ public class CloudFormationResourceProvisioner {
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.ecrService = ecrService;
         this.pipesService = pipesService;
+        this.cognitoService = cognitoService;
     }
 
     /**
@@ -169,6 +175,10 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Pipes::Pipe" -> provisionPipe(resource, properties, engine, region, stackName);
                 case "AWS::Lambda::EventSourceMapping" ->
                         provisionLambdaEventSourceMapping(resource, properties, engine, region);
+                case "AWS::Cognito::UserPool" ->
+                        provisionCognitoUserPool(resource, properties, engine, region, accountId, stackName);
+                case "AWS::Cognito::UserPoolClient" ->
+                        provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
                 default -> {
                     LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
                     resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
@@ -209,6 +219,8 @@ public class CloudFormationResourceProvisioner {
                         ecrService.deleteRepository(physicalId, null, true, region);
                 case "AWS::Pipes::Pipe" -> pipesService.deletePipe(physicalId, region);
                 case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
+                case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
+                case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -1581,6 +1593,71 @@ public class CloudFormationResourceProvisioner {
 
         Deployment deployment = apiGatewayV2Service.createDeployment(region, apiId, req);
         r.setPhysicalId(deployment.getDeploymentId());
+    }
+
+    // ── Cognito ──────────────────────────────────────────────────────────────
+
+    private void provisionCognitoUserPool(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                          String region, String accountId, String stackName) {
+        String poolName = resolveOptional(props, "UserPoolName", engine);
+        if (poolName == null || poolName.isBlank()) {
+            poolName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+
+        Map<String, Object> req = new HashMap<>();
+        if (props != null) {
+            req.putAll(jsonObjectToMap(engine.resolveNode(props)));
+        }
+        req.put("PoolName", poolName);
+
+        // Handle Tags
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("UserPoolTags") : null, engine);
+        if (!tags.isEmpty()) {
+            req.put("UserPoolTags", tags);
+        }
+
+        UserPool pool;
+        if (r.getPhysicalId() == null) {
+            pool = cognitoService.createUserPool(req, region);
+        } else {
+            req.put("UserPoolId", r.getPhysicalId());
+            pool = cognitoService.updateUserPool(req, region);
+        }
+
+        r.setPhysicalId(pool.getId());
+        r.getAttributes().put("Arn", pool.getArn());
+        r.getAttributes().put("UserPoolId", pool.getId());
+        r.getAttributes().put("ProviderName", pool.getName());
+        r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
+    }
+
+    private void provisionCognitoUserPoolClient(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                                String region, String accountId, String stackName) {
+        String userPoolId = resolveOptional(props, "UserPoolId", engine);
+        String clientName = resolveOptional(props, "ClientName", engine);
+        if (clientName == null || clientName.isBlank()) {
+            clientName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+        boolean generateSecret = Boolean.parseBoolean(resolveOrDefault(props, "GenerateSecret", engine, "false"));
+        boolean allowedOAuthFlowsUserPoolClient = Boolean.parseBoolean(resolveOrDefault(props, "AllowedOAuthFlowsUserPoolClient", engine, "false"));
+        List<String> allowedOAuthFlows = resolveStringListOrEmpty(props, "AllowedOAuthFlows", engine);
+        List<String> allowedOAuthScopes = resolveStringListOrEmpty(props, "AllowedOAuthScopes", engine);
+
+        UserPoolClient client;
+        if (r.getPhysicalId() == null) {
+            client = cognitoService.createUserPoolClient(userPoolId, clientName, generateSecret,
+                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+        } else {
+            client = cognitoService.updateUserPoolClient(userPoolId, r.getPhysicalId(), clientName,
+                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+        }
+
+        r.setPhysicalId(client.getClientId());
+        r.getAttributes().put("ClientId", client.getClientId());
+        r.getAttributes().put("ClientName", client.getClientName());
+        if (client.getClientSecret() != null) {
+            r.getAttributes().put("ClientSecret", client.getClientSecret());
+        }
     }
 
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {

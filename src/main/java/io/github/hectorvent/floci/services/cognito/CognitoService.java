@@ -278,6 +278,11 @@ public class CognitoService {
         return clientStore.scan(k -> clientStore.get(k).map(c -> c.getUserPoolId().equals(userPoolId)).orElse(false));
     }
 
+    public void deleteUserPoolClient(String clientId) {
+        clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+        clientStore.delete(clientId);
+    }
+
     public void deleteUserPoolClient(String userPoolId, String clientId) {
         describeUserPoolClient(userPoolId, clientId);
         clientStore.delete(clientId);

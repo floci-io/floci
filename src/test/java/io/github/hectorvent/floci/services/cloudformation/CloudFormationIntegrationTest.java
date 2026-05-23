@@ -30,6 +30,7 @@ class CloudFormationIntegrationTest {
     private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String SM_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @BeforeAll
@@ -4301,6 +4302,128 @@ class CloudFormationIntegrationTest {
             .body(containsString("RedrivePolicy"))
             .body(containsString("deadLetterTargetArn"))
             .body(containsString("cfn-sub-policies-dlq"));
+    }
+
+    @Test
+    void createStack_withCognitoUserPoolAndClient() {
+        String template = """
+            {
+              "Resources": {
+                "UserPool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cfn-test-pool",
+                    "UserPoolTags": [
+                      { "Key": "env", "Value": "test" },
+                      { "Key": "team", "Value": "auth" }
+                    ]
+                  }
+                },
+                "UserPoolClient": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {
+                    "ClientName": "cfn-test-client",
+                    "UserPoolId": { "Ref": "UserPool" },
+                    "GenerateSecret": true
+                  }
+                }
+              },
+              "Outputs": {
+                "PoolId": { "Value": { "Ref": "UserPool" } },
+                "PoolArn": { "Value": { "Fn::GetAtt": ["UserPool", "Arn"] } },
+                "ClientId": { "Value": { "Ref": "UserPoolClient" } }
+              }
+            }
+            """;
+
+        String stackName = "cognito-test-stack";
+
+        // 1. Create Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // 2. Describe Stacks and capture outputs
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        String poolId = describeXml.split("<OutputKey>PoolId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String poolArn = describeXml.split("<OutputKey>PoolArn</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String clientId = describeXml.split("<OutputKey>ClientId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+
+        assertThat(poolId, startsWith("us-east-1_"));
+        assertThat(poolArn, startsWith("arn:aws:cognito-idp:"));
+        assertThat(clientId, notNullValue());
+
+        // 3. Verify UserPool via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPool.Name", equalTo("cfn-test-pool"))
+            .body("UserPool.UserPoolTags.env", equalTo("test"))
+            .body("UserPool.UserPoolTags.team", equalTo("auth"));
+
+        // 4. Verify UserPoolClient via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientName", equalTo("cfn-test-client"))
+            .body("UserPoolClient.UserPoolId", equalTo(poolId))
+            .body("UserPoolClient.ClientSecret", notNullValue());
+
+        // 5. Delete Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 6. Verify resources are deleted
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
     }
 
 }
