@@ -260,6 +260,16 @@ public class CloudFormationService {
                                  boolean isCreate, String region, String accountId) {
         try {
             JsonNode template = parseTemplate(templateBody);
+
+            // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
+            SamTransformProcessor samProcessor = new SamTransformProcessor(objectMapper);
+            if (samProcessor.hasSamTransform(template)) {
+                LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
+                template = samProcessor.expandSamTemplate(template);
+                // Store the expanded template so GetTemplate returns the transformed version
+                templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
+            }
+
             stack.setTemplateBody(templateBody);
 
             // Merge default parameter values from the template with caller-supplied params
