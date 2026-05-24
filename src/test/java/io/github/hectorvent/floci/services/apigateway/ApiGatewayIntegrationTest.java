@@ -336,6 +336,20 @@ class ApiGatewayIntegrationTest {
     }
 
     @Test @Order(27)
+    void deleteDeployment() {
+        given()
+                .when().delete("/restapis/" + apiId + "/deployments/" + deploymentId)
+                .then()
+                .statusCode(204);
+
+        given()
+                .when().get("/restapis/" + apiId + "/deployments/" + deploymentId)
+                .then()
+                .statusCode(404)
+                .body("message", notNullValue());
+    }
+
+    @Test @Order(28)
     void deleteResource() {
         given()
                 .when().delete("/restapis/" + apiId + "/resources/" + resourceId)
@@ -343,7 +357,7 @@ class ApiGatewayIntegrationTest {
                 .statusCode(204);
     }
 
-    @Test @Order(28)
+    @Test @Order(29)
     void deleteRestApi() {
         given()
                 .when().delete("/restapis/" + apiId)
@@ -351,7 +365,7 @@ class ApiGatewayIntegrationTest {
                 .statusCode(202);
     }
 
-    @Test @Order(29)
+    @Test @Order(30)
     void getDeletedRestApiReturns404() {
         given()
                 .when().get("/restapis/" + apiId)
