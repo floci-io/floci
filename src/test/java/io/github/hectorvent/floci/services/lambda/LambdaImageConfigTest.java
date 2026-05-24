@@ -242,7 +242,8 @@ class LambdaImageConfigTest {
 
             ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
             launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
-                    runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager, embeddedDnsServer);
+                    runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager, embeddedDnsServer,
+                    mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class));
 
             when(runtimeApiServerFactory.create()).thenReturn(runtimeApiServer);
             when(runtimeApiServer.getPort()).thenReturn(9000);
