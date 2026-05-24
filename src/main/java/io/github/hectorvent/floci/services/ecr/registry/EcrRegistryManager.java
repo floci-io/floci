@@ -142,28 +142,28 @@ public class EcrRegistryManager {
                 config.services().ecr().registryBasePort(),
                 config.services().ecr().registryMaxPort());
 
-        String image = config.services().ecr().registryImage();
-
-        // Build environment variables
-        List<String> env = new ArrayList<>(List.of(
-                "REGISTRY_STORAGE_DELETE_ENABLED=true",
-                "REGISTRY_HTTP_ADDR=0.0.0.0:" + CONTAINER_INTERNAL_PORT
-        ));
-
-        // Build container spec
-        ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
-                .withName(name)
-                .withEnv(env)
-                .withPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
-                .withDockerNetwork(config.services().ecr().dockerNetwork())
-                .withLogRotation();
-
-        // Handle persistence mounting based on storage configuration
-        addPersistenceMounts(specBuilder, env);
-
-        ContainerSpec spec = specBuilder.build();
-
         try {
+            String image = config.services().ecr().registryImage();
+
+            // Build environment variables
+            List<String> env = new ArrayList<>(List.of(
+                    "REGISTRY_STORAGE_DELETE_ENABLED=true",
+                    "REGISTRY_HTTP_ADDR=0.0.0.0:" + CONTAINER_INTERNAL_PORT
+            ));
+
+            // Build container spec
+            ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
+                    .withName(name)
+                    .withEnv(env)
+                    .withPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
+                    .withDockerNetwork(config.services().ecr().dockerNetwork())
+                    .withLogRotation();
+
+            // Handle persistence mounting based on storage configuration
+            addPersistenceMounts(specBuilder, env);
+
+            ContainerSpec spec = specBuilder.build();
+
             ContainerInfo info = lifecycleManager.createAndStart(spec);
             this.containerId = info.containerId();
             this.hostPort = chosenPort;
@@ -173,6 +173,12 @@ public class EcrRegistryManager {
             // Attach log streaming (new feature)
             attachLogStream();
         } catch (Exception e) {
+            // Release the reserved port unless the container actually started, so a
+            // failed start (e.g. Docker unreachable) does not permanently exhaust the
+            // registry port pool across retries.
+            if (!started) {
+                portAllocator.release(chosenPort);
+            }
             throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
         }
         runReconcileOnce();
