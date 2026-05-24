@@ -523,6 +523,16 @@ public class ApiGatewayController {
                 .type(MediaType.APPLICATION_JSON).build();
     }
 
+    @DELETE
+    @Path("/restapis/{apiId}/deployments/{deploymentId}")
+    public Response deleteDeployment(@Context HttpHeaders headers,
+                                     @PathParam("apiId") String apiId,
+                                     @PathParam("deploymentId") String deploymentId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteDeployment(region, apiId, deploymentId);
+        return Response.noContent().build();
+    }
+
     @POST
     @Path("/restapis/{apiId}/stages")
     public Response createStage(@Context HttpHeaders headers,
@@ -1577,6 +1587,25 @@ public class ApiGatewayController {
             ObjectNode vars = node.putObject("variables");
             s.getVariables().forEach(vars::put);
         }
+        if (!s.getMethodSettings().isEmpty()) {
+            ObjectNode methodSettings = node.putObject("methodSettings");
+            s.getMethodSettings().forEach((key, setting) -> methodSettings.set(key, toMethodSettingNode(setting)));
+        }
+        return node;
+    }
+
+    private ObjectNode toMethodSettingNode(io.github.hectorvent.floci.services.apigateway.model.MethodSetting setting) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("metricsEnabled", setting.isMetricsEnabled());
+        node.put("loggingLevel", setting.getLoggingLevel());
+        node.put("dataTraceEnabled", setting.isDataTraceEnabled());
+        node.put("throttlingBurstLimit", setting.getThrottlingBurstLimit());
+        node.put("throttlingRateLimit", setting.getThrottlingRateLimit());
+        node.put("cachingEnabled", setting.isCachingEnabled());
+        node.put("cacheTtlInSeconds", setting.getCacheTtlInSeconds());
+        node.put("cacheDataEncrypted", setting.isCacheDataEncrypted());
+        node.put("requireAuthorizationForCacheControl", setting.isRequireAuthorizationForCacheControl());
+        node.put("unauthorizedCacheControlHeaderStrategy", setting.getUnauthorizedCacheControlHeaderStrategy());
         return node;
     }
 

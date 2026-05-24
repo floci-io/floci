@@ -8,7 +8,7 @@ name: Nightly
 #   Native:  floci/floci:nightly   floci/floci:nightly-mmddyyyy
 #   Compat:  floci/floci:nightly-compat   floci/floci:nightly-mmddyyyy-compat
 #
-# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ROLE_ARN
 
 on:
   schedule:
@@ -17,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -145,6 +146,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
       - name: Build and push native nightly image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         env:
@@ -157,6 +169,8 @@ jobs:
           tags: |
             floci/floci:nightly
             floci/floci:nightly-${{ needs.prepare.outputs.version }}
+            public.ecr.aws/floci/floci:nightly
+            public.ecr.aws/floci/floci:nightly-${{ needs.prepare.outputs.version }}
           labels: |
             org.opencontainers.image.version=nightly-${{ needs.prepare.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -179,6 +193,8 @@ jobs:
           tags: |
             floci/floci:nightly-compat
             floci/floci:nightly-${{ needs.prepare.outputs.version }}-compat
+            public.ecr.aws/floci/floci:nightly-compat
+            public.ecr.aws/floci/floci:nightly-${{ needs.prepare.outputs.version }}-compat
           build-args: |
             VERSION=nightly-${{ needs.prepare.outputs.version }}
           labels: |

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.sns;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
@@ -13,6 +14,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -156,15 +158,7 @@ public class SnsJsonHandler {
         String message = request.path("Message").asText(null);
         String subject = request.path("Subject").asText(null);
 
-        Map<String, MessageAttributeValue> attributes = new HashMap<>();
-        JsonNode attrsNode = request.path("MessageAttributes");
-        if (attrsNode.isObject()) {
-            attrsNode.fields().forEachRemaining(entry -> {
-                String dataType = entry.getValue().path("DataType").asText("String");
-                String stringValue = entry.getValue().path("StringValue").asText();
-                attributes.put(entry.getKey(), new MessageAttributeValue(stringValue, dataType));
-            });
-        }
+        Map<String, MessageAttributeValue> attributes = parseMessageAttributes(request.path("MessageAttributes"));
 
         String messageId = snsService.publish(topicArn, targetArn, phoneNumber, message, subject, attributes, region);
         ObjectNode response = objectMapper.createObjectNode();
@@ -215,12 +209,14 @@ public class SnsJsonHandler {
     private Response handlePublishBatch(JsonNode request, String region) {
         String topicArn = request.path("TopicArn").asText(null);
         List<Map<String, Object>> entries = new ArrayList<>();
+        List<String[]> entryAttributeFailures = new ArrayList<>();
 
         JsonNode entriesNode = request.path("PublishBatchRequestEntries");
         if (entriesNode.isArray()) {
             for (JsonNode entryNode : entriesNode) {
+                String id = entryNode.path("Id").asText(null);
                 Map<String, Object> entry = new HashMap<>();
-                entry.put("Id", entryNode.path("Id").asText(null));
+                entry.put("Id", id);
                 entry.put("Message", entryNode.path("Message").asText(null));
                 entry.put("Subject", entryNode.path("Subject").asText(null));
                 entry.put("MessageGroupId", entryNode.path("MessageGroupId").asText(null));
@@ -228,13 +224,14 @@ public class SnsJsonHandler {
 
                 JsonNode attrsNode = entryNode.path("MessageAttributes");
                 if (attrsNode.isObject()) {
-                    Map<String, MessageAttributeValue> messageAttributes = new HashMap<>();
-                    attrsNode.fields().forEachRemaining(field -> {
-                        String dataType = field.getValue().path("DataType").asText("String");
-                        String stringValue = field.getValue().path("StringValue").asText();
-                        messageAttributes.put(field.getKey(), new MessageAttributeValue(stringValue, dataType));
-                    });
-                    entry.put("MessageAttributes", messageAttributes);
+                    try {
+                        entry.put("MessageAttributes", parseMessageAttributes(attrsNode));
+                    } catch (AwsException e) {
+                        // Real AWS SNS surfaces per-entry attribute errors as Failed entries
+                        // and keeps processing the rest of the batch, instead of aborting.
+                        entryAttributeFailures.add(new String[]{id, e.getErrorCode(), e.getMessage(), "true"});
+                        continue;
+                    }
                 }
 
                 entries.add(entry);
@@ -252,7 +249,9 @@ public class SnsJsonHandler {
             successful.add(item);
         }
         ArrayNode failed = response.putArray("Failed");
-        for (String[] f : result.failed()) {
+        List<String[]> allFailed = new ArrayList<>(result.failed());
+        allFailed.addAll(entryAttributeFailures);
+        for (String[] f : allFailed) {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("Id", f[0]);
             item.put("Code", f[1]);
@@ -300,6 +299,33 @@ public class SnsJsonHandler {
         node.put("Endpoint", s.getEndpoint() != null ? s.getEndpoint() : "");
         node.put("Owner", s.getOwner() != null ? s.getOwner() : "");
         return node;
+    }
+
+    private Map<String, MessageAttributeValue> parseMessageAttributes(JsonNode attrsNode) {
+        Map<String, MessageAttributeValue> attributes = new HashMap<>();
+        if (!attrsNode.isObject()) {
+            return attributes;
+        }
+        attrsNode.fields().forEachRemaining(entry -> {
+            JsonNode valueNode = entry.getValue();
+            String binaryValueBase64 = valueNode.path("BinaryValue").asText(null);
+            String defaultDataType = binaryValueBase64 != null ? "Binary" : "String";
+            String dataType = valueNode.path("DataType").asText(defaultDataType);
+            if (binaryValueBase64 != null) {
+                byte[] binaryValue;
+                try {
+                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Invalid binary value for message attribute '" + entry.getKey() + "': not valid base64.", 400);
+                }
+                attributes.put(entry.getKey(), new MessageAttributeValue(binaryValue, dataType));
+            } else {
+                String stringValue = valueNode.path("StringValue").asText();
+                attributes.put(entry.getKey(), new MessageAttributeValue(stringValue, dataType));
+            }
+        });
+        return attributes;
     }
 
     private Map<String, String> jsonNodeToMap(JsonNode node) {

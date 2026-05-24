@@ -27,6 +27,14 @@ class S3VirtualHostFilterTest {
             // localhost is always recognized regardless of baseHostname (fixes virtual-host when FLOCI_HOSTNAME=floci)
             "my-bucket.localhost,      floci, my-bucket",
             "my-bucket.localhost:4566, floci, my-bucket",
+            // Region-qualified vhost form: bucket.s3.<region>.<baseHostname>
+            "my-bucket.s3.us-east-1.localhost,      localhost, my-bucket",
+            "my-bucket.s3.us-east-1.localhost:4566, localhost, my-bucket",
+            "my-bucket.s3.eu-west-2.localhost,      localhost, my-bucket",
+            // Region-qualified vhost against localhost fallback even when baseHostname differs
+            "my-bucket.s3.us-east-1.localhost,      floci, my-bucket",
+            // Region-qualified vhost against configured baseHostname
+            "my-bucket.s3.us-east-1.floci.internal, floci.internal, my-bucket",
             // AWS S3 domains (fallback — independent of baseHostname)
             "my-bucket.s3.amazonaws.com,               localhost, my-bucket",
             "my-bucket.s3.amazonaws.com:443,            localhost, my-bucket",
@@ -99,6 +107,9 @@ class S3VirtualHostFilterTest {
         assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.localhost.floci.io", null));
         assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost.floci.io", null));
         assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.localhost.floci.io", null));
+        // Region-qualified vhost against localhost fallback works without baseHostname
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost", null));
+        assertEquals("my-bucket", S3VirtualHostFilter.extractBucket("my-bucket.s3.us-east-1.localhost:4566", null));
     }
 
     // --- Hostname extraction from URL ---

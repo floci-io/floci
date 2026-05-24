@@ -278,6 +278,11 @@ public class CognitoService {
         return clientStore.scan(k -> clientStore.get(k).map(c -> c.getUserPoolId().equals(userPoolId)).orElse(false));
     }
 
+    public void deleteUserPoolClient(String clientId) {
+        clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+        clientStore.delete(clientId);
+    }
+
     public void deleteUserPoolClient(String userPoolId, String clientId) {
         describeUserPoolClient(userPoolId, clientId);
         clientStore.delete(clientId);
@@ -812,6 +817,14 @@ public class CognitoService {
         UserPool pool = poolStore.get(client.getUserPoolId())
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
         authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
+    }
+
+    public void adminConfirmSignUp(String userPoolId, String username) {
+        CognitoUser user = adminGetUser(userPoolId, username);
+        user.setUserStatus("CONFIRMED");
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Admin confirmed sign up for user {0} in pool {1}", username, userPoolId);
     }
 
     // ──────────────────────────── Auth ────────────────────────────

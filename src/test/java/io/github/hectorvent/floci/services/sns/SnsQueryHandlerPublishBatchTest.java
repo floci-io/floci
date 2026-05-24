@@ -89,6 +89,49 @@ class SnsQueryHandlerPublishBatchTest {
     }
 
     @Test
+    void publishBatch_invalidBinaryAttribute_failsOnlyOffendingEntryAndProcessesRest() {
+        // Arrange
+        sqsService.createQueue("partial-fail-queue", Map.of(), REGION);
+        String queueArn = "arn:aws:sqs:" + REGION + ":" + ACCOUNT + ":partial-fail-queue";
+
+        snsService.createTopic("partial-fail-topic", Map.of(), null, REGION);
+        String topicArn = "arn:aws:sns:" + REGION + ":" + ACCOUNT + ":partial-fail-topic";
+        snsService.subscribe(topicArn, "sqs", queueArn, REGION, Map.of("RawMessageDelivery", "true"));
+
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("TopicArn", topicArn);
+
+        // Entry 1: invalid base64 BinaryValue — must NOT abort the batch
+        params.add("PublishBatchRequestEntries.member.1.Id", "bad");
+        params.add("PublishBatchRequestEntries.member.1.Message", "ignored");
+        params.add("PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Name", "blob");
+        params.add("PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.DataType", "Binary");
+        params.add("PublishBatchRequestEntries.member.1.MessageAttributes.entry.1.Value.BinaryValue", "@@@-not-base64-@@@");
+
+        // Entry 2: valid — must be published
+        putBatchEntry(params, 2, "good", "valid-message", attr("kind", "String", "ok"));
+
+        // Act
+        Response response = handler.handle("PublishBatch", params, REGION);
+
+        // Assert — HTTP 200, partial-failure semantics (matches real AWS SNS)
+        assertEquals(200, response.getStatus(),
+                "PublishBatch must return 200 with per-entry failures, not abort the whole batch");
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Failed>"), "response must contain Failed list");
+        assertTrue(body.contains("<Id>bad</Id>"), "bad entry must appear in Failed list");
+        assertTrue(body.contains("<Code>InvalidParameterValue</Code>"), "Failed entry must carry InvalidParameterValue code");
+        assertTrue(body.contains("<SenderFault>true</SenderFault>"), "Failed entry must carry SenderFault=true");
+        assertTrue(body.contains("<Id>good</Id>"), "good entry must appear in Successful list");
+
+        // Good entry must have been delivered to SQS; bad entry must NOT
+        List<Message> messages = sqsService.receiveMessage(
+                BASE_URL + "/" + ACCOUNT + "/partial-fail-queue", 10, 30, 0, REGION);
+        assertEquals(1, messages.size(), "only the valid entry should be delivered");
+        assertEquals("valid-message", messages.get(0).getBody());
+    }
+
+    @Test
     void publishBatch_entryWithoutMessageAttributes_doesNotPolluteOtherEntries() {
         // Arrange
         sqsService.createQueue("mixed-attrs-queue", Map.of(), REGION);

@@ -16,10 +16,20 @@ import java.util.Base64;
  * Exposes Cognito well-known endpoints.
  * The JWKS endpoint allows downstream services to verify JWTs issued by Floci Cognito pools.
  * Path mirrors real AWS: /{userPoolId}/.well-known/jwks.json
+ *
+ * <p>The {@code poolId} path parameter is constrained to {@link #POOL_ID_PATTERN}
+ * so that S3 object keys like {@code /<bucket>/.well-known/jwks.json} do not
+ * collide with this route. Real Cognito UserPool IDs always contain an
+ * underscore (region prefix + {@code _} + random suffix, e.g.
+ * {@code us-east-1_AbC123XyZ}), while AWS S3 bucket names forbid underscores
+ * — using {@code _} as the discriminator routes S3 traffic correctly without
+ * needing a wider request filter.
  */
 @Path("/")
 @Produces(MediaType.APPLICATION_JSON)
 public class CognitoWellKnownController {
+
+    private static final String POOL_ID_PATTERN = "[^/_]+_[^/]+";
 
     private final CognitoService cognitoService;
 
@@ -29,7 +39,7 @@ public class CognitoWellKnownController {
     }
 
     @GET
-    @Path("/{poolId}/.well-known/jwks.json")
+    @Path("/{poolId:" + POOL_ID_PATTERN + "}/.well-known/jwks.json")
     public Response getJwks(@PathParam("poolId") String poolId) {
         UserPool pool = cognitoService.describeUserPool(poolId);
         String kid = cognitoService.getSigningKeyId(pool);
@@ -44,7 +54,7 @@ public class CognitoWellKnownController {
     }
 
     @GET
-    @Path("/{poolId}/.well-known/openid-configuration")
+    @Path("/{poolId:" + POOL_ID_PATTERN + "}/.well-known/openid-configuration")
     public Response getOpenIdConfiguration(@PathParam("poolId") String poolId) {
         UserPool pool = cognitoService.describeUserPool(poolId);
         String issuer = cognitoService.getIssuer(pool.getId());

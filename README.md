@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://github.com/user-attachments/assets/7f95c191-d457-44f9-bb42-17da438c5320" width="400" alt="Floci" />
+  <img height="450" alt="FLOCI logo" src="https://github.com/user-attachments/assets/4fbfc9b0-f4c7-4bf0-98c7-bab2ae3f64d5" />
   <p align="center">
     <strong>Light, fluffy, and always free</strong><br />
     No account. No auth token. No feature gates. Just <code>docker compose up</code>.
@@ -166,7 +166,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**51 AWS services. Broad coverage. Free forever.**
+**52 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -208,7 +208,7 @@ Floci supports local emulation for application services, data services, eventing
 | Category | Services |
 |---|---|
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager |
-| Events and workflows | EventBridge, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
+| Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, Cognito, ACM, Route53 |
 | Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
 | Graph database | Neptune |
@@ -243,6 +243,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Step Functions | In-process | ASL execution, task tokens, execution history |
 | CloudFormation | In-process | Stacks, change sets, resource provisioning |
 | EventBridge | In-process | Custom buses, rules, SQS, SNS and Lambda targets |
+| EventBridge Pipes | In-process | Poller-based integration connecting SQS, Kinesis, DynamoDB, and MSK sources to targets with optional filtering |
 | EventBridge Scheduler | In-process | Schedule groups, schedules, flexible time windows, retry policies, DLQs |
 | CloudWatch Logs | In-process | Log groups, streams, ingestion, filtering |
 | CloudWatch Metrics | In-process | Custom metrics, statistics, alarms |

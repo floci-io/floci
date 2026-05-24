@@ -11,6 +11,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -183,13 +184,11 @@ public class SnsQueryHandler {
         String messageGroupId = getParam(params, "MessageGroupId");
         String messageDeduplicationId = getParam(params, "MessageDeduplicationId");
 
-        Map<String, MessageAttributeValue> attributes = new HashMap<>();
-        for (int i = 1; ; i++) {
-            String name = params.getFirst("MessageAttributes.entry." + i + ".Name");
-            if (name == null) break;
-            String value = params.getFirst("MessageAttributes.entry." + i + ".Value.StringValue");
-            String dataType = params.getFirst("MessageAttributes.entry." + i + ".Value.DataType");
-            if (value != null) attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+        Map<String, MessageAttributeValue> attributes;
+        try {
+            attributes = parseMessageAttributes(params, "MessageAttributes.entry.");
+        } catch (AwsException e) {
+            return xmlErrorResponse(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
 
         try {
@@ -206,6 +205,7 @@ public class SnsQueryHandler {
     private Response handlePublishBatch(MultivaluedMap<String, String> params, String region) {
         String topicArn = getParam(params, "TopicArn");
         List<Map<String, Object>> entries = new ArrayList<>();
+        List<String[]> entryAttributeFailures = new ArrayList<>();
         for (int i = 1; ; i++) {
             String entryPrefix = "PublishBatchRequestEntries.member." + i;
             String id = getParam(params, entryPrefix + ".Id");
@@ -217,14 +217,14 @@ public class SnsQueryHandler {
             entry.put("MessageGroupId", getParam(params, entryPrefix + ".MessageGroupId"));
             entry.put("MessageDeduplicationId", getParam(params, entryPrefix + ".MessageDeduplicationId"));
 
-            Map<String, MessageAttributeValue> attributes = new HashMap<>();
-            for (int j = 1; ; j++) {
-                String attrPrefix = entryPrefix + ".MessageAttributes.entry." + j;
-                String name = params.getFirst(attrPrefix + ".Name");
-                if (name == null) break;
-                String value = params.getFirst(attrPrefix + ".Value.StringValue");
-                String dataType = params.getFirst(attrPrefix + ".Value.DataType");
-                if (value != null) attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+            Map<String, MessageAttributeValue> attributes;
+            try {
+                attributes = parseMessageAttributes(params, entryPrefix + ".MessageAttributes.entry.");
+            } catch (AwsException e) {
+                // Real AWS SNS surfaces per-entry attribute errors as Failed entries
+                // and keeps processing the rest of the batch, instead of aborting.
+                entryAttributeFailures.add(new String[]{id, e.getErrorCode(), e.getMessage(), "true"});
+                continue;
             }
             if (!attributes.isEmpty()) entry.put("MessageAttributes", attributes);
             entries.add(entry);
@@ -237,7 +237,9 @@ public class SnsQueryHandler {
                 xml.start("member").elem("Id", s[0]).elem("MessageId", s[1]).end("member");
             }
             xml.end("Successful").start("Failed");
-            for (String[] f : result.failed()) {
+            List<String[]> allFailed = new ArrayList<>(result.failed());
+            allFailed.addAll(entryAttributeFailures);
+            for (String[] f : allFailed) {
                 xml.start("member").elem("Id", f[0]).elem("Code", f[1])
                    .elem("Message", f[2]).elem("SenderFault", f[3]).end("member");
             }
@@ -359,6 +361,31 @@ public class SnsQueryHandler {
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
         return params.getFirst(name);
+    }
+
+    private Map<String, MessageAttributeValue> parseMessageAttributes(
+            MultivaluedMap<String, String> params, String prefix) {
+        Map<String, MessageAttributeValue> attributes = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst(prefix + i + ".Name");
+            if (name == null) break;
+            String value = params.getFirst(prefix + i + ".Value.StringValue");
+            String binaryValueBase64 = params.getFirst(prefix + i + ".Value.BinaryValue");
+            String dataType = params.getFirst(prefix + i + ".Value.DataType");
+            if (binaryValueBase64 != null) {
+                byte[] binaryValue;
+                try {
+                    binaryValue = Base64.getDecoder().decode(binaryValueBase64);
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("InvalidParameterValue",
+                            "Invalid binary value for message attribute '" + name + "': not valid base64.", 400);
+                }
+                attributes.put(name, new MessageAttributeValue(binaryValue, dataType != null ? dataType : "Binary"));
+            } else if (value != null) {
+                attributes.put(name, new MessageAttributeValue(value, dataType != null ? dataType : "String"));
+            }
+        }
+        return attributes;
     }
 
     Response xmlErrorResponse(String code, String message, int status) {

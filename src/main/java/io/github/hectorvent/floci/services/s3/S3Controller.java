@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.s3;
 
+import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
+
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -62,7 +64,9 @@ import org.jboss.logging.Logger;
 public class S3Controller {
 
     private static final Logger LOG = Logger.getLogger(S3Controller.class);
-    private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter.ISO_INSTANT;
+    private static final DateTimeFormatter ISO_FORMAT = DateTimeFormatter
+            .ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
+            .withZone(ZoneId.of("UTC"));
     private static final DateTimeFormatter RFC_822 = DateTimeFormatter
             .ofPattern("EEE, dd MMM yyyy HH:mm:ss z", Locale.US)
             .withZone(ZoneId.of("GMT"));
@@ -192,6 +196,10 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "ownershipControls")) {
                 s3Service.putBucketOwnershipControls(bucket, new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
+            if (hasQueryParam(uriInfo, "requestPayment")) {
+                s3Service.putBucketRequestPayment(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
             }
 
@@ -331,6 +339,9 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "ownershipControls")) {
                 return Response.ok(s3Service.getBucketOwnershipControls(bucket)).build();
+            }
+            if (hasQueryParam(uriInfo, "requestPayment")) {
+                return Response.ok(s3Service.getBucketRequestPayment(bucket)).build();
             }
 
             // --- Website Hosting Redirection Logic ---
@@ -799,8 +810,10 @@ public class S3Controller {
                     httpHeaders.getHeaderString("x-amz-bypass-governance-retention"));
             S3Object result = s3Service.deleteObject(bucket, key, versionId, bypass);
             var resp = Response.noContent();
-            if (result != null && result.isDeleteMarker()) {
-                resp.header("x-amz-delete-marker", "true");
+            if (result != null) {
+                if (result.isDeleteMarker()) {
+                    resp.header("x-amz-delete-marker", "true");
+                }
                 resp.header("x-amz-version-id", result.getVersionId());
             }
             return resp.build();

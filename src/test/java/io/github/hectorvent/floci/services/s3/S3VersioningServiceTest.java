@@ -202,6 +202,47 @@ class S3VersioningServiceTest {
     }
 
     @Test
+    void deleteMarkerByVersionIdRestoresPreviousVersion() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "file",
+                "original".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        S3Object marker = s3Service.deleteObject("versioned-bucket", "file");
+        assertThrows(AwsException.class, () -> s3Service.getObject("versioned-bucket", "file"));
+
+        s3Service.deleteObject("versioned-bucket", "file", marker.getVersionId());
+
+        S3Object restored = s3Service.getObject("versioned-bucket", "file");
+        assertEquals("original", new String(restored.getData()));
+        assertEquals(v1.getVersionId(), restored.getVersionId());
+    }
+
+    @Test
+    void deleteOnlyVersionByVersionIdClearsLatestPointer() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "sole",
+                "data".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        s3Service.deleteObject("versioned-bucket", "sole", v1.getVersionId());
+
+        assertThrows(AwsException.class, () -> s3Service.getObject("versioned-bucket", "sole"));
+    }
+
+    @Test
+    void deleteNonLatestVersionByVersionIdLeavesLatestUnchanged() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "multi",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObject("versioned-bucket", "multi",
+                "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        s3Service.deleteObject("versioned-bucket", "multi", v1.getVersionId());
+
+        S3Object latest = s3Service.getObject("versioned-bucket", "multi");
+        assertEquals("v2", new String(latest.getData()));
+    }
+
+    @Test
     void listObjectsExcludesDeleteMarkers() {
         s3Service.putBucketVersioning("versioned-bucket", "Enabled");
         s3Service.putObject("versioned-bucket", "keep.txt",

@@ -136,6 +136,23 @@ public class AppConfigService {
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Hosted configuration version not found", 404));
     }
 
+    public List<HostedConfigurationVersionSummary> listHostedConfigurationVersions(String appId, String profileId) {
+        String prefix = appId + "::" + profileId + "::";
+        return versionStore.scan(k -> k.startsWith(prefix))
+                .stream()
+                .sorted(Comparator.comparingInt(HostedConfigurationVersion::getVersionNumber))
+                .map(v -> {
+                    HostedConfigurationVersionSummary s = new HostedConfigurationVersionSummary();
+                    s.setApplicationId(v.getApplicationId());
+                    s.setConfigurationProfileId(v.getConfigurationProfileId());
+                    s.setVersionNumber(v.getVersionNumber());
+                    s.setDescription(v.getDescription());
+                    s.setContentType(v.getContentType());
+                    return s;
+                })
+                .toList();
+    }
+
     // ──────────────────────────── Deployment Strategy ────────────────────────────
 
     public DeploymentStrategy createDeploymentStrategy(Map<String, Object> request) {

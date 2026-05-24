@@ -96,11 +96,13 @@ nav:
     - Athena: services/athena.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
+    - EventBridge Pipes: services/pipes.md
     - EventBridge Scheduler: services/scheduler.md
     - CloudWatch: services/cloudwatch.md
     - ACM: services/acm.md
     - ECS: services/ecs.md
     - ECR: services/ecr.md
+    - Resource Groups Tagging API: services/resource-groups-tagging.md
     - EKS: services/eks.md
     - OpenSearch: services/opensearch.md
     - EC2: services/ec2.md

@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
+import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
 import io.github.hectorvent.floci.services.apigateway.model.Deployment;
 import io.github.hectorvent.floci.services.apigateway.model.Integration;
@@ -469,12 +470,72 @@ public class ApiGatewayService {
                     String varKey = path.substring("/variables/" .length());
                     LOG.infov("Setting stage variable {0} = {1}", varKey, value);
                     stage.getVariables().put(varKey, value);
+                } else {
+                    applyMethodSettingPatch(stage, path, value);
                 }
             }
         }
         stage.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
         stageStore.put(stageKey(region, apiId, stageName), stage);
         return stage;
+    }
+
+    private static final List<String> METHOD_SETTING_KEYS = List.of(
+            "metrics/enabled",
+            "logging/loglevel",
+            "logging/dataTrace",
+            "throttling/burstLimit",
+            "throttling/rateLimit",
+            "caching/enabled",
+            "caching/ttlInSeconds",
+            "caching/dataEncrypted",
+            "caching/requireAuthorizationForCacheControl",
+            "caching/unauthorizedCacheControlHeaderStrategy"
+    );
+
+    /**
+     * Applies a method-settings patch operation in the form
+     * <code>/{resourcePath}/{httpMethod}/{settingKey}</code>, e.g.
+     * <code>/*&#47;*&#47;metrics/enabled</code> or
+     * <code>/pets/GET/throttling/burstLimit</code>. Unknown setting keys are
+     * silently ignored to match real API Gateway's lenient PATCH semantics.
+     */
+    private void applyMethodSettingPatch(Stage stage, String path, String value) {
+        for (String settingKey : METHOD_SETTING_KEYS) {
+            String suffix = "/" + settingKey;
+            if (!path.endsWith(suffix)) continue;
+
+            String prefix = path.substring(1, path.length() - suffix.length());
+            int lastSlash = prefix.lastIndexOf('/');
+            if (lastSlash < 0) return;
+            String resourcePath = prefix.substring(0, lastSlash);
+            String httpMethod = prefix.substring(lastSlash + 1);
+            String methodKey = resourcePath + "/" + httpMethod;
+
+            MethodSetting setting = stage.getMethodSettings()
+                    .computeIfAbsent(methodKey, k -> new MethodSetting());
+            applyMethodSettingValue(setting, settingKey, value);
+            return;
+        }
+    }
+
+    private void applyMethodSettingValue(MethodSetting setting, String settingKey, String value) {
+        if (value == null) return;
+        switch (settingKey) {
+            case "metrics/enabled" -> setting.setMetricsEnabled(Boolean.parseBoolean(value));
+            case "logging/loglevel" -> setting.setLoggingLevel(value);
+            case "logging/dataTrace" -> setting.setDataTraceEnabled(Boolean.parseBoolean(value));
+            case "throttling/burstLimit" -> setting.setThrottlingBurstLimit(Integer.parseInt(value));
+            case "throttling/rateLimit" -> setting.setThrottlingRateLimit(Double.parseDouble(value));
+            case "caching/enabled" -> setting.setCachingEnabled(Boolean.parseBoolean(value));
+            case "caching/ttlInSeconds" -> setting.setCacheTtlInSeconds(Integer.parseInt(value));
+            case "caching/dataEncrypted" -> setting.setCacheDataEncrypted(Boolean.parseBoolean(value));
+            case "caching/requireAuthorizationForCacheControl" ->
+                    setting.setRequireAuthorizationForCacheControl(Boolean.parseBoolean(value));
+            case "caching/unauthorizedCacheControlHeaderStrategy" ->
+                    setting.setUnauthorizedCacheControlHeaderStrategy(value);
+            default -> { /* unreachable: caller pre-filters by METHOD_SETTING_KEYS */ }
+        }
     }
 
     public void deleteStage(String region, String apiId, String stageName) {

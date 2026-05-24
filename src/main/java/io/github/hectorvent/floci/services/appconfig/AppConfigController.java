@@ -120,6 +120,17 @@ public class AppConfigController {
 
     // ──────────────────────────── Hosted Configuration Version ────────────────────────────
 
+    @GET
+    @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions")
+    public Response listHostedConfigurationVersions(@PathParam("appId") String appId,
+                                                    @PathParam("profileId") String profileId) {
+        List<HostedConfigurationVersionSummary> items = service.listHostedConfigurationVersions(appId, profileId);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode arr = root.putArray("Items");
+        items.forEach(arr::addPOJO);
+        return Response.ok(root).build();
+    }
+
     @POST
     @Path("/applications/{appId}/configurationprofiles/{profileId}/hostedconfigurationversions")
     @Consumes(MediaType.WILDCARD)

@@ -1,13 +1,14 @@
 name: Release
 
 # Triggered when a version tag (e.g. 1.2.3) is pushed.
-# Builds native (amd64 + arm64) Docker images and pushes them to Docker Hub.
+# Builds native (amd64 + arm64) Docker images and pushes them to Docker Hub
+# and ECR Public Gallery (public.ecr.aws/floci/floci).
 #
 # Published tags:
 #   Native:  floci/floci:1.2.3        floci/floci:latest
 #   Compat:  floci/floci:1.2.3-compat floci/floci:latest-compat
 #
-# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN
+# Required secrets: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN, AWS_ROLE_ARN
 
 on:
   push:
@@ -16,6 +17,7 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 # Per-tag concurrency. Back-to-back tag pushes (e.g. 1.5.3 and 1.6.0 landing
 # minutes apart) resolve to different ${{ github.ref }} values, so they run
@@ -126,6 +128,17 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Login to Amazon ECR Public
+        uses: aws-actions/amazon-ecr-login@v2
+        with:
+          registry-type: public
+
       - name: Build and push native multi-arch image
         uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f # v7.1.0
         env:
@@ -138,6 +151,8 @@ jobs:
           tags: |
             floci/floci:${{ steps.version.outputs.version }}
             floci/floci:latest
+            public.ecr.aws/floci/floci:${{ steps.version.outputs.version }}
+            public.ecr.aws/floci/floci:latest
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           labels: |
@@ -162,6 +177,8 @@ jobs:
           tags: |
             floci/floci:${{ steps.version.outputs.version }}-compat
             floci/floci:latest-compat
+            public.ecr.aws/floci/floci:${{ steps.version.outputs.version }}-compat
+            public.ecr.aws/floci/floci:latest-compat
           build-args: |
             VERSION=${{ steps.version.outputs.version }}
           labels: |

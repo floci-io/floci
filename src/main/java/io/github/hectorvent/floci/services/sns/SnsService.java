@@ -32,6 +32,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
@@ -127,7 +128,11 @@ public class SnsService {
 
         if (name.endsWith(".fifo")) {
             topic.getAttributes().put("FifoTopic", "true");
-            topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
+                topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "true");
+            } else {
+                topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            }
         }
 
         topicStore.put(key, topic);
@@ -951,7 +956,12 @@ public class SnsService {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
-                    attr.put("Value", entry.getValue().getStringValue());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        attr.put("Value", Base64.getEncoder()
+                                .encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        attr.put("Value", entry.getValue().getStringValue());
+                    }
                 }
             }
             ObjectNode record = objectMapper.createObjectNode();
@@ -1007,7 +1017,12 @@ public class SnsService {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
-                    attr.put("Value", entry.getValue().getStringValue());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        attr.put("Value", Base64.getEncoder()
+                                .encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        attr.put("Value", entry.getValue().getStringValue());
+                    }
                 }
             }
             return objectMapper.writeValueAsString(node);
@@ -1040,7 +1055,7 @@ public class SnsService {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
                     if (entry.getValue().getBinaryValue() != null) {
-                        attr.put("Value", java.util.Base64.getEncoder()
+                        attr.put("Value", Base64.getEncoder()
                                 .encodeToString(entry.getValue().getBinaryValue()));
                     } else {
                         attr.put("Value", entry.getValue().getStringValue());

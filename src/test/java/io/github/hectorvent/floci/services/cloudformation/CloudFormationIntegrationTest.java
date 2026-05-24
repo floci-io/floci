@@ -30,6 +30,7 @@ class CloudFormationIntegrationTest {
     private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String SM_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @BeforeAll
@@ -4125,6 +4126,304 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body("authorizationType", equalTo("CUSTOM"))
             .body("authorizerId", equalTo(secondAuth));
+    }
+
+    @Test
+    void createStack_snsSqsFifoWithContentBasedDeduplicationAndSubscription() {
+        String stackName = "cfn-sns-sqs-fifo-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-test-topic.fifo",
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-test-queue.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MySubscription": {
+                  "Type": "AWS::SNS::Subscription",
+                  "Properties": {
+                    "TopicArn": {"Ref": "MyTopic"},
+                    "Protocol": "sqs",
+                    "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]},
+                    "RawMessageDelivery": true
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 1. Verify SNS Topic attributes
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", "arn:aws:sns:us-east-1:000000000000:cfn-test-topic.fifo")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ContentBasedDeduplication"))
+            .body(containsString("<value>true</value>"))
+            .body(containsString("FifoTopic"));
+
+        // 2. Verify SQS Queue attributes
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/cfn-test-queue.fifo")
+            .formParam("AttributeName.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ContentBasedDeduplication"))
+            .body(containsString("<Value>true</Value>"))
+            .body(containsString("FifoQueue"));
+
+        // 3. Verify SNS Subscription attributes
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String subArn = physicalIdByLogicalId(resourcesXml, "MySubscription");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", subArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("RawMessageDelivery"))
+            .body(containsString("<value>true</value>"))
+            .body(containsString("sqs"));
+    }
+
+    @Test
+    void createStack_snsSubscriptionWithFilterPolicyAndRedrivePolicy() {
+        String stackName = "cfn-sns-sub-policies-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-sub-policies-topic"
+                  }
+                },
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-policies-queue"
+                  }
+                },
+                "MyDLQ": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-policies-dlq"
+                  }
+                },
+                "MySubscription": {
+                  "Type": "AWS::SNS::Subscription",
+                  "Properties": {
+                    "TopicArn": {"Ref": "MyTopic"},
+                    "Protocol": "sqs",
+                    "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]},
+                    "FilterPolicy": {
+                      "price_usd": [{"numeric": [">=", 100]}]
+                    },
+                    "RedrivePolicy": {
+                      "deadLetterTargetArn": {"Fn::GetAtt": ["MyDLQ", "Arn"]}
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String subArn = physicalIdByLogicalId(resourcesXml, "MySubscription");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", subArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("FilterPolicy"))
+            .body(containsString("price_usd"))
+            .body(containsString("RedrivePolicy"))
+            .body(containsString("deadLetterTargetArn"))
+            .body(containsString("cfn-sub-policies-dlq"));
+    }
+
+    @Test
+    void createStack_withCognitoUserPoolAndClient() {
+        String template = """
+            {
+              "Resources": {
+                "UserPool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cfn-test-pool",
+                    "UserPoolTags": [
+                      { "Key": "env", "Value": "test" },
+                      { "Key": "team", "Value": "auth" }
+                    ]
+                  }
+                },
+                "UserPoolClient": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {
+                    "ClientName": "cfn-test-client",
+                    "UserPoolId": { "Ref": "UserPool" },
+                    "GenerateSecret": true
+                  }
+                }
+              },
+              "Outputs": {
+                "PoolId": { "Value": { "Ref": "UserPool" } },
+                "PoolArn": { "Value": { "Fn::GetAtt": ["UserPool", "Arn"] } },
+                "ClientId": { "Value": { "Ref": "UserPoolClient" } }
+              }
+            }
+            """;
+
+        String stackName = "cognito-test-stack";
+
+        // 1. Create Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // 2. Describe Stacks and capture outputs
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        String poolId = describeXml.split("<OutputKey>PoolId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String poolArn = describeXml.split("<OutputKey>PoolArn</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String clientId = describeXml.split("<OutputKey>ClientId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+
+        assertThat(poolId, startsWith("us-east-1_"));
+        assertThat(poolArn, startsWith("arn:aws:cognito-idp:"));
+        assertThat(clientId, notNullValue());
+
+        // 3. Verify UserPool via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPool.Name", equalTo("cfn-test-pool"))
+            .body("UserPool.UserPoolTags.env", equalTo("test"))
+            .body("UserPool.UserPoolTags.team", equalTo("auth"));
+
+        // 4. Verify UserPoolClient via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientName", equalTo("cfn-test-client"))
+            .body("UserPoolClient.UserPoolId", equalTo(poolId))
+            .body("UserPoolClient.ClientSecret", notNullValue());
+
+        // 5. Delete Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 6. Verify resources are deleted
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
     }
 
 }

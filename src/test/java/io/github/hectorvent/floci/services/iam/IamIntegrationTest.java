@@ -52,6 +52,24 @@ class IamIntegrationTest {
 
     @Test
     @Order(2)
+    void stsGetCallerIdentityHonoursTwelveDigitAccessKey() {
+        given()
+            .formParam("Action", "GetCallerIdentity")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=123456789012/20260227/us-east-1/sts/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("GetCallerIdentityResponse.GetCallerIdentityResult.UserId", equalTo("123456789012"))
+            .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo("123456789012"))
+            .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn",
+                    equalTo("arn:aws:iam::123456789012:root"));
+    }
+
+    @Test
+    @Order(3)
     void stsAssumeRole() {
         given()
             .formParam("Action", "AssumeRole")
@@ -71,6 +89,42 @@ class IamIntegrationTest {
             .body("AssumeRoleResponse.AssumeRoleResult.Credentials.Expiration", notNullValue())
             .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
                     containsString("assumed-role/TestRole/test-session"));
+    }
+
+    @Test
+    @Order(4)
+    void stsAssumeRoleHonoursTwelveDigitAccessKey() {
+        given()
+            .formParam("Action", "AssumeRole")
+            .formParam("RoleArn", "arn:aws:iam::123456789012:role/TestRole")
+            .formParam("RoleSessionName", "tenant-session")
+            .formParam("DurationSeconds", "3600")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=123456789012/20260227/us-east-1/sts/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
+                    equalTo("arn:aws:sts::123456789012:assumed-role/TestRole/tenant-session"));
+    }
+
+    @Test
+    @Order(6)
+    void stsAssumeRoleUsesAccountFromRoleArnForCrossAccount() {
+        given()
+            .formParam("Action", "AssumeRole")
+            .formParam("RoleArn", "arn:aws:iam::222222222222:role/CrossAccountRole")
+            .formParam("RoleSessionName", "cross-session")
+            .formParam("DurationSeconds", "3600")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=123456789012/20260227/us-east-1/sts/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AssumeRoleResponse.AssumeRoleResult.AssumedRoleUser.Arn",
+                    equalTo("arn:aws:sts::222222222222:assumed-role/CrossAccountRole/cross-session"));
     }
 
     // =========================================================================

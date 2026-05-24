@@ -19,6 +19,8 @@ import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
+import io.quarkus.vertx.http.HttpServerStart;
+import io.vertx.core.http.HttpServerOptions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -122,6 +124,54 @@ class EmulatorLifecycleTest {
 
         verify(storageFactory).loadAll();
         // run() is NOT called synchronously from onStart — it will be called by onHttpStart
+        verify(initializationHooksRunner, never()).run(InitializationHook.START);
+        verify(initLifecycleState, never()).markStartCompleted();
+    }
+
+    @Test
+    @DisplayName("onHttpStart on port 4566 (non-TLS) triggers hook execution and marks lifecycle completed")
+    void onHttpStart_nonTls_triggersHooksOnPort4566() throws IOException, InterruptedException {
+        when(tlsConfig.enabled()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+
+        verify(initializationHooksRunner).run(InitializationHook.START);
+        verify(initLifecycleState).markStartCompleted();
+    }
+
+    @Test
+    @DisplayName("onHttpStart on wrong port (non-TLS) is ignored")
+    void onHttpStart_nonTls_ignoresWrongPort() throws IOException, InterruptedException {
+        when(tlsConfig.enabled()).thenReturn(false);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4510)));
+
+        verify(initializationHooksRunner, never()).run(InitializationHook.START);
+        verify(initLifecycleState, never()).markStartCompleted();
+    }
+
+    @Test
+    @DisplayName("onHttpStart on port 4510 (TLS mode) triggers hook execution and marks lifecycle completed")
+    void onHttpStart_tls_triggersHooksOnBackendPort4510() throws IOException, InterruptedException {
+        when(tlsConfig.enabled()).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4510)));
+
+        verify(initializationHooksRunner).run(InitializationHook.START);
+        verify(initLifecycleState).markStartCompleted();
+    }
+
+    @Test
+    @DisplayName("onHttpStart on port 4566 (TLS mode) is ignored — public port is not the backend port")
+    void onHttpStart_tls_ignoresPublicPort4566() throws IOException, InterruptedException {
+        when(tlsConfig.enabled()).thenReturn(true);
+
+        emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566)));
+
         verify(initializationHooksRunner, never()).run(InitializationHook.START);
         verify(initLifecycleState, never()).markStartCompleted();
     }

@@ -35,6 +35,7 @@ public class EmulatorLifecycle {
 
     private static final Logger LOG = Logger.getLogger(EmulatorLifecycle.class);
     private static final int HTTP_PORT = 4566;
+    private static final int TLS_HTTP_BACKEND_PORT = 4510;
 
     @ConfigProperty(name = "quarkus.application.version", defaultValue = "")
     Optional<String> appVersion = Optional.empty();
@@ -130,7 +131,8 @@ public class EmulatorLifecycle {
     }
 
     void onHttpStart(@ObservesAsync HttpServerStart event) {
-        if (event.options().getPort() != HTTP_PORT) {
+        int expectedPort = config.tls().enabled() ? TLS_HTTP_BACKEND_PORT : HTTP_PORT;
+        if (event.options().getPort() != expectedPort) {
             return;
         }
         boolean hasStart = initializationHooksRunner.hasHooks(InitializationHook.START);
