@@ -1149,6 +1149,11 @@ public class ApiGatewayExecuteController {
             if (authError != null) return authError;
         }
 
+        if ("CUSTOM".equalsIgnoreCase(route.getAuthorizationType()) && route.getAuthorizerId() != null) {
+            Response authError = enforceRequestAuthorizerV2(region, apiId, stageName, route, httpMethod, path, headers, uriInfo);
+            if (authError != null) return authError;
+        }
+
         if (route.getTarget() == null) {
             return Response.status(500)
                     .entity(jsonMessage("No integration configured"))
@@ -1407,6 +1412,273 @@ public class ApiGatewayExecuteController {
         }
 
         return null; // authorized
+    }
+
+    // ──────────────────────────── HTTP API v2 Lambda REQUEST authorizer ────────────────────────────
+
+    /**
+     * Enforces a Lambda REQUEST authorizer on an HTTP API (v2) route.
+     * Supports both payload format versions (1.0 and 2.0) and simple responses.
+     *
+     * @return null if authorized, or an error Response if denied/unauthorized
+     */
+    private Response enforceRequestAuthorizerV2(String region, String apiId, String stageName,
+                                                Route route, String httpMethod, String path,
+                                                HttpHeaders headers, UriInfo uriInfo) {
+        Authorizer authorizer;
+        try {
+            authorizer = apiGatewayV2Service.getAuthorizer(region, apiId, route.getAuthorizerId());
+        } catch (AwsException e) {
+            return Response.status(500)
+                    .entity(jsonMessage("Authorizer not found"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        if (!"REQUEST".equalsIgnoreCase(authorizer.getAuthorizerType())) {
+            return null; // Not a REQUEST authorizer — skip
+        }
+
+        // Validate identity sources — if any configured source is missing, return 401 without invoking Lambda
+        List<String> identitySources = authorizer.getIdentitySource();
+        if (identitySources != null && !identitySources.isEmpty()) {
+            MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+            for (String expression : identitySources) {
+                if (expression.startsWith("$request.header.")) {
+                    String headerName = expression.substring("$request.header.".length());
+                    String value = headers.getHeaderString(headerName);
+                    if (value == null || value.isEmpty()) {
+                        return Response.status(401)
+                                .entity(jsonMessage("Unauthorized"))
+                                .type(MediaType.APPLICATION_JSON).build();
+                    }
+                } else if (expression.startsWith("$request.querystring.")) {
+                    String paramName = expression.substring("$request.querystring.".length());
+                    String value = queryParams.getFirst(paramName);
+                    if (value == null || value.isEmpty()) {
+                        return Response.status(401)
+                                .entity(jsonMessage("Unauthorized"))
+                                .type(MediaType.APPLICATION_JSON).build();
+                    }
+                }
+                // $context.* identity sources are always present — no validation needed
+            }
+        }
+
+        // Build the authorizer event payload based on the configured payload format version
+        String payloadFormatVersion = authorizer.getAuthorizerPayloadFormatVersion();
+        String eventJson;
+        if ("2.0".equals(payloadFormatVersion)) {
+            eventJson = buildRequestAuthorizerEventV2(httpMethod, path, route.getRouteKey(),
+                    apiId, stageName, region, headers, uriInfo);
+        } else {
+            // Default to 1.0 format
+            eventJson = buildRequestAuthorizerEventV1(httpMethod, path, apiId, stageName, region, headers, uriInfo);
+        }
+
+        // Extract the Lambda function name from the authorizer URI
+        String functionName = functionNameFromUri(authorizer.getAuthorizerUri());
+        if (functionName == null) {
+            LOG.warnv("Cannot extract function name from authorizer URI: {0}", authorizer.getAuthorizerUri());
+            return Response.status(500)
+                    .entity(jsonMessage("Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        // Invoke the authorizer Lambda
+        InvokeResult invokeResult;
+        try {
+            invokeResult = lambdaService.invoke(region, functionName,
+                    eventJson.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+        } catch (Exception e) {
+            LOG.warnv("Lambda REQUEST authorizer invocation failed for API {0}: {1}", apiId, e.getMessage());
+            return Response.status(500)
+                    .entity(jsonMessage("Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        // Check for function error (Lambda threw an exception)
+        if (invokeResult.getFunctionError() != null) {
+            LOG.warnv("Lambda REQUEST authorizer returned function error for API {0}: {1}",
+                    apiId, invokeResult.getFunctionError());
+            return Response.status(500)
+                    .entity(jsonMessage("Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        byte[] payload = invokeResult.getPayload();
+        if (payload == null || payload.length == 0) {
+            LOG.warnv("Lambda REQUEST authorizer returned empty payload for API {0}", apiId);
+            return Response.status(500)
+                    .entity(jsonMessage("Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+
+        // Parse the authorizer response
+        try {
+            JsonNode response = objectMapper.readTree(payload);
+
+            // Check if simple responses are enabled (format 2.0 feature)
+            Boolean enableSimpleResponses = authorizer.getEnableSimpleResponses();
+            if (Boolean.TRUE.equals(enableSimpleResponses)) {
+                // Simple response format: {"isAuthorized": true/false, "context": {...}}
+                JsonNode isAuthorized = response.path("isAuthorized");
+                if (isAuthorized.isMissingNode() || isAuthorized.isNull()) {
+                    LOG.warnv("Lambda REQUEST authorizer simple response missing isAuthorized for API {0}", apiId);
+                    return Response.status(500)
+                            .entity(jsonMessage("Internal Server Error"))
+                            .type(MediaType.APPLICATION_JSON).build();
+                }
+                if (!isAuthorized.asBoolean(false)) {
+                    return Response.status(403)
+                            .entity(jsonMessage("Forbidden"))
+                            .type(MediaType.APPLICATION_JSON).build();
+                }
+                return null; // authorized
+            }
+
+            // IAM policy document format
+            JsonNode policyDocument = response.path("policyDocument");
+            if (policyDocument.isMissingNode() || policyDocument.isNull()) {
+                LOG.warnv("Authorizer response missing policyDocument for API {0}", apiId);
+                return Response.status(500)
+                        .entity(jsonMessage("Internal Server Error"))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+
+            JsonNode statements = policyDocument.path("Statement");
+            if (statements.isMissingNode() || statements.isNull()
+                    || !statements.isArray() || statements.isEmpty()) {
+                LOG.warnv("Authorizer response missing or empty Statement array for API {0}", apiId);
+                return Response.status(500)
+                        .entity(jsonMessage("Internal Server Error"))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+
+            String effect = statements.get(0).path("Effect").asText("Deny");
+            if ("Deny".equalsIgnoreCase(effect)) {
+                return Response.status(403)
+                        .entity(jsonMessage("User is not authorized to access this resource"))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+
+            if (!"Allow".equalsIgnoreCase(effect)) {
+                LOG.warnv("Authorizer response has unrecognized Effect '{0}' for API {1}", effect, apiId);
+                return Response.status(500)
+                        .entity(jsonMessage("Internal Server Error"))
+                        .type(MediaType.APPLICATION_JSON).build();
+            }
+
+            return null; // authorized
+        } catch (Exception e) {
+            LOG.warnv("Failed to parse authorizer response for API {0}: {1}", apiId, e.getMessage());
+            return Response.status(500)
+                    .entity(jsonMessage("Internal Server Error"))
+                    .type(MediaType.APPLICATION_JSON).build();
+        }
+    }
+
+    /**
+     * Builds a REQUEST authorizer event in payload format version 1.0.
+     * Compatible with REST API (v1) REQUEST authorizer shape.
+     */
+    private String buildRequestAuthorizerEventV1(String httpMethod, String path,
+                                                  String apiId, String stageName, String region,
+                                                  HttpHeaders headers, UriInfo uriInfo) {
+        ObjectNode event = objectMapper.createObjectNode();
+        event.put("version", "1.0");
+        event.put("type", "REQUEST");
+        event.put("methodArn", buildMethodArn(region, apiId, stageName, httpMethod, path));
+        event.put("resource", path);
+        event.put("path", path);
+        event.put("httpMethod", httpMethod);
+
+        putSingleValueHeaders(event, headers);
+        putMultiValueHeaders(event, headers);
+        putQueryStringParameters(event, uriInfo);
+        putMultiValueQueryStringParameters(event, uriInfo);
+
+        event.putObject("pathParameters");
+        event.putNull("stageVariables");
+
+        // Request context
+        ObjectNode ctx = event.putObject("requestContext");
+        ctx.put("accountId", regionResolver.getAccountId());
+        ctx.put("apiId", apiId);
+        ctx.put("httpMethod", httpMethod);
+        ctx.put("path", path);
+        ctx.put("resourcePath", path);
+        ctx.put("stage", stageName);
+        ctx.put("requestId", UUID.randomUUID().toString());
+
+        try {
+            return objectMapper.writeValueAsString(event);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize v1 authorizer event", e);
+        }
+    }
+
+    /**
+     * Builds a REQUEST authorizer event in payload format version 2.0.
+     * Uses the newer HTTP API-native shape with routeArn, routeKey, rawPath, and requestContext.http.
+     */
+    private String buildRequestAuthorizerEventV2(String httpMethod, String path, String routeKey,
+                                                  String apiId, String stageName, String region,
+                                                  HttpHeaders headers, UriInfo uriInfo) {
+        ObjectNode event = objectMapper.createObjectNode();
+        event.put("version", "2.0");
+        event.put("type", "REQUEST");
+        event.put("routeArn", buildMethodArn(region, apiId, stageName, httpMethod, path));
+        event.put("routeKey", routeKey != null ? routeKey : "$default");
+        event.put("rawPath", path);
+        event.put("rawQueryString", uriInfo.getRequestUri().getRawQuery() != null
+                ? uriInfo.getRequestUri().getRawQuery() : "");
+
+        // Headers (lowercase keys for v2)
+        ObjectNode headersNode = event.putObject("headers");
+        MultivaluedMap<String, String> reqHeaders = headers.getRequestHeaders();
+        for (Map.Entry<String, List<String>> e : reqHeaders.entrySet()) {
+            if (!e.getValue().isEmpty()) headersNode.put(e.getKey().toLowerCase(), e.getValue().get(0));
+        }
+
+        // Query string parameters
+        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        if (!queryParams.isEmpty()) {
+            ObjectNode qsp = event.putObject("queryStringParameters");
+            for (Map.Entry<String, List<String>> e : queryParams.entrySet()) {
+                if (!e.getValue().isEmpty()) qsp.put(e.getKey(), e.getValue().get(0));
+            }
+        }
+
+        event.putObject("pathParameters");
+        event.putNull("stageVariables");
+
+        // Request context
+        ObjectNode ctx = event.putObject("requestContext");
+        String arnRegion = region != null ? region : regionResolver.getDefaultRegion();
+        ctx.put("accountId", regionResolver.getAccountId());
+        ctx.put("apiId", apiId);
+        ctx.put("domainName", apiId + ".execute-api." + arnRegion + ".amazonaws.com");
+        ctx.put("domainPrefix", apiId);
+        ctx.put("requestId", UUID.randomUUID().toString());
+        ctx.put("routeKey", routeKey != null ? routeKey : "$default");
+        ctx.put("stage", stageName);
+        ctx.put("time", java.time.format.DateTimeFormatter.ofPattern("dd/MMM/yyyy:HH:mm:ss Z")
+                .format(java.time.ZonedDateTime.now()));
+        ctx.put("timeEpoch", System.currentTimeMillis());
+
+        ObjectNode http = ctx.putObject("http");
+        http.put("method", httpMethod);
+        http.put("path", path);
+        http.put("protocol", "HTTP/1.1");
+        http.put("sourceIp", "127.0.0.1");
+        http.put("userAgent", headers.getHeaderString("User-Agent") != null
+                ? headers.getHeaderString("User-Agent") : "");
+
+        try {
+            return objectMapper.writeValueAsString(event);
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to serialize v2 authorizer event", e);
+        }
     }
 
     private String extractToken(Authorizer authorizer, HttpHeaders headers) {
