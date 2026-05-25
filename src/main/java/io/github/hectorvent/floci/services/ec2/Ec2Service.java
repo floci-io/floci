@@ -19,6 +19,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.BlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.Ebs;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -185,7 +187,7 @@ public class Ec2Service {
                                     List<String> securityGroupIds, String subnetId,
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn,
-                                    final List<Volume> volumes) {
+                                    final List<BlockDevice> blockDevices) {
         ensureDefaultResources(region);
 
         // Resolve subnet
@@ -272,17 +274,18 @@ public class Ec2Service {
             eni.setDeviceIndex(0);
             inst.getNetworkInterfaces().add(eni);
 
-            // EBS volumes
-            for (int j = 0; j < volumes.size(); j++) {
-                final Volume volume = volumes.get(j);
+            // Block device EBS volumes 
+            for (int j = 0; j < blockDevices.size(); j++) {
+                final BlockDevice blockDevice = blockDevices.get(j);
+                final Ebs ebs = Objects.requireNonNullElse(blockDevice.getEbs(), new Ebs());
                 final Volume ebsVolume = createVolume(
                     region,
-                    az,
-                    volume.getVolumeType(),
-                    volume.getSize(),
-                    volume.isEncrypted(),
-                    volume.getIops(),
-                    null,
+                    ebs.getAvailabilityZone(),
+                    ebs.getVolumeType(),
+                    ebs.getVolumeSize(),
+                    ebs.isEncrypted(),
+                    ebs.getIops(),
+                    ebs.getSnapshotId(),
                     null
                 );
                 if (j == 0) {
@@ -504,6 +507,8 @@ public class Ec2Service {
             case "instanceType" -> inst.setInstanceType(value);
             case "sourceDestCheck" -> inst.setSourceDestCheck(Boolean.parseBoolean(value));
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
+            case "disableApiStop" -> inst.setDisableApiStop(Boolean.parseBoolean(value));
+            case "disableApiTermination" -> inst.setDisableApiTermination(Boolean.parseBoolean(value));
         }
     }
 

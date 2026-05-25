@@ -39,6 +39,8 @@ public class Instance {
     private boolean sourceDestCheck = true;
     private boolean ebsOptimized = false;
     private boolean enaSupport = true;
+    private boolean disableApiStop = true;
+    private boolean disableApiTermination = true;
     private String iamInstanceProfileArn;
     private String region;
     private List<Tag> tags = new ArrayList<>();
@@ -135,6 +137,12 @@ public class Instance {
 
     public boolean isEnaSupport() { return enaSupport; }
     public void setEnaSupport(boolean enaSupport) { this.enaSupport = enaSupport; }
+
+    public boolean isDisableApiStop() { return this.disableApiStop; }
+    public void setDisableApiStop(boolean disableApiStop) { this.disableApiStop = disableApiStop; }
+
+    public boolean isDisableApiTermination() { return this.disableApiTermination; }
+    public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
 
     public String getIamInstanceProfileArn() { return iamInstanceProfileArn; }
     public void setIamInstanceProfileArn(String iamInstanceProfileArn) { this.iamInstanceProfileArn = iamInstanceProfileArn; }

@@ -211,8 +211,6 @@ public class Ec2QueryHandler {
 
     // ─── Instance handlers ────────────────────────────────────────────────────
 
-    private static final Pattern BLOCK_DEVICE_MAPPING_PATTERN = Pattern.compile("BlockDeviceMapping\\.(\\d+)(\\.\\w+){1,}");
-
     private Response handleRunInstances(MultivaluedMap<String, String> p, String region) {
         for (final var e : p.entrySet()) {
             System.out.printf("%s: [%s]\n", e.getKey(), String.join(", ", e.getValue()));
@@ -252,7 +250,7 @@ public class Ec2QueryHandler {
         }
 
         // VoblockDeviceMappingslumes
-        List<Volume> volumes = new ArrayList<>();
+        List<BlockDevice> blockDevices = new ArrayList<>();
         final Queue<String> keyQueue = new ArrayDeque<>();
         for (final Map.Entry<String, List<String>> entry : p.entrySet()) {
             final String key = entry.getKey();
@@ -263,34 +261,45 @@ public class Ec2QueryHandler {
             if (values.size() != 1) {
                 continue;
             }
+            final String value = values.get(0);
             keyQueue.clear();
-            Arrays.stream(key.split("\\.")).forEach(keyQueue::add);
-            keyQueue.poll(); // Remove BlockDeviceMapping at head
+            Arrays.stream(key.split("\\.")).skip(1).forEach(keyQueue::add);
             // TODO: Failed to parse index with NumberFormatException
             final int index = Integer.parseInt(keyQueue.poll()) - 1;
-            final Volume volume = volumes.size() <= index ? new Volume() : volumes.get(index);
+            final BlockDevice blockDevice = blockDevices.size() <= index ? new BlockDevice() : blockDevices.get(index);
             final String keySegment = keyQueue.poll();
-            if (!keySegment.equals("Ebs")) {
-                // TODO: Properties without "ebs" will be for VolumeAttachment instances
-                continue;
+            switch (keySegment) {
+                case "DeviceName": blockDevice.setDeviceName(value); continue;
+                case "NoDevice": blockDevice.setNoDevice(""); continue;
+                case "VirtualName": blockDevice.setVirtualName(value);
+                case "Ebs": break;
+                default: continue;
             }
+            final Ebs ebs = new Ebs();
+            blockDevice.setEbs(ebs);
             switch (keyQueue.poll()) {
-                case "VolumeType" -> volume.setVolumeType(values.get(0));
-                // TODO: Failed to parse size with NumberFormatException
-                case "VolumeSize" -> volume.setSize(Integer.parseInt(values.get(0)));
-                // TODO: Failed to parse iops with NumberFormatException
-                case "Iops" -> volume.setIops(Integer.parseInt(values.get(0)));
-                case "Encrypted" -> volume.setEncrypted(Boolean.parseBoolean(values.get(0)));
+                case "AvailabilityZone" -> ebs.setAvailabilityZone(value);
+                case "AvailabilityZoneId" -> ebs.setAvailabilityZoneId(value);
+                case "EbsCardIndex" -> ebs.setEbsCardIndex(Integer.parseInt(value));
+                case "Encrypted" -> ebs.setEncrypted(Boolean.parseBoolean(value));
+                case "Iops" -> ebs.setIops(Integer.parseInt(value));
+                case "KmsKeyId" -> ebs.setKmsKeyId(value);
+                case "OutpostArn" -> ebs.setOutpostArn(value);
+                case "SnapshotId" -> ebs.setSnapshotId(value);
+                case "Throughput" -> ebs.setThroughput(Integer.parseInt(value));
+                case "VolumeInitializationRate" -> ebs.setVolumeInitializationRate(Integer.parseInt(value));
+                case "VolumeSize" -> ebs.setVolumeSize(Integer.parseInt(value));
+                case "VolumeType" -> ebs.setVolumeType(value);
             }
         }
-        if (volumes.isEmpty()) {
+        if (blockDevices.isEmpty()) {
             // Ensure root volume always exists
-            volumes.add(new Volume());
+            blockDevices.add(new BlockDevice());
         }
 
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
-                volumes);
+                blockDevices);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -450,12 +459,12 @@ public class Ec2QueryHandler {
                 .start("DescribeInstanceAttributeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("instanceId", instanceId);
-        if ("instanceType".equals(attribute)) {
-            xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
-        } else if ("sourceDestCheck".equals(attribute)) {
-            xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
-        } else if ("ebsOptimized".equals(attribute)) {
-            xml.start("ebsOptimized").elem("value", String.valueOf(inst.isEbsOptimized())).end("ebsOptimized");
+        switch (attribute) {
+            case "instanceType" -> xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
+            case "sourceDestCheck" -> xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
+            case "ebsOptimized" -> xml.start("ebsOptimized").elem("value", String.valueOf(inst.isEbsOptimized())).end("ebsOptimized");
+            case "disableApiStop" -> xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
+            case "disableApiTermination" -> xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
         }
         xml.end("DescribeInstanceAttributeResponse");
         return xmlResponse(xml.build());
