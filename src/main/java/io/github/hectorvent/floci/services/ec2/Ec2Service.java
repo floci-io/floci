@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +33,7 @@ import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAttachment;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfacePrivateIpAddress;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
@@ -1500,10 +1504,32 @@ public class Ec2Service {
 
     // ─── Network Interfaces ─────────────────────────────────────────────────────
 
-    public List<NetworkInterface> describeNetworkInterfaces(String region, List<String> networkInterfaceIds,
-                                                              Map<String, List<String>> filters) {
+    public NetworkInterfaceListResult describeNetworkInterfaces(String region, List<String> networkInterfaceIds,
+                                                                   Map<String, List<String>> filters,
+                                                                   int maxResults, String nextToken) {
+        // Validate pagination parameters
+        if (maxResults > 0 && !networkInterfaceIds.isEmpty()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The parameter NetworkInterfaceId cannot be used with the parameter MaxResults.", 400);
+        }
+        if (maxResults > 0 && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 1000.", 400);
+        }
+        int offset = decodeToken(nextToken);
+
+        // Phase 6: validate NetworkInterfaceId format
+        for (String id : networkInterfaceIds) {
+            if (!id.startsWith("eni-")) {
+                throw new AwsException("InvalidNetworkInterfaceID.Malformed",
+                        "Invalid id: \"" + id + "\" (expecting \"eni-...\")", 400);
+            }
+        }
+
         ensureDefaultResources(region);
         List<NetworkInterface> result = new ArrayList<>();
+        Set<String> foundIds = new HashSet<>();
         for (Instance inst : instances.values()) {
             if (!inst.getRegion().equals(region)) continue;
             for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
@@ -1511,6 +1537,7 @@ public class Ec2Service {
                         && !networkInterfaceIds.contains(eni.getNetworkInterfaceId())) {
                     continue;
                 }
+                foundIds.add(eni.getNetworkInterfaceId());
                 NetworkInterface ni = new NetworkInterface();
                 ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
                 ni.setSubnetId(eni.getSubnetId());
@@ -1566,7 +1593,49 @@ public class Ec2Service {
                 result.add(ni);
             }
         }
-        return result;
+
+        // Phase 6: validate requested IDs exist
+        for (String id : networkInterfaceIds) {
+            if (!foundIds.contains(id)) {
+                throw new AwsException("InvalidNetworkInterfaceID.NotFound",
+                        "The network interface ID '" + id + "' does not exist", 400);
+            }
+        }
+
+        // Phase 5: pagination
+        if (maxResults > 0) {
+            int total = result.size();
+            int toIndex = Math.min(offset + maxResults, total);
+            List<NetworkInterface> page = (offset < total)
+                    ? result.subList(offset, toIndex)
+                    : Collections.emptyList();
+            String newNextToken = (toIndex < total)
+                    ? encodeToken(toIndex)
+                    : null;
+            return new NetworkInterfaceListResult(new ArrayList<>(page), newNextToken);
+        }
+
+        return new NetworkInterfaceListResult(result, null);
+    }
+
+    // ─── Pagination token encoding / decoding ──────────────────────────────────
+
+    private String encodeToken(int offset) {
+        String json = "{\"offset\":" + offset + "}";
+        return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private int decodeToken(String token) {
+        if (token == null || token.isEmpty()) return 0;
+        try {
+            String json = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
+            int start = json.indexOf("\"offset\":") + 9;
+            int end = json.indexOf('}', start);
+            return Integer.parseInt(json.substring(start, end));
+        } catch (Exception e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid NextToken", 400);
+        }
     }
 
     private Optional<Address> addressForInstance(String instanceId) {

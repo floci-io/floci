@@ -156,6 +156,16 @@ public class Ec2QueryHandler {
         return result;
     }
 
+    private int parseIntParam(MultivaluedMap<String, String> p, String name, int defaultValue) {
+        String val = p.getFirst(name);
+        if (val == null || val.isEmpty()) return defaultValue;
+        try {
+            return Integer.parseInt(val);
+        } catch (NumberFormatException e) {
+            return defaultValue;
+        }
+    }
+
     private Map<String, List<String>> getFilters(MultivaluedMap<String, String> p) {
         Map<String, List<String>> filters = new LinkedHashMap<>();
         for (int i = 1; ; i++) {
@@ -1117,7 +1127,14 @@ public class Ec2QueryHandler {
     private Response handleDescribeNetworkInterfaces(MultivaluedMap<String, String> p, String region) {
         List<String> ids = getList(p, "NetworkInterfaceId");
         Map<String, List<String>> filters = getFilters(p);
-        List<NetworkInterface> nis = service.describeNetworkInterfaces(region, ids, filters);
+
+        // Phase 5: pagination parameters
+        int maxResults = parseIntParam(p, "MaxResults", 0);
+        String nextToken = p.getFirst("NextToken");
+
+        NetworkInterfaceListResult result = service.describeNetworkInterfaces(region, ids, filters, maxResults, nextToken);
+        List<NetworkInterface> nis = result.networkInterfaces();
+
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeNetworkInterfacesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1179,8 +1196,11 @@ public class Ec2QueryHandler {
             }
             xml.end("item");
         }
-        xml.end("networkInterfaceSet")
-                .end("DescribeNetworkInterfacesResponse");
+        xml.end("networkInterfaceSet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.end("DescribeNetworkInterfacesResponse");
         return xmlResponse(xml.build());
     }
 
