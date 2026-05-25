@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
@@ -35,6 +36,7 @@ public class KmsJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "CreateKey" -> handleCreateKey(request, region);
+            case "GenerateRandom" -> handleGenerateRandom(request, region);
             case "GetPublicKey" -> handleGetPublicKey(request, region);
             case "DescribeKey" -> handleDescribeKey(request, region);
             case "ListKeys" -> handleListKeys(request, region);
@@ -388,6 +390,24 @@ public class KmsJsonHandler {
         String keyId = service.rotateKeyOnDemand(request.path("KeyId").asText(), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("KeyId", keyId);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGenerateRandom(JsonNode request, String region) {
+        if (!request.path("Recipient").isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "Recipient is not supported for GenerateRandom without Nitro Enclave support.",
+                    400);
+        }
+        if (!request.path("CustomKeyStoreId").isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "Custom key stores are not supported.",
+                    400);
+        }
+        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        byte[] randomBytes = service.generateRandom(numberOfBytes);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Plaintext", Base64.getEncoder().encodeToString(randomBytes));
         return Response.ok(response).build();
     }
 

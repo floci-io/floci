@@ -11,6 +11,7 @@ import {
   EncryptCommand,
   DecryptCommand,
   GenerateDataKeyCommand,
+  GenerateRandomCommand,
 } from '@aws-sdk/client-kms';
 import { makeClient, uniqueName } from './setup';
 
@@ -64,5 +65,11 @@ describe('KMS', () => {
     );
     expect(response.Plaintext).toBeTruthy();
     expect(response.CiphertextBlob).toBeTruthy();
+  });
+
+  it('should generate random bytes', async () => {
+    const response = await kms.send(new GenerateRandomCommand({ NumberOfBytes: 32 }));
+    expect(response.Plaintext).toBeTruthy();
+    expect(response.Plaintext!.byteLength).toBe(32);
   });
 });

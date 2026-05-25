@@ -78,7 +78,9 @@ class TestKMSAlias:
         kms_client.delete_alias(AliasName=alias_name)
 
         response = kms_client.list_aliases()
-        assert not any(a["AliasName"] == alias_name for a in response.get("Aliases", []))
+        assert not any(
+            a["AliasName"] == alias_name for a in response.get("Aliases", [])
+        )
 
         # Cleanup
         kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
@@ -224,3 +226,14 @@ class TestKMSTagging:
             )
         finally:
             kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
+
+
+class TestKMSGenerateRandom:
+    """Test KMS GenerateRandom operation."""
+
+    def test_generate_random(self, kms_client):
+        """Test GenerateRandom returns random bytes."""
+        response = kms_client.generate_random(NumberOfBytes=32)
+        plaintext = response["Plaintext"]
+        assert plaintext
+        assert len(plaintext) == 32
