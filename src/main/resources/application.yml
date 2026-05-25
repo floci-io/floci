@@ -194,6 +194,7 @@ floci:
       enabled: true
     cloudformation:
       enabled: true
+      deleted-stack-retention-seconds: 30
     acm:
       enabled: true
       validation-wait-seconds: 0

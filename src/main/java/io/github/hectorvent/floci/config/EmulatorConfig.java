@@ -577,6 +577,9 @@ public interface EmulatorConfig {
     interface CloudFormationServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("30")
+        long deletedStackRetentionSeconds();
     }
 
     interface AcmServiceConfig {
