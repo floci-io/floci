@@ -278,9 +278,10 @@ public class Ec2Service {
             for (int j = 0; j < blockDevices.size(); j++) {
                 final BlockDevice blockDevice = blockDevices.get(j);
                 final Ebs ebs = Objects.requireNonNullElse(blockDevice.getEbs(), new Ebs());
+                final String ebsAz = ebs.getAvailabilityZone();
                 final Volume ebsVolume = createVolume(
                     region,
-                    ebs.getAvailabilityZone(),
+                    ebsAz != null ?  ebsAz : az,
                     ebs.getVolumeType(),
                     ebs.getVolumeSize(),
                     ebs.isEncrypted(),
@@ -1429,6 +1430,7 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        // TODO: Do BlockDevice name & tags, and EBS tags need to be considered here?
         return true;
     }
 
