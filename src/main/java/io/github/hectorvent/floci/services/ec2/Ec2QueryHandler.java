@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
@@ -16,7 +17,8 @@ import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.Base64;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class Ec2QueryHandler {
@@ -209,7 +211,12 @@ public class Ec2QueryHandler {
 
     // ─── Instance handlers ────────────────────────────────────────────────────
 
+    private static final Pattern BLOCK_DEVICE_MAPPING_PATTERN = Pattern.compile("BlockDeviceMapping\\.(\\d+)(\\.\\w+){1,}");
+
     private Response handleRunInstances(MultivaluedMap<String, String> p, String region) {
+        for (final var e : p.entrySet()) {
+            System.out.printf("%s: [%s]\n", e.getKey(), String.join(", ", e.getValue()));
+        }
         String imageId = p.getFirst("ImageId");
         String instanceType = p.getFirst("InstanceType");
         int minCount = Integer.parseInt(p.getOrDefault("MinCount", List.of("1")).get(0));
@@ -244,8 +251,46 @@ public class Ec2QueryHandler {
             }
         }
 
+        // VoblockDeviceMappingslumes
+        List<Volume> volumes = new ArrayList<>();
+        final Queue<String> keyQueue = new ArrayDeque<>();
+        for (final Map.Entry<String, List<String>> entry : p.entrySet()) {
+            final String key = entry.getKey();
+            if (!key.startsWith("BlockDeviceMapping")) {
+                continue;
+            }
+            final List<String> values = entry.getValue();
+            if (values.size() != 1) {
+                continue;
+            }
+            keyQueue.clear();
+            Arrays.stream(key.split("\\.")).forEach(keyQueue::add);
+            keyQueue.poll(); // Remove BlockDeviceMapping at head
+            // TODO: Failed to parse index with NumberFormatException
+            final int index = Integer.parseInt(keyQueue.poll()) - 1;
+            final Volume volume = volumes.size() <= index ? new Volume() : volumes.get(index);
+            final String keySegment = keyQueue.poll();
+            if (!keySegment.equals("Ebs")) {
+                // TODO: Properties without "ebs" will be for VolumeAttachment instances
+                continue;
+            }
+            switch (keyQueue.poll()) {
+                case "VolumeType" -> volume.setVolumeType(values.get(0));
+                // TODO: Failed to parse size with NumberFormatException
+                case "VolumeSize" -> volume.setSize(Integer.parseInt(values.get(0)));
+                // TODO: Failed to parse iops with NumberFormatException
+                case "Iops" -> volume.setIops(Integer.parseInt(values.get(0)));
+                case "Encrypted" -> volume.setEncrypted(Boolean.parseBoolean(values.get(0)));
+            }
+        }
+        if (volumes.isEmpty()) {
+            // Ensure root volume always exists
+            volumes.add(new Volume());
+        }
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                volumes);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -1231,6 +1276,7 @@ public class Ec2QueryHandler {
                 .start("item")
                 .elem("deviceName", inst.getRootDeviceName())
                 .start("ebs")
+                .elem("volumeId", inst.getRootDeviceEbsVolumeId())
                 .elem("status", "attached")
                 .elem("deleteOnTermination", "true")
                 .end("ebs")

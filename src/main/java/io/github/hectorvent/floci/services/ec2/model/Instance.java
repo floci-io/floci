@@ -31,6 +31,7 @@ public class Instance {
     private String virtualizationType = "hvm";
     private String rootDeviceName = "/dev/xvda";
     private String rootDeviceType = "ebs";
+    private String rootDeviceEbsVolumeId;
     private Instant launchTime;
     private int amiLaunchIndex;
     private String clientToken;
@@ -110,6 +111,9 @@ public class Instance {
 
     public String getRootDeviceType() { return rootDeviceType; }
     public void setRootDeviceType(String rootDeviceType) { this.rootDeviceType = rootDeviceType; }
+
+    public String getRootDeviceEbsVolumeId() { return this.rootDeviceEbsVolumeId; }
+    public void setRootDeviceEbsVolumeId(final String rootDeviceEbsVolumeId) { this.rootDeviceEbsVolumeId = rootDeviceEbsVolumeId; }
 
     public Instant getLaunchTime() { return launchTime; }
     public void setLaunchTime(Instant launchTime) { this.launchTime = launchTime; }

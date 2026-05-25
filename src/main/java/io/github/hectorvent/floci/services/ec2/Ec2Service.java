@@ -184,7 +184,8 @@ public class Ec2Service {
                                     int minCount, int maxCount, String keyName,
                                     List<String> securityGroupIds, String subnetId,
                                     String clientToken, List<Tag> instanceTags,
-                                    String userData, String iamInstanceProfileArn) {
+                                    String userData, String iamInstanceProfileArn,
+                                    final List<Volume> volumes) {
         ensureDefaultResources(region);
 
         // Resolve subnet
@@ -270,6 +271,24 @@ public class Ec2Service {
             eni.setAttachmentId("eni-attach-" + randomHex(17));
             eni.setDeviceIndex(0);
             inst.getNetworkInterfaces().add(eni);
+
+            // EBS volumes
+            for (int j = 0; j < volumes.size(); j++) {
+                final Volume volume = volumes.get(j);
+                final Volume ebsVolume = createVolume(
+                    region,
+                    az,
+                    volume.getVolumeType(),
+                    volume.getSize(),
+                    volume.isEncrypted(),
+                    volume.getIops(),
+                    null,
+                    null
+                );
+                if (j == 0) {
+                    inst.setRootDeviceEbsVolumeId(ebsVolume.getVolumeId());
+                }
+            }
 
             instances.put(key(region, instanceId), inst);
             reservation.getInstances().add(inst);
