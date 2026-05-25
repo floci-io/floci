@@ -47,11 +47,11 @@ public class OpenSearchDomainManager {
     }
 
     public void startDomain(Domain domain) {
-        String image = config.services().opensearch().defaultImage();
+        String image = resolveImage(domain.getEngineVersion());
         String containerName = "floci-opensearch-" + domain.getDomainName();
 
-        LOG.infov("Starting OpenSearch container for domain: {0} using image {1}",
-                domain.getDomainName(), image);
+        LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
+                domain.getDomainName(), domain.getEngineVersion(), image);
 
         int hostPort = portAllocator.allocate(
                 config.services().opensearch().proxyBasePort(),
@@ -62,10 +62,11 @@ public class OpenSearchDomainManager {
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
                 .withEnv("discovery.type", "single-node")
-                .withEnv("DISABLE_SECURITY_PLUGIN", "true")
                 .withPortBinding(OPENSEARCH_PORT, hostPort)
                 .withDockerNetwork(config.services().dockerNetwork())
                 .withLogRotation();
+
+        applyEngineEnv(specBuilder, domain.getEngineVersion());
 
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
             ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
@@ -134,5 +135,52 @@ public class OpenSearchDomainManager {
     public void removeDomainStorage(Domain domain) {
         ContainerStorageHelper.removeStorage(config, lifecycleManager,
                 "opensearch", domain.getVolumeId(), domain.getDomainName());
+    }
+
+    private String resolveImage(String engineVersion) {
+        return OpenSearchVersions.resolveImage(
+                config.services().opensearch().defaultImage(), engineVersion);
+    }
+
+    /**
+     * Engine env that differs between OpenSearch lines and Elasticsearch. Both
+     * the security-plugin disable flag and the v2.12+ initial admin password
+     * are baked here rather than the call site so the {@link #startDomain}
+     * builder chain stays linear.
+     */
+    private void applyEngineEnv(ContainerBuilder.Builder specBuilder, String engineVersion) {
+        if (engineVersion != null && engineVersion.startsWith("Elasticsearch")) {
+            // The OSS distribution of Elasticsearch ships without x-pack, so
+            // any xpack.* setting is rejected as unknown and the node refuses
+            // to boot. The default OSS build has no security plugin to disable
+            // — leave the env empty and let the image use its bare defaults.
+            return;
+        }
+        specBuilder.withEnv("DISABLE_SECURITY_PLUGIN", "true");
+        // OpenSearch 2.12+ refuses to start without an initial admin password
+        // even when the security plugin is disabled (the bootstrap check fires
+        // before plugin config). Provide a fixed value — the security plugin
+        // is off so this isn't a real credential.
+        if (requiresInitialAdminPassword(engineVersion)) {
+            specBuilder.withEnv("OPENSEARCH_INITIAL_ADMIN_PASSWORD", "FlociAdmin1!");
+        }
+    }
+
+    private boolean requiresInitialAdminPassword(String engineVersion) {
+        if (engineVersion == null || !engineVersion.startsWith("OpenSearch_")) {
+            return false;
+        }
+        String numeric = engineVersion.substring("OpenSearch_".length());
+        int dot = numeric.indexOf('.');
+        if (dot < 0) {
+            return false;
+        }
+        try {
+            int major = Integer.parseInt(numeric.substring(0, dot));
+            int minor = Integer.parseInt(numeric.substring(dot + 1));
+            return major > 2 || (major == 2 && minor >= 12);
+        } catch (NumberFormatException e) {
+            return false;
+        }
     }
 }

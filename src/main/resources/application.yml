@@ -215,7 +215,10 @@ floci:
     opensearch:
       enabled: true
       mock: false
-      default-image: "opensearchproject/opensearch:2"
+      # default-image: optional override; uncomment to lock every domain to a
+      # single image (e.g. private registry mirror). When unset, the image is
+      # picked from OpenSearchVersions.imageFor(EngineVersion).
+      # default-image: "registry.example.com/opensearch:2.19.5"
       proxy-base-port: 9400
       proxy-max-port: 9499
       keep-running-on-shutdown: false

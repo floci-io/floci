@@ -639,8 +639,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
-        @WithDefault("opensearchproject/opensearch:2")
-        String defaultImage();
+        /**
+         * Optional fixed image used for every domain regardless of the
+         * requested {@code EngineVersion}. Useful for operators running a
+         * private registry mirror or pinning a specific patch tag. When unset
+         * (the common case), images resolve from
+         * {@code OpenSearchVersions.imageFor(...)} per the requested version.
+         */
+        Optional<String> defaultImage();
 
         @WithDefault("9400")
         int proxyBasePort();
