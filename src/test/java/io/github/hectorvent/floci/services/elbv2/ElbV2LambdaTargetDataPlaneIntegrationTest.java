@@ -75,7 +75,7 @@ class ElbV2LambdaTargetDataPlaneIntegrationTest {
             .body("""
                 {
                     "FunctionName": "%s",
-                    "Runtime": "python3.11",
+                    "Runtime": "python3.14",
                     "Role": "arn:aws:iam::000000000000:role/lambda-role",
                     "Handler": "index.handler",
                     "Timeout": 30,
