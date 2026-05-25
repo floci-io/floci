@@ -260,14 +260,13 @@ public class Ec2QueryHandler {
             final String value = values.get(0);
             keyQueue.clear();
             Arrays.stream(key.split("\\.")).skip(1).forEach(keyQueue::add);
-            // TODO: Failed to parse index with NumberFormatException
             final int index = Integer.parseInt(keyQueue.poll()) - 1;
             final BlockDevice blockDevice = blockDevices.size() <= index ? new BlockDevice() : blockDevices.get(index);
             final String keySegment = keyQueue.poll();
             switch (keySegment) {
                 case "DeviceName": blockDevice.setDeviceName(value); continue;
-                case "NoDevice": blockDevice.setNoDevice(""); continue;
-                case "VirtualName": blockDevice.setVirtualName(value);
+                case "NoDevice": blockDevice.setNoDevice(value); continue;
+                case "VirtualName": blockDevice.setVirtualName(value); continue;
                 case "Ebs": break;
                 default: continue;
             }
