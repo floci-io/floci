@@ -411,6 +411,10 @@ public class Ec2QueryHandler {
             xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
         } else if ("ebsOptimized".equals(attribute)) {
             xml.start("ebsOptimized").elem("value", String.valueOf(inst.isEbsOptimized())).end("ebsOptimized");
+        } else if ("disableApiStop".equals(attribute)) {
+            xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
+        } else if ("disableApiTermination".equals(attribute)) {
+            xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
         }
         xml.end("DescribeInstanceAttributeResponse");
         return xmlResponse(xml.build());
@@ -1226,16 +1230,19 @@ public class Ec2QueryHandler {
                 .end("privateDnsNameOptions")
                 .start("capacityReservationSpecification")
                 .elem("capacityReservationPreference", "open")
-                .end("capacityReservationSpecification")
-                .start("blockDeviceMapping")
+                .end("capacityReservationSpecification");
+        if (inst.getRootVolumeId() != null) {
+            xml.start("blockDeviceMapping")
                 .start("item")
                 .elem("deviceName", inst.getRootDeviceName())
                 .start("ebs")
+                .elem("volumeId", inst.getRootVolumeId())
                 .elem("status", "attached")
                 .elem("deleteOnTermination", "true")
                 .end("ebs")
                 .end("item")
                 .end("blockDeviceMapping");
+        }
         xml.raw(tagSetXml(inst.getTags()));
         return xml.build();
     }

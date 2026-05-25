@@ -34,6 +34,7 @@ class Ec2IntegrationTest {
     private static String allocationId;
     private static String associationId;
     private static String volumeId;
+    private static String rootVolumeId;
 
     // =========================================================================
     // Default resources
@@ -643,6 +644,85 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(82)
+    void describeInstancesBlockDeviceMappingHasVolumeId() {
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.blockDeviceMapping.item.deviceName",
+                    equalTo("/dev/xvda"))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.blockDeviceMapping.item.ebs.volumeId",
+                    startsWith("vol-"))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.blockDeviceMapping.item.ebs.status",
+                    equalTo("attached"))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.blockDeviceMapping.item.ebs.deleteOnTermination",
+                    equalTo("true"));
+    }
+
+    @Test
+    @Order(83)
+    void rootVolumeAppearsInDescribeVolumes() {
+        // Extract the root volume ID from DescribeInstances
+        String rootVolId = given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .extract().path("DescribeInstancesResponse.reservationSet.item.instancesSet.item.blockDeviceMapping.item.ebs.volumeId");
+
+        // Verify it exists in DescribeVolumes with state=in-use
+        given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("VolumeId.1", rootVolId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVolumesResponse.volumeSet.item.volumeId", equalTo(rootVolId))
+            .body("DescribeVolumesResponse.volumeSet.item.status", equalTo("in-use"));
+    }
+
+    @Test
+    @Order(84)
+    void describeInstanceAttributeDisableApiStop() {
+        given()
+            .formParam("Action", "DescribeInstanceAttribute")
+            .formParam("InstanceId", instanceId)
+            .formParam("Attribute", "disableApiStop")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceAttributeResponse.instanceId", equalTo(instanceId))
+            .body("DescribeInstanceAttributeResponse.disableApiStop.value", equalTo("false"));
+    }
+
+    @Test
+    @Order(85)
+    void describeInstanceAttributeDisableApiTermination() {
+        given()
+            .formParam("Action", "DescribeInstanceAttribute")
+            .formParam("InstanceId", instanceId)
+            .formParam("Attribute", "disableApiTermination")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceAttributeResponse.instanceId", equalTo(instanceId))
+            .body("DescribeInstanceAttributeResponse.disableApiTermination.value", equalTo("false"));
+    }
+
+    @Test
+    @Order(86)
     void describeInstancesByFilter() {
         given()
             .formParam("Action", "DescribeInstances")
@@ -658,7 +738,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(83)
+    @Order(87)
     void describeInstanceStatus() {
         given()
             .formParam("Action", "DescribeInstanceStatus")
@@ -673,7 +753,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(84)
+    @Order(88)
     void associateAddressToInstance() {
         associationId = given()
             .formParam("Action", "AssociateAddress")
@@ -689,7 +769,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(85)
+    @Order(89)
     void stopInstance() {
         given()
             .formParam("Action", "StopInstances")
@@ -704,7 +784,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(86)
+    @Order(89)
     void startInstance() {
         given()
             .formParam("Action", "StartInstances")
@@ -719,7 +799,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(87)
+    @Order(89)
     void rebootInstance() {
         given()
             .formParam("Action", "RebootInstances")
@@ -923,6 +1003,16 @@ class Ec2IntegrationTest {
     @Test
     @Order(100)
     void terminateInstance() {
+        // Capture root volume ID before termination
+        rootVolumeId = given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .extract().path("DescribeInstancesResponse.reservationSet.item.instancesSet.item.blockDeviceMapping.item.ebs.volumeId");
+
         given()
             .formParam("Action", "TerminateInstances")
             .formParam("InstanceId.1", instanceId)
@@ -933,6 +1023,20 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("TerminateInstancesResponse.instancesSet.item.instanceId", equalTo(instanceId))
             .body("TerminateInstancesResponse.instancesSet.item.currentState.name", equalTo("shutting-down"));
+    }
+
+    @Test
+    @Order(100)
+    void rootVolumeDeletedAfterTermination() {
+        given()
+            .formParam("Action", "DescribeVolumes")
+            .formParam("VolumeId.1", rootVolumeId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidVolume.NotFound"));
     }
 
     @Test

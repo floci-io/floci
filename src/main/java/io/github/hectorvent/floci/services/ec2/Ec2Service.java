@@ -39,6 +39,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
+import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -271,6 +272,27 @@ public class Ec2Service {
             eni.setDeviceIndex(0);
             inst.getNetworkInterfaces().add(eni);
 
+            // Root EBS volume
+            String rootVolId = "vol-" + randomHex(17);
+            inst.setRootVolumeId(rootVolId);
+            Volume rootVol = new Volume();
+            rootVol.setVolumeId(rootVolId);
+            rootVol.setAvailabilityZone(az);
+            rootVol.setVolumeType("gp3");
+            rootVol.setSize(8);
+            rootVol.setState("in-use");
+            rootVol.setRegion(region);
+            rootVol.setCreateTime(Instant.now());
+            VolumeAttachment att = new VolumeAttachment();
+            att.setVolumeId(rootVolId);
+            att.setInstanceId(instanceId);
+            att.setDevice(inst.getRootDeviceName());
+            att.setState("attached");
+            att.setDeleteOnTermination(true);
+            att.setAttachTime(Instant.now());
+            rootVol.getAttachments().add(att);
+            volumes.put(key(region, rootVolId), rootVol);
+
             instances.put(key(region, instanceId), inst);
             reservation.getInstances().add(inst);
 
@@ -357,6 +379,10 @@ public class Ec2Service {
                 inst.setTerminatedAt(System.currentTimeMillis());
             } else {
                 containerManager.terminate(inst);
+            }
+            // Delete root volume if deleteOnTermination (matches real AWS behavior)
+            if (inst.getRootVolumeId() != null) {
+                volumes.remove(key(region, inst.getRootVolumeId()));
             }
             Map<String, String> entry = new LinkedHashMap<>();
             entry.put("instanceId", id);
