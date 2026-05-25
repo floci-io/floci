@@ -118,10 +118,13 @@ class SamTransformProcessorTest {
             """);
 
         JsonNode expanded = processor.expandSamTemplate(template);
-        JsonNode lambdaProps = expanded.path("Resources").path("MyFunc").path("Properties");
+        JsonNode resources = expanded.path("Resources");
+        JsonNode lambdaProps = resources.path("MyFunc").path("Properties");
 
         // Should use the explicit role ARN
         assertEquals("arn:aws:iam::123456789012:role/my-role", lambdaProps.path("Role").asText());
+        // Should NOT create a generated role resource
+        assertFalse(resources.has("MyFuncRole"));
     }
 
     @Test
@@ -210,6 +213,7 @@ class SamTransformProcessorTest {
         assertEquals("HASH", tableProps.path("KeySchema").get(0).path("KeyType").asText());
         assertEquals("pk", tableProps.path("AttributeDefinitions").get(0).path("AttributeName").asText());
         assertEquals("S", tableProps.path("AttributeDefinitions").get(0).path("AttributeType").asText());
+        assertEquals("PAY_PER_REQUEST", tableProps.path("BillingMode").asText());
     }
 
     @Test

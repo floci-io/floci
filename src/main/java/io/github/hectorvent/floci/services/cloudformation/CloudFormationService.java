@@ -44,6 +44,7 @@ public class CloudFormationService {
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final SamTransformProcessor samTransformProcessor;
 
     @Inject
     public CloudFormationService(CloudFormationResourceProvisioner provisioner, S3Service s3Service,
@@ -54,6 +55,7 @@ public class CloudFormationService {
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.samTransformProcessor = new SamTransformProcessor(objectMapper);
     }
 
     // ── DescribeStacks ────────────────────────────────────────────────────────
@@ -262,10 +264,9 @@ public class CloudFormationService {
             JsonNode template = parseTemplate(templateBody);
 
             // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
-            SamTransformProcessor samProcessor = new SamTransformProcessor(objectMapper);
-            if (samProcessor.hasSamTransform(template)) {
+            if (samTransformProcessor.hasSamTransform(template)) {
                 LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
-                template = samProcessor.expandSamTemplate(template);
+                template = samTransformProcessor.expandSamTemplate(template);
                 // Store the expanded template so GetTemplate returns the transformed version
                 templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
             }

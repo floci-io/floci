@@ -2,8 +2,12 @@ package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
@@ -11,21 +15,34 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.not;
 
-/**
- * Integration tests for AWS::Serverless-2016-10-31 SAM Transform support.
- * Verifies that SAM resource types are expanded into standard CloudFormation resources
- * and provisioned correctly.
- */
 @QuarkusTest
 class SamTransformIntegrationTest {
+
+    private final List<String> stacksToDelete = new ArrayList<>();
 
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
     }
 
+    @AfterEach
+    void deleteStacks() {
+        for (String stackName : stacksToDelete) {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteStack")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/");
+        }
+        stacksToDelete.clear();
+    }
+
     @Test
     void samFunction_withInlineCode_createsLambdaAndRole() {
+        String stackName = "sam-hello-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             AWSTemplateFormatVersion: '2010-09-09'
             Transform: AWS::Serverless-2016-10-31
@@ -40,11 +57,10 @@ class SamTransformIntegrationTest {
                     exports.handler = async () => ({ statusCode: 200, body: 'ok' });
             """;
 
-        // 1. Create Stack
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "sam-hello-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
             .formParam("Capabilities.member.1", "CAPABILITY_IAM")
         .when()
@@ -53,18 +69,16 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
-        // 2. Verify stack completed
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-hello-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
-        // 3. Verify Lambda function was created
         given()
         .when()
             .get("/2015-03-31/functions/sam-hello-func")
@@ -74,11 +88,10 @@ class SamTransformIntegrationTest {
             .body("Configuration.Handler", equalTo("index.handler"))
             .body("Configuration.Runtime", equalTo("nodejs22.x"));
 
-        // 4. Verify resources show AWS::Lambda::Function (not AWS::Serverless::Function)
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
-            .formParam("StackName", "sam-hello-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
@@ -92,6 +105,9 @@ class SamTransformIntegrationTest {
 
     @Test
     void samFunction_withExplicitRole_skipsRoleGeneration() {
+        String stackName = "sam-explicit-role-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             AWSTemplateFormatVersion: '2010-09-09'
             Transform: AWS::Serverless-2016-10-31
@@ -109,7 +125,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "sam-explicit-role-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
             .formParam("Capabilities.member.1", "CAPABILITY_IAM")
         .when()
@@ -121,14 +137,13 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-explicit-role-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
-        // Lambda should be created with the explicit role
         given()
         .when()
             .get("/2015-03-31/functions/sam-explicit-role-func")
@@ -136,10 +151,27 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body("Configuration.FunctionName", equalTo("sam-explicit-role-func"))
             .body("Configuration.Role", equalTo("arn:aws:iam::000000000000:role/my-existing-role"));
+
+        // Verify no IAM role was created (only Lambda, no Role resource)
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        assertThat(resourcesXml, containsString("<ResourceType>AWS::Lambda::Function</ResourceType>"));
+        assertThat(resourcesXml, not(containsString("<ResourceType>AWS::IAM::Role</ResourceType>")));
     }
 
     @Test
     void samFunction_withEnvironmentAndTimeout() {
+        String stackName = "sam-configured-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             AWSTemplateFormatVersion: '2010-09-09'
             Transform: AWS::Serverless-2016-10-31
@@ -162,7 +194,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "sam-configured-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
             .formParam("Capabilities.member.1", "CAPABILITY_IAM")
         .when()
@@ -174,7 +206,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-configured-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
@@ -197,6 +229,9 @@ class SamTransformIntegrationTest {
 
     @Test
     void samSimpleTable_createsDynamoDbTable() {
+        String stackName = "sam-table-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             AWSTemplateFormatVersion: '2010-09-09'
             Transform: AWS::Serverless-2016-10-31
@@ -213,7 +248,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "sam-table-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
         .when()
             .post("/")
@@ -224,14 +259,13 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-table-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
-        // Verify DynamoDB table was created
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
             .contentType("application/x-amz-json-1.0")
@@ -246,11 +280,10 @@ class SamTransformIntegrationTest {
             .body("Table.KeySchema[0].AttributeName", equalTo("userId"))
             .body("Table.KeySchema[0].KeyType", equalTo("HASH"));
 
-        // Verify resource type in stack is DynamoDB, not Serverless
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
-            .formParam("StackName", "sam-table-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
@@ -263,6 +296,9 @@ class SamTransformIntegrationTest {
 
     @Test
     void samApi_createsApiGatewayResources() {
+        String stackName = "sam-api-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             AWSTemplateFormatVersion: '2010-09-09'
             Transform: AWS::Serverless-2016-10-31
@@ -277,7 +313,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "sam-api-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
         .when()
             .post("/")
@@ -288,18 +324,17 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-api-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
-        // Verify resources show API Gateway types
         String resourcesXml = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStackResources")
-            .formParam("StackName", "sam-api-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
@@ -312,7 +347,9 @@ class SamTransformIntegrationTest {
 
     @Test
     void samFunction_withCodeUri_s3Reference() {
-        // First create the S3 bucket and upload code
+        String stackName = "sam-s3code-stack";
+        stacksToDelete.add(stackName);
+
         given()
         .when()
             .put("/sam-code-bucket")
@@ -344,7 +381,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "sam-s3code-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
             .formParam("Capabilities.member.1", "CAPABILITY_IAM")
         .when()
@@ -356,7 +393,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-s3code-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
@@ -373,6 +410,9 @@ class SamTransformIntegrationTest {
 
     @Test
     void samMixedTemplate_withStandardAndSamResources() {
+        String stackName = "sam-mixed-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             AWSTemplateFormatVersion: '2010-09-09'
             Transform: AWS::Serverless-2016-10-31
@@ -393,7 +433,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "sam-mixed-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
             .formParam("Capabilities.member.1", "CAPABILITY_IAM")
         .when()
@@ -405,14 +445,13 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-mixed-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
-        // Verify SQS queue was created (standard resource)
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "GetQueueUrl")
@@ -423,7 +462,6 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body(containsString("sam-mixed-queue"));
 
-        // Verify Lambda function was created (SAM resource)
         given()
         .when()
             .get("/2015-03-31/functions/sam-mixed-func")
@@ -434,6 +472,9 @@ class SamTransformIntegrationTest {
 
     @Test
     void templateWithoutTransform_isNotAffected() {
+        String stackName = "no-transform-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             {
               "Resources": {
@@ -450,7 +491,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateStack")
-            .formParam("StackName", "no-transform-stack")
+            .formParam("StackName", stackName)
             .formParam("TemplateBody", template)
         .when()
             .post("/")
@@ -461,7 +502,7 @@ class SamTransformIntegrationTest {
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "no-transform-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
@@ -481,6 +522,9 @@ class SamTransformIntegrationTest {
 
     @Test
     void samFunction_viaChangeSet_createsLambda() {
+        String stackName = "sam-changeset-stack";
+        stacksToDelete.add(stackName);
+
         String template = """
             AWSTemplateFormatVersion: '2010-09-09'
             Transform: AWS::Serverless-2016-10-31
@@ -494,11 +538,10 @@ class SamTransformIntegrationTest {
                   InlineCode: "exports.handler = async () => ({});"
             """;
 
-        // 1. Create ChangeSet
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "CreateChangeSet")
-            .formParam("StackName", "sam-changeset-stack")
+            .formParam("StackName", stackName)
             .formParam("ChangeSetName", "sam-cs-1")
             .formParam("ChangeSetType", "CREATE")
             .formParam("TemplateBody", template)
@@ -509,22 +552,20 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body(containsString("<Id>"));
 
-        // 2. Execute ChangeSet
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "ExecuteChangeSet")
-            .formParam("StackName", "sam-changeset-stack")
+            .formParam("StackName", stackName)
             .formParam("ChangeSetName", "sam-cs-1")
         .when()
             .post("/")
         .then()
             .statusCode(200);
 
-        // 3. Wait for completion and verify
         given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "DescribeStacks")
-            .formParam("StackName", "sam-changeset-stack")
+            .formParam("StackName", stackName)
         .when()
             .post("/")
         .then()
