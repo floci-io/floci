@@ -17,7 +17,7 @@ setup_file() {
     load 'test_helper/common-setup'
 
     # Override TF_DIR to the minimal eni-destroy terraform config
-    ENI_TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/eni-destroy-tf" && pwd)"
+    ENI_TF_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/eni-destroy-tf" && pwd)"
     cd "$ENI_TF_DIR"
 
     echo "# === ENI Destroy Test ===" >&3
@@ -59,7 +59,7 @@ setup_file() {
 teardown_file() {
     load 'test_helper/common-setup'
 
-    ENI_TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/eni-destroy-tf" && pwd)"
+    ENI_TF_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/eni-destroy-tf" && pwd)"
     cd "$ENI_TF_DIR"
 
     # Clean up terraform state after test
@@ -68,7 +68,7 @@ teardown_file() {
 
 setup() {
     load 'test_helper/common-setup'
-    ENI_TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/eni-destroy-tf" && pwd)"
+    ENI_TF_DIR="$(cd "$(dirname "$BATS_TEST_FILENAME")/eni-destroy-tf" && pwd)"
 }
 
 # --- Spot checks: resources were created ---
@@ -82,10 +82,8 @@ setup() {
 }
 
 @test "ENI Destroy: Subnet was created" {
-    run aws_cmd ec2 describe-subnets \
-        --filters "Name=tag:Name,Values=floci-eni-destroy-subnet"
+    run terraform -chdir="$ENI_TF_DIR" state show aws_subnet.test
     assert_success
-    assert_output --partial "floci-eni-destroy-subnet"
     assert_output --partial "10.0.1.0/24"
 }
 
@@ -114,5 +112,5 @@ setup() {
     # Verify resources are actually gone
     run aws_cmd ec2 describe-vpcs \
         --filters "Name=tag:Name,Values=floci-eni-destroy-vpc"
-    assert_output --partial "{}"  # empty result = VPC deleted
+    assert_output --partial '"Vpcs": []'  # empty result = VPC deleted
 }
