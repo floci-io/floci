@@ -647,7 +647,8 @@ public class S3Controller {
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        appendObjectHeaders(resp, obj, overrides);
+        // includeChecksum=false: the stored checksum covers the whole object, not this range.
+        appendObjectHeaders(resp, obj, overrides, false);
         return resp.build();
     }
 
@@ -1541,6 +1542,14 @@ public class S3Controller {
     }
 
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides) {
+        appendObjectHeaders(resp, obj, overrides, true);
+    }
+
+    // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
+    // whole-object checksum, which does not match the range bytes returned. SDKs that
+    // validate it against the received body fail. Real S3 omits it on ranged responses.
+    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides,
+                                     boolean includeChecksum) {
         if (obj.getStorageClass() != null) {
             resp.header("x-amz-storage-class", obj.getStorageClass());
         }
@@ -1570,7 +1579,9 @@ public class S3Controller {
                 resp.header("x-amz-meta-" + entry.getKey(), entry.getValue());
             }
         }
-        appendChecksumHeaders(resp, obj.getChecksum());
+        if (includeChecksum) {
+            appendChecksumHeaders(resp, obj.getChecksum());
+        }
         appendLockHeaders(resp, obj);
     }
 
