@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import jakarta.annotation.PostConstruct;
@@ -121,7 +122,9 @@ public class AutoScalingReconciler {
                     null,
                     null,
                     lc.getUserData(),
-                    lc.getIamInstanceProfile());
+                    lc.getIamInstanceProfile(),
+                    List.of(new Volume())
+            );
 
             for (Instance ec2Inst : reservation.getInstances()) {
                 AsgInstance asgInst = new AsgInstance();
