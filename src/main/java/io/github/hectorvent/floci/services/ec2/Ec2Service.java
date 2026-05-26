@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
+import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -289,8 +290,17 @@ public class Ec2Service {
                     ebs.getSnapshotId(),
                     null
                 );
+                final VolumeAttachment attachment = new VolumeAttachment();
+                attachment.setVolumeId(ebsVolume.getVolumeId());
+                attachment.setInstanceId(inst.getInstanceId());
+                attachment.setDevice(blockDevice.getDeviceName());
+                attachment.setState("attached");
+                attachment.setDeleteOnTermination(true);
+                attachment.setAttachTime(Instant.now());
+                ebsVolume.getAttachments().add(attachment);
                 if (j == 0) {
                     inst.setRootDeviceEbsVolumeId(ebsVolume.getVolumeId());
+                    inst.setRootDeviceName(blockDevice.getDeviceName());
                 }
             }
 
@@ -371,6 +381,9 @@ public class Ec2Service {
             if (inst == null) {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
+            if (inst.getRootDeviceEbsVolumeId() != null) {
+                volumes.remove(key(region, inst.getRootDeviceEbsVolumeId()));
+            }
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
             }
@@ -388,6 +401,7 @@ public class Ec2Service {
             entry.put("currentState", "shutting-down");
             entry.put("currentCode", "32");
             result.add(entry);
+            instances.remove(key(region, id));
         }
         return result;
     }

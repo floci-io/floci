@@ -12,6 +12,7 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
+import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -1242,6 +1243,16 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("networkInterfaceSet");
+        final Optional<String> rootVolAttachTime = service.describeVolumes(
+            inst.getRegion(),
+            List.of(inst.getRootDeviceEbsVolumeId()),
+            Map.of("volume-id", List.of(inst.getRootDeviceEbsVolumeId()))
+        ).stream()
+            .flatMap((final Volume volume) -> volume.getAttachments().stream())
+            .filter((final VolumeAttachment att) -> att.getInstanceId().equals(inst.getInstanceId()))
+            .map(VolumeAttachment::getAttachTime)
+            .map(ISO_FMT::format)
+            .findFirst();
         xml.elem("clientToken", inst.getClientToken())
                 .start("stateReason")
                 .elem("code", "")
@@ -1281,6 +1292,7 @@ public class Ec2QueryHandler {
                 .elem("deviceName", inst.getRootDeviceName())
                 .start("ebs")
                 .elem("volumeId", inst.getRootDeviceEbsVolumeId())
+                .elem("attachTime", rootVolAttachTime.orElse(""))
                 .elem("status", "attached")
                 .elem("deleteOnTermination", "true")
                 .end("ebs")
