@@ -1243,16 +1243,6 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("networkInterfaceSet");
-        final Optional<String> rootVolAttachTime = service.describeVolumes(
-            inst.getRegion(),
-            List.of(inst.getRootDeviceEbsVolumeId()),
-            Map.of("volume-id", List.of(inst.getRootDeviceEbsVolumeId()))
-        ).stream()
-            .flatMap((final Volume volume) -> volume.getAttachments().stream())
-            .filter((final VolumeAttachment att) -> att.getInstanceId().equals(inst.getInstanceId()))
-            .map(VolumeAttachment::getAttachTime)
-            .map(ISO_FMT::format)
-            .findFirst();
         xml.elem("clientToken", inst.getClientToken())
                 .start("stateReason")
                 .elem("code", "")
@@ -1292,8 +1282,14 @@ public class Ec2QueryHandler {
                 .elem("deviceName", inst.getRootDeviceName())
                 .start("ebs")
                 .elem("volumeId", inst.getRootDeviceEbsVolumeId())
-                .elem("attachTime", rootVolAttachTime.orElse(""))
-                .elem("status", "attached")
+                .elem("attachTime", service.getVolumeAttachment(
+                        inst.getRegion(),
+                        inst.getRootDeviceEbsVolumeId(),
+                        inst.getInstanceId()
+                    ).map(VolumeAttachment::getAttachTime)
+                    .map(ISO_FMT::format)
+                    .orElse("")
+                ).elem("status", "attached")
                 .elem("deleteOnTermination", "true")
                 .end("ebs")
                 .end("item")

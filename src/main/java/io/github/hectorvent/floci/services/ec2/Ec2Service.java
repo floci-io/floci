@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -1507,5 +1508,16 @@ public class Ec2Service {
             throw new AwsException("InvalidVolume.NotFound",
                     "The volume '" + volumeId + "' does not exist.", 400);
         }
+    }
+
+    public Optional<VolumeAttachment> getVolumeAttachment(final String region, final String volumeId, final String instanceId) {
+        return describeVolumes(
+            region,
+            List.of(volumeId),
+            Map.of("volume-id", List.of(volumeId))
+        ).stream()
+            .flatMap((final Volume volume) -> volume.getAttachments().stream())
+            .filter((final VolumeAttachment att) -> att.getInstanceId().equals(instanceId))
+            .findFirst();
     }
 }
