@@ -281,9 +281,9 @@ public class Ec2Service {
                 final BlockDevice blockDevice = blockDevices.get(j);
                 final Ebs ebs = Objects.requireNonNullElse(blockDevice.getEbs(), new Ebs());
                 final String ebsAz = ebs.getAvailabilityZone();
-                final Volume ebsVolume = createVolume(
+                final Volume volume = createVolume(
                     region,
-                    ebsAz != null ?  ebsAz : az,
+                    ebsAz != null ? ebsAz : az,
                     ebs.getVolumeType(),
                     ebs.getVolumeSize(),
                     ebs.isEncrypted(),
@@ -292,15 +292,15 @@ public class Ec2Service {
                     null
                 );
                 final VolumeAttachment attachment = new VolumeAttachment();
-                attachment.setVolumeId(ebsVolume.getVolumeId());
+                attachment.setVolumeId(volume.getVolumeId());
                 attachment.setInstanceId(inst.getInstanceId());
                 attachment.setDevice(blockDevice.getDeviceName());
                 attachment.setState("attached");
                 attachment.setDeleteOnTermination(true);
                 attachment.setAttachTime(Instant.now());
-                ebsVolume.getAttachments().add(attachment);
+                volume.getAttachments().add(attachment);
                 if (j == 0) {
-                    inst.setRootDeviceEbsVolumeId(ebsVolume.getVolumeId());
+                    inst.setRootDeviceVolumeId(volume.getVolumeId());
                     inst.setRootDeviceName(blockDevice.getDeviceName());
                 }
             }
@@ -382,8 +382,8 @@ public class Ec2Service {
             if (inst == null) {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
-            if (inst.getRootDeviceEbsVolumeId() != null) {
-                volumes.remove(key(region, inst.getRootDeviceEbsVolumeId()));
+            if (inst.getRootDeviceVolumeId() != null) {
+                volumes.remove(key(region, inst.getRootDeviceVolumeId()));
             }
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());

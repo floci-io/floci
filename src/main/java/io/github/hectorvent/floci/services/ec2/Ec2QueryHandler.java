@@ -12,7 +12,6 @@ import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
 import java.nio.charset.StandardCharsets;
-import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
@@ -1281,10 +1280,10 @@ public class Ec2QueryHandler {
                 .start("item")
                 .elem("deviceName", inst.getRootDeviceName())
                 .start("ebs")
-                .elem("volumeId", inst.getRootDeviceEbsVolumeId())
+                .elem("volumeId", inst.getRootDeviceVolumeId())
                 .elem("attachTime", service.getVolumeAttachment(
                         inst.getRegion(),
-                        inst.getRootDeviceEbsVolumeId(),
+                        inst.getRootDeviceVolumeId(),
                         inst.getInstanceId()
                     ).map(VolumeAttachment::getAttachTime)
                     .map(ISO_FMT::format)
