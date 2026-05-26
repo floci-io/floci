@@ -1619,11 +1619,18 @@ public class S3Controller {
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
         String copyServerSideEncryption = httpHeaders.getHeaderString("x-amz-server-side-encryption");
         String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
+        String taggingDirective = httpHeaders.getHeaderString("x-amz-tagging-directive");
+        String taggingHeader = httpHeaders.getHeaderString("x-amz-tagging");
+        Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective) && taggingHeader != null
+                ? parseInlineTaggingHeader(taggingHeader)
+                : null;
         S3Object copy = s3Service.copyObject(sourceBucket, sourceObject.objectKey(), destBucket, destKey,
                 sourceObject.versionId(),
                 new CopyObjectOptions()
                         .withMetadataDirective(httpHeaders.getHeaderString("x-amz-metadata-directive"))
                         .withReplacementMetadata(extractUserMetadata(httpHeaders))
+                        .withTaggingDirective(taggingDirective)
+                        .withReplacementTagging(replacementTagging)
                         .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                         .withContentType(contentType)
                         .withContentEncoding(copyContentEncoding)
