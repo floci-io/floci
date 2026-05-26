@@ -550,6 +550,8 @@ public class S3Service {
                         byte[] promotedData = readVersionedFile(bucketName, key, newLatest.getVersionId());
                         if (promotedData != null) {
                             writeFile(bucketName, key, promotedData);
+                        } else {
+                            deleteFile(bucketName, key);
                         }
                     }
                 }

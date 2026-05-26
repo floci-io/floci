@@ -329,7 +329,7 @@ class S3VersioningServiceTest {
 
         // getObject without versionId should return v1's content, not v2's
         S3Object result = s3Service.getObject("versioned-bucket", "key");
-        assertEquals("v1", new String(result.getData()),
+        assertEquals("v1", new String(result.getData(), StandardCharsets.UTF_8),
                 "getObject should return the promoted version's content after deleting the latest");
     }
 

@@ -384,15 +384,15 @@ class S3VersioningIntegrationTest {
             .statusCode(200);
 
         // Verify exactly 1 version exists
-        String afterReuploadXml = given()
+        var versions = given()
         .when()
             .get("/" + resBucket + "?versions&prefix=" + key)
         .then()
             .statusCode(200)
-            .extract().body().asString();
+            .extract().xmlPath()
+            .getList("ListVersionsResult.Version");
 
-        int versionCount = afterReuploadXml.split("<Version>").length - 1;
-        assertEquals(1, versionCount,
-                "only the newly uploaded version should exist — deleted versions must not resurrect, got: " + afterReuploadXml);
+        assertEquals(1, versions.size(),
+                "only the newly uploaded version should exist — deleted versions must not resurrect");
     }
 }
