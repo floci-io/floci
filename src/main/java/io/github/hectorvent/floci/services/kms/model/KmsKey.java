@@ -24,6 +24,7 @@ public class KmsKey {
     private Map<String, String> tags = new HashMap<>();
     private String privateKeyEncoded;
     private String publicKeyEncoded;
+    private int onDemandRotationCount;
 
     public KmsKey() {
         this.creationDate = Instant.now().getEpochSecond();
@@ -70,4 +71,7 @@ public class KmsKey {
 
     public String getPublicKeyEncoded() { return publicKeyEncoded; }
     public void setPublicKeyEncoded(String publicKeyEncoded) { this.publicKeyEncoded = publicKeyEncoded; }
+
+    public int getOnDemandRotationCount() { return onDemandRotationCount; }
+    public void setOnDemandRotationCount(int onDemandRotationCount) { this.onDemandRotationCount = onDemandRotationCount; }
 }

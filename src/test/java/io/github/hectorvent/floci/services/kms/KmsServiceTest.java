@@ -663,6 +663,22 @@ class KmsServiceTest {
         assertEquals(400, ex.getHttpStatus());
     }
 
+    @Test
+    void rotateKeyOnDemandLimitExceededThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+
+        for (int i = 0; i < 25; i++) {
+            kmsService.rotateKeyOnDemand(key.getKeyId(), REGION);
+        }
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.rotateKeyOnDemand(key.getKeyId(), REGION));
+
+        assertEquals("LimitExceededException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals(25, kmsService.describeKey(key.getKeyId(), REGION).getOnDemandRotationCount());
+    }
+
     // ── Issue #497 — HMAC key specs ─────────────────────────────────────────
 
     @ParameterizedTest

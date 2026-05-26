@@ -290,6 +290,7 @@ public class KmsService {
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    private static final int ON_DEMAND_ROTATION_LIMIT = 25;
     public String rotateKeyOnDemand(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
         if (!key.isEnabled()) {
@@ -297,6 +298,12 @@ public class KmsService {
                     "KMS key " + key.getKeyId() + " is disabled.", 400);
         }
         validateRotationSupported(key);
+        if (key.getOnDemandRotationCount() >= ON_DEMAND_ROTATION_LIMIT) {
+            throw new AwsException("LimitExceededException",
+                    "On-demand rotation quota for KMS key " + key.getKeyId() + " is exceeded.", 400);
+        }
+        key.setOnDemandRotationCount(key.getOnDemandRotationCount() + 1);
+        keyStore.put(region + "::" + key.getKeyId(), key);
         return key.getKeyId();
     }
 
