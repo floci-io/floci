@@ -4426,4 +4426,93 @@ class CloudFormationIntegrationTest {
             .statusCode(404);
     }
 
+    @Test
+    void createStack_withNestedStack_resourcesAreProvisioned() {
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "nested-stack-child-queue"
+                  }
+                }
+              },
+              "Outputs": {
+                "QueueUrl": {
+                  "Value": {"Ref": "ChildQueue"}
+                }
+              }
+            }
+            """;
+
+        // Upload child template to S3
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        given()
+            .contentType("application/json")
+            .body(childTemplate)
+        .when()
+            .put("/nested-stack-templates/child.json")
+        .then()
+            .statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {
+                    "TemplateURL": "http://localhost/nested-stack-templates/child.json"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "parent-nested-stack")
+            .formParam("TemplateBody", parentTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // Parent stack reaches CREATE_COMPLETE
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "parent-nested-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // Nested stack resource itself is CREATE_COMPLETE
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "parent-nested-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceType>AWS::CloudFormation::Stack</ResourceType>"))
+            .body(containsString("<ResourceStatus>CREATE_COMPLETE</ResourceStatus>"));
+
+        // SQS queue defined in the nested template actually exists
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "nested-stack-child-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("nested-stack-child-queue"));
+    }
+
 }

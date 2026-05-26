@@ -307,9 +307,15 @@ public class CloudFormationService {
                     }
 
                     addEvent(stack, logicalId, null, type, "CREATE_IN_PROGRESS", null);
-                    resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
-                            engine, region, accountId, stack.getStackName(),
-                            resource.getPhysicalId(), resource.getAttributes());
+                    if ("AWS::CloudFormation::Stack".equals(type)) {
+                        resource = executeNestedStack(stack, logicalId,
+                                props.isMissingNode() ? null : props,
+                                engine, region, accountId, isCreate);
+                    } else {
+                        resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
+                                engine, region, accountId, stack.getStackName(),
+                                resource.getPhysicalId(), resource.getAttributes());
+                    }
                     stack.getResources().put(logicalId, resource);
 
                     physicalIds.put(logicalId, resource.getPhysicalId());
@@ -560,6 +566,49 @@ public class CloudFormationService {
         String normalizedSuffix = suffix.toLowerCase(Locale.ROOT);
         return normalizedHost.length() > normalizedSuffix.length() + 1
                 && normalizedHost.endsWith("." + normalizedSuffix);
+    }
+
+    private StackResource executeNestedStack(Stack parentStack, String logicalId, JsonNode props,
+                                             CloudFormationTemplateEngine engine, String region,
+                                             String accountId, boolean isCreate) {
+        StackResource resource = new StackResource();
+        resource.setLogicalId(logicalId);
+        resource.setResourceType("AWS::CloudFormation::Stack");
+
+        String templateUrl = props != null ? engine.resolve(props.path("TemplateURL")) : null;
+        if (templateUrl == null || templateUrl.isBlank()) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason("Missing TemplateURL");
+            return resource;
+        }
+
+        String childTemplate = fetchTemplateFromS3(templateUrl);
+        String childStackName = parentStack.getStackName() + "-" + logicalId;
+
+        Stack childStack = newStack(childStackName, region);
+        childStack.setStatus("CREATE_IN_PROGRESS");
+        stacks.put(key(childStackName, region), childStack);
+
+        Map<String, String> childParams = new LinkedHashMap<>();
+        if (props != null && props.has("Parameters") && props.get("Parameters").isObject()) {
+            props.get("Parameters").fields().forEachRemaining(e ->
+                    childParams.put(e.getKey(), engine.resolve(e.getValue())));
+        }
+
+        executeTemplate(childStack, childTemplate, childParams, isCreate, region, accountId);
+
+        resource.setPhysicalId(childStack.getStackId());
+        resource.getAttributes().put("Arn", childStack.getStackId());
+        childStack.getOutputs().forEach((k, v) -> resource.getAttributes().put("Outputs." + k, v));
+
+        if ("CREATE_FAILED".equals(childStack.getStatus()) || "UPDATE_FAILED".equals(childStack.getStatus())) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason("Nested stack " + childStackName + " failed: " + childStack.getStatusReason());
+        } else {
+            resource.setStatus("CREATE_COMPLETE");
+        }
+
+        return resource;
     }
 
     private Stack newStack(String stackName, String region) {
