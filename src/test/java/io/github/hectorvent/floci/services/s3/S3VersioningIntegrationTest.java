@@ -247,7 +247,7 @@ class S3VersioningIntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(18)
     void rollbackScenario_copyWithReplaceMetadataPreservesVersionKey() {
         String rollbackBucket = "rollback-scenario-test";
         given().when().put("/" + rollbackBucket).then().statusCode(200);
@@ -329,5 +329,70 @@ class S3VersioningIntegrationTest {
             .statusCode(200)
             .body(containsString("<Key>version</Key>"))
             .body(containsString("<Value>20231103</Value>"));
+    }
+
+    @Test
+    @Order(19)
+    void deleteAllVersionsThenReuploadSameContent_noResurrection() {
+        String resBucket = "resurrection-test";
+        given().when().put("/" + resBucket).then().statusCode(200);
+        String xml = "<VersioningConfiguration><Status>Enabled</Status></VersioningConfiguration>";
+        given().body(xml).when().put("/" + resBucket + "?versioning").then().statusCode(200);
+
+        String key = "resurrection-test.txt";
+
+        // Upload two versions
+        String vid1 = given()
+            .body("v1-content")
+            .contentType("text/plain")
+        .when()
+            .put("/" + resBucket + "/" + key)
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+
+        String vid2 = given()
+            .body("v2-content")
+            .contentType("text/plain")
+        .when()
+            .put("/" + resBucket + "/" + key)
+        .then()
+            .statusCode(200)
+            .extract().header("x-amz-version-id");
+
+        // Permanently delete both versions (latest first)
+        given().when().delete("/" + resBucket + "/" + key + "?versionId=" + vid2).then().statusCode(204);
+        given().when().delete("/" + resBucket + "/" + key + "?versionId=" + vid1).then().statusCode(204);
+
+        // Confirm zero versions for this key
+        String afterDeleteXml = given()
+        .when()
+            .get("/" + resBucket + "?versions&prefix=" + key)
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+        assertFalse(afterDeleteXml.contains("<Version>"),
+                "no versions should remain after permanent delete, got: " + afterDeleteXml);
+
+        // Re-upload with same content as v1
+        given()
+            .body("v1-content")
+            .contentType("text/plain")
+        .when()
+            .put("/" + resBucket + "/" + key)
+        .then()
+            .statusCode(200);
+
+        // Verify exactly 1 version exists
+        String afterReuploadXml = given()
+        .when()
+            .get("/" + resBucket + "?versions&prefix=" + key)
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        int versionCount = afterReuploadXml.split("<Version>").length - 1;
+        assertEquals(1, versionCount,
+                "only the newly uploaded version should exist — deleted versions must not resurrect, got: " + afterReuploadXml);
     }
 }
