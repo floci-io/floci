@@ -279,4 +279,39 @@ class S3VersioningServiceTest {
         assertEquals("v2-tag", tags.get("version"),
                 "copyObject without TaggingDirective should copy source tags to destination");
     }
+
+    @Test
+    void copyObjectWithReplaceTaggerReplacesSourceTags() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "replace-key",
+                "content".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObjectTagging("versioned-bucket", "replace-key", Map.of("original", "tag"));
+
+        s3Service.copyObject("versioned-bucket", "replace-key", "versioned-bucket", "replace-key",
+                null,
+                new CopyObjectOptions()
+                        .withTaggingDirective("REPLACE")
+                        .withReplacementTagging(Map.of("new", "value")));
+
+        Map<String, String> tags = s3Service.getObjectTagging("versioned-bucket", "replace-key");
+        assertEquals("value", tags.get("new"), "REPLACE should apply replacement tags");
+        assertNull(tags.get("original"), "REPLACE should not preserve source tags");
+    }
+
+    @Test
+    void copyObjectWithReplaceTaggerAndNoTagsClearsTags() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "clear-key",
+                "content".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObjectTagging("versioned-bucket", "clear-key", Map.of("should", "disappear"));
+
+        s3Service.copyObject("versioned-bucket", "clear-key", "versioned-bucket", "clear-key",
+                null,
+                new CopyObjectOptions()
+                        .withTaggingDirective("REPLACE")
+                        .withReplacementTagging(Map.of()));
+
+        Map<String, String> tags = s3Service.getObjectTagging("versioned-bucket", "clear-key");
+        assertTrue(tags.isEmpty(), "REPLACE with empty tags should clear all source tags");
+    }
 }

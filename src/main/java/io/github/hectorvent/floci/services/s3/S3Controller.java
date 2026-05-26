@@ -1621,8 +1621,8 @@ public class S3Controller {
         String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
         String taggingDirective = httpHeaders.getHeaderString("x-amz-tagging-directive");
         String taggingHeader = httpHeaders.getHeaderString("x-amz-tagging");
-        Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective) && taggingHeader != null
-                ? parseInlineTaggingHeader(taggingHeader)
+        Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective)
+                ? (taggingHeader != null ? parseInlineTaggingHeader(taggingHeader) : Map.of())
                 : null;
         S3Object copy = s3Service.copyObject(sourceBucket, sourceObject.objectKey(), destBucket, destKey,
                 sourceObject.versionId(),
