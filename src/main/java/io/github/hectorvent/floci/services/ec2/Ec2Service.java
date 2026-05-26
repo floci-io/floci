@@ -1511,6 +1511,9 @@ public class Ec2Service {
     }
 
     public Optional<VolumeAttachment> getVolumeAttachment(final String region, final String volumeId, final String instanceId) {
+        if (volumeId == null) {
+            return Optional.empty();
+        }
         return describeVolumes(
             region,
             List.of(volumeId),
