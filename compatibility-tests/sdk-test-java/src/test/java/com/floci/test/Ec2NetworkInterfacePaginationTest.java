@@ -115,7 +115,9 @@ class Ec2NetworkInterfacePaginationTest {
     @DisplayName("DescribeNetworkInterfaces without pagination returns all 6 ENIs")
     void describeNetworkInterfacesAll() {
         DescribeNetworkInterfacesResponse resp = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder().build());
+                DescribeNetworkInterfacesRequest.builder()
+                        .filters(Filter.builder().name("subnet-id").values(subnetId).build())
+                        .build());
 
         assertThat(resp.networkInterfaces()).hasSize(6);
         assertThat(resp.nextToken()).isNull();
@@ -127,6 +129,7 @@ class Ec2NetworkInterfacePaginationTest {
     void describeNetworkInterfacesFirstPage() {
         DescribeNetworkInterfacesResponse resp = ec2.describeNetworkInterfaces(
                 DescribeNetworkInterfacesRequest.builder()
+                        .filters(Filter.builder().name("subnet-id").values(subnetId).build())
                         .maxResults(5)
                         .build());
 
@@ -141,6 +144,7 @@ class Ec2NetworkInterfacePaginationTest {
         // Page 1: get nextToken
         DescribeNetworkInterfacesResponse page1 = ec2.describeNetworkInterfaces(
                 DescribeNetworkInterfacesRequest.builder()
+                        .filters(Filter.builder().name("subnet-id").values(subnetId).build())
                         .maxResults(5)
                         .build());
         assertThat(page1.nextToken()).isNotNull();
@@ -148,6 +152,7 @@ class Ec2NetworkInterfacePaginationTest {
         // Page 2: use nextToken
         DescribeNetworkInterfacesResponse page2 = ec2.describeNetworkInterfaces(
                 DescribeNetworkInterfacesRequest.builder()
+                        .filters(Filter.builder().name("subnet-id").values(subnetId).build())
                         .maxResults(5)
                         .nextToken(page1.nextToken())
                         .build());
@@ -176,6 +181,7 @@ class Ec2NetworkInterfacePaginationTest {
         // Get a valid token from first page
         DescribeNetworkInterfacesResponse page1 = ec2.describeNetworkInterfaces(
                 DescribeNetworkInterfacesRequest.builder()
+                        .filters(Filter.builder().name("subnet-id").values(subnetId).build())
                         .maxResults(5)
                         .build());
         String token = page1.nextToken();
@@ -183,6 +189,7 @@ class Ec2NetworkInterfacePaginationTest {
         // Use it to get the last page
         DescribeNetworkInterfacesResponse page2 = ec2.describeNetworkInterfaces(
                 DescribeNetworkInterfacesRequest.builder()
+                        .filters(Filter.builder().name("subnet-id").values(subnetId).build())
                         .maxResults(5)
                         .nextToken(token)
                         .build());
@@ -191,6 +198,7 @@ class Ec2NetworkInterfacePaginationTest {
         // would be invalid, but using a valid token again should still work
         DescribeNetworkInterfacesResponse repeat = ec2.describeNetworkInterfaces(
                 DescribeNetworkInterfacesRequest.builder()
+                        .filters(Filter.builder().name("subnet-id").values(subnetId).build())
                         .maxResults(5)
                         .nextToken(token)
                         .build());
