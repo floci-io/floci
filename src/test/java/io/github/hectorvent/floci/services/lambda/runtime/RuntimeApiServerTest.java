@@ -241,7 +241,7 @@ class RuntimeApiServerTest {
                 s.bind(new InetSocketAddress(port));
                 bound = true;
                 break;
-            } catch (java.net.BindException e) {
+            } catch (IOException e) {
                 Thread.sleep(100);
             }
         }
