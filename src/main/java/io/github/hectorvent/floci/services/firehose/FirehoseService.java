@@ -41,13 +41,67 @@ public class FirehoseService {
     }
 
     public String createDeliveryStream(String name, S3Destination s3Config) {
+        return createDeliveryStream(name, s3Config, List.of());
+    }
+
+    public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags) {
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
         DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config);
         description.setAccountId(regionResolver.getAccountId());
+        description.setTags(tags);
         streamStore.put(name, description);
         buffers.put(name, Collections.synchronizedList(new ArrayList<>()));
         LOG.infov("Created Firehose delivery stream: {0}", name);
         return arn;
+    }
+
+    public void tagDeliveryStream(String name, List<DeliveryStreamDescription.Tag> tagsToTag) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        Map<String, String> tagMap = new LinkedHashMap<>();
+        for (DeliveryStreamDescription.Tag t : stream.getTags()) {
+            tagMap.put(t.getKey(), t.getValue());
+        }
+        for (DeliveryStreamDescription.Tag t : tagsToTag) {
+            tagMap.put(t.getKey(), t.getValue());
+        }
+        List<DeliveryStreamDescription.Tag> newTags = new ArrayList<>();
+        tagMap.forEach((k, v) -> newTags.add(new DeliveryStreamDescription.Tag(k, v)));
+        stream.setTags(newTags);
+        streamStore.put(name, stream);
+        LOG.infov("Tagged Firehose delivery stream {0}: {1}", name, tagsToTag);
+    }
+
+    public void untagDeliveryStream(String name, List<String> tagKeys) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        List<DeliveryStreamDescription.Tag> newTags = new ArrayList<>();
+        for (DeliveryStreamDescription.Tag t : stream.getTags()) {
+            if (!tagKeys.contains(t.getKey())) {
+                newTags.add(t);
+            }
+        }
+        stream.setTags(newTags);
+        streamStore.put(name, stream);
+        LOG.infov("Untagged Firehose delivery stream {0}: {1}", name, tagKeys);
+    }
+
+    public List<DeliveryStreamDescription.Tag> listTagsForDeliveryStream(String name, String exclusiveStartTagKey, Integer limit) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        List<DeliveryStreamDescription.Tag> tags = stream.getTags();
+        int startIndex = 0;
+        if (exclusiveStartTagKey != null && !exclusiveStartTagKey.isEmpty()) {
+            for (int i = 0; i < tags.size(); i++) {
+                if (tags.get(i).getKey().equals(exclusiveStartTagKey)) {
+                    startIndex = i + 1;
+                    break;
+                }
+            }
+        }
+        int size = tags.size() - startIndex;
+        int end = tags.size();
+        if (limit != null && limit > 0 && limit < size) {
+            end = startIndex + limit;
+        }
+        return new ArrayList<>(tags.subList(startIndex, end));
     }
 
     public DeliveryStreamDescription describeDeliveryStream(String name) {
