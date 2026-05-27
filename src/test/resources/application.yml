@@ -139,7 +139,6 @@ floci:
     opensearch:
       enabled: true
       mock: true
-      default-image: "opensearchproject/opensearch:2"
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:

@@ -24,7 +24,7 @@ public class Domain {
     private String arn;
 
     @JsonProperty("EngineVersion")
-    private String engineVersion = "OpenSearch_2.11";
+    private String engineVersion;
 
     @JsonProperty("Processing")
     private boolean processing = false;

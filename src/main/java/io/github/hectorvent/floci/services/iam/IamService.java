@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.iam;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -44,10 +45,10 @@ public class IamService {
     private final StorageBackend<String, AccessKey> accessKeys;
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
-    private final String accountId;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public IamService(StorageFactory storageFactory, EmulatorConfig config) {
+    public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
         this(
             storageFactory.create("iam", "iam-users.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-groups.json", new TypeReference<>() {}),
@@ -56,7 +57,7 @@ public class IamService {
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
-            config.defaultAccountId()
+            regionResolver
         );
     }
 
@@ -67,7 +68,7 @@ public class IamService {
                StorageBackend<String, AccessKey> accessKeys,
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
-               String accountId) {
+               RegionResolver regionResolver) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -75,7 +76,7 @@ public class IamService {
         this.accessKeys = accessKeys;
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
-        this.accountId = accountId;
+        this.regionResolver = regionResolver;
     }
 
     @PostConstruct
@@ -803,10 +804,6 @@ public class IamService {
     // Internal helpers
     // =========================================================================
 
-    public String getAccountId() {
-        return accountId;
-    }
-
     public Optional<String> findSecretKey(String accessKeyId) {
         return accessKeys.get(accessKeyId).map(AccessKey::getSecretAccessKey);
     }
@@ -996,7 +993,7 @@ public class IamService {
     }
 
     private String iamArn(String resourceType, String path, String name) {
-        return AwsArnUtils.Arn.of("iam", "", accountId, resourceType + path + name).toString();
+        return AwsArnUtils.Arn.of("iam", "", regionResolver.getAccountId(), resourceType + path + name).toString();
     }
 
     private static String normalizePath(String path) {

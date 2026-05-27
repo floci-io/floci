@@ -69,6 +69,7 @@ public class ElbV2QueryHandler {
                 case "DeleteLoadBalancer"            -> handleDeleteLoadBalancer(params, region);
                 case "ModifyLoadBalancerAttributes"  -> handleModifyLoadBalancerAttributes(params, region);
                 case "DescribeLoadBalancerAttributes"-> handleDescribeLoadBalancerAttributes(params, region);
+                case "DescribeCapacityReservation"   -> handleDescribeCapacityReservation(params, region);
                 case "SetSecurityGroups"             -> handleSetSecurityGroups(params, region);
                 case "SetSubnets"                    -> handleSetSubnets(params, region);
                 case "SetIpAddressType"              -> handleSetIpAddressType(params, region);
@@ -84,6 +85,8 @@ public class ElbV2QueryHandler {
                 case "DescribeListeners"             -> handleDescribeListeners(params, region);
                 case "DeleteListener"                -> handleDeleteListener(params, region);
                 case "ModifyListener"                -> handleModifyListener(params, region);
+                case "ModifyListenerAttributes"      -> handleModifyListenerAttributes(params, region);
+                case "DescribeListenerAttributes"    -> handleDescribeListenerAttributes(params, region);
                 // Rules
                 case "CreateRule"                    -> handleCreateRule(params, region);
                 case "DescribeRules"                 -> handleDescribeRules(params, region);
@@ -205,6 +208,31 @@ public class ElbV2QueryHandler {
            .end("DescribeLoadBalancerAttributesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeLoadBalancerAttributesResponse");
+        return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private Response handleDescribeCapacityReservation(MultivaluedMap<String, String> p, String region) {
+        String arn = p.getFirst("LoadBalancerArn");
+        ElbV2Service.CapacityReservation cr = service.describeCapacityReservation(region, arn);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeCapacityReservationResponse", AwsNamespaces.ELB_V2)
+                .start("DescribeCapacityReservationResult");
+        if (cr.lastModifiedTime() != null) {
+            xml.elem("LastModifiedTime", ISO_FMT.format(cr.lastModifiedTime()));
+        }
+        if (cr.decreaseRequestsRemaining() != null) {
+            xml.elem("DecreaseRequestsRemaining", cr.decreaseRequestsRemaining());
+        }
+        if (cr.minimumCapacityUnits() != null) {
+            xml.start("MinimumLoadBalancerCapacity")
+                 .elem("CapacityUnits", cr.minimumCapacityUnits())
+               .end("MinimumLoadBalancerCapacity");
+        }
+        xml.start("CapacityReservationState").end("CapacityReservationState")
+           .end("DescribeCapacityReservationResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeCapacityReservationResponse");
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
@@ -460,6 +488,43 @@ public class ElbV2QueryHandler {
                 .end("ModifyListenerResponse")
                 .build();
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private Response handleModifyListenerAttributes(MultivaluedMap<String, String> p, String region) {
+        String arn = p.getFirst("ListenerArn");
+        Map<String, String> attrs = parseAttributes(p, "Attributes");
+        service.modifyListenerAttributes(region, arn, attrs);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyListenerAttributesResponse", AwsNamespaces.ELB_V2)
+                .start("ModifyListenerAttributesResult")
+                  .start("Attributes");
+        for (Map.Entry<String, String> e : attrs.entrySet()) {
+            xml.start("member").elem("Key", e.getKey()).elem("Value", e.getValue()).end("member");
+        }
+        xml.end("Attributes")
+           .end("ModifyListenerAttributesResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("ModifyListenerAttributesResponse");
+        return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
+    }
+
+    private Response handleDescribeListenerAttributes(MultivaluedMap<String, String> p, String region) {
+        String arn = p.getFirst("ListenerArn");
+        Map<String, String> attrs = service.describeListenerAttributes(region, arn);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeListenerAttributesResponse", AwsNamespaces.ELB_V2)
+                .start("DescribeListenerAttributesResult")
+                  .start("Attributes");
+        for (Map.Entry<String, String> e : attrs.entrySet()) {
+            xml.start("member").elem("Key", e.getKey()).elem("Value", e.getValue()).end("member");
+        }
+        xml.end("Attributes")
+           .end("DescribeListenerAttributesResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeListenerAttributesResponse");
+        return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
     // ── Rules ─────────────────────────────────────────────────────────────────

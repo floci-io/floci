@@ -8,8 +8,10 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
@@ -60,6 +62,7 @@ public class ContainerLauncher {
     private final EmulatorConfig config;
     private final EcrRegistryManager ecrRegistryManager;
     private final EmbeddedDnsServer embeddedDnsServer;
+    private final LambdaLayerService layerService;
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -74,7 +77,8 @@ public class ContainerLauncher {
                              DockerHostResolver dockerHostResolver,
                              EmulatorConfig config,
                              EcrRegistryManager ecrRegistryManager,
-                             EmbeddedDnsServer embeddedDnsServer) {
+                             EmbeddedDnsServer embeddedDnsServer,
+                             LambdaLayerService layerService) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -84,6 +88,7 @@ public class ContainerLauncher {
         this.config = config;
         this.ecrRegistryManager = ecrRegistryManager;
         this.embeddedDnsServer = embeddedDnsServer;
+        this.layerService = layerService;
     }
 
     /**
@@ -258,6 +263,24 @@ public class ContainerLauncher {
                 } else {
                     LOG.warnv("Provided runtime function {0} is missing 'bootstrap' file in {1}",
                             fn.getFunctionName(), fn.getCodeLocalPath());
+                }
+            }
+        }
+
+        // 3. Copy layer contents into /opt (layers are merged in order)
+        if (fn.getLayers() != null && !fn.getLayers().isEmpty()) {
+            for (String layerArn : fn.getLayers()) {
+                LambdaLayerVersion layer = layerService.resolveLayerByArn(layerArn);
+                if (layer != null && layer.getCodeLocalPath() != null) {
+                    Path layerPath = Path.of(layer.getCodeLocalPath());
+                    if (Files.exists(layerPath)) {
+                        copyDirToContainer(dockerClient, containerId, layerPath, "/opt", fn.getFunctionName());
+                        LOG.debugv("Copied layer {0} into container {1} at /opt", layerArn, containerId);
+                    } else {
+                        LOG.warnv("Layer code path not found for {0}: {1}", layerArn, layer.getCodeLocalPath());
+                    }
+                } else {
+                    LOG.warnv("Could not resolve layer ARN: {0} for function {1}", layerArn, fn.getFunctionName());
                 }
             }
         }

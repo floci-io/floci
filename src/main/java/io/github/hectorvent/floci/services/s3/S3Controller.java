@@ -437,6 +437,7 @@ public class S3Controller {
                               @HeaderParam("Content-Encoding") String contentEncoding,
                               @HeaderParam("x-amz-content-sha256") String contentSha256,
                               @HeaderParam("x-amz-copy-source") String copySource,
+                              @HeaderParam("x-amz-tagging") String tagging,
                               @HeaderParam("If-Match") String ifMatch,
                               @HeaderParam("If-None-Match") String ifNoneMatch,
                               @QueryParam("uploadId") String uploadId,
@@ -483,6 +484,8 @@ public class S3Controller {
                 return preconditionResponse;
             }
 
+            Map<String, String> inlineTags = parseInlineTaggingHeader(tagging);
+
             String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
             String retainUntilStr = httpHeaders.getHeaderString("x-amz-object-lock-retain-until-date");
             String legalHold = httpHeaders.getHeaderString("x-amz-object-lock-legal-hold");
@@ -508,7 +511,8 @@ public class S3Controller {
                             .withServerSideEncryption(serverSideEncryption)
                             .withAcl(cannedAcl)
                             .withChecksumAlgorithm(checksumAlgorithm)
-                            .withClientChecksum(extractChecksumFromHeaders(httpHeaders)));
+                            .withClientChecksum(extractChecksumFromHeaders(httpHeaders))
+                            .withTagging(inlineTags));
             var resp = Response.ok().header("ETag", obj.getETag());
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
@@ -649,7 +653,8 @@ public class S3Controller {
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        appendObjectHeaders(resp, obj, overrides);
+        // includeChecksum=false: the stored checksum covers the whole object, not this range.
+        appendObjectHeaders(resp, obj, overrides, false);
         return resp.build();
     }
 
@@ -1543,6 +1548,14 @@ public class S3Controller {
     }
 
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides) {
+        appendObjectHeaders(resp, obj, overrides, true);
+    }
+
+    // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
+    // whole-object checksum, which does not match the range bytes returned. SDKs that
+    // validate it against the received body fail. Real S3 omits it on ranged responses.
+    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides,
+                                     boolean includeChecksum) {
         if (obj.getStorageClass() != null) {
             resp.header("x-amz-storage-class", obj.getStorageClass());
         }
@@ -1572,7 +1585,9 @@ public class S3Controller {
                 resp.header("x-amz-meta-" + entry.getKey(), entry.getValue());
             }
         }
-        appendChecksumHeaders(resp, obj.getChecksum());
+        if (includeChecksum) {
+            appendChecksumHeaders(resp, obj.getChecksum());
+        }
         appendLockHeaders(resp, obj);
     }
 
@@ -1615,11 +1630,18 @@ public class S3Controller {
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
         String copyServerSideEncryption = httpHeaders.getHeaderString("x-amz-server-side-encryption");
         String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
+        String taggingDirective = httpHeaders.getHeaderString("x-amz-tagging-directive");
+        String taggingHeader = httpHeaders.getHeaderString("x-amz-tagging");
+        Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective)
+                ? (taggingHeader != null ? parseInlineTaggingHeader(taggingHeader) : Map.of())
+                : null;
         S3Object copy = s3Service.copyObject(sourceBucket, sourceObject.objectKey(), destBucket, destKey,
                 sourceObject.versionId(),
                 new CopyObjectOptions()
                         .withMetadataDirective(httpHeaders.getHeaderString("x-amz-metadata-directive"))
                         .withReplacementMetadata(extractUserMetadata(httpHeaders))
+                        .withTaggingDirective(taggingDirective)
+                        .withReplacementTagging(replacementTagging)
                         .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                         .withContentType(contentType)
                         .withContentEncoding(copyContentEncoding)
@@ -2269,6 +2291,55 @@ public class S3Controller {
             }
             return disposition.substring(valueStart, valueEnd).trim();
         }
+    }
+
+    private static final int MAX_INLINE_TAGS = 10;
+    private static final int MAX_INLINE_TAGGING_HEADER_BYTES = 8 * 1024;
+
+    /**
+     * Parses an {@code x-amz-tagging} request-header value (URL-encoded
+     * {@code k=v&k=v}) into a tag map. Returns an empty map for null or blank input.
+     *
+     * <p>Note: the error codes thrown here ({@code InvalidArgument} for malformed input,
+     * {@code BadRequest} for exceeding the 10-tag limit) match real-AWS S3 behavior
+     * observed in practice but are not in the S3 Smithy service model.
+     */
+    private static Map<String, String> parseInlineTaggingHeader(String header) {
+        if (header == null || header.isEmpty()) {
+            return Map.of();
+        }
+        if (header.getBytes(StandardCharsets.UTF_8).length > MAX_INLINE_TAGGING_HEADER_BYTES) {
+            throw new AwsException("InvalidArgument",
+                    "The x-amz-tagging header exceeds the 8 KB limit.", 400);
+        }
+        Map<String, String> tags = new LinkedHashMap<>();
+        for (String pair : header.split("&")) {
+            if (pair.isEmpty()) {
+                continue;
+            }
+            int eq = pair.indexOf('=');
+            if (eq < 0) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-tagging header is malformed: missing '=' in pair.", 400);
+            }
+            String rawKey = pair.substring(0, eq);
+            String rawValue = pair.substring(eq + 1);
+            if (rawKey.isEmpty()) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-tagging header is malformed: empty tag key.", 400);
+            }
+            String tagKey = URLDecoder.decode(rawKey, StandardCharsets.UTF_8);
+            String tagValue = URLDecoder.decode(rawValue, StandardCharsets.UTF_8);
+            if (tags.put(tagKey, tagValue) != null) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-tagging header contains duplicate tag key: " + tagKey, 400);
+            }
+        }
+        if (tags.size() > MAX_INLINE_TAGS) {
+            throw new AwsException("BadRequest",
+                    "Object tags cannot be greater than " + MAX_INLINE_TAGS, 400);
+        }
+        return tags;
     }
 
     /**

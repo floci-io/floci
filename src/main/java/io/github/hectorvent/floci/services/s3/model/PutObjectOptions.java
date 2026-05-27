@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.s3.model;
 
 import java.time.Instant;
+import java.util.Map;
 
 public class PutObjectOptions {
     private String storageClass;
@@ -13,6 +14,7 @@ public class PutObjectOptions {
     private String serverSideEncryption;
     private String acl;
     private String checksumAlgorithm;
+    private Map<String, String> tagging;
 
     public String getStorageClass() { return storageClass; }
     public PutObjectOptions withStorageClass(String storageClass) { this.storageClass = storageClass; return this; }
@@ -43,6 +45,9 @@ public class PutObjectOptions {
 
     public String getChecksumAlgorithm() { return checksumAlgorithm; }
     public PutObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }
+
+    public Map<String, String> getTagging() { return tagging; }
+    public PutObjectOptions withTagging(Map<String, String> tagging) { this.tagging = tagging; return this; }
 
     private S3Checksum clientChecksum;
     public S3Checksum getClientChecksum() { return clientChecksum; }

@@ -197,65 +197,79 @@ public class ElbV2DataPlane {
 
     private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
         req.bodyHandler(body -> {
-            try {
-                Map<String, Object> event = buildAlbEvent(req, body);
+            Map<String, Object> event = buildAlbEvent(req, body);
+            // Lambda invocation is synchronous and may take seconds while a cold container
+            // boots and polls the Runtime API. The Runtime API itself runs on Vert.x event
+            // loops, so blocking the listener's event loop here would deadlock the runtime
+            // and the function would time out. Offload to a worker thread, same as WebSocket.
+            // ordered=false so independent ALB requests run in parallel on the worker pool.
+            vertx.<InvokeResult>executeBlocking(() -> {
                 byte[] payload = objectMapper.writeValueAsBytes(event);
-                InvokeResult result = lambdaService.invoke(region, functionArn, payload, InvocationType.RequestResponse);
-
-                if (result.getFunctionError() != null) {
-                    req.response().setStatusCode(502).end("Lambda function error: " + result.getFunctionError());
-                    return;
+                return lambdaService.invoke(region, functionArn, payload, InvocationType.RequestResponse);
+            }, false).onSuccess(result -> {
+                try {
+                    writeLambdaResponse(req, result);
+                } catch (Exception e) {
+                    LOG.errorf(e, "Error writing Lambda response for %s", functionArn);
+                    req.response().setStatusCode(502).end("Lambda invocation error");
                 }
-
-                if (result.getPayload() == null || result.getPayload().length == 0) {
-                    req.response().setStatusCode(200).end();
-                    return;
-                }
-
-                Map<String, Object> lambdaResp = objectMapper.readValue(result.getPayload(),
-                        new TypeReference<Map<String, Object>>() {});
-
-                int statusCode = 200;
-                Object sc = lambdaResp.get("statusCode");
-                if (sc != null) {
-                    statusCode = ((Number) sc).intValue();
-                }
-
-                req.response().setStatusCode(statusCode);
-
-                Object headers = lambdaResp.get("headers");
-                if (headers instanceof Map<?, ?> headerMap) {
-                    for (Map.Entry<?, ?> entry : headerMap.entrySet()) {
-                        req.response().putHeader(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
-                    }
-                }
-
-                Object multiValueHeaders = lambdaResp.get("multiValueHeaders");
-                if (multiValueHeaders instanceof Map<?, ?> mvh) {
-                    for (Map.Entry<?, ?> entry : mvh.entrySet()) {
-                        if (entry.getValue() instanceof List<?> values) {
-                            for (Object v : values) {
-                                req.response().putHeader(String.valueOf(entry.getKey()), String.valueOf(v));
-                            }
-                        }
-                    }
-                }
-
-                Object responseBody = lambdaResp.get("body");
-                Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
-                if (responseBody == null) {
-                    req.response().end();
-                } else if (Boolean.TRUE.equals(isBase64)) {
-                    byte[] decoded = Base64.getDecoder().decode(String.valueOf(responseBody));
-                    req.response().end(Buffer.buffer(decoded));
-                } else {
-                    req.response().end(String.valueOf(responseBody));
-                }
-            } catch (Exception e) {
+            }).onFailure(e -> {
                 LOG.errorf(e, "Error invoking Lambda target %s", functionArn);
                 req.response().setStatusCode(502).end("Lambda invocation error");
-            }
+            });
         });
+    }
+
+    private void writeLambdaResponse(io.vertx.core.http.HttpServerRequest req, InvokeResult result) throws java.io.IOException {
+        if (result.getFunctionError() != null) {
+            req.response().setStatusCode(502).end("Lambda function error: " + result.getFunctionError());
+            return;
+        }
+
+        if (result.getPayload() == null || result.getPayload().length == 0) {
+            req.response().setStatusCode(200).end();
+            return;
+        }
+
+        Map<String, Object> lambdaResp = objectMapper.readValue(result.getPayload(),
+                new TypeReference<Map<String, Object>>() {});
+
+        int statusCode = 200;
+        Object sc = lambdaResp.get("statusCode");
+        if (sc != null) {
+            statusCode = ((Number) sc).intValue();
+        }
+
+        req.response().setStatusCode(statusCode);
+
+        Object headers = lambdaResp.get("headers");
+        if (headers instanceof Map<?, ?> headerMap) {
+            for (Map.Entry<?, ?> entry : headerMap.entrySet()) {
+                req.response().putHeader(String.valueOf(entry.getKey()), String.valueOf(entry.getValue()));
+            }
+        }
+
+        Object multiValueHeaders = lambdaResp.get("multiValueHeaders");
+        if (multiValueHeaders instanceof Map<?, ?> mvh) {
+            for (Map.Entry<?, ?> entry : mvh.entrySet()) {
+                if (entry.getValue() instanceof List<?> values) {
+                    for (Object v : values) {
+                        req.response().putHeader(String.valueOf(entry.getKey()), String.valueOf(v));
+                    }
+                }
+            }
+        }
+
+        Object responseBody = lambdaResp.get("body");
+        Boolean isBase64 = (Boolean) lambdaResp.get("isBase64Encoded");
+        if (responseBody == null) {
+            req.response().end();
+        } else if (Boolean.TRUE.equals(isBase64)) {
+            byte[] decoded = Base64.getDecoder().decode(String.valueOf(responseBody));
+            req.response().end(Buffer.buffer(decoded));
+        } else {
+            req.response().end(String.valueOf(responseBody));
+        }
     }
 
     private Map<String, Object> buildAlbEvent(io.vertx.core.http.HttpServerRequest req, Buffer body) {
