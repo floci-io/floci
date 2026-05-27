@@ -1,12 +1,17 @@
 package io.github.hectorvent.floci.services.sqs;
 
-import io.github.hectorvent.floci.core.storage.StorageBackend;
-import io.github.hectorvent.floci.services.sqs.model.Message;
-
 import java.time.Instant;
-import java.util.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Optional;
+import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.stream.Collectors;
+
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.sqs.model.Message;
 
 /**
  * Thread-safe wrapper around a per-queue message list. All operations acquire a
@@ -46,23 +51,23 @@ class GuardedMessageQueue {
     }
 
     void addMessage(Message message) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.add(message);
             persist();
         }
     }
 
     void addAll(List<Message> toAdd) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.addAll(toAdd);
             persist();
         }
     }
 
     ClaimResult claimVisibleMessages(int maxMessages, int effectiveTimeout,
-                                     boolean fifo, int maxReceiveCount,
-                                     String deadLetterTargetArn) {
-        try (var _ = hold()) {
+                                      boolean fifo, int maxReceiveCount,
+                                      String deadLetterTargetArn) {
+        try (var guard = hold()) {
             List<Message> claimed = new ArrayList<>();
             List<Message> dlqCandidates = new ArrayList<>();
 
@@ -136,7 +141,7 @@ class GuardedMessageQueue {
     }
 
     Optional<Message> removeByReceiptHandle(String receiptHandle) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             Message removed = null;
             for (Iterator<Message> it = messages.iterator(); it.hasNext(); ) {
                 Message m = it.next();
@@ -154,7 +159,7 @@ class GuardedMessageQueue {
     }
 
     boolean changeVisibility(String receiptHandle, int visibilityTimeout) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             for (Message msg : messages) {
                 if (receiptHandle.equals(msg.getReceiptHandle())) {
                     msg.setVisibleAt(Instant.now().plusSeconds(visibilityTimeout));
@@ -167,21 +172,21 @@ class GuardedMessageQueue {
     }
 
     void removeMessages(List<Message> toRemove) {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.removeAll(toRemove);
             persist();
         }
     }
 
     void purge() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             messages.clear();
             persist();
         }
     }
 
     List<Message> drainAll() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             List<Message> drained = new ArrayList<>(messages);
             messages.clear();
             persist();
@@ -207,7 +212,7 @@ class GuardedMessageQueue {
     }
 
     MessageCounts messageCounts() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             long visible = 0;
             long inFlight = 0;
             for (Message m : messages) {
@@ -219,30 +224,36 @@ class GuardedMessageQueue {
     }
 
     List<Message> peekAll() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             return new ArrayList<>(messages);
         }
     }
 
     boolean isEmpty() {
-        try (var _ = hold()) {
+        try (var guard = hold()) {
             return messages.isEmpty();
         }
     }
 
-    Message findByDeduplicationId(String dedupId) {
-        return findByDeduplicationId(dedupId, null);
+    Message findByDeduplicationId(String deduplicationId) {
+    try (var guard = hold()) {
+        return messages.stream()
+                .filter(m -> deduplicationId.equals(m.getMessageDeduplicationId()))
+                .findFirst()
+                .orElse(null);
     }
+}
 
-    Message findByDeduplicationId(String dedupId, String messageGroupId) {
-        try (var _ = hold()) {
-            return messages.stream()
-                    .filter(msg -> dedupId.equals(msg.getMessageDeduplicationId()))
-                    .filter(msg -> messageGroupId == null
-                            || messageGroupId.equals(msg.getMessageGroupId()))
-                    .findFirst().orElse(null);
-        }
+    Message findByDeduplicationId(String deduplicationId, String messageGroupId) {
+    try (var guard = hold()) {
+        return messages.stream()
+                .filter(m -> deduplicationId.equals(m.getMessageDeduplicationId())
+                        && (messageGroupId == null
+                            || messageGroupId.equals(m.getMessageGroupId())))
+                .findFirst()
+                .orElse(null);
     }
+}
 
     void close() {
         closed = true;

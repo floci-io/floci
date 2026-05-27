@@ -273,7 +273,7 @@
             <properties>
                 <skipITs>true</skipITs>
                 <quarkus.native.enabled>true</quarkus.native.enabled>
-                <maven.compiler.release>24</maven.compiler.release>
+                <maven.compiler.release>25</maven.compiler.release>
             </properties>
         </profile>
     </profiles>
