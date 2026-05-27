@@ -130,6 +130,26 @@ public class CognitoService {
         return pool;
     }
 
+    public void addCustomAttributes(String userPoolId, List<Map<String, Object>> customAttributes) {
+        UserPool pool = describeUserPool(userPoolId);
+        List<Map<String, Object>> schema = pool.getSchemaAttributes();
+        if (schema == null) {
+            schema = new ArrayList<>();
+        }
+        for (Map<String, Object> attr : customAttributes) {
+            String name = (String) attr.get("Name");
+            if (name != null && !name.startsWith("custom:")) {
+                attr = new HashMap<>(attr);
+                attr.put("Name", "custom:" + name);
+            }
+            schema.add(attr);
+        }
+        pool.setSchemaAttributes(schema);
+        pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        poolStore.put(userPoolId, pool);
+        LOG.infov("Added custom attributes to User Pool: {0}", userPoolId);
+    }
+
     @SuppressWarnings("unchecked")
     private void populateUserPool(UserPool pool, Map<String, Object> request) {
         if (request.containsKey("Policies")) pool.setPolicies((Map<String, Object>) request.get("Policies"));
@@ -578,6 +598,16 @@ public class CognitoService {
         userStore.put(userKey(userPoolId, user.getUsername()), user);
     }
 
+    public void adminDeleteUserAttributes(String userPoolId, String username, List<String> attributeNames) {
+        CognitoUser user = adminGetUser(userPoolId, username);
+        for (String attrName : attributeNames) {
+            user.getAttributes().remove(attrName);
+        }
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Deleted attributes {0} for user {1} in pool {2}", attributeNames, username, userPoolId);
+    }
+
     public void adminEnableUser(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         user.setEnabled(true);
@@ -929,6 +959,15 @@ public class CognitoService {
             throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
         }
         adminUpdateUserAttributes(poolId, username, attributes);
+    }
+
+    public void deleteUserAttributes(String accessToken, List<String> attributeNames) {
+        String username = extractUsernameFromToken(accessToken);
+        String poolId = extractPoolIdFromToken(accessToken);
+        if (username == null || poolId == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+        }
+        adminDeleteUserAttributes(poolId, username, attributeNames);
     }
 
     public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope) {

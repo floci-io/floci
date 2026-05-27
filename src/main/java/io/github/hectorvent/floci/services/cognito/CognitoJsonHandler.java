@@ -38,6 +38,7 @@ public class CognitoJsonHandler {
             case "DescribeUserPool" -> handleDescribeUserPool(request);
             case "ListUserPools" -> handleListUserPools(request);
             case "UpdateUserPool" -> handleUpdateUserPool(request, region);
+            case "AddCustomAttributes" -> handleAddCustomAttributes(request);
             case "TagResource" -> handleTagResource(request);
             case "UntagResource" -> handleUntagResource(request);
             case "ListTagsForResource" -> handleListTagsForResource(request);
@@ -59,6 +60,7 @@ public class CognitoJsonHandler {
             case "AdminDeleteUser" -> handleAdminDeleteUser(request);
             case "AdminSetUserPassword" -> handleAdminSetUserPassword(request);
             case "AdminUpdateUserAttributes" -> handleAdminUpdateUserAttributes(request);
+            case "AdminDeleteUserAttributes" -> handleAdminDeleteUserAttributes(request);
             case "AdminUserGlobalSignOut" -> handleAdminUserGlobalSignOut(request);
             case "AdminEnableUser" -> handleAdminEnableUser(request);
             case "AdminDisableUser" -> handleAdminDisableUser(request);
@@ -75,6 +77,7 @@ public class CognitoJsonHandler {
             case "ConfirmForgotPassword" -> handleConfirmForgotPassword(request);
             case "GetUser" -> handleGetUser(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
+            case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
             case "CreateGroup" -> handleCreateGroup(request);
             case "GetGroup" -> handleGetGroup(request);
             case "ListGroups" -> handleListGroups(request);
@@ -125,6 +128,21 @@ public class CognitoJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPool", userPoolToFullNode(pool));
         return Response.ok(response).build();
+    }
+
+    private Response handleAddCustomAttributes(JsonNode request) {
+        String userPoolId = request.path("UserPoolId").asText();
+        List<Map<String, Object>> customAttributes = new java.util.ArrayList<>();
+        JsonNode attrsNode = request.path("CustomAttributes");
+        if (attrsNode.isArray()) {
+            for (JsonNode attrNode : attrsNode) {
+                @SuppressWarnings("unchecked")
+                Map<String, Object> attr = objectMapper.convertValue(attrNode, Map.class);
+                customAttributes.add(attr);
+            }
+        }
+        service.addCustomAttributes(userPoolId, customAttributes);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleTagResource(JsonNode request) {
@@ -332,6 +350,14 @@ public class CognitoJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleAdminDeleteUserAttributes(JsonNode request) {
+        String userPoolId = request.path("UserPoolId").asText();
+        String username = request.path("Username").asText();
+        List<String> attributeNames = readStringList(request.path("UserAttributeNames"));
+        service.adminDeleteUserAttributes(userPoolId, username, attributeNames);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Response handleAdminUserGlobalSignOut(JsonNode request) {
         service.adminUserGlobalSignOut(
                 request.path("UserPoolId").asText(),
@@ -511,6 +537,13 @@ public class CognitoJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.putArray("CodeDeliveryDetailsList");
         return Response.ok(response).build();
+    }
+
+    private Response handleDeleteUserAttributes(JsonNode request) {
+        String accessToken = request.path("AccessToken").asText();
+        List<String> attributeNames = readStringList(request.path("UserAttributeNames"));
+        service.deleteUserAttributes(accessToken, attributeNames);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private ObjectNode userPoolToDescriptionNode(UserPool p) {
