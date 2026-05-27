@@ -546,12 +546,16 @@ public class S3Service {
                         newLatest.setLatest(true);
                         objectStore.put(versionedKey(bucketName, key, newLatest.getVersionId()), newLatest);
                         objectStore.put(latestKey, newLatest);
-                        // Sync the latest file pointer to the promoted version's content
-                        byte[] promotedData = readVersionedFile(bucketName, key, newLatest.getVersionId());
-                        if (promotedData != null) {
-                            writeFile(bucketName, key, promotedData);
-                        } else {
+                        // Delete markers have no versioned file — readVersionedFile throws in persistent mode.
+                        if (newLatest.isDeleteMarker()) {
                             deleteFile(bucketName, key);
+                        } else {
+                            byte[] promotedData = readVersionedFile(bucketName, key, newLatest.getVersionId());
+                            if (promotedData != null) {
+                                writeFile(bucketName, key, promotedData);
+                            } else {
+                                deleteFile(bucketName, key);
+                            }
                         }
                     }
                 }
