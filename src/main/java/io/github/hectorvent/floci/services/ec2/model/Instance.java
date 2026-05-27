@@ -31,6 +31,7 @@ public class Instance {
     private String virtualizationType = "hvm";
     private String rootDeviceName = "/dev/xvda";
     private String rootDeviceType = "ebs";
+    private String rootDeviceVolumeId;
     private Instant launchTime;
     private int amiLaunchIndex;
     private String clientToken;
@@ -38,6 +39,8 @@ public class Instance {
     private boolean sourceDestCheck = true;
     private boolean ebsOptimized = false;
     private boolean enaSupport = true;
+    private boolean disableApiStop = true;
+    private boolean disableApiTermination = true;
     private String iamInstanceProfileArn;
     private String region;
     private List<Tag> tags = new ArrayList<>();
@@ -111,6 +114,9 @@ public class Instance {
     public String getRootDeviceType() { return rootDeviceType; }
     public void setRootDeviceType(String rootDeviceType) { this.rootDeviceType = rootDeviceType; }
 
+    public String getRootDeviceVolumeId() { return this.rootDeviceVolumeId; }
+    public void setRootDeviceVolumeId(final String rootDeviceVolumeId) { this.rootDeviceVolumeId = rootDeviceVolumeId; }
+
     public Instant getLaunchTime() { return launchTime; }
     public void setLaunchTime(Instant launchTime) { this.launchTime = launchTime; }
 
@@ -131,6 +137,12 @@ public class Instance {
 
     public boolean isEnaSupport() { return enaSupport; }
     public void setEnaSupport(boolean enaSupport) { this.enaSupport = enaSupport; }
+
+    public boolean isDisableApiStop() { return this.disableApiStop; }
+    public void setDisableApiStop(boolean disableApiStop) { this.disableApiStop = disableApiStop; }
+
+    public boolean isDisableApiTermination() { return this.disableApiTermination; }
+    public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
 
     public String getIamInstanceProfileArn() { return iamInstanceProfileArn; }
     public void setIamInstanceProfileArn(String iamInstanceProfileArn) { this.iamInstanceProfileArn = iamInstanceProfileArn; }

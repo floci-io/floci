@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
-import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -16,7 +15,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.Base64;
 
 @ApplicationScoped
 public class Ec2QueryHandler {
@@ -244,8 +242,56 @@ public class Ec2QueryHandler {
             }
         }
 
+        // VoblockDeviceMappingslumes
+        List<BlockDevice> blockDevices = new ArrayList<>();
+        final Queue<String> keyQueue = new ArrayDeque<>();
+        for (final Map.Entry<String, List<String>> entry : p.entrySet()) {
+            final String key = entry.getKey();
+            if (!key.startsWith("BlockDeviceMapping")) {
+                continue;
+            }
+            final List<String> values = entry.getValue();
+            if (values.size() != 1) {
+                continue;
+            }
+            final String value = values.get(0);
+            keyQueue.clear();
+            Arrays.stream(key.split("\\.")).skip(1).forEach(keyQueue::add);
+            final int index = Integer.parseInt(keyQueue.poll()) - 1;
+            final BlockDevice blockDevice = blockDevices.size() <= index ? new BlockDevice() : blockDevices.get(index);
+            final String keySegment = keyQueue.poll();
+            switch (keySegment) {
+                case "DeviceName": blockDevice.setDeviceName(value); continue;
+                case "NoDevice": blockDevice.setNoDevice(value); continue;
+                case "VirtualName": blockDevice.setVirtualName(value); continue;
+                case "Ebs": break;
+                default: continue;
+            }
+            final Ebs ebs = new Ebs();
+            blockDevice.setEbs(ebs);
+            switch (keyQueue.poll()) {
+                case "AvailabilityZone" -> ebs.setAvailabilityZone(value);
+                case "AvailabilityZoneId" -> ebs.setAvailabilityZoneId(value);
+                case "EbsCardIndex" -> ebs.setEbsCardIndex(Integer.parseInt(value));
+                case "Encrypted" -> ebs.setEncrypted(Boolean.parseBoolean(value));
+                case "Iops" -> ebs.setIops(Integer.parseInt(value));
+                case "KmsKeyId" -> ebs.setKmsKeyId(value);
+                case "OutpostArn" -> ebs.setOutpostArn(value);
+                case "SnapshotId" -> ebs.setSnapshotId(value);
+                case "Throughput" -> ebs.setThroughput(Integer.parseInt(value));
+                case "VolumeInitializationRate" -> ebs.setVolumeInitializationRate(Integer.parseInt(value));
+                case "VolumeSize" -> ebs.setVolumeSize(Integer.parseInt(value));
+                case "VolumeType" -> ebs.setVolumeType(value);
+            }
+        }
+        if (blockDevices.isEmpty()) {
+            // Ensure root volume always exists
+            blockDevices.add(new BlockDevice());
+        }
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
-                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
+                keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn,
+                blockDevices);
 
         XmlBuilder xml = new XmlBuilder()
                 .start("RunInstancesResponse", AwsNamespaces.EC2)
@@ -405,12 +451,12 @@ public class Ec2QueryHandler {
                 .start("DescribeInstanceAttributeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("instanceId", instanceId);
-        if ("instanceType".equals(attribute)) {
-            xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
-        } else if ("sourceDestCheck".equals(attribute)) {
-            xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
-        } else if ("ebsOptimized".equals(attribute)) {
-            xml.start("ebsOptimized").elem("value", String.valueOf(inst.isEbsOptimized())).end("ebsOptimized");
+        switch (attribute) {
+            case "instanceType" -> xml.start("instanceType").elem("value", inst.getInstanceType()).end("instanceType");
+            case "sourceDestCheck" -> xml.start("sourceDestCheck").elem("value", String.valueOf(inst.isSourceDestCheck())).end("sourceDestCheck");
+            case "ebsOptimized" -> xml.start("ebsOptimized").elem("value", String.valueOf(inst.isEbsOptimized())).end("ebsOptimized");
+            case "disableApiStop" -> xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
+            case "disableApiTermination" -> xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
         }
         xml.end("DescribeInstanceAttributeResponse");
         return xmlResponse(xml.build());
@@ -1231,7 +1277,15 @@ public class Ec2QueryHandler {
                 .start("item")
                 .elem("deviceName", inst.getRootDeviceName())
                 .start("ebs")
-                .elem("status", "attached")
+                .elem("volumeId", inst.getRootDeviceVolumeId())
+                .elem("attachTime", service.getVolumeAttachment(
+                        inst.getRegion(),
+                        inst.getRootDeviceVolumeId(),
+                        inst.getInstanceId()
+                    ).map(VolumeAttachment::getAttachTime)
+                    .map(ISO_FMT::format)
+                    .orElse("")
+                ).elem("status", "attached")
                 .elem("deleteOnTermination", "true")
                 .end("ebs")
                 .end("item")

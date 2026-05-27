@@ -7,6 +7,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -19,6 +20,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.model.Address;
+import io.github.hectorvent.floci.services.ec2.model.BlockDevice;
+import io.github.hectorvent.floci.services.ec2.model.Ebs;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
@@ -39,6 +42,7 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroupRule;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.Volume;
+import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -184,7 +188,8 @@ public class Ec2Service {
                                     int minCount, int maxCount, String keyName,
                                     List<String> securityGroupIds, String subnetId,
                                     String clientToken, List<Tag> instanceTags,
-                                    String userData, String iamInstanceProfileArn) {
+                                    String userData, String iamInstanceProfileArn,
+                                    final List<BlockDevice> blockDevices) {
         ensureDefaultResources(region);
 
         // Resolve subnet
@@ -271,6 +276,35 @@ public class Ec2Service {
             eni.setDeviceIndex(0);
             inst.getNetworkInterfaces().add(eni);
 
+            // Block device EBS volumes 
+            for (int j = 0; j < blockDevices.size(); j++) {
+                final BlockDevice blockDevice = blockDevices.get(j);
+                final Ebs ebs = Objects.requireNonNullElse(blockDevice.getEbs(), new Ebs());
+                final String ebsAz = ebs.getAvailabilityZone();
+                final Volume volume = createVolume(
+                    region,
+                    ebsAz != null ? ebsAz : az,
+                    ebs.getVolumeType(),
+                    ebs.getVolumeSize(),
+                    ebs.isEncrypted(),
+                    ebs.getIops(),
+                    ebs.getSnapshotId(),
+                    null
+                );
+                final VolumeAttachment attachment = new VolumeAttachment();
+                attachment.setVolumeId(volume.getVolumeId());
+                attachment.setInstanceId(inst.getInstanceId());
+                attachment.setDevice(blockDevice.getDeviceName());
+                attachment.setState("attached");
+                attachment.setDeleteOnTermination(true);
+                attachment.setAttachTime(Instant.now());
+                volume.getAttachments().add(attachment);
+                if (j == 0) {
+                    inst.setRootDeviceVolumeId(volume.getVolumeId());
+                    inst.setRootDeviceName(blockDevice.getDeviceName());
+                }
+            }
+
             instances.put(key(region, instanceId), inst);
             reservation.getInstances().add(inst);
 
@@ -348,6 +382,9 @@ public class Ec2Service {
             if (inst == null) {
                 throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
             }
+            if (inst.getRootDeviceVolumeId() != null) {
+                volumes.remove(key(region, inst.getRootDeviceVolumeId()));
+            }
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
             }
@@ -365,6 +402,7 @@ public class Ec2Service {
             entry.put("currentState", "shutting-down");
             entry.put("currentCode", "32");
             result.add(entry);
+            instances.remove(key(region, id));
         }
         return result;
     }
@@ -485,6 +523,8 @@ public class Ec2Service {
             case "instanceType" -> inst.setInstanceType(value);
             case "sourceDestCheck" -> inst.setSourceDestCheck(Boolean.parseBoolean(value));
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
+            case "disableApiStop" -> inst.setDisableApiStop(Boolean.parseBoolean(value));
+            case "disableApiTermination" -> inst.setDisableApiTermination(Boolean.parseBoolean(value));
         }
     }
 
@@ -1405,6 +1445,7 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        // TODO: Do BlockDevice name & tags, and EBS tags need to be considered here?
         return true;
     }
 
@@ -1467,5 +1508,19 @@ public class Ec2Service {
             throw new AwsException("InvalidVolume.NotFound",
                     "The volume '" + volumeId + "' does not exist.", 400);
         }
+    }
+
+    public Optional<VolumeAttachment> getVolumeAttachment(final String region, final String volumeId, final String instanceId) {
+        if (volumeId == null) {
+            return Optional.empty();
+        }
+        return describeVolumes(
+            region,
+            List.of(volumeId),
+            Map.of("volume-id", List.of(volumeId))
+        ).stream()
+            .flatMap((final Volume volume) -> volume.getAttachments().stream())
+            .filter((final VolumeAttachment att) -> att.getInstanceId().equals(instanceId))
+            .findFirst();
     }
 }
