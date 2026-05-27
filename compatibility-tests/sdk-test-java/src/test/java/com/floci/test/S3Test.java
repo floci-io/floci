@@ -427,4 +427,104 @@ class S3Test {
             } catch (Exception ignored) {}
         }
     }
+
+    @Test
+    @Order(27)
+    void putObjectPersistsInlineTaggingHeader() {
+        String bucket = TestFixtures.uniqueName("inline-tag-bucket");
+        String key = "inline-tagged.txt";
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        try {
+            s3.putObject(PutObjectRequest.builder()
+                            .bucket(bucket).key(key)
+                            .tagging(Tagging.builder()
+                                    .tagSet(
+                                            software.amazon.awssdk.services.s3.model.Tag.builder().key("env").value("test").build(),
+                                            software.amazon.awssdk.services.s3.model.Tag.builder().key("project").value("floci").build()
+                                    )
+                                    .build())
+                            .build(),
+                    RequestBody.fromString("inline-tagged content"));
+
+            GetObjectTaggingResponse response = s3.getObjectTagging(
+                    GetObjectTaggingRequest.builder().bucket(bucket).key(key).build());
+
+            assertThat(response.tagSet()).hasSize(2);
+            assertThat(response.tagSet())
+                    .anyMatch(t -> "env".equals(t.key()) && "test".equals(t.value()))
+                    .anyMatch(t -> "project".equals(t.key()) && "floci".equals(t.value()));
+        } finally {
+            try {
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+            } catch (Exception ignored) {}
+            try {
+                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+            } catch (Exception ignored) {}
+        }
+    }
+
+    @Test
+    @Order(28)
+    void putObjectInlineTaggingRejectsMalformedPair() {
+        assertInlineTaggingHeaderRejected("nokeyhasvalue", 400, "InvalidArgument");
+    }
+
+    @Test
+    @Order(29)
+    void putObjectInlineTaggingRejectsEmptyKey() {
+        assertInlineTaggingHeaderRejected("=value", 400, "InvalidArgument");
+    }
+
+    @Test
+    @Order(30)
+    void putObjectInlineTaggingRejectsDuplicateKey() {
+        assertInlineTaggingHeaderRejected("env=a&env=b", 400, "InvalidArgument");
+    }
+
+    @Test
+    @Order(31)
+    void putObjectInlineTaggingRejectsTooManyTags() {
+        StringBuilder header = new StringBuilder();
+        for (int i = 0; i < 11; i++) {
+            if (i > 0) header.append('&');
+            header.append("k").append(i).append("=v").append(i);
+        }
+        assertInlineTaggingHeaderRejected(header.toString(), 400, "BadRequest");
+    }
+
+    @Test
+    @Order(32)
+    void putObjectInlineTaggingRejectsOversizedHeader() {
+        // The size check runs before pair parsing, so a single huge value trips it
+        // without first being rejected by the >10-tag rule.
+        String huge = "k=" + "v".repeat(8 * 1024 + 1);
+        assertInlineTaggingHeaderRejected(huge, 400, "InvalidArgument");
+    }
+
+    private void assertInlineTaggingHeaderRejected(String rawTaggingHeader, int expectedStatus, String expectedErrorCode) {
+        String bucket = TestFixtures.uniqueName("inline-tag-reject");
+        String key = "rejected.txt";
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        try {
+            assertThatThrownBy(() -> s3.putObject(
+                    PutObjectRequest.builder()
+                            .bucket(bucket).key(key)
+                            .overrideConfiguration(o -> o.putHeader("x-amz-tagging", rawTaggingHeader))
+                            .build(),
+                    RequestBody.fromString("content")))
+                    .isInstanceOf(S3Exception.class)
+                    .satisfies(e -> {
+                        S3Exception s3e = (S3Exception) e;
+                        assertThat(s3e.statusCode()).isEqualTo(expectedStatus);
+                        assertThat(s3e.awsErrorDetails().errorCode()).isEqualTo(expectedErrorCode);
+                    });
+        } finally {
+            try {
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+            } catch (Exception ignored) {}
+            try {
+                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+            } catch (Exception ignored) {}
+        }
+    }
 }

@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.19] - 2026-05-24
+
+### Added
+
+- **lambda:** Lambda layer support — `PublishLayerVersion`, `GetLayerVersion`, `ListLayerVersions`, `DeleteLayerVersion` ([#1015](https://github.com/floci-io/floci/pull/1015))
+- **elbv2:** `DescribeListenerAttributes`, `ModifyListenerAttributes`, `DescribeCapacityReservation`, and `ModifyCapacityReservation` actions ([#1021](https://github.com/floci-io/floci/pull/1021))
+- **kms:** `RotateKeyOnDemand` support for on-demand key rotation ([#990](https://github.com/floci-io/floci/pull/990))
+- **apigateway:** Lambda REQUEST authorizer support for HTTP API v2 routes ([#1011](https://github.com/floci-io/floci/pull/1011))
+- **apigateway:** persist `UpdateStage` `methodSettings` patch operations on v1 stages ([#1004](https://github.com/floci-io/floci/pull/1004))
+- **cognito:** `UpdateGroup`, `ListUsersInGroup`, and `AdminConfirmSignUp` actions ([#998](https://github.com/floci-io/floci/pull/998))
+- **ci:** Docker images now published to ECR Public Gallery ([#1000](https://github.com/floci-io/floci/pull/1000))
+
+### Fixed
+
+- **s3:** remove private `hasQueryParam` in `S3Controller` that shadowed the static import from `S3RequestParser` — presigned `PUT` requests with `x-amz-tagging` in `X-Amz-SignedHeaders` were misrouted to `PutObjectTagging` and returned 404 ([#1023](https://github.com/floci-io/floci/pull/1023))
+- **iam:** honour 12-digit access key as account ID in IAM ARNs — `CreateRole`, `CreateUser`, `CreateGroup`, `CreatePolicy`, and `CreateInstanceProfile` always returned `000000000000` regardless of caller identity ([#1017](https://github.com/floci-io/floci/pull/1017))
+- **s3:** persist inline `x-amz-tagging` header on `PutObject` ([#987](https://github.com/floci-io/floci/pull/987))
+- **apigateway:** implement `DeleteDeployment` endpoint and return correct JSON 404 error for missing resources ([#1019](https://github.com/floci-io/floci/pull/1019))
+- **rds:** register `DbEndpoint` for native-image reflection ([#1014](https://github.com/floci-io/floci/pull/1014))
+- **apigateway:** populate full `APIGatewayRequestAuthorizerEvent` fields for REQUEST authorizers ([#1002](https://github.com/floci-io/floci/pull/1002))
+- **sns:** return per-entry failures from `PublishBatch` instead of aborting the whole batch on a single entry failure ([#1008](https://github.com/floci-io/floci/pull/1008))
+- **cognito:** CloudFormation provisioning for `UserPool` and `UserPoolClient` resource types ([#1007](https://github.com/floci-io/floci/pull/1007))
+- **lifecycle:** fix incorrect readiness status display when TLS is enabled and AppConfig is initialising ([#1006](https://github.com/floci-io/floci/pull/1006))
+- **s3:** unblock `.well-known/*` object keys that were hijacked by Cognito OIDC routes ([#1003](https://github.com/floci-io/floci/pull/1003))
+- **sns:** preserve binary message attributes through `Publish` and fan-out delivery ([#989](https://github.com/floci-io/floci/pull/989))
+- **cognito:** include user attributes in ID token claims ([#985](https://github.com/floci-io/floci/pull/985))
+- **ecr:** release registry port when container start fails to prevent port exhaustion ([#1010](https://github.com/floci-io/floci/pull/1010))
+- **s3:** restore object data on delete marker removal and return missing version headers ([#966](https://github.com/floci-io/floci/pull/966))
+- **sts:** honour 12-digit access key as account ID in STS responses ([#983](https://github.com/floci-io/floci/pull/983))
+- **sqs:** accept bare queue name in `QueueUrl` field ([#980](https://github.com/floci-io/floci/pull/980))
+- **s3:** accept region-qualified virtual-host form `bucket.s3.<region>.<host>` ([#978](https://github.com/floci-io/floci/pull/978))
+- **sqs/sns:** add `ContentBasedDeduplication` support and SNS subscription CloudFormation provisioning ([#974](https://github.com/floci-io/floci/pull/974))
+- **s3:** handle `PutBucketRequestPayment` instead of falling through to `CreateBucket` ([#994](https://github.com/floci-io/floci/pull/994))
+
+### Documentation
+
+- **pipes:** add documentation and navigation for EventBridge Pipes ([#1001](https://github.com/floci-io/floci/pull/1001))
+- **tagging:** add Resource Groups Tagging service documentation ([#976](https://github.com/floci-io/floci/pull/976))
+- **transcribe:** add Transcribe service documentation ([#975](https://github.com/floci-io/floci/pull/975))
+
 ## [1.5.18] - 2026-05-21
 
 ### Added
@@ -708,7 +748,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.18...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.19...HEAD
+[1.5.19]: https://github.com/floci-io/floci/compare/1.5.18...1.5.19
 [1.5.18]: https://github.com/floci-io/floci/compare/1.5.17...1.5.18
 [1.5.17]: https://github.com/floci-io/floci/compare/1.5.16...1.5.17
 [1.5.16]: https://github.com/floci-io/floci/compare/1.5.15...1.5.16

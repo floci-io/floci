@@ -158,7 +158,8 @@ public class AwsQueryController {
             "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
             "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
-            "DescribeInstanceTypes"
+            "DescribeInstanceTypes",
+            "DescribeNetworkInterfaces"
     );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;

@@ -30,6 +30,7 @@
 | `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
 | `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
 | `DisableKeyRotation` | Disable automatic key rotation |
+| `RotateKeyOnDemand` | Rotate key material on demand (symmetric keys only) |
 
 ## Configuration
 

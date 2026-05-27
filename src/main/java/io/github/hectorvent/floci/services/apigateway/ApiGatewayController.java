@@ -523,6 +523,16 @@ public class ApiGatewayController {
                 .type(MediaType.APPLICATION_JSON).build();
     }
 
+    @DELETE
+    @Path("/restapis/{apiId}/deployments/{deploymentId}")
+    public Response deleteDeployment(@Context HttpHeaders headers,
+                                     @PathParam("apiId") String apiId,
+                                     @PathParam("deploymentId") String deploymentId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteDeployment(region, apiId, deploymentId);
+        return Response.noContent().build();
+    }
+
     @POST
     @Path("/restapis/{apiId}/stages")
     public Response createStage(@Context HttpHeaders headers,

@@ -30,7 +30,7 @@ public class OpenSearchService {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchService.class);
 
-    private static final String DEFAULT_ENGINE_VERSION = "OpenSearch_2.11";
+    private static final String DEFAULT_ENGINE_VERSION = OpenSearchVersions.DEFAULT_VERSION;
 
     private final StorageBackend<String, Domain> domainStore;
     private final EmulatorConfig config;
@@ -76,6 +76,7 @@ public class OpenSearchService {
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
                                 EbsOptions ebsOptions, Map<String, String> tags, String region) {
         validateDomainName(domainName);
+        OpenSearchVersions.validate(engineVersion);
 
         if (domainStore.get(domainName).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
@@ -143,6 +144,7 @@ public class OpenSearchService {
                                       ClusterConfig clusterConfig, EbsOptions ebsOptions,
                                       String region) {
         Domain domain = describeDomain(domainName);
+        OpenSearchVersions.validate(engineVersion);
 
         if (engineVersion != null && !engineVersion.isBlank()) {
             domain.setEngineVersion(engineVersion);
@@ -203,10 +205,13 @@ public class OpenSearchService {
 
     public Domain upgradeDomain(String domainName, String targetVersion) {
         Domain domain = describeDomain(domainName);
-        if (targetVersion != null && !targetVersion.isBlank()) {
-            domain.setEngineVersion(targetVersion);
-            domainStore.put(domainName, domain);
+        if (targetVersion == null || targetVersion.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "TargetVersion is required for UpgradeDomain.", 400);
         }
+        OpenSearchVersions.validateUpgrade(domain.getEngineVersion(), targetVersion);
+        domain.setEngineVersion(targetVersion);
+        domainStore.put(domainName, domain);
         return domain;
     }
 

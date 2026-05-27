@@ -633,6 +633,36 @@ class KmsServiceTest {
         assertFalse(kmsService.getKeyRotationStatus(key.getKeyId(), REGION));
     }
 
+    // ── Issue #911 — RotateKeyOnDemand ──────────────────────────────────────
+
+    @Test
+    void rotateKeyOnDemandReturnsKeyId() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        String keyId = kmsService.rotateKeyOnDemand(key.getKeyId(), REGION);
+        assertEquals(key.getKeyId(), keyId);
+    }
+
+    @Test
+    void rotateKeyOnDemandOnAsymmetricKeyThrows() {
+        KmsKey key = kmsService.createKey("rsa key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.rotateKeyOnDemand(key.getKeyId(), REGION));
+
+        assertEquals("UnsupportedOperationException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void rotateKeyOnDemandOnDisabledKeyThrows() {
+        KmsKey key = kmsService.createKey(null, REGION);
+        key.setEnabled(false);
+        AwsException ex = assertThrows(AwsException.class, () ->
+                kmsService.rotateKeyOnDemand(key.getKeyId(), REGION));
+
+        assertEquals("DisabledException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
     // ── Issue #497 — HMAC key specs ─────────────────────────────────────────
 
     @ParameterizedTest

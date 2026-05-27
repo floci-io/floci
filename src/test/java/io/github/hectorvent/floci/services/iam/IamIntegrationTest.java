@@ -328,6 +328,42 @@ class IamIntegrationTest {
                     equalTo("TestRole"));
     }
 
+    @Test
+    @Order(23)
+    void iamCreateRoleHonoursTwelveDigitAccessKey() {
+        given()
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "TenantRole")
+            .formParam("Path", "/")
+            .formParam("AssumeRolePolicyDocument", TRUST_POLICY)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=123456789012/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateRoleResponse.CreateRoleResult.Role.RoleName", equalTo("TenantRole"))
+            .body("CreateRoleResponse.CreateRoleResult.Role.Arn",
+                    equalTo("arn:aws:iam::123456789012:role/TenantRole"));
+    }
+
+    @Test
+    @Order(24)
+    void iamGetRoleHonoursTwelveDigitAccessKey() {
+        given()
+            .formParam("Action", "GetRole")
+            .formParam("RoleName", "TenantRole")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=123456789012/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetRoleResponse.GetRoleResult.Role.RoleName", equalTo("TenantRole"))
+            .body("GetRoleResponse.GetRoleResult.Role.Arn",
+                    equalTo("arn:aws:iam::123456789012:role/TenantRole"));
+    }
+
     // =========================================================================
     // Managed Policies
     // =========================================================================
