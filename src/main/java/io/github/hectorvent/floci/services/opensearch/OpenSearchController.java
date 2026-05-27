@@ -31,17 +31,18 @@ public class OpenSearchController {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchController.class);
 
-    private static final List<String> SUPPORTED_VERSIONS = List.of(
-            "OpenSearch_2.13", "OpenSearch_2.11", "OpenSearch_2.9", "OpenSearch_2.7",
-            "OpenSearch_2.5", "OpenSearch_2.3", "OpenSearch_1.3", "OpenSearch_1.2",
-            "Elasticsearch_7.10", "Elasticsearch_7.9", "Elasticsearch_7.8"
-    );
-
     private static final List<String> INSTANCE_TYPES = List.of(
             "t3.small.search", "t3.medium.search",
             "m5.large.search", "m5.xlarge.search", "m5.2xlarge.search",
+            "m6g.large.search", "m6g.xlarge.search", "m6g.2xlarge.search",
+            "m7g.large.search", "m7g.xlarge.search", "m7g.2xlarge.search",
             "r5.large.search", "r5.xlarge.search", "r5.2xlarge.search",
-            "c5.large.search", "c5.xlarge.search", "c5.2xlarge.search"
+            "r6g.large.search", "r6g.xlarge.search", "r6g.2xlarge.search",
+            "r7g.large.search", "r7g.xlarge.search", "r7g.2xlarge.search",
+            "c5.large.search", "c5.xlarge.search", "c5.2xlarge.search",
+            "c6g.large.search", "c6g.xlarge.search", "c6g.2xlarge.search",
+            "c7g.large.search", "c7g.xlarge.search", "c7g.2xlarge.search",
+            "or1.medium.search", "or1.large.search", "or1.xlarge.search", "or1.2xlarge.search"
     );
 
     private final OpenSearchService service;
@@ -266,7 +267,7 @@ public class OpenSearchController {
     public Response listVersions(@Context HttpHeaders headers) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode versions = response.putArray("Versions");
-        SUPPORTED_VERSIONS.forEach(versions::add);
+        OpenSearchVersions.supportedVersions().forEach(versions::add);
         return Response.ok(response).build();
     }
 
@@ -277,12 +278,25 @@ public class OpenSearchController {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode compatibleVersions = response.putArray("CompatibleVersions");
 
-        ObjectNode entry = objectMapper.createObjectNode();
-        entry.put("SourceVersion", "OpenSearch_2.9");
-        ArrayNode targets = entry.putArray("TargetVersions");
-        targets.add("OpenSearch_2.11");
-        targets.add("OpenSearch_2.13");
-        compatibleVersions.add(entry);
+        // When domainName is set, narrow the response to that domain's source
+        // version — matches AWS's GetCompatibleVersions behavior. Otherwise
+        // return the full matrix so SDK clients can render upgrade pickers.
+        if (domainName != null && !domainName.isBlank()) {
+            String sourceVersion = service.describeDomain(domainName).getEngineVersion();
+            ObjectNode entry = objectMapper.createObjectNode();
+            entry.put("SourceVersion", sourceVersion);
+            ArrayNode targets = entry.putArray("TargetVersions");
+            OpenSearchVersions.compatibleTargets(sourceVersion).forEach(targets::add);
+            compatibleVersions.add(entry);
+        } else {
+            OpenSearchVersions.compatibilityMatrix().forEach((source, targetList) -> {
+                ObjectNode entry = objectMapper.createObjectNode();
+                entry.put("SourceVersion", source);
+                ArrayNode targets = entry.putArray("TargetVersions");
+                targetList.forEach(targets::add);
+                compatibleVersions.add(entry);
+            });
+        }
 
         return Response.ok(response).build();
     }

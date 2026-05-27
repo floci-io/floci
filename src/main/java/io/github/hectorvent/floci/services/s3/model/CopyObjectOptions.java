@@ -5,6 +5,8 @@ import java.util.Map;
 public class CopyObjectOptions {
     private String metadataDirective;
     private Map<String, String> replacementMetadata;
+    private String taggingDirective;
+    private Map<String, String> replacementTagging;
     private String storageClass;
     private String contentType;
     private String contentEncoding;
@@ -18,6 +20,12 @@ public class CopyObjectOptions {
 
     public Map<String, String> getReplacementMetadata() { return replacementMetadata; }
     public CopyObjectOptions withReplacementMetadata(Map<String, String> replacementMetadata) { this.replacementMetadata = replacementMetadata; return this; }
+
+    public String getTaggingDirective() { return taggingDirective; }
+    public CopyObjectOptions withTaggingDirective(String taggingDirective) { this.taggingDirective = taggingDirective; return this; }
+
+    public Map<String, String> getReplacementTagging() { return replacementTagging; }
+    public CopyObjectOptions withReplacementTagging(Map<String, String> replacementTagging) { this.replacementTagging = replacementTagging; return this; }
 
     public String getStorageClass() { return storageClass; }
     public CopyObjectOptions withStorageClass(String storageClass) { this.storageClass = storageClass; return this; }

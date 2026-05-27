@@ -2,7 +2,6 @@ package io.github.hectorvent.floci.services.ec2;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
-import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -110,6 +109,8 @@ public class Ec2QueryHandler {
                 case "DescribeAccountAttributes" -> handleDescribeAccountAttributes(params, region);
                 // Instance Types
                 case "DescribeInstanceTypes" -> handleDescribeInstanceTypes(params, region);
+                // Network Interfaces
+                case "DescribeNetworkInterfaces" -> handleDescribeNetworkInterfaces(params, region);
                 // Volumes
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
@@ -152,6 +153,17 @@ public class Ec2QueryHandler {
             result.add(v);
         }
         return result;
+    }
+
+    private int parseIntParam(MultivaluedMap<String, String> p, String name, int defaultValue) {
+        String val = p.getFirst(name);
+        if (val == null || val.isEmpty()) return defaultValue;
+        try {
+            return Integer.parseInt(val);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidMaxResults",
+                    "The specified value for MaxResults is not valid.", 400);
+        }
     }
 
     private Map<String, List<String>> getFilters(MultivaluedMap<String, String> p) {
@@ -1111,6 +1123,88 @@ public class Ec2QueryHandler {
             xml.end("supportedArchitectures").end("item");
         }
         xml.end("instanceTypeSet").end("DescribeInstanceTypesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    // ─── Network Interface handlers ───────────────────────────────────────────
+
+    private Response handleDescribeNetworkInterfaces(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "NetworkInterfaceId");
+        Map<String, List<String>> filters = getFilters(p);
+
+        // Phase 5: pagination parameters
+        int maxResults = parseIntParam(p, "MaxResults", 0);
+        String nextToken = p.getFirst("NextToken");
+
+        NetworkInterfaceListResult result = service.describeNetworkInterfaces(region, ids, filters, maxResults, nextToken);
+        List<NetworkInterface> nis = result.networkInterfaces();
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeNetworkInterfacesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("networkInterfaceSet");
+        for (NetworkInterface ni : nis) {
+            xml.start("item")
+                    .elem("networkInterfaceId", ni.getNetworkInterfaceId())
+                    .elem("subnetId", ni.getSubnetId())
+                    .elem("vpcId", ni.getVpcId())
+                    .elem("availabilityZone", ni.getAvailabilityZone())
+                    .elem("description", ni.getDescription())
+                    .elem("ownerId", ni.getOwnerId())
+                    .elem("status", ni.getStatus())
+                    .elem("interfaceType", ni.getInterfaceType())
+                    .elem("macAddress", ni.getMacAddress())
+                    .elem("privateIpAddress", ni.getPrivateIpAddress())
+                    .elem("privateDnsName", ni.getPrivateDnsName())
+                    .elem("sourceDestCheck", String.valueOf(ni.isSourceDestCheck()))
+                    .start("groupSet");
+            for (GroupIdentifier gi : ni.getGroups()) {
+                xml.start("item")
+                        .elem("groupId", gi.getGroupId())
+                        .elem("groupName", gi.getGroupName())
+                        .end("item");
+            }
+            xml.end("groupSet");
+            // Phase 3: tagSet from instance tags
+            xml.raw(tagSetXml(ni.getTagSet()));
+            if (ni.getAttachment() != null) {
+                xml.start("attachment")
+                        .elem("attachmentId", ni.getAttachment().getAttachmentId())
+                        .elem("deviceIndex", String.valueOf(ni.getAttachment().getDeviceIndex()))
+                        .elem("status", ni.getAttachment().getStatus())
+                        .elem("attachTime", ni.getAttachment().getAttachTime())
+                        .elem("deleteOnTermination", String.valueOf(ni.getAttachment().isDeleteOnTermination()))
+                        .elem("instanceId", ni.getAttachment().getInstanceId())
+                        .elem("instanceOwnerId", ni.getAttachment().getInstanceOwnerId())
+                        .end("attachment");
+            }
+            // Phase 3: privateIpAddressesSet with association
+            if (!ni.getPrivateIpAddresses().isEmpty()) {
+                xml.start("privateIpAddressesSet");
+                for (NetworkInterfacePrivateIpAddress ip : ni.getPrivateIpAddresses()) {
+                    xml.start("item")
+                            .elem("privateIpAddress", ip.getPrivateIpAddress())
+                            .elem("privateDnsName", ip.getPrivateDnsName())
+                            .elem("primary", String.valueOf(ip.isPrimary()));
+                    if (ip.getAssociation() != null) {
+                        xml.start("association")
+                                .elem("publicIp", ip.getAssociation().getPublicIp())
+                                .elem("allocationId", ip.getAssociation().getAllocationId())
+                                .elem("associationId", ip.getAssociation().getAssociationId())
+                                .elem("ipOwnerId", ip.getAssociation().getIpOwnerId())
+                                .end("association");
+                    }
+                    xml.end("item");
+                }
+                xml.end("privateIpAddressesSet");
+            }
+            xml.end("item");
+        }
+        xml.end("networkInterfaceSet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.end("DescribeNetworkInterfacesResponse");
         return xmlResponse(xml.build());
     }
 

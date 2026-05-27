@@ -1,12 +1,18 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,6 +30,11 @@ import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAssociation;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAttachment;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceListResult;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterfacePrivateIpAddress;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
 import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
@@ -49,6 +60,8 @@ import jakarta.inject.Inject;
 public class Ec2Service {
 
     private static final Logger LOG = Logger.getLogger(Ec2Service.class);
+    private static final DateTimeFormatter ISO_FMT = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")
+            .withZone(ZoneOffset.UTC);
 
     private final String accountId;
     private final EmulatorConfig config;
@@ -1431,6 +1444,25 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        if (resource instanceof NetworkInterface ni) {
+            return switch (filterName) {
+                case "network-interface-id" -> matchesValue(values, ni.getNetworkInterfaceId());
+                case "subnet-id" -> matchesValue(values, ni.getSubnetId());
+                case "vpc-id" -> matchesValue(values, ni.getVpcId());
+                case "group-id" -> ni.getGroups().stream()
+                        .anyMatch(g -> matchesValue(values, g.getGroupId()));
+                case "status" -> matchesValue(values, ni.getStatus());
+                case "private-ip-address" ->
+                    matchesValue(values, ni.getPrivateIpAddress()) ||
+                    ni.getPrivateIpAddresses().stream()
+                        .anyMatch(ip -> matchesValue(values, ip.getPrivateIpAddress()));
+                case "description" -> matchesValue(values, ni.getDescription());
+                case "owner-id" -> matchesValue(values, ni.getOwnerId());
+                case "mac-address" -> matchesValue(values, ni.getMacAddress());
+                case "private-dns-name" -> matchesValue(values, ni.getPrivateDnsName());
+                default -> true;
+            };
+        }
         return true;
     }
 
@@ -1445,6 +1477,7 @@ public class Ec2Service {
         if (resource instanceof KeyPair kp) return kp.getTags();
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
+        if (resource instanceof NetworkInterface ni) return ni.getTagSet();
         return Collections.emptyList();
     }
 
@@ -1493,5 +1526,147 @@ public class Ec2Service {
             throw new AwsException("InvalidVolume.NotFound",
                     "The volume '" + volumeId + "' does not exist.", 400);
         }
+    }
+
+    // ─── Network Interfaces ─────────────────────────────────────────────────────
+
+    public NetworkInterfaceListResult describeNetworkInterfaces(String region, List<String> networkInterfaceIds,
+                                                                   Map<String, List<String>> filters,
+                                                                   int maxResults, String nextToken) {
+        // Validate pagination parameters
+        if (maxResults > 0 && !networkInterfaceIds.isEmpty()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "The parameter NetworkInterfaceId cannot be used with the parameter MaxResults.", 400);
+        }
+        if (maxResults > 0 && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 1000.", 400);
+        }
+        int offset = decodeToken(nextToken);
+
+        // Phase 6: validate NetworkInterfaceId format
+        for (String id : networkInterfaceIds) {
+            if (!id.startsWith("eni-")) {
+                throw new AwsException("InvalidNetworkInterfaceID.Malformed",
+                        "Invalid id: \"" + id + "\" (expecting \"eni-...\")", 400);
+            }
+        }
+
+        ensureDefaultResources(region);
+        List<NetworkInterface> result = new ArrayList<>();
+        Set<String> foundIds = new HashSet<>();
+        for (Instance inst : instances.values()) {
+            if (!inst.getRegion().equals(region)) continue;
+            for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
+                if (!networkInterfaceIds.isEmpty()
+                        && !networkInterfaceIds.contains(eni.getNetworkInterfaceId())) {
+                    continue;
+                }
+                foundIds.add(eni.getNetworkInterfaceId());
+                NetworkInterface ni = new NetworkInterface();
+                ni.setNetworkInterfaceId(eni.getNetworkInterfaceId());
+                ni.setSubnetId(eni.getSubnetId());
+                ni.setVpcId(eni.getVpcId());
+                ni.setDescription(eni.getDescription());
+                ni.setOwnerId(eni.getOwnerId());
+                ni.setStatus(eni.getStatus());
+                ni.setMacAddress(eni.getMacAddress());
+                ni.setPrivateIpAddress(eni.getPrivateIpAddress());
+                ni.setPrivateDnsName(eni.getPrivateDnsName());
+                ni.setSourceDestCheck(eni.isSourceDestCheck());
+                ni.setGroups(new ArrayList<>(eni.getGroups()));
+                // Phase 3: availability zone, tags, interface type
+                if (inst.getPlacement() != null) {
+                    ni.setAvailabilityZone(inst.getPlacement().getAvailabilityZone());
+                }
+                ni.getTagSet().addAll(inst.getTags());
+
+                NetworkInterfaceAttachment att = new NetworkInterfaceAttachment();
+                att.setAttachmentId(eni.getAttachmentId());
+                att.setDeviceIndex(eni.getDeviceIndex());
+                att.setStatus("attached");
+                att.setInstanceId(inst.getInstanceId());
+                att.setInstanceOwnerId(eni.getOwnerId());
+                // Phase 3: attachTime from instance launchTime, deleteOnTermination
+                if (inst.getLaunchTime() != null) {
+                    att.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+                }
+                att.setDeleteOnTermination(true);
+                ni.setAttachment(att);
+
+                // Phase 3: privateIpAddressesSet — primary IP
+                NetworkInterfacePrivateIpAddress primaryIp = new NetworkInterfacePrivateIpAddress();
+                primaryIp.setPrivateIpAddress(eni.getPrivateIpAddress());
+                primaryIp.setPrivateDnsName(eni.getPrivateDnsName());
+                primaryIp.setPrimary(true);
+                // Look up EIP association for this instance
+                addressForInstance(inst.getInstanceId()).ifPresent(addr -> {
+                    NetworkInterfaceAssociation assoc = new NetworkInterfaceAssociation();
+                    assoc.setPublicIp(addr.getPublicIp());
+                    assoc.setAllocationId(addr.getAllocationId());
+                    assoc.setAssociationId(addr.getAssociationId());
+                    assoc.setIpOwnerId(eni.getOwnerId());
+                    primaryIp.setAssociation(assoc);
+                });
+                ni.getPrivateIpAddresses().add(primaryIp);
+
+                // Phase 4: apply filters
+                if (!matchesFilters(ni, filters, region)) {
+                    continue;
+                }
+
+                result.add(ni);
+            }
+        }
+
+        // Phase 6: validate requested IDs exist
+        for (String id : networkInterfaceIds) {
+            if (!foundIds.contains(id)) {
+                throw new AwsException("InvalidNetworkInterfaceID.NotFound",
+                        "The network interface ID '" + id + "' does not exist", 400);
+            }
+        }
+
+        // Phase 5: pagination
+        if (maxResults > 0) {
+            int total = result.size();
+            int toIndex = Math.min(offset + maxResults, total);
+            List<NetworkInterface> page = (offset < total)
+                    ? result.subList(offset, toIndex)
+                    : Collections.emptyList();
+            String newNextToken = (toIndex < total)
+                    ? encodeToken(toIndex)
+                    : null;
+            return new NetworkInterfaceListResult(new ArrayList<>(page), newNextToken);
+        }
+
+        return new NetworkInterfaceListResult(result, null);
+    }
+
+    // ─── Pagination token encoding / decoding ──────────────────────────────────
+
+    private String encodeToken(int offset) {
+        String json = "{\"offset\":" + offset + "}";
+        return Base64.getEncoder().encodeToString(json.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private int decodeToken(String token) {
+        if (token == null || token.isEmpty()) return 0;
+        try {
+            String json = new String(Base64.getDecoder().decode(token), StandardCharsets.UTF_8);
+            int start = json.indexOf("\"offset\":") + 9;
+            int end = json.indexOf('}', start);
+            return Integer.parseInt(json.substring(start, end));
+        } catch (Exception e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid NextToken", 400);
+        }
+    }
+
+    private Optional<Address> addressForInstance(String instanceId) {
+        return addresses.values().stream()
+                .filter(a -> instanceId.equals(a.getInstanceId()) && a.getAssociationId() != null)
+                .findFirst();
     }
 }
