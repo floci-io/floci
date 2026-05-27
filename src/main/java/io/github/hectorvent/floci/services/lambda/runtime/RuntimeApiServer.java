@@ -133,6 +133,13 @@ public class RuntimeApiServer {
             ctx.response().setStatusCode(202).end();
         });
 
+        long deadline = System.currentTimeMillis() + 5000;
+        tryListen(started, router, deadline);
+
+        return started;
+    }
+
+    private void tryListen(CompletableFuture<Void> started, Router router, long deadline) {
         httpServer = vertx.createHttpServer(new HttpServerOptions()
                 .setMaxFormAttributeSize(-1));
         httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
@@ -140,12 +147,15 @@ public class RuntimeApiServer {
                 LOG.infov("RuntimeApiServer started on port {0}", port);
                 started.complete(null);
             } else {
-                LOG.errorv(result.cause(), "RuntimeApiServer failed to bind on port {0}", port);
-                started.completeExceptionally(result.cause());
+                if (System.currentTimeMillis() < deadline) {
+                    LOG.debugv("RuntimeApiServer failed to bind on port {0}, retrying in 100ms...", port);
+                    httpServer.close(ar -> vertx.setTimer(100, id -> tryListen(started, router, deadline)));
+                } else {
+                    LOG.errorv(result.cause(), "RuntimeApiServer failed to bind on port {0}", port);
+                    started.completeExceptionally(result.cause());
+                }
             }
         });
-
-        return started;
     }
 
     public synchronized CompletableFuture<Void> stop() {
