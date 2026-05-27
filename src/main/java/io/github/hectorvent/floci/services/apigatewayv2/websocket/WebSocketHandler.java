@@ -561,6 +561,9 @@ public class WebSocketHandler {
         String sourceIp = connectionInfo != null ? connectionInfo.getSourceIp() : "127.0.0.1";
         String userAgent = connectionInfo != null ? connectionInfo.getUserAgent() : "";
 
+        // Unregister the connection IMMEDIATELY so it is gone from the maps right away
+        connectionManager.unregister(connectionId);
+
         // Look up the $disconnect route
         Route disconnectRoute = apiGatewayV2Service.findRouteByKey(region, apiId, "$disconnect");
 
@@ -585,7 +588,6 @@ public class WebSocketHandler {
             } catch (AwsException e) {
                 LOG.warnv("$disconnect integration {0} not found for connection {1}: {2}",
                         integrationId, connectionId, e.getMessage());
-                connectionManager.unregister(connectionId);
                 return;
             }
 
@@ -607,12 +609,7 @@ public class WebSocketHandler {
                     LOG.warnv("Error invoking $disconnect route for connection {0}: {1}",
                             connectionId, ar.cause().getMessage());
                 }
-                // Always unregister the connection regardless of $disconnect outcome
-                connectionManager.unregister(connectionId);
             });
-        } else {
-            // No $disconnect route — just unregister
-            connectionManager.unregister(connectionId);
         }
     }
 
