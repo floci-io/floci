@@ -153,7 +153,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::KMS::Key" -> provisionKmsKey(resource, properties, engine, region, accountId);
                 case "AWS::KMS::Alias" -> provisionKmsAlias(resource, properties, engine, region);
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
-                case "AWS::CloudFormation::Stack" -> provisionNestedStack(resource, properties, engine, region);
                 case "AWS::CDK::Metadata" -> provisionCdkMetadata(resource);
                 case "AWS::S3::BucketPolicy" -> provisionS3BucketPolicy(resource, properties, engine);
                 case "AWS::SQS::QueuePolicy" -> provisionSqsQueuePolicy(resource, properties, engine);
@@ -1178,17 +1177,6 @@ public class CloudFormationResourceProvisioner {
         }
 
         return password;
-    }
-
-    // ── Nested Stack ──────────────────────────────────────────────────────────
-
-    private void provisionNestedStack(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                      String region) {
-        // Nested stacks are stubbed — return a synthetic stack ID
-        String nestedId = AwsArnUtils.Arn.of("cloudformation", region, "", "stack/nested-" + UUID.randomUUID().toString().substring(0, 8) + "/").toString();
-        r.setPhysicalId(nestedId);
-        r.getAttributes().put("Arn", nestedId);
-        r.getAttributes().put("Outputs.BootstrapVersion", "21");
     }
 
     // ── EventBridge ─────────────────────────────────────────────────────────

@@ -51,6 +51,19 @@ class OpenSearchIntegrationTest {
     }
 
     @Test
+    @Order(2)
+    void createDomainRejectsUnknownEngineVersion() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"bogus-version-domain\",\"EngineVersion\":\"OpenSearch_99.0\"}")
+        .when()
+            .post("/2021-01-01/opensearch/domain")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
     @Order(3)
     void describeDomain() {
         given()
@@ -214,7 +227,10 @@ class OpenSearchIntegrationTest {
         .then()
             .statusCode(200)
             .body("Versions", not(empty()))
-            .body("Versions", hasItem("OpenSearch_2.11"));
+            .body("Versions", hasItem("OpenSearch_3.6"))
+            .body("Versions", hasItem("OpenSearch_2.19"))
+            .body("Versions", hasItem("OpenSearch_2.11"))
+            .body("Versions", hasItem("Elasticsearch_7.10"));
     }
 
     @Test
@@ -226,7 +242,25 @@ class OpenSearchIntegrationTest {
             .get("/2021-01-01/opensearch/compatibleVersions")
         .then()
             .statusCode(200)
-            .body("CompatibleVersions", not(empty()));
+            .body("CompatibleVersions", not(empty()))
+            .body("CompatibleVersions.SourceVersion", hasItem("OpenSearch_2.19"));
+    }
+
+    @Test
+    @Order(14)
+    void getCompatibleVersionsForDomain() {
+        // domainName-scoped query should only return the source/target row for
+        // the named domain, not the full matrix.
+        given()
+            .header("Authorization", AUTH_HEADER)
+            .queryParam("domainName", DOMAIN_NAME)
+        .when()
+            .get("/2021-01-01/opensearch/compatibleVersions")
+        .then()
+            .statusCode(200)
+            .body("CompatibleVersions", hasSize(1))
+            .body("CompatibleVersions[0].SourceVersion", equalTo("OpenSearch_2.11"))
+            .body("CompatibleVersions[0].TargetVersions", hasItem("OpenSearch_2.13"));
     }
 
     @Test
@@ -341,6 +375,19 @@ class OpenSearchIntegrationTest {
             .statusCode(200)
             .body("DomainName", equalTo(DOMAIN_NAME))
             .body("TargetVersion", equalTo("OpenSearch_2.13"));
+    }
+
+    @Test
+    @Order(23)
+    void upgradeDomainRejectsUnsupportedTarget() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"DomainName\":\"" + DOMAIN_NAME + "\",\"TargetVersion\":\"OpenSearch_99.0\"}")
+        .when()
+            .post("/2021-01-01/opensearch/upgradeDomain")
+        .then()
+            .statusCode(400);
     }
 
     @Test

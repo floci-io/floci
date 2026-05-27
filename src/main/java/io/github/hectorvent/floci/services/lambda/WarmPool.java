@@ -15,7 +15,9 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
@@ -202,8 +204,28 @@ public class WarmPool {
             queue.clear();
         }
         LOG.infov("Draining {0} container(s) for function: {1}", toStop.size(), functionName);
-        for (ContainerHandle handle : toStop) {
-            stopQuietly(handle);
+        stopInParallel(toStop);
+    }
+
+    private void stopInParallel(List<ContainerHandle> handles) {
+        if (handles.isEmpty()) return;
+        int parallelism = Math.min(handles.size(), 16);
+        ExecutorService pool = Executors.newFixedThreadPool(parallelism,
+                r -> { Thread t = new Thread(r, "warm-pool-drainer"); t.setDaemon(true); return t; });
+        try {
+            List<Future<?>> futures = new ArrayList<>(handles.size());
+            for (ContainerHandle handle : handles) {
+                futures.add(pool.submit(() -> stopQuietly(handle)));
+            }
+            for (Future<?> f : futures) {
+                try {
+                    f.get(15, TimeUnit.SECONDS);
+                } catch (Exception e) {
+                    LOG.warnv("Drain task did not finish cleanly: {0}", e.getMessage());
+                }
+            }
+        } finally {
+            pool.shutdownNow();
         }
     }
 
