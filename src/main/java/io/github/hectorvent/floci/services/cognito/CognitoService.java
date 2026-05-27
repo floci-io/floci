@@ -984,6 +984,10 @@ public class CognitoService {
         return baseUrl + "/cognito-idp/oauth2/token";
     }
 
+    public String getUserInfoEndpoint() {
+        return baseUrl + "/cognito-idp/oauth2/userInfo";
+    }
+
     // ──────────────────────────── Private helpers ────────────────────────────
 
     UserPoolClient findClientById(String clientId) {
