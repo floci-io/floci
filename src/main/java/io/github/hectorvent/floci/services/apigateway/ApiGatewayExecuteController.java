@@ -1734,7 +1734,7 @@ public class ApiGatewayExecuteController {
         };
     }
 
-    private String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
+    String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
                                      String apiId, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
@@ -1757,6 +1757,12 @@ public class ApiGatewayExecuteController {
             for (Map.Entry<String, java.util.List<String>> e : queryParams.entrySet()) {
                 if (!e.getValue().isEmpty()) qsp.put(e.getKey(), e.getValue().get(0));
             }
+        }
+
+        Map<String, String> pathParams = extractV2PathParams(routeKey, path);
+        if (!pathParams.isEmpty()) {
+            ObjectNode pp = event.putObject("pathParameters");
+            pathParams.forEach(pp::put);
         }
 
         ObjectNode ctx = event.putObject("requestContext");
