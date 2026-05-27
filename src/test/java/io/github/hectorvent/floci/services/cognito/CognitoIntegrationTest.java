@@ -30,6 +30,7 @@ import java.util.stream.StreamSupport;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -55,7 +56,15 @@ class CognitoIntegrationTest {
     void createPoolClientAndUser() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """
                 {
-                  "PoolName": "JwtPool"
+                  "PoolName": "JwtPool",
+                  "Schema": [
+                    {
+                      "Name": "department",
+                      "AttributeDataType": "String",
+                      "Mutable": true,
+                      "Required": false
+                    }
+                  ]
                 }
                 """);
         poolId = poolResponse.path("UserPool").path("Id").asText();
@@ -73,7 +82,12 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "Username": "%s",
                   "UserAttributes": [
-                    { "Name": "email", "Value": "%s" }
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "email_verified", "Value": "true" },
+                    { "Name": "phone_number_verified", "Value": "true" },
+                    { "Name": "given_name", "Value": "Test" },
+                    { "Name": "family_name", "Value": "User" },
+                    { "Name": "custom:department", "Value": "engineering" }
                   ]
                 }
                 """.formatted(poolId, username, username))
@@ -185,7 +199,8 @@ class CognitoIntegrationTest {
                 """.formatted(poolId));
 
         JsonNode schema = body.path("UserPool").path("SchemaAttributes");
-        assertEquals(20, schema.size(), "DescribeUserPool must include all 20 Cognito standard attributes");
+        assertTrue(schema.size() >= 20,
+                "DescribeUserPool must include all 20 Cognito standard attributes");
 
         java.util.Set<String> names = new java.util.HashSet<>();
         schema.forEach(attr -> names.add(attr.path("Name").asText()));
@@ -656,6 +671,87 @@ class CognitoIntegrationTest {
         assertEquals(2, scopes.size());
         assertTrue(scopes.toString().contains("email"));
         assertTrue(scopes.toString().contains("openid"));
+    }
+
+    // ── Issue #984: ID token includes standard + custom user attributes ─
+
+    @Test
+    @Order(37)
+    void idTokenIncludesStandardAndCustomAttributes() throws Exception {
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(clientId, username, password));
+
+        JsonNode payload = decodeJwtPayload(
+                auth.path("AuthenticationResult").path("IdToken").asText());
+
+        System.out.println(payload);
+
+        assertEquals("Test", payload.path("given_name").asText(),
+                "IdToken should include given_name");
+        assertEquals("User", payload.path("family_name").asText(),
+                "IdToken should include family_name");
+        assertEquals("engineering", payload.path("custom:department").asText(),
+                "IdToken should include custom:department");
+        assertEquals(true, payload.path("email_verified").isBoolean(),
+                "IdToken should include email_verified serialized as a JSON boolean");
+        assertEquals(true, payload.path("phone_number_verified").isBoolean(),
+                "IdToken should include phone_number_verified serialized as a JSON boolean");
+    }
+
+    @Test
+    @Order(38)
+    void accessTokenOmitsProfileAttributes() throws Exception {
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(clientId, username, password));
+
+        JsonNode payload = decodeJwtPayload(
+                auth.path("AuthenticationResult").path("AccessToken").asText());
+
+        assertTrue(payload.path("given_name").isMissingNode(),
+                "AccessToken should not include given_name");
+        assertTrue(payload.path("family_name").isMissingNode(),
+                "AccessToken should not include family_name");
+        assertTrue(payload.path("custom:department").isMissingNode(),
+                "AccessToken should not include custom:* attributes");
+    }
+
+    @Test
+    @Order(39)
+    void refreshedIdTokenIncludesUserAttributes() throws Exception {
+        JsonNode authResp = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
+                }
+                """.formatted(clientId, username, password));
+        String refreshToken = authResp.path("AuthenticationResult").path("RefreshToken").asText();
+
+        JsonNode refreshed = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "REFRESH_TOKEN_AUTH",
+                  "AuthParameters": { "REFRESH_TOKEN": "%s" }
+                }
+                """.formatted(clientId, refreshToken));
+
+        JsonNode payload = decodeJwtPayload(
+                refreshed.path("AuthenticationResult").path("IdToken").asText());
+
+        assertEquals("Test", payload.path("given_name").asText(),
+                "Refreshed IdToken should still include given_name");
+        assertEquals("engineering", payload.path("custom:department").asText(),
+                "Refreshed IdToken should still include custom:* attributes");
     }
 
     // ── Issue #229: Password verification ──────────────────────────────

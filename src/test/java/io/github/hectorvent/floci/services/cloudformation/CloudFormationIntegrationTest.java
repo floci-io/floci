@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -10,6 +13,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -33,9 +37,17 @@ class CloudFormationIntegrationTest {
     private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
+    @Inject
+    MutableClock clock;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @BeforeEach
+    void resetClock() {
+        clock.reset();
     }
 
     private static byte[] buildHandlerZip() {
@@ -997,6 +1009,170 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackName>arn-events-stack</StackName>"));
+    }
+
+    @Test
+    void describeDeletedStackEvents_byArn_returnsDeleteCompleteEvents() throws Exception {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "deleted-arn-events-test-bucket"
+                  }
+                }
+              }
+            }
+            """;
+
+        String createResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "deleted-arn-events-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"))
+            .extract().asString();
+
+        String stackArn = createResponse.substring(
+                createResponse.indexOf("<StackId>") + "<StackId>".length(),
+                createResponse.indexOf("</StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "deleted-arn-events-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String deletedEventsXml = null;
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            deletedEventsXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (deletedEventsXml.contains("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>")) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertThat(deletedEventsXml, containsString("<StackId>" + stackArn + "</StackId>"));
+        assertThat(deletedEventsXml, containsString("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>DELETE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "deleted-arn-events-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not exist"));
+    }
+
+    @Test
+    void describeDeletedStack_byArn_expiresAfterRetentionWindow() throws Exception {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "deleted-arn-expiry-test-bucket"
+                  }
+                }
+              }
+            }
+            """;
+
+        String createResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "deleted-arn-expiry-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"))
+            .extract().asString();
+
+        String stackArn = createResponse.substring(
+                createResponse.indexOf("<StackId>") + "<StackId>".length(),
+                createResponse.indexOf("</StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "deleted-arn-expiry-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long readyDeadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < readyDeadline) {
+            String deletedEventsXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (deletedEventsXml.contains("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>")) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        clock.advance(Duration.ofSeconds(31));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not exist"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not exist"));
     }
 
     @Test
@@ -4424,6 +4600,95 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(404);
+    }
+
+    @Test
+    void createStack_withNestedStack_resourcesAreProvisioned() {
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "nested-stack-child-queue"
+                  }
+                }
+              },
+              "Outputs": {
+                "QueueUrl": {
+                  "Value": {"Ref": "ChildQueue"}
+                }
+              }
+            }
+            """;
+
+        // Upload child template to S3
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        given()
+            .contentType("application/json")
+            .body(childTemplate)
+        .when()
+            .put("/nested-stack-templates/child.json")
+        .then()
+            .statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {
+                    "TemplateURL": "http://localhost/nested-stack-templates/child.json"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "parent-nested-stack")
+            .formParam("TemplateBody", parentTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // Parent stack reaches CREATE_COMPLETE
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "parent-nested-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // Nested stack resource itself is CREATE_COMPLETE
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "parent-nested-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceType>AWS::CloudFormation::Stack</ResourceType>"))
+            .body(containsString("<ResourceStatus>CREATE_COMPLETE</ResourceStatus>"));
+
+        // SQS queue defined in the nested template actually exists
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "nested-stack-child-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("nested-stack-child-queue"));
     }
 
 }

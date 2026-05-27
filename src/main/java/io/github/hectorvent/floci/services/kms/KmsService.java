@@ -290,6 +290,16 @@ public class KmsService {
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    public String rotateKeyOnDemand(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        if (!key.isEnabled()) {
+            throw new AwsException("DisabledException",
+                    "KMS key " + key.getKeyId() + " is disabled.", 400);
+        }
+        validateRotationSupported(key);
+        return key.getKeyId();
+    }
+
     private void validateRotationSupported(KmsKey key) {
         if (!"ENCRYPT_DECRYPT".equals(key.getKeyUsage())
                 || !"SYMMETRIC_DEFAULT".equals(key.getCustomerMasterKeySpec())) {

@@ -93,6 +93,7 @@ nav:
     - RDS: services/rds.md
     - MSK (Kafka): services/msk.md
     - Glue: services/glue.md
+    - Neptune: services/neptune.md
     - Athena: services/athena.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md

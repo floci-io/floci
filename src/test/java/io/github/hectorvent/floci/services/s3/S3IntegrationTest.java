@@ -573,6 +573,24 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(40)
+    void getObjectRangeOmitsWholeObjectChecksum() {
+        // greeting.txt has a stored whole-object CRC64NVME checksum (see getObject).
+        // A 206 partial response must NOT carry that checksum: it is computed over the
+        // full object, so SDKs that validate it against the received range bytes fail.
+        // Real S3 omits whole-object checksum headers on ranged responses.
+        given()
+            .header("Range", "bytes=4-7")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(206)
+            .header("Content-Range", equalTo("bytes 4-7/20"))
+            .body(equalTo("o Wo"))
+            .header("x-amz-checksum-crc64nvme", nullValue());
+    }
+
+    @Test
     @Order(50)
     void getObjectIfNoneMatchReturns304() {
         String eTag = given()

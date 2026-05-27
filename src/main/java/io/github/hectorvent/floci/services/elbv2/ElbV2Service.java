@@ -145,6 +145,18 @@ public class ElbV2Service {
         lb.getAttributes().putAll(newAttrs);
     }
 
+    /** Capacity reservation status for a load balancer. All fields are {@code null} when no
+     *  capacity is reserved, which is always the case in Floci (capacity cannot be reserved). */
+    public record CapacityReservation(Integer decreaseRequestsRemaining,
+                                      Integer minimumCapacityUnits,
+                                      Instant lastModifiedTime) {}
+
+    public CapacityReservation describeCapacityReservation(String region, String arn) {
+        requireLoadBalancer(region, arn);
+        // Floci does not reserve load balancer capacity, so there is never a reservation to report.
+        return new CapacityReservation(null, null, null);
+    }
+
     public void setSecurityGroups(String region, String arn, List<String> sgIds) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
         lb.setSecurityGroups(new ArrayList<>(sgIds));
@@ -345,6 +357,16 @@ public class ElbV2Service {
             result = result.stream().filter(l -> arnSet.contains(l.getListenerArn())).collect(Collectors.toList());
         }
         return result;
+    }
+
+    public Map<String, String> describeListenerAttributes(String region, String arn) {
+        Listener listener = requireListener(region, arn);
+        return new LinkedHashMap<>(listener.getAttributes());
+    }
+
+    public void modifyListenerAttributes(String region, String arn, Map<String, String> newAttrs) {
+        Listener listener = requireListener(region, arn);
+        listener.getAttributes().putAll(newAttrs);
     }
 
     public void deleteListener(String region, String listenerArn) {

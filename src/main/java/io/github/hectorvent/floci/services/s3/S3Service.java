@@ -297,6 +297,9 @@ public class S3Service {
         object.setCacheControl(effectiveOptions.getCacheControl());
         object.setServerSideEncryption(normalizedServerSideEncryption);
         object.setAcl(cannedObjectAclXml(effectiveOptions.getAcl()));
+        if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
+            object.setTags(new HashMap<>(effectiveOptions.getTagging()));
+        }
 
         if (bucket.isVersioningEnabled()) {
             String versionId = UUID.randomUUID().toString();
@@ -2132,6 +2135,11 @@ public class S3Service {
         String effectiveServerSideEncryption = normalizedServerSideEncryption != null
                 ? normalizedServerSideEncryption
                 : source.getServerSideEncryption();
+        boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
+        Map<String, String> effectiveTags = replaceTags
+                ? effectiveOptions.getReplacementTagging()
+                : source.getTags();
+
         S3Object copy = storeObject(destBucket, destKey, source.getData(), effectiveContentType, metadata,
                 source.getChecksum(), source.getParts(),
                 new PutObjectOptions()
@@ -2140,7 +2148,8 @@ public class S3Service {
                         .withContentDisposition(effectiveContentDisposition)
                         .withCacheControl(effectiveCacheControl)
                         .withServerSideEncryption(effectiveServerSideEncryption)
-                        .withAcl(effectiveOptions.getAcl()));
+                        .withAcl(effectiveOptions.getAcl())
+                        .withTagging(effectiveTags));
         copy.setETag(source.getETag());
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
         fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
