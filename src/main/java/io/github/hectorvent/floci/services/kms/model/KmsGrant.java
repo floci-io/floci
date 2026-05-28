@@ -15,6 +15,7 @@ public class KmsGrant {
     private String keyId;
     private String keyArn;
     private String granteePrincipal;
+    private String retiringPrincipal;
     private List<String> operations = new ArrayList<>();
     private long creationDate;
 
@@ -36,6 +37,9 @@ public class KmsGrant {
 
     public String getGranteePrincipal() { return granteePrincipal; }
     public void setGranteePrincipal(String granteePrincipal) { this.granteePrincipal = granteePrincipal; }
+
+    public String getRetiringPrincipal() { return retiringPrincipal; }
+    public void setRetiringPrincipal(String retiringPrincipal) { this.retiringPrincipal = retiringPrincipal; }
 
     public List<String> getOperations() { return operations; }
     public void setOperations(List<String> operations) { this.operations = operations; }

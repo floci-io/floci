@@ -241,6 +241,11 @@ public class KmsService {
     }
 
     public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations, String region) {
+        return createGrant(keyId, granteePrincipal, operations, null, region);
+    }
+
+    public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations,
+                                String retiringPrincipal, String region) {
         if (keyId == null || keyId.isBlank()) {
             throw new AwsException("ValidationException", "KeyId is required", 400);
         }
@@ -262,6 +267,7 @@ public class KmsService {
         grant.setKeyId(key.getKeyId());
         grant.setKeyArn(key.getArn());
         grant.setGranteePrincipal(granteePrincipal);
+        grant.setRetiringPrincipal(retiringPrincipal);
         grant.setOperations(new ArrayList<>(operations));
 
         grantStore.put(region + "::" + grantId, grant);
@@ -269,22 +275,100 @@ public class KmsService {
         return grant;
     }
 
-    public List<Map<String, Object>> listGrants(String keyId, String region) {
+    private static final int DEFAULT_GRANT_LIMIT = 50;
+    private static final int MAX_GRANT_LIMIT = 100;
+
+    public Map<String, Object> listGrants(String keyId, String region, String marker, Integer limit,
+                                           String grantIdFilter, String granteePrincipalFilter) {
+        // Validate filter mutual exclusivity
+        if (grantIdFilter != null && (grantIdFilter.length() > 128)) {
+            throw new AwsException("ValidationException", "GrantId exceeds maximum length of 128", 400);
+        }
+
         KmsKey key = resolveKey(keyId, region);
         String prefix = region + "::";
-        return grantStore.scan(k -> k.startsWith(prefix)).stream()
+
+        // Collect and sort grants deterministically by grantId
+        List<KmsGrant> sortedGrants = grantStore.scan(k -> k.startsWith(prefix)).stream()
                 .filter(grant -> key.getKeyId().equals(grant.getKeyId()))
-                .map(KmsService::grantToMap)
+                .filter(grant -> grantIdFilter == null || grantIdFilter.isBlank()
+                        || grantIdFilter.equals(grant.getGrantId()))
+                .filter(grant -> granteePrincipalFilter == null || granteePrincipalFilter.isBlank()
+                        || granteePrincipalFilter.equals(grant.getGranteePrincipal()))
+                .sorted(Comparator.comparing(KmsGrant::getGrantId))
                 .toList();
+
+        return paginateGrants(sortedGrants, marker, limit);
     }
 
-    private static Map<String, Object> grantToMap(KmsGrant grant) {
+    public Map<String, Object> listRetirableGrants(String retiringPrincipal, String region,
+                                                    String marker, Integer limit) {
+        if (retiringPrincipal == null || retiringPrincipal.isBlank()) {
+            throw new AwsException("ValidationException", "RetiringPrincipal is required", 400);
+        }
+
+        String prefix = region + "::";
+
+        List<KmsGrant> sortedGrants = grantStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(grant -> retiringPrincipal.equals(grant.getRetiringPrincipal()))
+                .sorted(Comparator.comparing(KmsGrant::getGrantId))
+                .toList();
+
+        return paginateGrants(sortedGrants, marker, limit);
+    }
+
+    private Map<String, Object> paginateGrants(List<KmsGrant> sortedGrants, String marker, Integer limit) {
+        int effectiveLimit = limit != null ? Math.clamp(limit, 1, MAX_GRANT_LIMIT) : DEFAULT_GRANT_LIMIT;
+
+        int startIndex = 0;
+        if (marker != null && !marker.isBlank()) {
+            String decodedMarker;
+            try {
+                decodedMarker = new String(Base64.getDecoder().decode(marker), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidMarkerException",
+                        "The request was rejected because the marker is not valid.", 400);
+            }
+            String lastGrantId = decodedMarker;
+            boolean found = false;
+            for (int i = 0; i < sortedGrants.size(); i++) {
+                if (sortedGrants.get(i).getGrantId().equals(lastGrantId)) {
+                    startIndex = i + 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                throw new AwsException("InvalidMarkerException",
+                        "The request was rejected because the marker that specifies where pagination should next begin is not valid.", 400);
+            }
+        }
+
+        int endIndex = Math.min(startIndex + effectiveLimit, sortedGrants.size());
+        List<KmsGrant> page = sortedGrants.subList(startIndex, endIndex);
+        boolean truncated = endIndex < sortedGrants.size();
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("Grants", page.stream().map(this::grantToMap).toList());
+        result.put("Truncated", truncated);
+        if (truncated && !page.isEmpty()) {
+            String lastGrantId = page.getLast().getGrantId();
+            String nextMarker = Base64.getEncoder().encodeToString(lastGrantId.getBytes(StandardCharsets.UTF_8));
+            result.put("NextMarker", nextMarker);
+        }
+        return result;
+    }
+
+    private Map<String, Object> grantToMap(KmsGrant grant) {
         Map<String, Object> result = new HashMap<>();
         result.put("GrantId", grant.getGrantId());
         result.put("KeyId", grant.getKeyArn());
         result.put("GranteePrincipal", grant.getGranteePrincipal());
         result.put("Operations", grant.getOperations());
         result.put("CreationDate", grant.getCreationDate());
+        if (grant.getRetiringPrincipal() != null) {
+            result.put("RetiringPrincipal", grant.getRetiringPrincipal());
+        }
         return result;
     }
 
