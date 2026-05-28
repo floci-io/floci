@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.quarkus.runtime.Startup;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -36,6 +37,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Core RDS business logic — DB instances, clusters, and parameter groups.
  * Starts DB containers and auth proxies on creation.
  */
+@Startup
 @ApplicationScoped
 public class RdsService {
 
