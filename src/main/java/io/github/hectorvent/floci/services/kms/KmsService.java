@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
+import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -49,6 +50,7 @@ public class KmsService {
 
     private final StorageBackend<String, KmsKey> keyStore;
     private final StorageBackend<String, KmsAlias> aliasStore;
+    private final StorageBackend<String, KmsGrant> grantStore;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -57,14 +59,18 @@ public class KmsService {
                         new TypeReference<Map<String, KmsKey>>() {}),
                 storageFactory.create("kms", "kms-aliases.json",
                         new TypeReference<Map<String, KmsAlias>>() {}),
+                storageFactory.create("kms", "kms-grants.json",
+                        new TypeReference<Map<String, KmsGrant>>() {}),
                 regionResolver);
     }
 
     KmsService(StorageBackend<String, KmsKey> keyStore,
-               StorageBackend<String, KmsAlias> aliasStore,
-               RegionResolver regionResolver) {
+                StorageBackend<String, KmsAlias> aliasStore,
+               StorageBackend<String, KmsGrant> grantStore,
+                RegionResolver regionResolver) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
+        this.grantStore = grantStore;
         this.regionResolver = regionResolver;
     }
 
@@ -234,9 +240,52 @@ public class KmsService {
         return keyStore.scan(k -> k.startsWith(prefix));
     }
 
+    public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations, String region) {
+        if (keyId == null || keyId.isBlank()) {
+            throw new AwsException("ValidationException", "KeyId is required", 400);
+        }
+        if (granteePrincipal == null || granteePrincipal.isBlank()) {
+            throw new AwsException("ValidationException", "GranteePrincipal is required", 400);
+        }
+        if (operations == null || operations.isEmpty()) {
+            throw new AwsException("ValidationException", "Operations is required", 400);
+        }
+
+        KmsKey key = resolveKey(keyId, region);
+        String grantId = UUID.randomUUID().toString();
+        byte[] tokenBytes = new byte[32];
+        ThreadLocalRandom.current().nextBytes(tokenBytes);
+
+        KmsGrant grant = new KmsGrant();
+        grant.setGrantId(grantId);
+        grant.setGrantToken(Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes));
+        grant.setKeyId(key.getKeyId());
+        grant.setKeyArn(key.getArn());
+        grant.setGranteePrincipal(granteePrincipal);
+        grant.setOperations(new ArrayList<>(operations));
+
+        grantStore.put(region + "::" + grantId, grant);
+        LOG.infov("Created KMS grant: {0} for key {1} in {2}", grantId, key.getKeyId(), region);
+        return grant;
+    }
+
     public List<Map<String, Object>> listGrants(String keyId, String region) {
-        resolveKey(keyId, region);
-        return List.of();
+        KmsKey key = resolveKey(keyId, region);
+        String prefix = region + "::";
+        return grantStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(grant -> key.getKeyId().equals(grant.getKeyId()))
+                .map(KmsService::grantToMap)
+                .toList();
+    }
+
+    private static Map<String, Object> grantToMap(KmsGrant grant) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("GrantId", grant.getGrantId());
+        result.put("KeyId", grant.getKeyArn());
+        result.put("GranteePrincipal", grant.getGranteePrincipal());
+        result.put("Operations", grant.getOperations());
+        result.put("CreationDate", grant.getCreationDate());
+        return result;
     }
 
     public void scheduleKeyDeletion(String keyId, int pendingWindowInDays, String region) {

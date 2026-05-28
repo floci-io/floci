@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
+import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -38,6 +39,7 @@ public class KmsJsonHandler {
             case "GetPublicKey" -> handleGetPublicKey(request, region);
             case "DescribeKey" -> handleDescribeKey(request, region);
             case "ListKeys" -> handleListKeys(request, region);
+            case "CreateGrant" -> handleCreateGrant(request, region);
             case "ListGrants" -> handleListGrants(request, region);
             case "Encrypt" -> handleEncrypt(request, region);
             case "Decrypt" -> handleDecrypt(request, region);
@@ -141,10 +143,34 @@ public class KmsJsonHandler {
     }
 
     private Response handleListGrants(JsonNode request, String region) {
-        service.listGrants(request.path("KeyId").asText(), region);
+        List<Map<String, Object>> grants = service.listGrants(request.path("KeyId").asText(), region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.putArray("Grants");
+        ArrayNode array = response.putArray("Grants");
+        for (Map<String, Object> grant : grants) {
+            ObjectNode entry = array.addObject();
+            entry.put("GrantId", (String) grant.get("GrantId"));
+            entry.put("KeyId", (String) grant.get("KeyId"));
+            entry.put("GranteePrincipal", (String) grant.get("GranteePrincipal"));
+            entry.put("CreationDate", ((Number) grant.get("CreationDate")).longValue());
+            ArrayNode operations = entry.putArray("Operations");
+            if (grant.get("Operations") instanceof List<?> operationValues) {
+                operationValues.forEach(operation -> operations.add(String.valueOf(operation)));
+            }
+        }
         response.put("Truncated", false);
+        return Response.ok(response).build();
+    }
+
+    private Response handleCreateGrant(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText(null);
+        String granteePrincipal = request.path("GranteePrincipal").asText(null);
+        List<String> operations = new java.util.ArrayList<>();
+        request.path("Operations").forEach(operation -> operations.add(operation.asText()));
+
+        KmsGrant grant = service.createGrant(keyId, granteePrincipal, operations, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("GrantId", grant.getGrantId());
+        response.put("GrantToken", grant.getGrantToken());
         return Response.ok(response).build();
     }
 
