@@ -36,9 +36,6 @@ import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
-
-import io.github.hectorvent.floci.services.s3.model.S3Object;
-
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -1530,6 +1527,11 @@ public class CloudFormationResourceProvisioner {
         Map<String, Object> req = new HashMap<>();
         req.put("name", name);
         req.put("protocolType", resolveOrDefault(props, "ProtocolType", engine, "HTTP"));
+        req.put("routeSelectionExpression", resolveOptional(props, "RouteSelectionExpression", engine));
+        req.put("apiKeySelectionExpression", resolveOptional(props, "ApiKeySelectionExpression", engine));
+        req.put("description", resolveOptional(props, "Description", engine));
+        req.put("version", resolveOptional(props, "Version", engine));
+        req.put("tags", parseCfnTags(props != null ? props.get("Tags") : null, engine));
 
         Api api = apiGatewayV2Service.createApi(region, req);
         r.setPhysicalId(api.getApiId());
@@ -1542,7 +1544,9 @@ public class CloudFormationResourceProvisioner {
         Map<String, Object> req = new HashMap<>();
         req.put("routeKey", resolveOptional(props, "RouteKey", engine));
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
+        req.put("authorizerId", resolveOptional(props, "AuthorizerId", engine));
         req.put("target", resolveOptional(props, "Target", engine));
+        req.put("routeResponseSelectionExpression", resolveOptional(props, "RouteResponseSelectionExpression", engine));
 
         Route route = apiGatewayV2Service.createRoute(region, apiId, req);
         r.setPhysicalId(route.getRouteId());
@@ -1554,7 +1558,21 @@ public class CloudFormationResourceProvisioner {
         Map<String, Object> req = new HashMap<>();
         req.put("integrationType", resolveOptional(props, "IntegrationType", engine));
         req.put("integrationUri", resolveOptional(props, "IntegrationUri", engine));
+        req.put("connectionType", resolveOptional(props, "ConnectionType", engine));
+        req.put("connectionId", resolveOptional(props, "ConnectionId", engine));
         req.put("payloadFormatVersion", resolveOrDefault(props, "PayloadFormatVersion", engine, "2.0"));
+        req.put("integrationMethod", resolveOptional(props, "IntegrationMethod", engine));
+        req.put("templateSelectionExpression", resolveOptional(props, "TemplateSelectionExpression", engine));
+        String timeout = resolveOptional(props, "TimeoutInMillis", engine);
+        if (timeout != null) {
+            try {
+                req.put("timeoutInMillis", Integer.parseInt(timeout));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        req.put("requestTemplates", parseCfnMap(props != null ? props.get("RequestTemplates") : null, engine));
+        req.put("responseTemplates", parseCfnMap(props != null ? props.get("ResponseTemplates") : null, engine));
+        req.put("requestParameters", parseCfnMap(props != null ? props.get("RequestParameters") : null, engine));
 
         Integration integration = apiGatewayV2Service.createIntegration(region, apiId, req);
         r.setPhysicalId(integration.getIntegrationId());
@@ -1567,10 +1585,12 @@ public class CloudFormationResourceProvisioner {
 
         Map<String, Object> req = new HashMap<>();
         req.put("stageName", stageName);
+        req.put("deploymentId", resolveOptional(props, "DeploymentId", engine));
         req.put("autoDeploy", resolveOrDefault(props, "AutoDeploy", engine, "false"));
+        req.put("stageVariables", parseCfnMap(props != null ? props.get("StageVariables") : null, engine));
 
         Stage stage = apiGatewayV2Service.createStage(region, apiId, req);
-        r.setPhysicalId(stageName);
+        r.setPhysicalId(stage.getStageName());
     }
 
     private void provisionApiGatewayV2Deployment(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -1578,6 +1598,7 @@ public class CloudFormationResourceProvisioner {
         String apiId = resolveOptional(props, "ApiId", engine);
         Map<String, Object> req = new HashMap<>();
         req.put("description", resolveOptional(props, "Description", engine));
+        req.put("stageName", resolveOptional(props, "StageName", engine));
 
         Deployment deployment = apiGatewayV2Service.createDeployment(region, apiId, req);
         r.setPhysicalId(deployment.getDeploymentId());
@@ -1659,6 +1680,20 @@ public class CloudFormationResourceProvisioner {
                                     CloudFormationTemplateEngine engine, String defaultValue) {
         String value = resolveOptional(props, name, engine);
         return (value != null && !value.isBlank()) ? value : defaultValue;
+    }
+
+    private Map<String, String> parseCfnMap(JsonNode node, CloudFormationTemplateEngine engine) {
+        Map<String, String> out = new HashMap<>();
+        if (node == null || node.isNull() || !node.isObject()) {
+            return out;
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        Iterator<Map.Entry<String, JsonNode>> fields = resolved.fields();
+        while (fields.hasNext()) {
+            Map.Entry<String, JsonNode> entry = fields.next();
+            out.put(entry.getKey(), engine.resolve(entry.getValue()));
+        }
+        return out;
     }
 
     private void deleteRoleSafe(String roleName) {
