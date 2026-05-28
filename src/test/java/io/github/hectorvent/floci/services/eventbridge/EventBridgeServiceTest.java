@@ -541,6 +541,72 @@ class EventBridgeServiceTest {
     }
 
     @Test
+    void matchesPatternTopLevelOr_firstBranchMatches() {
+        Map<String, Object> event = Map.of("Source", "aws.ec2", "DetailType", "Other");
+        assertTrue(service.matchesPattern(event,
+                "{\"$or\":[{\"source\":[\"aws.ec2\"]},{\"source\":[\"aws.s3\"]}]}"));
+    }
+
+    @Test
+    void matchesPatternTopLevelOr_secondBranchMatches() {
+        Map<String, Object> event = Map.of("Source", "aws.s3", "DetailType", "Other");
+        assertTrue(service.matchesPattern(event,
+                "{\"$or\":[{\"source\":[\"aws.ec2\"]},{\"source\":[\"aws.s3\"]}]}"));
+    }
+
+    @Test
+    void matchesPatternTopLevelOr_noBranchMatches() {
+        Map<String, Object> event = Map.of("Source", "aws.rds", "DetailType", "Other");
+        assertFalse(service.matchesPattern(event,
+                "{\"$or\":[{\"source\":[\"aws.ec2\"]},{\"source\":[\"aws.s3\"]}]}"));
+    }
+
+    @Test
+    void matchesPatternTopLevelOrCombinedWithOtherField() {
+        Map<String, Object> event = Map.of("Source", "aws.ec2", "DetailType", "EC2 Instance State-change Notification");
+        // source must match AND one of the detail-types must match
+        assertTrue(service.matchesPattern(event,
+                "{\"source\":[\"aws.ec2\"],\"$or\":[{\"detail-type\":[\"EC2 Instance State-change Notification\"]},{\"detail-type\":[\"EC2 Spot Instance Interruption Warning\"]}]}"));
+        // source matches but neither detail-type matches
+        assertFalse(service.matchesPattern(event,
+                "{\"source\":[\"aws.ec2\"],\"$or\":[{\"detail-type\":[\"Something Else\"]},{\"detail-type\":[\"Also Wrong\"]}]}"));
+    }
+
+    @Test
+    void matchesPatternDetailLevelOr_matches() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"status\":\"CONFIRMED\"}"
+        );
+        assertTrue(service.matchesPattern(event,
+                "{\"detail\":{\"$or\":[{\"status\":[\"CONFIRMED\"]},{\"status\":[\"PENDING\"]}]}}"));
+    }
+
+    @Test
+    void matchesPatternDetailLevelOr_noMatch() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"status\":\"CANCELLED\"}"
+        );
+        assertFalse(service.matchesPattern(event,
+                "{\"detail\":{\"$or\":[{\"status\":[\"CONFIRMED\"]},{\"status\":[\"PENDING\"]}]}}"));
+    }
+
+    @Test
+    void matchesPatternDetailLevelOrCombinedWithOtherField() {
+        Map<String, Object> event = Map.of(
+                "Source", "my.app",
+                "Detail", "{\"status\":\"CONFIRMED\",\"region\":\"us-east-1\"}"
+        );
+        // region matches AND one of the statuses matches
+        assertTrue(service.matchesPattern(event,
+                "{\"detail\":{\"region\":[\"us-east-1\"],\"$or\":[{\"status\":[\"CONFIRMED\"]},{\"status\":[\"PENDING\"]}]}}"));
+        // region matches but status doesn't
+        assertFalse(service.matchesPattern(event,
+                "{\"detail\":{\"region\":[\"us-east-1\"],\"$or\":[{\"status\":[\"CANCELLED\"]},{\"status\":[\"FAILED\"]}]}}"));
+    }
+
+    @Test
     void matchesPatternCombinesAccountRegionAndDetail() {
         Map<String, Object> event = Map.of(
                 "Source", "my.app",
