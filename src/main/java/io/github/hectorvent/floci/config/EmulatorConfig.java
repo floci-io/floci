@@ -62,6 +62,8 @@ public interface EmulatorConfig {
 
     AuthConfig auth();
 
+    SecurityConfig security();
+
     ServicesConfig services();
 
     DockerConfig docker();
@@ -89,6 +91,15 @@ public interface EmulatorConfig {
          * </pre>
          */
         Optional<List<String>> extraSuffixes();
+    }
+
+    interface SecurityConfig {
+        Optional<List<String>> extraCorsAllowedOrigins();
+        Optional<List<String>> extraCorsAllowedHeaders();
+        Optional<List<String>> extraCorsExposeHeaders();
+
+        @WithDefault("false")
+        boolean disableCorsHeaders();
     }
 
     interface StorageConfig {

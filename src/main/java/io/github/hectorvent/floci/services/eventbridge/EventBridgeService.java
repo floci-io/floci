@@ -741,6 +741,19 @@ public class EventBridgeService {
         }
         try {
             JsonNode pattern = objectMapper.readTree(eventPattern);
+            JsonNode orClauses = pattern.get("$or");
+            if (orClauses != null && orClauses.isArray()) {
+                boolean anyMatches = false;
+                for (JsonNode subPattern : orClauses) {
+                    if (matchesPattern(event, objectMapper.writeValueAsString(subPattern))) {
+                        anyMatches = true;
+                        break;
+                    }
+                }
+                if (!anyMatches) {
+                    return false;
+                }
+            }
             JsonNode sourceField = pattern.get("source");
             if (sourceField != null && sourceField.isArray()) {
                 String eventSource = (String) event.get("Source");
@@ -806,9 +819,25 @@ public class EventBridgeService {
     }
 
     private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
+        JsonNode orClauses = pattern.get("$or");
+        if (orClauses != null && orClauses.isArray()) {
+            boolean anyMatches = false;
+            for (JsonNode subPattern : orClauses) {
+                if (matchesDetailNode(actual, subPattern)) {
+                    anyMatches = true;
+                    break;
+                }
+            }
+            if (!anyMatches) {
+                return false;
+            }
+        }
         var fields = pattern.fields();
         while (fields.hasNext()) {
             var field = fields.next();
+            if ("$or".equals(field.getKey())) {
+                continue;
+            }
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {

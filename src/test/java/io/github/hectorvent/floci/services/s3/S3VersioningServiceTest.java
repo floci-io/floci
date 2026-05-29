@@ -314,4 +314,23 @@ class S3VersioningServiceTest {
         Map<String, String> tags = s3Service.getObjectTagging("versioned-bucket", "clear-key");
         assertTrue(tags.isEmpty(), "REPLACE with empty tags should clear all source tags");
     }
+
+    @Test
+    void getObjectReturnsPromotedContentAfterLatestVersionDeleted() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+
+        s3Service.putObject("versioned-bucket", "key",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        S3Object v2 = s3Service.putObject("versioned-bucket", "key",
+                "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        // Delete the latest version (v2) — v1 should be promoted
+        s3Service.deleteObject("versioned-bucket", "key", v2.getVersionId());
+
+        // getObject without versionId should return v1's content, not v2's
+        S3Object result = s3Service.getObject("versioned-bucket", "key");
+        assertEquals("v1", new String(result.getData(), StandardCharsets.UTF_8),
+                "getObject should return the promoted version's content after deleting the latest");
+    }
+
 }

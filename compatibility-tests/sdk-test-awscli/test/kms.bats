@@ -39,6 +39,17 @@ teardown() {
     [ "$found" = "true" ]
 }
 
+@test "KMS: list grants" {
+    out=$(aws_cmd kms create-key --description "bats-test-key")
+    KEY_ID=$(json_get "$out" '.KeyMetadata.KeyId')
+    [ -n "$KEY_ID" ]
+
+    run aws_cmd kms list-grants --key-id "$KEY_ID"
+    assert_success
+    has_grants=$(echo "$output" | jq 'has("Grants") and (.Grants | type == "array")')
+    [ "$has_grants" = "true" ]
+}
+
 @test "KMS: encrypt and decrypt" {
     out=$(aws_cmd kms create-key --description "bats-test-key")
     KEY_ID=$(json_get "$out" '.KeyMetadata.KeyId')

@@ -37,6 +37,36 @@ class TestKMSKey:
         assert response["KeyMetadata"]["KeyState"] == "PendingDeletion"
 
 
+class TestKMSGrants:
+    """Test KMS grant operations."""
+
+    def test_list_grants(self, kms_client):
+        """Test ListGrants returns an empty grant list for a new key."""
+        response = kms_client.create_key(Description="pytest-grant-test-key")
+        key_id = response["KeyMetadata"]["KeyId"]
+
+        try:
+            response = kms_client.list_grants(KeyId=key_id)
+            assert response["Grants"] == []
+        finally:
+            kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
+
+    def test_list_grants_paginator(self, kms_client):
+        """Test ListGrants paginator returns pages with Grants."""
+        response = kms_client.create_key(Description="pytest-grant-test-key")
+        key_id = response["KeyMetadata"]["KeyId"]
+
+        try:
+            paginator = kms_client.get_paginator("list_grants")
+            pages = list(paginator.paginate(KeyId=key_id))
+
+            assert pages
+            assert all("Grants" in page for page in pages)
+            assert [grant for page in pages for grant in page["Grants"]] == []
+        finally:
+            kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
+
+
 class TestKMSAlias:
     """Test KMS alias operations."""
 
@@ -78,7 +108,9 @@ class TestKMSAlias:
         kms_client.delete_alias(AliasName=alias_name)
 
         response = kms_client.list_aliases()
-        assert not any(a["AliasName"] == alias_name for a in response.get("Aliases", []))
+        assert not any(
+            a["AliasName"] == alias_name for a in response.get("Aliases", [])
+        )
 
         # Cleanup
         kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
