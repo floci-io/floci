@@ -9,6 +9,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
 import java.io.IOException;
+import java.net.BindException;
+import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -19,9 +21,13 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 
+import org.junit.jupiter.api.condition.EnabledOnOs;
+import org.junit.jupiter.api.condition.OS;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class RuntimeApiServerTest {
@@ -45,8 +51,8 @@ class RuntimeApiServerTest {
     }
 
     @AfterEach
-    void tearDown() {
-        server.stop();
+    void tearDown() throws Exception {
+        server.stop().get(5, TimeUnit.SECONDS);
         scheduler.shutdownNow();
         vertx.close();
     }
@@ -221,6 +227,30 @@ class RuntimeApiServerTest {
         InvokeResult result = invocation.getResultFuture().get(0, TimeUnit.SECONDS);
         assertEquals("Unhandled", result.getFunctionError());
         assertTrue(new String(result.getPayload()).contains("ContainerStopped"));
+    }
+
+    @Test
+    @Timeout(10)
+    void stopReleasesPortSynchronously() throws Exception {
+        server.stop().get(5, TimeUnit.SECONDS);
+        try (ServerSocket s = new ServerSocket()) {
+            s.setReuseAddress(true);
+            s.bind(new InetSocketAddress(port));
+        }
+    }
+
+    @Test
+    @Timeout(10)
+    void newServerOnSamePortAcceptsTrafficAfterStop() throws Exception {
+        server.stop().get(5, TimeUnit.SECONDS);
+
+        server = new RuntimeApiServer(vertx, port);
+        server.start().get(5, TimeUnit.SECONDS);
+
+        HttpResponse<String> resp = httpClient.send(
+                HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/x")).GET().build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertEquals(404, resp.statusCode());
     }
 
     private static int findFreePort() throws IOException {

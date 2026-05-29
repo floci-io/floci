@@ -42,6 +42,14 @@ public class Instance {
     private String region;
     private List<Tag> tags = new ArrayList<>();
 
+    private String rootVolumeId;
+
+    // NOTE: disableApiStop and disableApiTermination are stored but ModifyInstanceAttribute
+    // does not yet wire them through. Terraform reads these via DescribeInstanceAttribute;
+    // without model backing, a modify → plan cycle would show drift. Tracked as a known limitation.
+    private boolean disableApiStop = false;
+    private boolean disableApiTermination = false;
+
     // Docker backing fields (not serialised to AWS wire format)
     private String dockerContainerId;
     private String containerBridgeIp;
@@ -155,4 +163,13 @@ public class Instance {
 
     public String getContainerBridgeIp() { return containerBridgeIp; }
     public void setContainerBridgeIp(String containerBridgeIp) { this.containerBridgeIp = containerBridgeIp; }
+
+    public String getRootVolumeId() { return rootVolumeId; }
+    public void setRootVolumeId(String rootVolumeId) { this.rootVolumeId = rootVolumeId; }
+
+    public boolean isDisableApiStop() { return disableApiStop; }
+    public void setDisableApiStop(boolean disableApiStop) { this.disableApiStop = disableApiStop; }
+
+    public boolean isDisableApiTermination() { return disableApiTermination; }
+    public void setDisableApiTermination(boolean disableApiTermination) { this.disableApiTermination = disableApiTermination; }
 }

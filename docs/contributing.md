@@ -30,14 +30,49 @@ mvn test -Dtest=SsmIntegrationTest#putParameter
 
 This project uses [Conventional Commits](https://www.conventionalcommits.org/) — required for semantic-release to generate the changelog and version bumps automatically.
 
-| Prefix | Effect |
+> **The PR title is validated automatically by CI** and must follow this format, since it becomes the squash-merge commit message that semantic-release reads.
+
+### Format
+
+```
+<type>[optional scope]: <description>
+```
+
+| Type | Effect |
 |---|---|
-| `feat:` | New feature → minor version bump |
-| `fix:` | Bug fix → patch version bump |
-| `perf:` | Performance improvement → patch |
-| `docs:` | Documentation only → no version bump |
-| `chore:` | Build/CI → no version bump |
+| `feat` | New feature → minor version bump |
+| `fix` | Bug fix → patch version bump |
+| `perf` | Performance improvement → patch |
+| `revert` | Reverts a previous commit → patch |
+| `docs` | Documentation only → no version bump |
+| `style` | Formatting, whitespace → no version bump |
+| `chore` | Build/CI/housekeeping → no version bump |
+| `refactor` | Code restructure → no version bump |
+| `test` | Adding/updating tests → no version bump |
+| `build` | Build system changes → no version bump |
+| `ci` | CI workflow changes → no version bump |
 | `feat!:` or `BREAKING CHANGE:` | Breaking change → major bump |
+
+### Valid examples ✅
+
+```
+feat(dynamodb): add PartiQL ExecuteStatement support
+fix(s3): make us-east-1 bucket creation idempotent
+chore: release 1.5.16
+feat!: remove legacy v1 endpoint
+ci: add conventional commits lint workflow
+```
+
+### Invalid examples ❌
+
+```
+Add PartiQL support              # missing type
+Feature: add something           # not a valid type
+feat : space before colon        # space before colon
+FIX(s3): uppercase type          # type must be lowercase
+feat(my scope): spaces in scope  # scope cannot contain spaces
+wip: still working on this      # not a recognised type
+```
 
 ## Adding a New AWS Service
 

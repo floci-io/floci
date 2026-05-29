@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.ecs.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -22,6 +24,7 @@ public class EcsServiceModel {
     private String namespace;
     private String deploymentController;
     private Map<String, String> tags = new HashMap<>();
+    private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
 
     public String getServiceArn() { return serviceArn; }
     public void setServiceArn(String serviceArn) { this.serviceArn = serviceArn; }
@@ -61,4 +64,9 @@ public class EcsServiceModel {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public List<EcsLoadBalancer> getLoadBalancers() { return loadBalancers; }
+    public void setLoadBalancers(List<EcsLoadBalancer> loadBalancers) {
+        this.loadBalancers = loadBalancers != null ? loadBalancers : new ArrayList<>();
+    }
 }

@@ -146,6 +146,12 @@ def ecr_client(aws_config, client_config):
 
 
 @pytest.fixture
+def neptune_client(aws_config, client_config):
+    """Create Neptune client."""
+    return boto3.client("neptune", config=client_config, **aws_config)
+
+
+@pytest.fixture
 def pipes_client(aws_config, client_config):
     """Create EventBridge Pipes client."""
     return boto3.client("pipes", config=client_config, **aws_config)

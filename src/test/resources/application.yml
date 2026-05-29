@@ -34,6 +34,7 @@ floci:
         flush-interval-ms: 60000
       opensearch:
         flush-interval-ms: 60000
+      cloudfront:
 
   auth:
     validate-signatures: false
@@ -91,6 +92,7 @@ floci:
       proxy-base-port: 6379
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
+      default-memcached-image: "memcached:1.6"
     rds:
       enabled: true
       proxy-base-port: 7001
@@ -98,6 +100,11 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    neptune:
+      enabled: true
+      proxy-base-port: 8182
+      proxy-max-port: 8282
+      default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
       enabled: true
     scheduler:
@@ -135,7 +142,6 @@ floci:
     opensearch:
       enabled: true
       mock: true
-      default-image: "opensearchproject/opensearch:2"
       proxy-base-port: 9400
       proxy-max-port: 9499
     ec2:
@@ -182,4 +188,12 @@ floci:
     pricing:
       enabled: true
     ce:
+      enabled: true
+    cur:
+      enabled: true
+      emit-mode: off
+    bcm-data-exports:
+      enabled: true
+      emit-mode: off
+    cloudfront:
       enabled: true

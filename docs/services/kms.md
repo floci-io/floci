@@ -30,6 +30,16 @@
 | `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
 | `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
 | `DisableKeyRotation` | Disable automatic key rotation |
+| `RotateKeyOnDemand` | Rotate key material on demand (symmetric keys only) |
+| `CreateGrant` | Create a grant for a KMS key |
+| `ListGrants` | List grants for a KMS key |
+| `ListRetirableGrants` | List grants retirable by a principal |
+| `RevokeGrant` | Revoke (administratively delete) a grant |
+| `RetireGrant` | Retire a grant (token- or key+grant-based) |
+
+## Grant Support Scope
+
+Grant lifecycle operations (`CreateGrant`, `ListGrants`, `ListRetirableGrants`, `RevokeGrant`, `RetireGrant`) are supported. However, grant lifecycle support **does not** imply grant-based authorization enforcement on cryptographic operations (`Encrypt`, `Decrypt`, `Sign`, `Verify`, `GenerateDataKey`, etc.). Grants are stored and queryable but are not evaluated during crypto operations.
 
 ## Configuration
 

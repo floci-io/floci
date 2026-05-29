@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
+import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
@@ -46,6 +47,7 @@ public class EcsService {
 
     private final RegionResolver regionResolver;
     private final EcsContainerManager containerManager;
+    private final EcsLoadBalancerRegistrar lbRegistrar;
     private final boolean dockerMode;
     private final String baseUrl;
     private final ScheduledExecutorService reconciler = Executors.newSingleThreadScheduledExecutor(
@@ -80,21 +82,12 @@ public class EcsService {
 
     @Inject
     public EcsService(RegionResolver regionResolver, EcsContainerManager containerManager,
-                      EmulatorConfig config) {
-        this(regionResolver, containerManager, !config.services().ecs().mock(),
-                config.effectiveBaseUrl());
-    }
-
-    EcsService(RegionResolver regionResolver, EcsContainerManager containerManager) {
-        this(regionResolver, containerManager, false, "http://localhost:4566");
-    }
-
-    EcsService(RegionResolver regionResolver, EcsContainerManager containerManager, boolean dockerMode,
-               String baseUrl) {
+                      EmulatorConfig config, EcsLoadBalancerRegistrar lbRegistrar) {
         this.regionResolver = regionResolver;
         this.containerManager = containerManager;
-        this.dockerMode = dockerMode;
-        this.baseUrl = baseUrl;
+        this.dockerMode = !config.services().ecs().mock();
+        this.baseUrl = config.effectiveBaseUrl();
+        this.lbRegistrar = lbRegistrar;
     }
 
     @PostConstruct
@@ -301,6 +294,7 @@ public class EcsService {
                     taskHandles.put(taskArn, handle);
                     cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
                     LOG.infov("Started ECS task (docker): {0}", taskArn);
+                    registerTaskWithLoadBalancers(task, cluster, group, region);
                 } catch (Exception e) {
                     LOG.errorv("Failed to start ECS task {0}: {1}", taskArn, e.getMessage());
                     task.setLastStatus(TaskStatus.STOPPED.name());
@@ -326,6 +320,8 @@ public class EcsService {
         task.setLastStatus(TaskStatus.STOPPING.name());
         task.setStoppedReason(reason != null ? reason : "Stopped by user");
 
+        deregisterTaskFromLoadBalancers(task, region);
+
         if (dockerMode) {
             EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
             containerManager.stopTask(handle);
@@ -344,6 +340,34 @@ public class EcsService {
 
         LOG.infov("Stopped ECS task: {0}", task.getTaskArn());
         return task;
+    }
+
+    /** Registers a freshly-started task's containers as ELBv2 targets if its service is load-balanced. */
+    private void registerTaskWithLoadBalancers(EcsTask task, EcsCluster cluster, String group, String region) {
+        if (group == null) {
+            return;
+        }
+        EcsServiceModel svc = services.get(serviceKey(region, cluster.getClusterName(), group));
+        if (svc != null && !svc.getLoadBalancers().isEmpty()) {
+            lbRegistrar.registerTask(task, svc, region);
+        }
+    }
+
+    /** Deregisters a stopping task's containers from any ELBv2 target groups its service declared. */
+    private void deregisterTaskFromLoadBalancers(EcsTask task, String region) {
+        // Gated on dockerMode for symmetry with the register hook (inside launchTasks'
+        // dockerMode branch): mock-mode tasks have no containers and never registered.
+        if (!dockerMode || task.getGroup() == null) {
+            return;
+        }
+        EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
+        if (cluster == null) {
+            return;
+        }
+        EcsServiceModel svc = services.get(serviceKey(region, cluster.getClusterName(), task.getGroup()));
+        if (svc != null && !svc.getLoadBalancers().isEmpty()) {
+            lbRegistrar.deregisterTask(task, svc, region);
+        }
     }
 
     public List<EcsTask> describeTasks(String clusterRef, List<String> taskRefs, String region) {
@@ -405,7 +429,8 @@ public class EcsService {
     // ── Services ──────────────────────────────────────────────────────────────
 
     public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
-                                          int desiredCount, LaunchType launchType, String region) {
+                                          int desiredCount, LaunchType launchType,
+                                          List<EcsLoadBalancer> loadBalancers, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         resolveTaskDefinitionOrThrow(taskDefinition, region);
 
@@ -423,6 +448,7 @@ public class EcsService {
         svc.setTaskDefinition(taskDefinition);
         svc.setLaunchType(launchType != null ? launchType : LaunchType.FARGATE);
         svc.setDesiredCount(desiredCount);
+        svc.setLoadBalancers(loadBalancers);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
 
@@ -463,10 +489,11 @@ public class EcsService {
             throw new AwsException("InvalidParameterException",
                     "The service cannot be stopped. Update the service to 0 tasks or use the force flag.", 400);
         }
-        services.remove(key);
         svc.setStatus("INACTIVE");
         svc.setDesiredCount(0);
         cluster.setActiveServicesCount(Math.max(0, cluster.getActiveServicesCount() - 1));
+        // Stop tasks before removing the service from the map, so the per-task
+        // ELBv2 deregistration hook can still resolve the service's loadBalancers.
         tasks.values().stream()
                 .filter(t -> t.getClusterArn().equals(cluster.getClusterArn()))
                 .filter(t -> svc.getServiceArn().equals(t.getGroup())
@@ -480,6 +507,7 @@ public class EcsService {
                                 t.getTaskArn(), e.getMessage());
                     }
                 });
+        services.remove(key);
         return svc;
     }
 

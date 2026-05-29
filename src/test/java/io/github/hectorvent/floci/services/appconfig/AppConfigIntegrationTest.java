@@ -210,9 +210,26 @@ class AppConfigIntegrationTest {
                 .header("Next-Poll-Configuration-Token", notNullValue());
     }
 
-    // ──────────────────────────── Builtin deployment strategies ────────────────────────────
+    // ──────────────────────────── Hosted Configuration Version list ────────────────────────────
 
     @Test @Order(13)
+    void listHostedConfigurationVersionsReturnsBothVersions() {
+        given()
+                .when().get("/applications/" + appId + "/configurationprofiles/" + profileId + "/hostedconfigurationversions")
+                .then()
+                .statusCode(200)
+                .body("Items.size()", equalTo(2))
+                .body("Items[0].VersionNumber", equalTo(1))
+                .body("Items[0].ContentType", startsWith("application/json"))
+                .body("Items[0].ApplicationId", equalTo(appId))
+                .body("Items[0].ConfigurationProfileId", equalTo(profileId))
+                .body("Items[1].VersionNumber", equalTo(2))
+                .body("Items.Content", everyItem(nullValue()));
+    }
+
+    // ──────────────────────────── Builtin deployment strategies ────────────────────────────
+
+    @Test @Order(14)
     void builtinStrategyAllAtOnceCanBeUsedWithoutCreating() {
         given()
                 .contentType(ContentType.JSON)
@@ -226,7 +243,7 @@ class AppConfigIntegrationTest {
 
     // ──────────────────────────── Application tagging ────────────────────────────
 
-    @Test @Order(14)
+    @Test @Order(15)
     void listTagsOnNewApplicationIsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -236,7 +253,7 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
-    @Test @Order(15)
+    @Test @Order(16)
     void tagApplication() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -247,7 +264,7 @@ class AppConfigIntegrationTest {
                 .statusCode(204);
     }
 
-    @Test @Order(16)
+    @Test @Order(17)
     void listTagsAfterTagging() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -258,7 +275,7 @@ class AppConfigIntegrationTest {
                 .body("Tags.team", equalTo("platform"));
     }
 
-    @Test @Order(17)
+    @Test @Order(18)
     void untagApplication() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -267,7 +284,7 @@ class AppConfigIntegrationTest {
                 .statusCode(204);
     }
 
-    @Test @Order(18)
+    @Test @Order(19)
     void listTagsAfterUntagging() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId;
         given()
@@ -280,7 +297,7 @@ class AppConfigIntegrationTest {
 
     // ──────────────────────────── Tags on non-application resources (no-op) ────────────────────────────
 
-    @Test @Order(19)
+    @Test @Order(20)
     void listTagsForEnvironmentArnReturnsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId + "/environment/" + envId;
         given()
@@ -290,7 +307,7 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
-    @Test @Order(20)
+    @Test @Order(21)
     void listTagsForDeploymentArnReturnsEmpty() {
         String arn = "arn:aws:appconfig:us-east-1:000000000000:application/" + appId + "/environment/" + envId + "/deployment/1";
         given()
@@ -300,7 +317,7 @@ class AppConfigIntegrationTest {
                 .body("Tags", anEmptyMap());
     }
 
-    @Test @Order(21)
+    @Test @Order(22)
     void emptyConfigurationReturnsEmptyPayload() {
         emptyAppId = given()
                 .contentType(ContentType.JSON)

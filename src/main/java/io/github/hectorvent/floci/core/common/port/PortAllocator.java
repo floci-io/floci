@@ -4,34 +4,43 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * Thread-safe sequential port dispenser for Lambda Runtime API servers.
+ * Hands out ports from a configured range for Lambda Runtime API servers.
+ * Throws {@link IllegalStateException} when the range is exhausted; the
+ * caller releases a port back to the pool via {@link #release(int)}.
  */
 @ApplicationScoped
 public class PortAllocator {
 
-    private final AtomicInteger counter;
     private final int basePort;
-    private final int range;
+    private final int maxPort;
+    private final Set<Integer> inUse = ConcurrentHashMap.newKeySet();
 
     @Inject
     public PortAllocator(EmulatorConfig config) {
-        this.basePort = config.services().lambda().runtimeApiBasePort();
-        int maxPort = config.services().lambda().runtimeApiMaxPort();
-        this.range = maxPort - basePort + 1;
-        this.counter = new AtomicInteger(0);
+        this(config.services().lambda().runtimeApiBasePort(),
+                config.services().lambda().runtimeApiMaxPort());
     }
 
     PortAllocator(int basePort, int maxPort) {
         this.basePort = basePort;
-        this.range = maxPort - basePort + 1;
-        this.counter = new AtomicInteger(0);
+        this.maxPort = maxPort;
     }
 
     public int allocate() {
-        int offset = counter.getAndIncrement();
-        return basePort + (Math.abs(offset) % range);
+        for (int p = basePort; p <= maxPort; p++) {
+            if (inUse.add(p)) {
+                return p;
+            }
+        }
+        throw new IllegalStateException(
+                "No free ports in range " + basePort + "-" + maxPort);
+    }
+
+    public void release(int port) {
+        inUse.remove(port);
     }
 }

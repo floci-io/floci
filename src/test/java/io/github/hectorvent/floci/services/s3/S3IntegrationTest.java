@@ -30,13 +30,13 @@ class S3IntegrationTest {
 
     @Test
     @Order(2)
-    void createDuplicateBucketFails() {
+    void createDuplicateBucketInUsEast1IsIdempotent() {
         given()
         .when()
             .put("/test-bucket")
         .then()
-            .statusCode(409)
-            .body(containsString("BucketAlreadyOwnedByYou"));
+            .statusCode(200)
+            .header("Location", equalTo("/test-bucket"));
     }
 
     @Test
@@ -77,7 +77,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-sha256", notNullValue())
+            .header("x-amz-checksum-crc64nvme", notNullValue())
             .body(equalTo("Hello World from S3!"));
     }
 
@@ -93,7 +93,7 @@ class S3IntegrationTest {
             .body(containsString("<GetObjectAttributesResponse"))
             .body(containsString("<StorageClass>STANDARD_IA</StorageClass>"))
             .body(containsString("<ObjectSize>20</ObjectSize>"))
-            .body(containsString("<ChecksumSHA256>"));
+            .body(containsString("<ChecksumCRC64NVME>"));
     }
 
     @Test
@@ -108,7 +108,7 @@ class S3IntegrationTest {
             .header("Content-Length", notNullValue())
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
-            .header("x-amz-checksum-sha256", notNullValue());
+            .header("x-amz-checksum-crc64nvme", notNullValue());
     }
 
     @Test
@@ -573,6 +573,24 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(40)
+    void getObjectRangeOmitsWholeObjectChecksum() {
+        // greeting.txt has a stored whole-object CRC64NVME checksum (see getObject).
+        // A 206 partial response must NOT carry that checksum: it is computed over the
+        // full object, so SDKs that validate it against the received range bytes fail.
+        // Real S3 omits whole-object checksum headers on ranged responses.
+        given()
+            .header("Range", "bytes=4-7")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(206)
+            .header("Content-Range", equalTo("bytes 4-7/20"))
+            .body(equalTo("o Wo"))
+            .header("x-amz-checksum-crc64nvme", nullValue());
+    }
+
+    @Test
     @Order(50)
     void getObjectIfNoneMatchReturns304() {
         String eTag = given()
@@ -817,7 +835,10 @@ class S3IntegrationTest {
             .put("/encoding-test-bucket/encoded.txt")
         .then()
             .statusCode(200)
-            .header("ETag", notNullValue());
+            .header("ETag", notNullValue())
+            .header("Content-Encoding", nullValue())
+            .header("Content-Disposition", nullValue())
+            .header("Cache-Control", nullValue());
     }
 
     @Test
@@ -1624,5 +1645,44 @@ class S3IntegrationTest {
         .then()
                 .statusCode(400)
                 .body(containsString("InvalidKey"));
+    }
+
+    @Test
+    @Order(150)
+    void putObjectRejectsMismatchedCRC32() {
+        given()
+            .body("hello")
+            .header("x-amz-checksum-crc32", "INVALID==")
+        .when()
+            .put("/test-bucket/checksum-crc32-test.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("BadDigest"));
+    }
+
+    @Test
+    @Order(151)
+    void putObjectRejectsMismatchedCRC32C() {
+        given()
+            .body("hello")
+            .header("x-amz-checksum-crc32c", "INVALID==")
+        .when()
+            .put("/test-bucket/checksum-crc32c-test.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("BadDigest"));
+    }
+
+    @Test
+    @Order(152)
+    void putObjectRejectsMismatchedCRC64NVME() {
+        given()
+            .body("hello")
+            .header("x-amz-checksum-crc64nvme", "INVALID==")
+        .when()
+            .put("/test-bucket/checksum-crc64nvme-test.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("BadDigest"));
     }
 }

@@ -1,12 +1,29 @@
 package io.github.hectorvent.floci.services.apigateway;
 
-import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
-import io.github.hectorvent.floci.services.apigateway.model.*;
-import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
+import java.io.IOException;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
+import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
+import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
+import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
+import io.github.hectorvent.floci.services.apigateway.model.RestApi;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
+import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Api;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Authorizer;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Deployment;
@@ -16,17 +33,22 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.Model;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Route;
 import io.github.hectorvent.floci.services.apigatewayv2.model.RouteResponse;
 import io.github.hectorvent.floci.services.apigatewayv2.model.Stage;
+import io.github.hectorvent.floci.services.apigatewayv2.model.VpcLink;
 import jakarta.inject.Inject;
-import jakarta.ws.rs.*;
+import jakarta.ws.rs.Consumes;
+import jakarta.ws.rs.DELETE;
+import jakarta.ws.rs.GET;
+import jakarta.ws.rs.PATCH;
+import jakarta.ws.rs.POST;
+import jakarta.ws.rs.PUT;
+import jakarta.ws.rs.Path;
+import jakarta.ws.rs.PathParam;
+import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
-import org.jboss.logging.Logger;
-
-import java.io.IOException;
-import java.util.List;
-import java.util.Map;
 
 /**
  * Unified AWS API Gateway management endpoints (v1 REST and v2 HTTP).
@@ -35,8 +57,6 @@ import java.util.Map;
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes({MediaType.APPLICATION_JSON, "application/json-patch+json"})
 public class ApiGatewayController {
-
-    private static final Logger LOG = Logger.getLogger(ApiGatewayController.class);
 
     private final ApiGatewayService service;
     private final ApiGatewayV2Service v2Service;
@@ -156,8 +176,55 @@ public class ApiGatewayController {
 
     // ──────────────────────────── General REST APIs (v1) ────────────────────────────
 
+    @GET
+    @Path("/account")
+    public Response getAccount(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(toAccountNode(service.getAccount(region)).toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @PATCH
+    @Path("/account")
+    public Response updateAccount(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            if (body == null || body.isBlank()) {
+                throw new AwsException("BadRequestException", "Request body is required", 400);
+            }
+            com.fasterxml.jackson.databind.JsonNode node = objectMapper.readTree(body).path("patchOperations");
+            if (!node.isArray()) {
+                throw new AwsException("BadRequestException", "patchOperations must be an array", 400);
+            }
+
+            List<Map<String, String>> patchOperations = new ArrayList<>();
+            for (com.fasterxml.jackson.databind.JsonNode operationNode : node) {
+                if (operationNode == null || operationNode.isNull() || !operationNode.isObject()) {
+                    throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
+                }
+                try {
+                    Map<String, String> operation = objectMapper.convertValue(operationNode,
+                            new TypeReference<Map<String, String>>() {
+                            });
+                    if (operation == null) {
+                        throw new AwsException("BadRequestException", "Each patch operation must be an object", 400);
+                    }
+                    patchOperations.add(operation);
+                } catch (IllegalArgumentException e) {
+                    throw new AwsException("BadRequestException", "Invalid patch operation", 400);
+                }
+            }
+
+            return Response.ok(toAccountNode(service.updateAccount(region, patchOperations)).toString())
+                    .type(MediaType.APPLICATION_JSON)
+                    .build();
+        } catch (IOException | IllegalArgumentException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
     @POST
     @Path("/restapis")
+    @Consumes(MediaType.WILDCARD)
     public Response createRestApi(@Context HttpHeaders headers,
                                   @QueryParam("mode") String mode,
                                   String body) {
@@ -178,6 +245,7 @@ public class ApiGatewayController {
 
     @PUT
     @Path("/restapis/{apiId}")
+    @Consumes(MediaType.WILDCARD)
     public Response putRestApi(@Context HttpHeaders headers,
                                @PathParam("apiId") String apiId,
                                @QueryParam("mode") String mode,
@@ -453,6 +521,16 @@ public class ApiGatewayController {
         String region = regionResolver.resolveRegion(headers);
         return Response.ok(toDeploymentNode(service.getDeployment(region, apiId, deploymentId)).toString())
                 .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/restapis/{apiId}/deployments/{deploymentId}")
+    public Response deleteDeployment(@Context HttpHeaders headers,
+                                     @PathParam("apiId") String apiId,
+                                     @PathParam("deploymentId") String deploymentId) {
+        String region = regionResolver.resolveRegion(headers);
+        service.deleteDeployment(region, apiId, deploymentId);
+        return Response.noContent().build();
     }
 
     @POST
@@ -962,6 +1040,49 @@ public class ApiGatewayController {
         }
     }
 
+    // ──────────────────────────── VPC Links (v2) ────────────────────────────
+
+    @POST
+    @Path("/v2/vpclinks")
+    public Response createVpcLink(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> request = objectMapper.readValue(body, Map.class);
+            VpcLink link = v2Service.createVpcLink(region, request);
+            return Response.status(201).entity(toV2VpcLinkNode(link).toString()).type(MediaType.APPLICATION_JSON).build();
+        } catch (IOException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/v2/vpclinks")
+    public Response getVpcLinks(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        List<VpcLink> links = v2Service.getVpcLinks(region);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("items");
+        links.forEach(l -> items.add(toV2VpcLinkNode(l)));
+        return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @GET
+    @Path("/v2/vpclinks/{vpcLinkId}")
+    public Response getVpcLink(@Context HttpHeaders headers, @PathParam("vpcLinkId") String vpcLinkId) {
+        String region = regionResolver.resolveRegion(headers);
+        return Response.ok(toV2VpcLinkNode(v2Service.getVpcLink(region, vpcLinkId)).toString())
+                .type(MediaType.APPLICATION_JSON).build();
+    }
+
+    @DELETE
+    @Path("/v2/vpclinks/{vpcLinkId}")
+    public Response deleteVpcLink(@Context HttpHeaders headers, @PathParam("vpcLinkId") String vpcLinkId) {
+        String region = regionResolver.resolveRegion(headers);
+        v2Service.deleteVpcLink(region, vpcLinkId);
+        return Response.accepted().build();
+    }
+
     // ──────────────────────────── Route Responses (v2) ────────────────────────────
 
     @POST
@@ -1466,6 +1587,25 @@ public class ApiGatewayController {
             ObjectNode vars = node.putObject("variables");
             s.getVariables().forEach(vars::put);
         }
+        if (!s.getMethodSettings().isEmpty()) {
+            ObjectNode methodSettings = node.putObject("methodSettings");
+            s.getMethodSettings().forEach((key, setting) -> methodSettings.set(key, toMethodSettingNode(setting)));
+        }
+        return node;
+    }
+
+    private ObjectNode toMethodSettingNode(io.github.hectorvent.floci.services.apigateway.model.MethodSetting setting) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("metricsEnabled", setting.isMetricsEnabled());
+        node.put("loggingLevel", setting.getLoggingLevel());
+        node.put("dataTraceEnabled", setting.isDataTraceEnabled());
+        node.put("throttlingBurstLimit", setting.getThrottlingBurstLimit());
+        node.put("throttlingRateLimit", setting.getThrottlingRateLimit());
+        node.put("cachingEnabled", setting.isCachingEnabled());
+        node.put("cacheTtlInSeconds", setting.getCacheTtlInSeconds());
+        node.put("cacheDataEncrypted", setting.isCacheDataEncrypted());
+        node.put("requireAuthorizationForCacheControl", setting.isRequireAuthorizationForCacheControl());
+        node.put("unauthorizedCacheControlHeaderStrategy", setting.getUnauthorizedCacheControlHeaderStrategy());
         return node;
     }
 
@@ -1544,6 +1684,30 @@ public class ApiGatewayController {
         return node;
     }
 
+    private ObjectNode toAccountNode(io.github.hectorvent.floci.services.apigateway.model.Account account) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (account.getApiKeyVersion() != null) {
+            node.put("apiKeyVersion", account.getApiKeyVersion());
+        }
+        if (account.getCloudwatchRoleArn() != null) {
+            node.put("cloudwatchRoleArn", account.getCloudwatchRoleArn());
+        }
+        if (account.getFeatures() != null) {
+            ArrayNode features = node.putArray("features");
+            account.getFeatures().forEach(features::add);
+        }
+        if (account.getThrottleSettings() != null) {
+            ObjectNode throttle = node.putObject("throttleSettings");
+            if (account.getThrottleSettings().getBurstLimit() != null) {
+                throttle.put("burstLimit", account.getThrottleSettings().getBurstLimit());
+            }
+            if (account.getThrottleSettings().getRateLimit() != null) {
+                throttle.put("rateLimit", account.getThrottleSettings().getRateLimit());
+            }
+        }
+        return node;
+    }
+
     private ObjectNode toV2ApiNode(Api api) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("apiId", api.getApiId());
@@ -1559,6 +1723,32 @@ public class ApiGatewayController {
             api.getTags().forEach(tagsNode::put);
             node.set("tags", tagsNode);
         }
+        if (api.getCorsConfiguration() != null) {
+            node.set("corsConfiguration", toV2CorsNode(api.getCorsConfiguration()));
+        }
+        return node;
+    }
+
+    private ObjectNode toV2CorsNode(Api.Cors cors) {
+        ObjectNode node = objectMapper.createObjectNode();
+        if (cors.allowOrigins() != null) {
+            ArrayNode arr = node.putArray("allowOrigins");
+            cors.allowOrigins().forEach(arr::add);
+        }
+        if (cors.allowMethods() != null) {
+            ArrayNode arr = node.putArray("allowMethods");
+            cors.allowMethods().forEach(arr::add);
+        }
+        if (cors.allowHeaders() != null) {
+            ArrayNode arr = node.putArray("allowHeaders");
+            cors.allowHeaders().forEach(arr::add);
+        }
+        if (cors.exposeHeaders() != null) {
+            ArrayNode arr = node.putArray("exposeHeaders");
+            cors.exposeHeaders().forEach(arr::add);
+        }
+        if (cors.maxAge() != null) node.put("maxAge", cors.maxAge());
+        if (cors.allowCredentials() != null) node.put("allowCredentials", cors.allowCredentials());
         return node;
     }
 
@@ -1567,6 +1757,7 @@ public class ApiGatewayController {
         node.put("routeId", r.getRouteId());
         node.put("routeKey", r.getRouteKey());
         node.put("authorizationType", r.getAuthorizationType());
+        if (r.getAuthorizerId() != null) node.put("authorizerId", r.getAuthorizerId());
         if (r.getTarget() != null) node.put("target", r.getTarget());
         if (r.getRouteResponseSelectionExpression() != null) node.put("routeResponseSelectionExpression", r.getRouteResponseSelectionExpression());
         return node;
@@ -1576,6 +1767,8 @@ public class ApiGatewayController {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("integrationId", i.getIntegrationId());
         node.put("integrationType", i.getIntegrationType());
+        if (i.getConnectionType() != null) node.put("connectionType", i.getConnectionType());
+        if (i.getConnectionId() != null) node.put("connectionId", i.getConnectionId());
         node.put("payloadFormatVersion", i.getPayloadFormatVersion());
         if (i.getIntegrationUri() != null) node.put("integrationUri", i.getIntegrationUri());
         if (i.getRequestTemplates() != null) {
@@ -1586,6 +1779,10 @@ public class ApiGatewayController {
             ObjectNode responseTemplates = node.putObject("responseTemplates");
             i.getResponseTemplates().forEach(responseTemplates::put);
         }
+        if (i.getRequestParameters() != null) {
+            ObjectNode requestParameters = node.putObject("requestParameters");
+            i.getRequestParameters().forEach(requestParameters::put);
+        }
         if (i.getTemplateSelectionExpression() != null) {
             node.put("templateSelectionExpression", i.getTemplateSelectionExpression());
         }
@@ -1594,6 +1791,29 @@ public class ApiGatewayController {
         }
         if (i.getTimeoutInMillis() != 0) {
             node.put("timeoutInMillis", i.getTimeoutInMillis());
+        }
+        return node;
+    }
+
+    private ObjectNode toV2VpcLinkNode(VpcLink v) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("vpcLinkId", v.getVpcLinkId());
+        if (v.getName() != null) node.put("name", v.getName());
+        if (v.getVpcLinkStatus() != null) node.put("vpcLinkStatus", v.getVpcLinkStatus());
+        node.put("vpcLinkVersion", "V2");
+        node.put("createdDate", Instant.ofEpochMilli(v.getCreatedDate()).toString());
+        if (v.getSubnetIds() != null) {
+            ArrayNode subnets = node.putArray("subnetIds");
+            v.getSubnetIds().forEach(subnets::add);
+        }
+        if (v.getSecurityGroupIds() != null) {
+            ArrayNode sgs = node.putArray("securityGroupIds");
+            v.getSecurityGroupIds().forEach(sgs::add);
+        }
+        if (v.getTags() != null && !v.getTags().isEmpty()) {
+            ObjectNode tagsNode = objectMapper.createObjectNode();
+            v.getTags().forEach(tagsNode::put);
+            node.set("tags", tagsNode);
         }
         return node;
     }
@@ -1648,6 +1868,9 @@ public class ApiGatewayController {
         }
         if (a.getAuthorizerResultTtlInSeconds() != null) {
             node.put("authorizerResultTtlInSeconds", a.getAuthorizerResultTtlInSeconds());
+        }
+        if (a.getEnableSimpleResponses() != null) {
+            node.put("enableSimpleResponses", a.getEnableSimpleResponses());
         }
         return node;
     }

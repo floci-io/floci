@@ -58,9 +58,16 @@ class S3ServiceTest {
     }
 
     @Test
-    void createDuplicateBucketThrows() {
-        s3Service.createBucket("test-bucket", "us-east-1");
-        assertThrows(AwsException.class, () -> s3Service.createBucket("test-bucket", "us-east-1"));
+    void createDuplicateBucketInUsEast1IsIdempotent() {
+        Bucket first = s3Service.createBucket("test-bucket", "us-east-1");
+        Bucket duplicate = s3Service.createBucket("test-bucket", "us-east-1");
+        assertSame(first, duplicate);
+    }
+
+    @Test
+    void createDuplicateBucketOutsideUsEast1Throws() {
+        s3Service.createBucket("eu-bucket", "eu-central-1");
+        assertThrows(AwsException.class, () -> s3Service.createBucket("eu-bucket", "eu-central-1"));
     }
 
     @Test
@@ -92,10 +99,10 @@ class S3ServiceTest {
     }
 
     @Test
-    void putObjectLastModifiedHasSecondPrecision() {
+    void putObjectLastModifiedHasMillisecondPrecision() {
         s3Service.createBucket("test-bucket", null);
         S3Object obj = s3Service.putObject("test-bucket", "file.txt", "data".getBytes(), null, null);
-        assertEquals(0, obj.getLastModified().getNano());
+        assertEquals(0, obj.getLastModified().getNano() % 1_000_000);
     }
 
     @Test
@@ -355,7 +362,7 @@ class S3ServiceTest {
         assertEquals("STANDARD_IA", head.getStorageClass());
         assertEquals("team-a", head.getMetadata().get("owner"));
         assertNotNull(head.getChecksum());
-        assertNotNull(head.getChecksum().getChecksumSHA256());
+        assertNotNull(head.getChecksum().getChecksumCRC64NVME());
         assertEquals("FULL_OBJECT", head.getChecksum().getChecksumType());
         assertEquals(stored.getETag(), head.getETag());
     }
@@ -375,7 +382,7 @@ class S3ServiceTest {
         assertEquals(7L, attributes.getObjectSize());
         assertEquals("GLACIER", attributes.getStorageClass());
         assertNotNull(attributes.getChecksum());
-        assertNotNull(attributes.getChecksum().getChecksumSHA256());
+        assertNotNull(attributes.getChecksum().getChecksumCRC64NVME());
         assertNull(attributes.getObjectParts());
     }
 

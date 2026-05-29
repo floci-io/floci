@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.eks.EksController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesController;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -87,6 +88,11 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("rds"), Set.of(), Set.of()),
+                descriptor("neptune", "neptune", config.services().neptune().enabled(), true,
+                        "neptune", storageMode(config.storage().services().neptune().mode(), config.storage().mode()),
+                        5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
+                        protocols(ServiceProtocol.QUERY),
+                        Set.of(), Set.of("neptune"), Set.of(), Set.of()),
                 descriptor("events", "eventbridge", config.services().eventbridge().enabled(), true,
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -219,6 +225,10 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodeDeploy_20141006."), Set.of("codedeploy"), Set.of(), Set.of()),
+                descriptor("config", "configservice", config.services().configservice().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("StarlingDoveService."), Set.of("config"), Set.of(), Set.of()),
                 descriptor("autoscaling", "autoscaling", config.services().autoscaling().enabled(), true,
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
@@ -255,7 +265,20 @@ public class ResolvedServiceCatalog {
                 descriptor("ce", "ce", config.services().ce().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
-                        Set.of("AWSInsightsIndexService."), Set.of("ce"), Set.of(), Set.of())
+                        Set.of("AWSInsightsIndexService."), Set.of("ce"), Set.of(), Set.of()),
+                descriptor("cur", "cur", config.services().cur().enabled(), true,
+                        "cur", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSOrigamiServiceGatewayService."), Set.of("cur"), Set.of(), Set.of()),
+                descriptor("bcm-data-exports", "bcmdataexports", config.services().bcmDataExports().enabled(), true,
+                        "bcmdataexports", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSBillingAndCostManagementDataExports."), Set.of("bcm-data-exports"), Set.of(), Set.of()),
+                descriptor("cloudfront", "cloudfront", config.services().cloudfront().enabled(), true,
+                        "cloudfront", storageMode(config.storage().services().cloudfront().mode(), config.storage().mode()),
+                        5000L, AwsNamespaces.CLOUDFRONT, ServiceProtocol.REST_XML,
+                        protocols(ServiceProtocol.REST_XML),
+                        Set.of(), Set.of("cloudfront"), Set.of(), Set.of(CloudFrontController.class))
         ));
     }
 

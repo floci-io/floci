@@ -7,6 +7,145 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.19] - 2026-05-24
+
+### Added
+
+- **lambda:** Lambda layer support — `PublishLayerVersion`, `GetLayerVersion`, `ListLayerVersions`, `DeleteLayerVersion` ([#1015](https://github.com/floci-io/floci/pull/1015))
+- **elbv2:** `DescribeListenerAttributes`, `ModifyListenerAttributes`, `DescribeCapacityReservation`, and `ModifyCapacityReservation` actions ([#1021](https://github.com/floci-io/floci/pull/1021))
+- **kms:** `RotateKeyOnDemand` support for on-demand key rotation ([#990](https://github.com/floci-io/floci/pull/990))
+- **apigateway:** Lambda REQUEST authorizer support for HTTP API v2 routes ([#1011](https://github.com/floci-io/floci/pull/1011))
+- **apigateway:** persist `UpdateStage` `methodSettings` patch operations on v1 stages ([#1004](https://github.com/floci-io/floci/pull/1004))
+- **cognito:** `UpdateGroup`, `ListUsersInGroup`, and `AdminConfirmSignUp` actions ([#998](https://github.com/floci-io/floci/pull/998))
+- **ci:** Docker images now published to ECR Public Gallery ([#1000](https://github.com/floci-io/floci/pull/1000))
+
+### Fixed
+
+- **s3:** remove private `hasQueryParam` in `S3Controller` that shadowed the static import from `S3RequestParser` — presigned `PUT` requests with `x-amz-tagging` in `X-Amz-SignedHeaders` were misrouted to `PutObjectTagging` and returned 404 ([#1023](https://github.com/floci-io/floci/pull/1023))
+- **iam:** honour 12-digit access key as account ID in IAM ARNs — `CreateRole`, `CreateUser`, `CreateGroup`, `CreatePolicy`, and `CreateInstanceProfile` always returned `000000000000` regardless of caller identity ([#1017](https://github.com/floci-io/floci/pull/1017))
+- **s3:** persist inline `x-amz-tagging` header on `PutObject` ([#987](https://github.com/floci-io/floci/pull/987))
+- **apigateway:** implement `DeleteDeployment` endpoint and return correct JSON 404 error for missing resources ([#1019](https://github.com/floci-io/floci/pull/1019))
+- **rds:** register `DbEndpoint` for native-image reflection ([#1014](https://github.com/floci-io/floci/pull/1014))
+- **apigateway:** populate full `APIGatewayRequestAuthorizerEvent` fields for REQUEST authorizers ([#1002](https://github.com/floci-io/floci/pull/1002))
+- **sns:** return per-entry failures from `PublishBatch` instead of aborting the whole batch on a single entry failure ([#1008](https://github.com/floci-io/floci/pull/1008))
+- **cognito:** CloudFormation provisioning for `UserPool` and `UserPoolClient` resource types ([#1007](https://github.com/floci-io/floci/pull/1007))
+- **lifecycle:** fix incorrect readiness status display when TLS is enabled and AppConfig is initialising ([#1006](https://github.com/floci-io/floci/pull/1006))
+- **s3:** unblock `.well-known/*` object keys that were hijacked by Cognito OIDC routes ([#1003](https://github.com/floci-io/floci/pull/1003))
+- **sns:** preserve binary message attributes through `Publish` and fan-out delivery ([#989](https://github.com/floci-io/floci/pull/989))
+- **cognito:** include user attributes in ID token claims ([#985](https://github.com/floci-io/floci/pull/985))
+- **ecr:** release registry port when container start fails to prevent port exhaustion ([#1010](https://github.com/floci-io/floci/pull/1010))
+- **s3:** restore object data on delete marker removal and return missing version headers ([#966](https://github.com/floci-io/floci/pull/966))
+- **sts:** honour 12-digit access key as account ID in STS responses ([#983](https://github.com/floci-io/floci/pull/983))
+- **sqs:** accept bare queue name in `QueueUrl` field ([#980](https://github.com/floci-io/floci/pull/980))
+- **s3:** accept region-qualified virtual-host form `bucket.s3.<region>.<host>` ([#978](https://github.com/floci-io/floci/pull/978))
+- **sqs/sns:** add `ContentBasedDeduplication` support and SNS subscription CloudFormation provisioning ([#974](https://github.com/floci-io/floci/pull/974))
+- **s3:** handle `PutBucketRequestPayment` instead of falling through to `CreateBucket` ([#994](https://github.com/floci-io/floci/pull/994))
+
+### Documentation
+
+- **pipes:** add documentation and navigation for EventBridge Pipes ([#1001](https://github.com/floci-io/floci/pull/1001))
+- **tagging:** add Resource Groups Tagging service documentation ([#976](https://github.com/floci-io/floci/pull/976))
+- **transcribe:** add Transcribe service documentation ([#975](https://github.com/floci-io/floci/pull/975))
+
+## [1.5.18] - 2026-05-21
+
+### Added
+
+- **cloudfront:** CloudFront service emulation — `CreateDistribution`, `GetDistribution`, `UpdateDistribution`, `DeleteDistribution`, `ListDistributions`; distribution state, origins, cache behaviors, and viewer certificate management ([#969](https://github.com/floci-io/floci/pull/969))
+- **config:** AWS Config service emulation — configuration recorders, delivery channels, config rules, `StartConfigurationRecorder`, `StopConfigurationRecorder`, `DescribeConfigurationRecorders`, `PutDeliveryChannel`, `DescribeDeliveryChannels`, `PutConfigRule`, `DescribeConfigRules`, `DeleteConfigRule` ([#934](https://github.com/floci-io/floci/pull/934))
+- **neptune:** SDK compatibility tests added to the Neptune control plane and Gremlin Docker backend ([#958](https://github.com/floci-io/floci/pull/958))
+- **apigatewayv2:** HTTP API requests are now forwarded through ALB listeners — HTTP_PROXY integrations targeting ALB are resolved at dispatch time, enabling ECS/ELBv2 stacks backed by API Gateway HTTP APIs ([#941](https://github.com/floci-io/floci/pull/941))
+- **sqs:** persist and return `AWSTraceHeader` system attribute on `SendMessage` and `ReceiveMessage` for X-Ray tracing compatibility ([#909](https://github.com/floci-io/floci/pull/909))
+- **sqs:** implement `StartMessageMoveTask`, `ListMessageMoveTasks`, and `CancelMessageMoveTask` with async drain and configurable `MaxNumberOfMessagesPerSecond` rate limiting ([#910](https://github.com/floci-io/floci/pull/910))
+- **kms:** implement `GenerateMac` and `VerifyMac` for HMAC keys (`HMAC_256`, `HMAC_384`, `HMAC_512`) ([#927](https://github.com/floci-io/floci/pull/927))
+- **apigateway:** handle inbound requests to custom domain names — custom domain name mappings are matched before stage routing, enabling SDK and Terraform workflows that create `AWS::ApiGateway::DomainName` resources ([#922](https://github.com/floci-io/floci/pull/922))
+- **ecs:** register ECS service containers as ELBv2 targets — ECS tasks are automatically registered and deregistered in target groups when services scale or update ([#929](https://github.com/floci-io/floci/pull/929))
+- **elasticache:** Memcached cluster management — `CreateCacheCluster` and `DescribeCacheClusters` for `memcached` engine; Memcached data-plane proxy backed by a real Memcached Docker container ([#930](https://github.com/floci-io/floci/pull/930))
+- **sns:** HTTP/HTTPS endpoint delivery — subscriptions with `http` or `https` protocol now deliver notifications via real HTTP POST with the standard SNS envelope; includes subscription confirmation handshake ([#865](https://github.com/floci-io/floci/pull/865))
+- **secretsmanager:** add `RestoreSecret` operation — restores a soft-deleted secret, clears the `DeletedDate`, and returns the updated metadata ([#915](https://github.com/floci-io/floci/pull/915))
+
+### Fixed
+
+- **s3:** return `ObjectLockConfigurationNotFoundError` when `GetObjectLockConfiguration` is called on a bucket that was not created with Object Lock enabled ([#971](https://github.com/floci-io/floci/pull/971))
+- **core:** lowercase `smithy-protocol` response header to `smithy-protocol` — some AWS SDK versions rejected the mixed-case variant, breaking CBOR responses ([#968](https://github.com/floci-io/floci/pull/968))
+- **s3:** omit `Content-Type` body-description headers and user-defined metadata (`x-amz-meta-*`) from `PutObject` responses — these fields are request-only and their presence in the response caused SDK assertion failures ([#948](https://github.com/floci-io/floci/pull/948))
+- **rds:** persist instance and cluster metadata across storage-backed restarts — `DescribeDBInstances` and `DescribeDBClusters` returned empty results after restart ([#945](https://github.com/floci-io/floci/pull/945))
+- **s3:** fix `ListObjects` v1 `marker`-based pagination — the next-page marker was not advanced correctly, causing infinite loops or skipped objects on subsequent pages ([#939](https://github.com/floci-io/floci/pull/939))
+- **sqs:** reject `SendMessageBatch` when the combined payload exceeds `MaximumMessageSize` — previously only individual message size was checked ([#907](https://github.com/floci-io/floci/pull/907))
+- **apigatewayv2:** include `corsConfiguration` in HTTP API `Get`/`Create`/`Update` responses ([#933](https://github.com/floci-io/floci/pull/933))
+- **core:** fix crash when the request `Content-Type` header is an empty string — previously threw a `NullPointerException` during media-type parsing ([#940](https://github.com/floci-io/floci/pull/940))
+- **lambda:** log an actionable hint when the concurrency pool is exhausted instead of returning a bare 429 ([#935](https://github.com/floci-io/floci/pull/935))
+- **dynamodb:** correct `DeleteTable` status transitions — table enters `DELETING` before removal; fix PartiQL `SELECT` scan to respect `FilterExpression` ([#915](https://github.com/floci-io/floci/pull/915))
+- **lambda:** make `PortAllocator` a checkout/release pool — prevents port collisions under concurrent invocations and restores released ports to the free set ([#936](https://github.com/floci-io/floci/pull/936))
+- **apigatewayv2:** raise Vert.x WebSocket frame size limit to 256 KB to match AWS WebSocket API frame limits ([#938](https://github.com/floci-io/floci/pull/938))
+- **apigatewayv2:** include `connectionType` and `enableSimpleResponses` fields in `Integration` and `Authorizer` responses ([#931](https://github.com/floci-io/floci/pull/931))
+- **sns:** preserve per-entry `MessageAttributes` in `PublishBatch` — attributes from sibling entries were leaking across batch items ([#891](https://github.com/floci-io/floci/pull/891))
+- **lambda:** await `HttpServer` close in `RuntimeApiServer.stop()` to prevent in-flight `/next` polls from being dropped during graceful shutdown ([#926](https://github.com/floci-io/floci/pull/926))
+- **apigateway:** accept any `Content-Type` on `PutRestApi` and `ImportRestApi` — previously rejected non-`application/json` bodies, breaking Swagger YAML imports ([#925](https://github.com/floci-io/floci/pull/925))
+- **s3:** honor `response-content-type`, `response-content-disposition`, `response-cache-control`, and other `response-*` query parameters on `GetObject` and `HeadObject` ([#923](https://github.com/floci-io/floci/pull/923))
+- **cognito:** correct `USER_SRP_AUTH` `PASSWORD_VERIFIER` challenge signature computation — HMAC-SHA256 was using the wrong derived key, causing authentication failures with real SRP clients ([#912](https://github.com/floci-io/floci/pull/912))
+- **ec2:** add missing instance response fields (`privateDnsNameOptions`, `maintenanceOptions`, `currentInstanceBootMode`) to fix Terraform nil pointer dereference on `aws_instance` resources ([#883](https://github.com/floci-io/floci/pull/883))
+- **sns:** emit canonical AWS error codes (`InvalidParameterValue`) for `Publish` and `PublishBatch` message size violations ([#906](https://github.com/floci-io/floci/pull/906))
+- **sqs:** skip JSON `null` tag and attribute values instead of persisting the literal string `"null"` ([#905](https://github.com/floci-io/floci/pull/905))
+- **sqs:** scope FIFO deduplication ID lookup per `MessageGroupId` when `DeduplicationScope=messageGroup` is set on the queue ([#908](https://github.com/floci-io/floci/pull/908))
+
+### Documentation
+
+- Update README with service coverage and configuration examples ([#885](https://github.com/floci-io/floci/pull/885))
+
+## [1.5.17] - 2026-05-18
+
+### Added
+
+- **neptune:** Neptune control plane — `CreateDBCluster`, `DescribeDBClusters`, `ModifyDBCluster`, `DeleteDBCluster`, `CreateDBInstance`, `DescribeDBInstances`, `ModifyDBInstance`, `DeleteDBInstance`; each cluster is backed by a real TinkerPop Gremlin Server Docker container behind a transparent TCP proxy ([#881](https://github.com/floci-io/floci/pull/881))
+- **apigateway:** `GetAccount` and `UpdateAccount` — account-level configuration including throttle settings and CloudWatch log role ARN; enables Terraform and CDK stacks that call `aws_api_gateway_account` ([#867](https://github.com/floci-io/floci/pull/867))
+- **apigatewayv2:** `HTTP_PROXY` integration type — forwards inbound requests to the configured `IntegrationUri` with `RequestParameters` transformations matching AWS-faithful semantics ([#860](https://github.com/floci-io/floci/pull/860))
+- **dynamodb:** `ExecuteStatement`, `ExecuteTransaction`, `BatchExecuteStatement` — hand-rolled PartiQL tokenizer and recursive-descent parser supporting SELECT/INSERT/UPDATE/DELETE, `?` positional placeholders, `begins_with`, and `BETWEEN`; translates to existing service calls with no new storage ([#864](https://github.com/floci-io/floci/pull/864))
+- **sns:** `FilterPolicyScope=MessageBody` — filter policies scoped to the message body are now evaluated at publish time; previously the scope was persisted but ignored, delivering all messages regardless of the policy ([#863](https://github.com/floci-io/floci/pull/863))
+- **cognito:** `PostConfirmation` and `PreSignUp` Lambda triggers — `PostConfirmation_ConfirmSignUp` fires after `ConfirmSignUp`; `PreSignUp_SignUp` fires before user persistence on `SignUp`; `autoConfirmUser=true` in the PreSignUp response auto-confirms and chains into PostConfirmation ([#859](https://github.com/floci-io/floci/pull/859))
+- **ses:** `PutAccountSuppressionAttributes` (`PUT /v2/email/account/suppression`) — set account-level suppression list reasons (`BOUNCE`/`COMPLAINT`); `GetAccount` response now includes a `SuppressionAttributes` object reflecting the stored setting ([#853](https://github.com/floci-io/floci/pull/853))
+- **cur / bcm-data-exports:** Cost and Usage Reports (`AWSOrigamiServiceGatewayService.*`) and BCM Data Exports (`AWSBillingAndCostManagementDataExports.*`) management planes sharing one underlying export pipeline ([#850](https://github.com/floci-io/floci/pull/850))
+
+### Fixed
+
+- **dynamodb:** honor legacy `Expected` condition in `UpdateItem` — `handleUpdateItem` now reads the `Expected` field, and `evaluateLegacyExpected` normalizes the legacy `{"Value": x}` shape to `{"AttributeValueList": [x]}` before evaluation; conditional writes that should fail were silently succeeding ([#888](https://github.com/floci-io/floci/pull/888))
+- **apigatewayv2:** `Route` responses now include `authorizerId` — the field was persisted and used at dispatch time but never emitted by `toV2RouteNode`, breaking SDK and Terraform reads ([#887](https://github.com/floci-io/floci/pull/887))
+- **eventbridge:** persisted rules no longer disappear on reload — `Rule.getRegion()` is a derived getter with no setter; `ObjectMapper` wrote `"region"` into `eventbridge-rules.json` and then threw `UnrecognizedPropertyException` on startup, causing all persisted rules to be silently dropped ([#878](https://github.com/floci-io/floci/pull/878))
+- **s3:** `PutObject` now returns the checksum for the algorithm actually specified by the caller; previously always returned `ChecksumSHA1` + `ChecksumSHA256` regardless of `--checksum-algorithm` ([#877](https://github.com/floci-io/floci/pull/877))
+- **eks:** cluster readiness polling now uses the container's bridge IP instead of the container hostname, fixing clusters stuck in `CREATING` when Floci runs inside Docker; startup failures are handled gracefully instead of returning 500 ([#873](https://github.com/floci-io/floci/pull/873))
+- **eventbridge:** region is now correctly propagated through rule dispatch so SQS queue lookup uses the rule's region rather than the primary region ([#870](https://github.com/floci-io/floci/pull/870))
+- **eventbridge:** `EventBusName` is now accepted as a full ARN (`arn:aws:events:…:event-bus/my-bus`) in addition to a plain name across all EventBridge operations ([#843](https://github.com/floci-io/floci/pull/843))
+
+## [1.5.16] - 2026-05-15
+
+### Added
+
+- **stepfunctions:** `ValidateStateMachineDefinition` — validates ASL definitions and returns structured diagnostics with `/States/<state>/<field>` paths for precise error location ([#845](https://github.com/floci-io/floci/pull/845))
+- **stepfunctions:** `ListTagsForResource`, `TagResource`, `UntagResource` for state machines and activities; covers both the AWS SDK (JSON 1.0) and Terraform (REST) wire paths ([#767](https://github.com/floci-io/floci/pull/767))
+- **rds:** cluster parameter group actions — `CreateDBClusterParameterGroup`, `DescribeDBClusterParameterGroups`, `DeleteDBClusterParameterGroup`, `ModifyDBClusterParameterGroup`, `DescribeDBClusterParameters`; mirrors the existing instance-level parameter group shape and unblocks IaC stacks that define Aurora `ClusterParameterGroup` resources ([#838](https://github.com/floci-io/floci/pull/838))
+- **s3:** full `SelectObjectContent` evaluator with floci-duck integration — recursive WHERE (AND, OR, NOT, LIKE, BETWEEN, IN, IS NULL, comparisons), JSON Lines and JSON array input formats, cross-format output (CSV→JSON, JSON→CSV), real `BytesScanned`/`BytesReturned` stats; routes CSV and JSON through floci-duck when available with a pure-Java fallback for standalone mode ([#835](https://github.com/floci-io/floci/pull/835))
+- **eventbridge:** `UpdateEventBus` — update event bus description, KMS key, dead-letter config, or log config ([#834](https://github.com/floci-io/floci/pull/834))
+- **ce:** AWS Cost Explorer service — `GetCostAndUsage`, `GetCostAndUsageWithResources`, `GetDimensionValues`, `GetTags`, `GetReservationCoverage`, `GetReservationUtilization`, `GetSavingsPlansCoverage`, `GetSavingsPlansUtilization`, `GetCostCategories`; cost is synthesized from existing resource state multiplied by the bundled pricing snapshot; supports `DAILY`/`MONTHLY`/`HOURLY` granularity, all standard metrics, and `GroupBy` on `DIMENSION`, `TAG`, and `COST_CATEGORY` ([#832](https://github.com/floci-io/floci/pull/832))
+- **transcribe:** AWS Transcribe service — `StartTranscriptionJob`, `GetTranscriptionJob`, `ListTranscriptionJobs`, `DeleteTranscriptionJob`, `CreateVocabulary`, `GetVocabulary`, `ListVocabularies`, `UpdateVocabulary`, `DeleteVocabulary` ([#827](https://github.com/floci-io/floci/pull/827))
+
+### Fixed
+
+- **core:** remove AWS SDK from Floci's runtime classpath to eliminate version conflicts with user-bundled SDKs ([#846](https://github.com/floci-io/floci/pull/846))
+- **core:** improve log level structure and reduce noise in hot paths ([#847](https://github.com/floci-io/floci/pull/847))
+- **s3:** make `us-east-1` bucket creation idempotent — repeated `CreateBucket` calls for the same bucket in `us-east-1` no longer raise `BucketAlreadyOwnedByYou` ([#844](https://github.com/floci-io/floci/pull/844))
+- **ec2:** support wildcard (`*`, `?`) filter values across all EC2 resources (VPCs, Subnets, Security Groups, Instances, Internet Gateways, Route Tables, Volumes), matching real AWS filter behavior ([#837](https://github.com/floci-io/floci/pull/837))
+- **pricing:** bundle pricing snapshot resources into the native image — the Price List service was unavailable in GraalVM native builds ([#836](https://github.com/floci-io/floci/pull/836))
+- **kms:** `Encrypt` now derives a fresh AES-GCM nonce per call (was deterministic, leaking plaintext equality); `Decrypt` now validates `EncryptionContext` as AAD and raises `InvalidCiphertextException` on any mismatch ([#825](https://github.com/floci-io/floci/pull/825))
+- **s3:** strip `charset` parameter from `Content-Type` in XML responses ([#809](https://github.com/floci-io/floci/pull/809))
+- **sqs:** FIFO `ReceiveMessage` now returns messages from multiple distinct message groups in a single call ([#785](https://github.com/floci-io/floci/pull/785))
+- **sqs:** honor `AttributeNames` and `MessageSystemAttributeNames` on `ReceiveMessage` ([#784](https://github.com/floci-io/floci/pull/784))
+- **sqs:** implement `AddPermission` and `RemovePermission` ([#781](https://github.com/floci-io/floci/pull/781))
+- **stepfunctions:** honor `TimeoutSeconds` on `Parallel` state ([#771](https://github.com/floci-io/floci/pull/771))
+
+### Documentation
+
+- Improve README readability ([#831](https://github.com/floci-io/floci/pull/831))
+
 ## [1.5.15] - 2026-05-13
 
 ### Added
@@ -609,7 +748,11 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.15...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.19...HEAD
+[1.5.19]: https://github.com/floci-io/floci/compare/1.5.18...1.5.19
+[1.5.18]: https://github.com/floci-io/floci/compare/1.5.17...1.5.18
+[1.5.17]: https://github.com/floci-io/floci/compare/1.5.16...1.5.17
+[1.5.16]: https://github.com/floci-io/floci/compare/1.5.15...1.5.16
 [1.5.15]: https://github.com/floci-io/floci/compare/1.5.14...1.5.15
 [1.5.14]: https://github.com/floci-io/floci/compare/1.5.13...1.5.14
 [1.5.13]: https://github.com/floci-io/floci/compare/1.5.12...1.5.13

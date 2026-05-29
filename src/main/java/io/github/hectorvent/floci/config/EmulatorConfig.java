@@ -142,7 +142,9 @@ public interface EmulatorConfig {
         AppConfigDataStorageConfig appconfigdata();
         ElastiCacheStorageConfig elasticache();
         RdsStorageConfig rds();
+        NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
+        CloudFrontStorageConfig cloudfront();
     }
 
     interface SsmStorageConfig {
@@ -241,11 +243,19 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface NeptuneStorageConfig {
+        Optional<String> mode();
+    }
+
     interface BackupStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
         long flushIntervalMs();
+    }
+
+    interface CloudFrontStorageConfig {
+        Optional<String> mode();
     }
 
     interface WalConfig {
@@ -308,6 +318,7 @@ public interface EmulatorConfig {
         CodeDeployServiceConfig codedeploy();
         AutoScalingServiceConfig autoscaling();
         BackupServiceConfig backup();
+        NeptuneServiceConfig neptune();
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
@@ -315,6 +326,10 @@ public interface EmulatorConfig {
         DuckConfig duck();
         TranscribeServiceConfig transcribe();
         CostExplorerServiceConfig ce();
+        CurServiceConfig cur();
+        BcmDataExportsServiceConfig bcmDataExports();
+        ConfigServiceConfig configservice();
+        CloudFrontServiceConfig cloudfront();
     }
 
     interface TransferServiceConfig {
@@ -345,6 +360,11 @@ public interface EmulatorConfig {
 
         @WithDefault("ns-4.awsdns-04.co.uk")
         String defaultNameserver4();
+    }
+
+    interface ConfigServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface AutoScalingServiceConfig {
@@ -441,7 +461,10 @@ public interface EmulatorConfig {
         @WithDefault("valkey/valkey:8")
         String defaultImage();
 
-        /** Docker network to attach Valkey containers to. Empty = default bridge. */
+        @WithDefault("memcached:1.6")
+        String defaultMemcachedImage();
+
+        /** Docker network to attach ElastiCache containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
     }
 
@@ -465,6 +488,24 @@ public interface EmulatorConfig {
         String defaultMariadbImage();
 
         /** Docker network to attach DB containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+    }
+
+    interface NeptuneServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** Base port of the proxy port range. First cluster gets this port. */
+        @WithDefault("8182")
+        int proxyBasePort();
+
+        /** Inclusive upper bound of the proxy port range. */
+        @WithDefault("8282")
+        int proxyMaxPort();
+
+        @WithDefault("tinkerpop/gremlin-server:3.7.3")
+        String defaultImage();
+
         Optional<String> dockerNetwork();
     }
 
@@ -547,6 +588,9 @@ public interface EmulatorConfig {
     interface CloudFormationServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("30")
+        long deletedStackRetentionSeconds();
     }
 
     interface AcmServiceConfig {
@@ -609,8 +653,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
-        @WithDefault("opensearchproject/opensearch:2")
-        String defaultImage();
+        /**
+         * Optional fixed image used for every domain regardless of the
+         * requested {@code EngineVersion}. Useful for operators running a
+         * private registry mirror or pinning a specific patch tag. When unset
+         * (the common case), images resolve from
+         * {@code OpenSearchVersions.imageFor(...)} per the requested version.
+         */
+        Optional<String> defaultImage();
 
         @WithDefault("9400")
         int proxyBasePort();
@@ -687,6 +737,49 @@ public interface EmulatorConfig {
          */
         @WithDefault("0.0")
         double creditUsdMonthly();
+    }
+
+    interface CurServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Controls when CUR Parquet artifacts are emitted:
+         * <ul>
+         *   <li>{@code synchronous} — emit on report definition mutations (default; suits tests)</li>
+         *   <li>{@code daily} — emit once per 24h via the CUR-owned scheduled executor</li>
+         *   <li>{@code off} — management plane only, no Parquet emission</li>
+         * </ul>
+         */
+        @WithDefault("synchronous")
+        String emitMode();
+
+        /**
+         * S3 bucket used to stage NDJSON row payloads before DuckDB writes the
+         * final Parquet artifact. Created on first use if it doesn't exist.
+         */
+        @WithDefault("floci-cur-staging")
+        String stagingBucket();
+    }
+
+    interface CloudFrontServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("cloudfront.net")
+        String domainSuffix();
+    }
+
+    interface BcmDataExportsServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /**
+         * Same semantics as {@code floci.services.cur.emit-mode} but applied to
+         * BCM Data Exports {@code Export} records.
+         */
+        @WithDefault("synchronous")
+        String emitMode();
     }
 
     interface EcrServiceConfig {

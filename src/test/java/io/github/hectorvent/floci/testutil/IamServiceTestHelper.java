@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.testutil;
 
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.iam.IamService;
@@ -23,7 +24,7 @@ public final class IamServiceTestHelper {
                     StorageBackend.class,
                     StorageBackend.class,
                     StorageBackend.class,
-                    String.class
+                    RegionResolver.class
             );
             constructor.setAccessible(true);
 
@@ -38,7 +39,7 @@ public final class IamServiceTestHelper {
                     accessKeys,
                     null,
                     null,
-                    "123456789012"
+                    new RegionResolver("us-east-1", "123456789012")
             );
         } catch (ReflectiveOperationException e) {
             throw new IllegalStateException("Failed to construct IamService test fixture", e);

@@ -1,12 +1,14 @@
 package io.github.hectorvent.floci.services.ecs;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
+import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
@@ -370,13 +372,57 @@ public class EcsJsonHandler {
         String taskDefinition = req.path("taskDefinition").asText();
         int desiredCount = req.path("desiredCount").asInt(1);
         LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
+        List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, region);
+                desiredCount, launchType, loadBalancers, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
         return Response.ok(resp).build();
+    }
+
+    private List<EcsLoadBalancer> parseLoadBalancers(JsonNode node) {
+        List<EcsLoadBalancer> result = new ArrayList<>();
+        if (node == null || !node.isArray()) {
+            return result;
+        }
+        for (JsonNode lb : node) {
+            String targetGroupArn = lb.hasNonNull("targetGroupArn")
+                    ? lb.path("targetGroupArn").asText() : null;
+            String loadBalancerName = lb.hasNonNull("loadBalancerName")
+                    ? lb.path("loadBalancerName").asText() : null;
+            String containerName = lb.hasNonNull("containerName")
+                    ? lb.path("containerName").asText() : null;
+            Integer containerPort = lb.hasNonNull("containerPort")
+                    ? lb.path("containerPort").asInt() : null;
+
+            // AWS rejects malformed loadBalancers entries with InvalidParameterException.
+            // containerName + containerPort are always required; an entry must target
+            // either a target group (ALB/NLB) or a classic load balancer by name.
+            if (containerName == null || containerName.isBlank()) {
+                throw new AwsException("InvalidParameterException",
+                        "loadBalancers entry is missing the required containerName.", 400);
+            }
+            if (containerPort == null) {
+                throw new AwsException("InvalidParameterException",
+                        "loadBalancers entry is missing the required containerPort.", 400);
+            }
+            boolean hasTargetGroup = targetGroupArn != null && !targetGroupArn.isBlank();
+            boolean hasLoadBalancerName = loadBalancerName != null && !loadBalancerName.isBlank();
+            if (!hasTargetGroup && !hasLoadBalancerName) {
+                throw new AwsException("InvalidParameterException",
+                        "loadBalancers entry must specify either targetGroupArn or loadBalancerName.", 400);
+            }
+
+            EcsLoadBalancer m = new EcsLoadBalancer();
+            m.setTargetGroupArn(targetGroupArn);
+            m.setLoadBalancerName(loadBalancerName);
+            m.setContainerName(containerName);
+            m.setContainerPort(containerPort);
+            result.add(m);
+        }
+        return result;
     }
 
     private Response handleUpdateService(JsonNode req, String region) {
@@ -954,6 +1000,18 @@ public class EcsJsonHandler {
         if (s.getNamespace() != null) { n.put("namespace", s.getNamespace()); }
         if (s.getTags() != null && !s.getTags().isEmpty()) {
             n.set("tags", tagsNode(s.getTags()));
+        }
+        if (s.getLoadBalancers() != null && !s.getLoadBalancers().isEmpty()) {
+            ArrayNode lbs = objectMapper.createArrayNode();
+            for (EcsLoadBalancer lb : s.getLoadBalancers()) {
+                ObjectNode ln = objectMapper.createObjectNode();
+                if (lb.getTargetGroupArn() != null) { ln.put("targetGroupArn", lb.getTargetGroupArn()); }
+                if (lb.getLoadBalancerName() != null) { ln.put("loadBalancerName", lb.getLoadBalancerName()); }
+                if (lb.getContainerName() != null) { ln.put("containerName", lb.getContainerName()); }
+                if (lb.getContainerPort() != null) { ln.put("containerPort", lb.getContainerPort()); }
+                lbs.add(ln);
+            }
+            n.set("loadBalancers", lbs);
         }
         return n;
     }

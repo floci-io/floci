@@ -216,4 +216,69 @@ class ApiGatewayV2JsonHandlerTest {
         given().when().delete("/v2/apis/" + apiId + "/stages/prod").then().statusCode(204);
         given().when().delete("/v2/apis/" + apiId).then().statusCode(204);
     }
+
+    @Test
+    @Order(20)
+    void json11CreateIntegrationWithRequestParametersRoundTrips() throws Exception {
+        // Create a fresh API for this test (the cleanup test removed the previous one)
+        String localApiId = given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateApi")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"Name":"rp-test","ProtocolType":"HTTP"}
+                        """)
+                .when().post("/")
+                .then().statusCode(201).extract().path("ApiId");
+
+        // Create HTTP_PROXY integration with RequestParameters
+        String createBody = given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateIntegration")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {
+                          "ApiId": "%s",
+                          "IntegrationType": "HTTP_PROXY",
+                          "IntegrationUri": "http://example.com/{proxy}",
+                          "PayloadFormatVersion": "1.0",
+                          "RequestParameters": {
+                            "overwrite:path": "/public/$request.path.proxy",
+                            "overwrite:header.Host": "wallet.internal",
+                            "append:header.x-user-id": "$context.authorizer.claims.userId"
+                          }
+                        }
+                        """.formatted(localApiId))
+                .when().post("/")
+                .then().statusCode(201).extract().asString();
+
+        com.fasterxml.jackson.databind.ObjectMapper mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        com.fasterxml.jackson.databind.JsonNode created = mapper.readTree(createBody);
+        String localIntegrationId = created.get("IntegrationId").asText();
+        org.junit.jupiter.api.Assertions.assertEquals("HTTP_PROXY", created.get("IntegrationType").asText());
+        com.fasterxml.jackson.databind.JsonNode createdRP = created.get("RequestParameters");
+        org.junit.jupiter.api.Assertions.assertNotNull(createdRP, "CreateIntegration response should include RequestParameters");
+        org.junit.jupiter.api.Assertions.assertEquals("/public/$request.path.proxy", createdRP.get("overwrite:path").asText());
+        org.junit.jupiter.api.Assertions.assertEquals("wallet.internal", createdRP.get("overwrite:header.Host").asText());
+        org.junit.jupiter.api.Assertions.assertEquals("$context.authorizer.claims.userId", createdRP.get("append:header.x-user-id").asText());
+
+        // Get the integration and assert RequestParameters survived persistence
+        String getBody = given()
+                .contentType(AMZ_JSON)
+                .header("X-Amz-Target", TARGET_PREFIX + "GetIntegration")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                        {"ApiId":"%s","IntegrationId":"%s"}
+                        """.formatted(localApiId, localIntegrationId))
+                .when().post("/")
+                .then().statusCode(200).extract().asString();
+
+        com.fasterxml.jackson.databind.JsonNode getRP = mapper.readTree(getBody).get("RequestParameters");
+        org.junit.jupiter.api.Assertions.assertNotNull(getRP, "GetIntegration response should include RequestParameters");
+        org.junit.jupiter.api.Assertions.assertEquals("/public/$request.path.proxy", getRP.get("overwrite:path").asText());
+        org.junit.jupiter.api.Assertions.assertEquals("$context.authorizer.claims.userId", getRP.get("append:header.x-user-id").asText());
+
+        // Cleanup
+        given().when().delete("/v2/apis/" + localApiId).then().statusCode(204);
+    }
 }

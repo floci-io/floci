@@ -27,6 +27,7 @@ public class DynamoDbJsonHandler {
     private final DynamoDbStreamService dynamoDbStreamService;
     private final KinesisService kinesisService;
     private final ObjectMapper objectMapper;
+    private final DynamoDbPartiQLHandler partiQLHandler;
 
     @Inject
     public DynamoDbJsonHandler(DynamoDbService dynamoDbService, DynamoDbStreamService dynamoDbStreamService,
@@ -35,6 +36,7 @@ public class DynamoDbJsonHandler {
         this.dynamoDbStreamService = dynamoDbStreamService;
         this.kinesisService = kinesisService;
         this.objectMapper = objectMapper;
+        this.partiQLHandler = new DynamoDbPartiQLHandler(dynamoDbService, objectMapper);
     }
 
     public Response handle(String action, JsonNode request, String region) throws Exception {
@@ -67,6 +69,9 @@ public class DynamoDbJsonHandler {
             case "ExportTableToPointInTime" -> handleExportTable(request, region);
             case "DescribeExport" -> handleDescribeExport(request, region);
             case "ListExports" -> handleListExports(request, region);
+            case "ExecuteStatement" -> handleExecuteStatement(request, region);
+            case "ExecuteTransaction" -> handleExecuteTransaction(request, region);
+            case "BatchExecuteStatement" -> handleBatchExecuteStatement(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnknownOperationException", "Operation " + action + " is not supported."))
                     .build();
@@ -196,11 +201,9 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ResourceInUseException",
                     "Table " + tableName + " can't be deleted while DeletionProtectionEnabled is set to true", 400);
         }
-        dynamoDbService.deleteTable(tableName, region);
-
-        table.setTableStatus("DELETING");
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
+        dynamoDbService.deleteTable(tableName, region);
         return Response.ok(response).build();
     }
 
@@ -458,11 +461,20 @@ public class DynamoDbJsonHandler {
         }
 
         JsonNode updateData = attributeUpdates.isMissingNode() ? null : attributeUpdates;
+        JsonNode expectedUpd = request.has("Expected") ? request.get("Expected") : null;
+        String conditionalOperatorUpd = request.has("ConditionalOperator")
+                ? request.get("ConditionalOperator").asText() : "AND";
 
         if (updateData != null && updateExpression != null) {
             throw new AwsException("ValidationException",
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
+        }
+
+        if (conditionExpression != null && expectedUpd != null) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {Expected} Expression parameters: {ConditionExpression}", 400);
         }
 
         // Validate EAN/EAV usage across UpdateExpression + ConditionExpression
@@ -492,6 +504,11 @@ public class DynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, hashTokens);
             Set<String> colonTokensAll = extractColonTokens(updateExpression, conditionExpression);
             checkUnusedEav(exprAttrValues, colonTokensAll);
+        }
+
+        if (expectedUpd != null) {
+            JsonNode existingForUpd = dynamoDbService.getItem(tableName, key, region);
+            evaluateLegacyExpected(existingForUpd, expectedUpd, conditionalOperatorUpd, returnValuesOnConditionCheckFailure);
         }
 
         DynamoDbService.UpdateResult result = dynamoDbService.updateItem(
@@ -533,7 +550,7 @@ public class DynamoDbJsonHandler {
                 boolean exists = condition.get("Exists").asBoolean();
                 condResult = exists ? attrValue != null : attrValue == null;
             } else {
-                condResult = dynamoDbService.matchesKeyConditionPublic(attrValue, condition);
+                condResult = dynamoDbService.matchesKeyConditionPublic(attrValue, normalizeLegacyCondition(condition));
             }
             if (useOr) overall = overall || condResult;
             else overall = overall && condResult;
@@ -545,6 +562,27 @@ public class DynamoDbJsonHandler {
                 throw new ConditionalCheckFailedException(null);
             }
         }
+    }
+
+    /**
+     * Converts a legacy Expected condition from the {"Value": {...}} form to the
+     * {"AttributeValueList": [{...}]} form expected by matchesKeyCondition.
+     * Operators that already use AttributeValueList (IN, BETWEEN) pass through unchanged.
+     */
+    private JsonNode normalizeLegacyCondition(JsonNode condition) {
+        if (!condition.has("Value") || condition.has("AttributeValueList")) {
+            return condition;
+        }
+        com.fasterxml.jackson.databind.node.ObjectNode normalized = objectMapper.createObjectNode();
+        condition.fields().forEachRemaining(e -> {
+            if (!"Value".equals(e.getKey())) {
+                normalized.set(e.getKey(), e.getValue());
+            }
+        });
+        com.fasterxml.jackson.databind.node.ArrayNode avl = objectMapper.createArrayNode();
+        avl.add(condition.get("Value"));
+        normalized.set("AttributeValueList", avl);
+        return normalized;
     }
 
     private void addItemCollectionMetrics(ObjectNode response, JsonNode request, String tableName,
@@ -1876,5 +1914,90 @@ public class DynamoDbJsonHandler {
             response.put("NextToken", result.nextToken());
         }
         return Response.ok(response).build();
+    }
+
+    private Response handleExecuteStatement(JsonNode request, String region) {
+        String statement = request.path("Statement").asText();
+        List<JsonNode> parameters = toPartiQLParams(request.path("Parameters"));
+        DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(statement, parameters);
+        PartiQLExecuteContext ctx = PartiQLExecuteContext.builder()
+                .limit(request.has("Limit") ? request.get("Limit").asInt() : null)
+                .nextToken(request.has("NextToken") ? request.get("NextToken").asText() : null);
+        JsonNode result = partiQLHandler.execute(stmt, ctx, region);
+        return Response.ok(result).build();
+    }
+
+    private Response handleExecuteTransaction(JsonNode request, String region) {
+        JsonNode stmts = request.path("TransactStatements");
+        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
+            throw new AwsException("ValidationException", "TransactStatements must not be empty", 400);
+        }
+        List<JsonNode> transactItems = new ArrayList<>();
+        for (JsonNode s : stmts) {
+            DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
+                    s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
+            transactItems.add(partiQLHandler.toTransactItem(stmt, region));
+        }
+        try {
+            dynamoDbService.transactWriteItems(transactItems, region);
+            ObjectNode resp = objectMapper.createObjectNode();
+            resp.set("Responses", objectMapper.createArrayNode());
+            return Response.ok(resp).build();
+        } catch (TransactionCanceledException e) {
+            ObjectNode body = objectMapper.createObjectNode();
+            body.put("__type", "TransactionCanceledException");
+            body.put("message", e.getMessage());
+            ArrayNode reasons = body.putArray("CancellationReasons");
+            for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
+                ObjectNode r = objectMapper.createObjectNode();
+                r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
+                r.put("Message", reason.code().isEmpty() ? "" : "The conditional request failed");
+                if (reason.item() != null) {
+                    r.set("Item", reason.item());
+                }
+                reasons.add(r);
+            }
+            return Response.status(400).entity(body).build();
+        }
+    }
+
+    private Response handleBatchExecuteStatement(JsonNode request, String region) {
+        JsonNode stmts = request.path("Statements");
+        if (stmts.isMissingNode() || !stmts.isArray() || stmts.isEmpty()) {
+            throw new AwsException("ValidationException", "Statements must not be empty", 400);
+        }
+        ArrayNode responses = objectMapper.createArrayNode();
+        for (JsonNode s : stmts) {
+            try {
+                DynamoDbPartiQLParser.Stmt stmt = DynamoDbPartiQLParser.parse(
+                        s.path("Statement").asText(), toPartiQLParams(s.path("Parameters")));
+                JsonNode result = partiQLHandler.execute(stmt, PartiQLExecuteContext.builder(), region);
+                ObjectNode slot = objectMapper.createObjectNode();
+                JsonNode firstItem = result.path("Items").path(0);
+                if (!firstItem.isMissingNode()) {
+                    slot.set("Item", firstItem);
+                }
+                responses.add(slot);
+            } catch (AwsException e) {
+                ObjectNode slot = objectMapper.createObjectNode();
+                ObjectNode err = objectMapper.createObjectNode();
+                err.put("Code", e.getErrorCode());
+                err.put("Message", e.getMessage());
+                slot.set("Error", err);
+                responses.add(slot);
+            }
+        }
+        ObjectNode resp = objectMapper.createObjectNode();
+        resp.set("Responses", responses);
+        return Response.ok(resp).build();
+    }
+
+    private List<JsonNode> toPartiQLParams(JsonNode node) {
+        if (node == null || node.isMissingNode() || !node.isArray()) {
+            return Collections.emptyList();
+        }
+        List<JsonNode> params = new ArrayList<>();
+        node.forEach(params::add);
+        return params;
     }
 }

@@ -115,8 +115,9 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         String firstLabel = hostname.substring(0, firstDot);
         String remainder  = hostname.substring(firstDot + 1);
 
-        // Primary: remainder must match the configured base hostname
-        if (baseHostname != null && remainder.equalsIgnoreCase(baseHostname)) {
+        // Primary: remainder must match the configured base hostname,
+        // either directly or in the AWS region-qualified s3.<region>.<host> form.
+        if (baseHostname != null && matchesEndpointHost(remainder, baseHostname)) {
             return firstLabel;
         }
 
@@ -126,6 +127,24 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         }
 
         return null;
+    }
+
+    /**
+     * Matches a hostname directly or its region-qualified s3.&lt;region&gt;.&lt;hostname&gt; variant.
+     * Example: with hostname="localhost", both "localhost" and "s3.us-east-1.localhost" match.
+     */
+    private static boolean matchesEndpointHost(String remainder, String hostname) {
+        if (remainder.equalsIgnoreCase(hostname)) {
+            return true;
+        }
+        String lowerRem = remainder.toLowerCase();
+        String lowerHost = hostname.toLowerCase();
+        String suffix = "." + lowerHost;
+        if (lowerRem.startsWith("s3.") && lowerRem.endsWith(suffix)
+                && lowerRem.length() > "s3.".length() + suffix.length()) {
+            return true;
+        }
+        return false;
     }
 
     /** Extracts the hostname (without scheme or port) from a URL string. */
@@ -174,7 +193,8 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         // localhost always resolves to 127.0.0.1 — accept regardless of FLOCI_HOSTNAME config.
         // Fixes: SDK with endpointOverride("http://localhost:4566") without forcePathStyle sends
         // Host: my-bucket.localhost:4566, which must be recognized even when baseHostname=floci.
-        if ("localhost".equals(remainder)) {
+        // Also accept the region-qualified s3.<region>.localhost form (e.g. bucket.s3.us-east-1.localhost).
+        if (matchesEndpointHost(remainder, "localhost")) {
             return true;
         }
         // LocalStack public wildcard DNS: bucket.s3.localhost.localstack.cloud and bucket.localhost.localstack.cloud

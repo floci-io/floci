@@ -153,6 +153,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>rds</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>neptune</artifactId>
+        </dependency>
         <!-- EventBridge client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

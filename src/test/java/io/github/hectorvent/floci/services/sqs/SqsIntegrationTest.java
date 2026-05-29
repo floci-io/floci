@@ -384,6 +384,42 @@ class SqsIntegrationTest {
     }
 
     @Test
+    void sendMessageBatch_queryProtocol_oversizedBatchReturnsBatchRequestTooLong() {
+        String queueName = "batch-oversize-query-queue";
+        String queueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", queueName)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            String bigBody = "x".repeat(100_000);
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", bigBody)
+                .formParam("SendMessageBatchRequestEntry.3.Id", "c")
+                .formParam("SendMessageBatchRequestEntry.3.MessageBody", bigBody)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body(containsString("BatchRequestTooLong"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", queueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
     void createQueue_idempotent_sameAttributes() {
         String queueName = "idempotent-test-queue";
 
@@ -529,6 +565,92 @@ class SqsIntegrationTest {
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "DeleteQueue")
                 .formParam("QueueUrl", filterQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void sendMessage_queryProtocol_persistsAwsTraceHeader() {
+        String traceQueueName = "query-trace-queue";
+        String traceQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", traceQueueName)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", traceQueueUrl)
+                .formParam("MessageBody", "hi")
+                .formParam("MessageSystemAttribute.1.Name", "AWSTraceHeader")
+                .formParam("MessageSystemAttribute.1.Value.DataType", "String")
+                .formParam("MessageSystemAttribute.1.Value.StringValue", "Root=1-query-single")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", traceQueueUrl)
+                .formParam("MaxNumberOfMessages", "1")
+                .formParam("VisibilityTimeout", "0")
+                .formParam("MessageSystemAttributeName.1", "AWSTraceHeader")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Name>AWSTraceHeader</Name>"))
+                .body(containsString("<Value>Root=1-query-single</Value>"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", traceQueueUrl)
+            .when().post("/");
+        }
+    }
+
+    @Test
+    void sendMessageBatch_queryProtocol_persistsAwsTraceHeaderPerEntry() {
+        String traceQueueName = "query-batch-trace-queue";
+        String traceQueueUrl = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", traceQueueName)
+        .when().post("/").then().statusCode(200)
+            .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
+
+        try {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessageBatch")
+                .formParam("QueueUrl", traceQueueUrl)
+                .formParam("SendMessageBatchRequestEntry.1.Id", "a")
+                .formParam("SendMessageBatchRequestEntry.1.MessageBody", "first")
+                .formParam("SendMessageBatchRequestEntry.1.MessageSystemAttribute.1.Name", "AWSTraceHeader")
+                .formParam("SendMessageBatchRequestEntry.1.MessageSystemAttribute.1.Value.DataType", "String")
+                .formParam("SendMessageBatchRequestEntry.1.MessageSystemAttribute.1.Value.StringValue", "Root=1-aaa")
+                .formParam("SendMessageBatchRequestEntry.2.Id", "b")
+                .formParam("SendMessageBatchRequestEntry.2.MessageBody", "second")
+                .formParam("SendMessageBatchRequestEntry.2.MessageSystemAttribute.1.Name", "AWSTraceHeader")
+                .formParam("SendMessageBatchRequestEntry.2.MessageSystemAttribute.1.Value.DataType", "String")
+                .formParam("SendMessageBatchRequestEntry.2.MessageSystemAttribute.1.Value.StringValue", "Root=1-bbb")
+            .when().post("/").then().statusCode(200);
+
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "ReceiveMessage")
+                .formParam("QueueUrl", traceQueueUrl)
+                .formParam("MaxNumberOfMessages", "10")
+                .formParam("VisibilityTimeout", "0")
+                .formParam("MessageSystemAttributeName.1", "AWSTraceHeader")
+            .when().post("/").then().statusCode(200)
+                .body(containsString("<Value>Root=1-aaa</Value>"))
+                .body(containsString("<Value>Root=1-bbb</Value>"));
+        } finally {
+            given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DeleteQueue")
+                .formParam("QueueUrl", traceQueueUrl)
             .when().post("/");
         }
     }

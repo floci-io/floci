@@ -57,6 +57,7 @@ public class SqsJsonHandler {
             case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(request, region);
             case "StartMessageMoveTask" -> handleStartMessageMoveTask(request, region);
             case "ListMessageMoveTasks" -> handleListMessageMoveTasks(request, region);
+            case "CancelMessageMoveTask" -> handleCancelMessageMoveTask(request, region);
             case "AddPermission" -> handleAddPermission(request, region);
             case "RemovePermission" -> handleRemovePermission(request, region);
             default -> Response.status(400)
@@ -111,6 +112,9 @@ public class SqsJsonHandler {
         if (msg.getMessageDeduplicationId() != null
                 && (all || requested.contains("MessageDeduplicationId"))) {
             attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
+        }
+        if (msg.getAwsTraceHeader() != null && (all || requested.contains("AWSTraceHeader"))) {
+            attrs.put("AWSTraceHeader", msg.getAwsTraceHeader());
         }
         if (!attrs.isEmpty()) {
             msgNode.set("Attributes", attrs);
@@ -214,8 +218,13 @@ public class SqsJsonHandler {
             });
         }
 
+        // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
+        // capture it (if present) so ReceiveMessage can return it as a system attribute.
+        String awsTraceHeader = request.path("MessageSystemAttributes")
+                .path("AWSTraceHeader").path("StringValue").asText(null);
+
         Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
-                messageGroupId, messageDeduplicationId, messageAttributes, region);
+                messageGroupId, messageDeduplicationId, messageAttributes, awsTraceHeader, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         response.put("MessageId", msg.getMessageId());
@@ -338,6 +347,11 @@ public class SqsJsonHandler {
         ArrayNode successful = objectMapper.createArrayNode();
         ArrayNode failed = objectMapper.createArrayNode();
 
+        record ParsedEntry(String id, String body, int delay, String groupId, String dedupId,
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
+
+        List<ParsedEntry> parsedEntries = new ArrayList<>();
+        int totalSize = 0;
         if (entries.isArray()) {
             for (JsonNode entry : entries) {
                 String id = entry.path("Id").asText();
@@ -365,9 +379,24 @@ public class SqsJsonHandler {
                     });
                 }
 
+                String entryAwsTraceHeader = entry.path("MessageSystemAttributes")
+                        .path("AWSTraceHeader").path("StringValue").asText(null);
+
+                totalSize += SqsService.computeMessageSize(messageBody, messageAttributes);
+                parsedEntries.add(new ParsedEntry(id, messageBody, delaySeconds,
+                        messageGroupId, messageDeduplicationId, messageAttributes,
+                        entryAwsTraceHeader));
+            }
+        }
+
+        sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
+
+        for (ParsedEntry parsed : parsedEntries) {
+                String id = parsed.id();
                 try {
-                    Message msg = sqsService.sendMessage(queueUrl, messageBody, delaySeconds,
-                            messageGroupId, messageDeduplicationId, messageAttributes, region);
+                    Message msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
+                            parsed.groupId(), parsed.dedupId(), parsed.attributes(),
+                            parsed.awsTraceHeader(), region);
                     ObjectNode success = objectMapper.createObjectNode();
                     success.put("Id", id);
                     success.put("MessageId", msg.getMessageId());
@@ -387,7 +416,6 @@ public class SqsJsonHandler {
                     fail.put("SenderFault", true);
                     failed.add(fail);
                 }
-            }
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -412,7 +440,8 @@ public class SqsJsonHandler {
     private Response handleStartMessageMoveTask(JsonNode request, String region) {
         String sourceArn = request.path("SourceArn").asText(null);
         String destinationArn = request.path("DestinationArn").asText(null);
-        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, region);
+        int maxRate = request.path("MaxNumberOfMessagesPerSecond").asInt(0);
+        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, maxRate, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("TaskHandle", taskHandle);
         return Response.ok(response).build();
@@ -420,9 +449,36 @@ public class SqsJsonHandler {
 
     private Response handleListMessageMoveTasks(JsonNode request, String region) {
         String sourceArn = request.path("SourceArn").asText(null);
-        sqsService.listMessageMoveTasks(sourceArn, region);
+        int maxResults = request.path("MaxResults").asInt(10);
+        List<SqsService.MoveTask> tasks = sqsService.listMessageMoveTasks(sourceArn, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.putArray("Results");
+        ArrayNode results = response.putArray("Results");
+        int count = 0;
+        for (SqsService.MoveTask t : tasks) {
+            if (count++ >= maxResults) break;
+            ObjectNode node = results.addObject();
+            node.put("TaskHandle", t.taskHandle());
+            node.put("SourceArn", t.sourceArn());
+            if (t.destinationArn() != null) {
+                node.put("DestinationArn", t.destinationArn());
+            }
+            node.put("MaxNumberOfMessagesPerSecond", t.maxNumberOfMessagesPerSecond());
+            node.put("Status", t.status());
+            node.put("ApproximateNumberOfMessagesMoved", t.approximateNumberOfMessagesMoved());
+            node.put("ApproximateNumberOfMessagesToMove", t.approximateNumberOfMessagesToMove());
+            node.put("StartedTimestamp", t.startedTimestampMillis());
+            if (t.failureReason() != null) {
+                node.put("FailureReason", t.failureReason());
+            }
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleCancelMessageMoveTask(JsonNode request, String region) {
+        String taskHandle = request.path("TaskHandle").asText(null);
+        long moved = sqsService.cancelMessageMoveTask(taskHandle, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ApproximateNumberOfMessagesMoved", moved);
         return Response.ok(response).build();
     }
 
@@ -516,7 +572,14 @@ public class SqsJsonHandler {
     private Map<String, String> jsonNodeToMap(JsonNode node) {
         Map<String, String> map = new HashMap<>();
         if (node != null && node.isObject()) {
-            node.fields().forEachRemaining(entry -> map.put(entry.getKey(), entry.getValue().asText()));
+            node.fields().forEachRemaining(entry -> {
+                JsonNode value = entry.getValue();
+                if (value == null || value.isNull() || value.isMissingNode()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "the parameter 'value' may not be null", 400);
+                }
+                map.put(entry.getKey(), value.asText());
+            });
         }
         return map;
     }

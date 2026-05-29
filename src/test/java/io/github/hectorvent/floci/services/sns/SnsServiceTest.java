@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.sns;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -40,6 +42,14 @@ class SnsServiceTest {
         assertNotNull(topic);
         assertEquals("my-topic", topic.getName());
         assertEquals("arn:aws:sns:us-east-1:000000000000:my-topic", topic.getTopicArn());
+    }
+
+    @Test
+    void createTopic_fifoWithContentBasedDeduplication() {
+        Topic topic = snsService.createTopic("my-topic.fifo",
+                Map.of("ContentBasedDeduplication", "true"), null, REGION);
+        assertEquals("true", topic.getAttributes().get("ContentBasedDeduplication"));
+        assertEquals("true", topic.getAttributes().get("FifoTopic"));
     }
 
     @Test
@@ -221,17 +231,17 @@ class SnsServiceTest {
     }
 
     @Test
-    void publish_messageExceedsSizeLimit_throwsInvalidParameterException() {
+    void publish_messageExceedsSizeLimit_throwsInvalidParameter() {
         Topic topic = snsService.createTopic("size-topic", null, null, REGION);
         String tooBig = "x".repeat(262_145);
         AwsException ex = assertThrows(AwsException.class, () ->
                 snsService.publish(topic.getTopicArn(), null, tooBig, null, REGION));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("InvalidParameter", ex.getErrorCode());
         assertTrue(ex.getMessage().toLowerCase().contains("too long"));
     }
 
     @Test
-    void publish_messagePlusAttributesExceedsLimit_throws() {
+    void publish_messagePlusAttributesExceedsLimit_throwsInvalidParameter() {
         Topic topic = snsService.createTopic("size-topic", null, null, REGION);
         String body = "x".repeat(262_100);
         Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> attrs = Map.of(
@@ -239,7 +249,8 @@ class SnsServiceTest {
                         "y".repeat(200), "String"));
         AwsException ex = assertThrows(AwsException.class, () ->
                 snsService.publish(topic.getTopicArn(), null, null, body, null, attrs, REGION));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals("InvalidParameter", ex.getErrorCode());
+        assertTrue(ex.getMessage().toLowerCase().contains("too long"));
     }
 
     @Test
@@ -262,5 +273,199 @@ class SnsServiceTest {
         snsService.subscribe(topic.getTopicArn(), "sqs", "http://queue2", REGION, Map.of());
         Map<String, String> attrs = snsService.getTopicAttributes(topic.getTopicArn(), REGION);
         assertEquals("2", attrs.get("SubscriptionsConfirmed"));
+    }
+
+    @Test
+    void publish_withHttpSubscriber_pendingConfirmation_skipsDelivery() {
+        Topic topic = snsService.createTopic("http-topic", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "http",
+                "http://localhost:9999/webhook", REGION, Map.of());
+        // HTTP subscription should be pending confirmation
+        assertEquals("true", sub.getAttributes().get("PendingConfirmation"));
+        assertNotNull(sub.getAttributes().get("ConfirmationToken"));
+        // Publish should succeed but skip delivery to pending subscription
+        String messageId = snsService.publish(topic.getTopicArn(), null, "Hello HTTP!", null, REGION);
+        assertNotNull(messageId);
+    }
+
+    @Test
+    void subscribe_httpPendingConfirmation_canBeConfirmed() {
+        Topic topic = snsService.createTopic("http-topic2", null, null, REGION);
+        Subscription sub = snsService.subscribe(topic.getTopicArn(), "http",
+                "http://localhost:9999/webhook", REGION, Map.of());
+        assertEquals("true", sub.getAttributes().get("PendingConfirmation"));
+        String token = sub.getAttributes().get("ConfirmationToken");
+        assertNotNull(token);
+
+        // Confirm the subscription
+        String confirmedArn = snsService.confirmSubscription(topic.getTopicArn(), token, REGION);
+        assertEquals(sub.getSubscriptionArn(), confirmedArn);
+    }
+
+    @Test
+    void subscribe_httpProtocol_rejectsHttpsEndpoint() {
+        Topic topic = snsService.createTopic("scheme-topic", null, null, REGION);
+        assertThrows(AwsException.class,
+            () -> snsService.subscribe(topic.getTopicArn(), "http",
+                    "https://example.com/hook", REGION, Map.of()));
+    }
+
+    @Test
+    void subscribe_httpsProtocol_rejectsHttpEndpoint() {
+        Topic topic = snsService.createTopic("scheme-topic2", null, null, REGION);
+        assertThrows(AwsException.class,
+            () -> snsService.subscribe(topic.getTopicArn(), "https",
+                    "http://example.com/hook", REGION, Map.of()));
+    }
+
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private Subscription subscriptionWithPolicy(String filterPolicy, String scope) {
+        Subscription sub = new Subscription(
+                "arn:aws:sns:us-east-1:000000000000:t:sub", "arn:aws:sns:us-east-1:000000000000:t",
+                "sqs", "arn:aws:sqs:us-east-1:000000000000:q", ACCOUNT);
+        if (filterPolicy != null) {
+            sub.getAttributes().put("FilterPolicy", filterPolicy);
+        }
+        if (scope != null) {
+            sub.getAttributes().put("FilterPolicyScope", scope);
+        }
+        return sub;
+    }
+
+    private static JsonNode body(String json) {
+        try {
+            return MAPPER.readTree(json);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    @Test
+    void filterPolicy_messageBody_topLevelStringMatch() {
+        Subscription sub = subscriptionWithPolicy("{\"store\":[\"shoes\"]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(sub, body("{\"store\":\"shoes\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"store\":\"books\"}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_nestedKeyDescent() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"store\":{\"city\":[\"seattle\",\"portland\"]}}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(sub,
+                body("{\"store\":{\"city\":\"seattle\"}}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub,
+                body("{\"store\":{\"city\":\"boston\"}}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub,
+                body("{\"store\":{\"region\":\"west\"}}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_numericRule() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"price\":[{\"numeric\":[\">=\",100,\"<\",200]}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(sub, body("{\"price\":150}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"price\":50}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"price\":\"150\"}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_arrayValueOr() {
+        Subscription sub = subscriptionWithPolicy("{\"tag\":[\"a\",\"b\"]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(sub, body("{\"tag\":[\"x\",\"b\",\"y\"]}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"tag\":[\"x\",\"y\"]}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_existsTrueAndFalse() {
+        Subscription present = subscriptionWithPolicy("{\"k\":[{\"exists\":true}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(present, body("{\"k\":\"v\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(present, body("{\"other\":\"v\"}"), null));
+
+        Subscription absent = subscriptionWithPolicy("{\"k\":[{\"exists\":false}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(absent, body("{\"other\":\"v\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(absent, body("{\"k\":\"v\"}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_prefixAndAnythingBut() {
+        Subscription prefix = subscriptionWithPolicy(
+                "{\"name\":[{\"prefix\":\"foo\"}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(prefix, body("{\"name\":\"foobar\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(prefix, body("{\"name\":\"bar\"}"), null));
+
+        Subscription anythingBut = subscriptionWithPolicy(
+                "{\"name\":[{\"anything-but\":[\"foo\",\"bar\"]}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(anythingBut, body("{\"name\":\"baz\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(anythingBut, body("{\"name\":\"foo\"}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_prefixIsTextOnly() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"price\":[{\"prefix\":\"1\"}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"price\":100}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"price\":true}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_anythingButIsTypeAware() {
+        Subscription strRule = subscriptionWithPolicy(
+                "{\"x\":[{\"anything-but\":[\"foo\"]}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(strRule, body("{\"x\":100}"), null));
+
+        Subscription numRule = subscriptionWithPolicy(
+                "{\"x\":[{\"anything-but\":[100]}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(numRule, body("{\"x\":100}"), null));
+        assertTrue(snsService.matchesFilterPolicy(numRule, body("{\"x\":200}"), null));
+        assertTrue(snsService.matchesFilterPolicy(numRule, body("{\"x\":\"100\"}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_existsRequiresNonEmptyValue() {
+        Subscription existsTrue = subscriptionWithPolicy("{\"k\":[{\"exists\":true}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(existsTrue, body("{\"k\":\"\"}"), null));
+        assertFalse(snsService.matchesFilterPolicy(existsTrue, body("{\"k\":[]}"), null));
+        assertFalse(snsService.matchesFilterPolicy(existsTrue, body("{\"k\":{}}"), null));
+        assertTrue(snsService.matchesFilterPolicy(existsTrue, body("{\"k\":0}"), null));
+        assertTrue(snsService.matchesFilterPolicy(existsTrue, body("{\"k\":false}"), null));
+
+        Subscription existsFalse = subscriptionWithPolicy("{\"k\":[{\"exists\":false}]}", "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(existsFalse, body("{\"k\":\"\"}"), null));
+        assertTrue(snsService.matchesFilterPolicy(existsFalse, body("{\"k\":[]}"), null));
+        assertTrue(snsService.matchesFilterPolicy(existsFalse, body("{\"k\":{}}"), null));
+        assertFalse(snsService.matchesFilterPolicy(existsFalse, body("{\"k\":0}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_anythingButRequiresKeyPresent() {
+        Subscription sub = subscriptionWithPolicy(
+                "{\"x\":[{\"anything-but\":[\"foo\"]}]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{}"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body("{\"other\":\"v\"}"), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_invalidJson_doesNotDeliver() {
+        Subscription sub = subscriptionWithPolicy("{\"k\":[\"v\"]}", "MessageBody");
+        assertFalse(snsService.matchesFilterPolicy(sub, body("not json"), null));
+        assertFalse(snsService.matchesFilterPolicy(sub, body(""), null));
+    }
+
+    @Test
+    void filterPolicy_messageBody_noFilterPolicy_alwaysDelivers() {
+        Subscription sub = subscriptionWithPolicy(null, "MessageBody");
+        assertTrue(snsService.matchesFilterPolicy(sub, body("not json"), null));
+    }
+
+    @Test
+    void filterPolicy_messageAttributes_unchanged() {
+        Subscription sub = subscriptionWithPolicy("{\"event\":[\"order\"]}", null);
+        Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> matching = Map.of(
+                "event", new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("order", "String"));
+        Map<String, io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue> nonMatching = Map.of(
+                "event", new io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue("refund", "String"));
+        assertTrue(snsService.matchesFilterPolicy(sub, null, matching));
+        assertFalse(snsService.matchesFilterPolicy(sub, null, nonMatching));
     }
 }

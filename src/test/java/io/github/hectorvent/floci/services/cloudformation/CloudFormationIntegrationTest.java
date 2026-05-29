@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
+import io.github.hectorvent.floci.testing.MutableClock;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import jakarta.inject.Inject;
 import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -10,6 +13,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.Base64;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -30,11 +34,20 @@ class CloudFormationIntegrationTest {
     private static final String DYNAMODB_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String SSM_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String SM_CONTENT_TYPE = "application/x-amz-json-1.1";
+    private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    @Inject
+    MutableClock clock;
 
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    @BeforeEach
+    void resetClock() {
+        clock.reset();
     }
 
     private static byte[] buildHandlerZip() {
@@ -996,6 +1009,170 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<StackName>arn-events-stack</StackName>"));
+    }
+
+    @Test
+    void describeDeletedStackEvents_byArn_returnsDeleteCompleteEvents() throws Exception {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "deleted-arn-events-test-bucket"
+                  }
+                }
+              }
+            }
+            """;
+
+        String createResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "deleted-arn-events-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"))
+            .extract().asString();
+
+        String stackArn = createResponse.substring(
+                createResponse.indexOf("<StackId>") + "<StackId>".length(),
+                createResponse.indexOf("</StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "deleted-arn-events-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String deletedEventsXml = null;
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            deletedEventsXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (deletedEventsXml.contains("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>")) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertThat(deletedEventsXml, containsString("<StackId>" + stackArn + "</StackId>"));
+        assertThat(deletedEventsXml, containsString("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>DELETE_COMPLETE</StackStatus>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "deleted-arn-events-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not exist"));
+    }
+
+    @Test
+    void describeDeletedStack_byArn_expiresAfterRetentionWindow() throws Exception {
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "deleted-arn-expiry-test-bucket"
+                  }
+                }
+              }
+            }
+            """;
+
+        String createResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "deleted-arn-expiry-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"))
+            .extract().asString();
+
+        String stackArn = createResponse.substring(
+                createResponse.indexOf("<StackId>") + "<StackId>".length(),
+                createResponse.indexOf("</StackId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "deleted-arn-expiry-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long readyDeadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < readyDeadline) {
+            String deletedEventsXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackEvents")
+                .formParam("StackName", stackArn)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (deletedEventsXml.contains("<ResourceStatus>DELETE_COMPLETE</ResourceStatus>")) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        clock.advance(Duration.ofSeconds(31));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not exist"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("does not exist"));
     }
 
     @Test
@@ -4125,6 +4302,393 @@ class CloudFormationIntegrationTest {
             .statusCode(200)
             .body("authorizationType", equalTo("CUSTOM"))
             .body("authorizerId", equalTo(secondAuth));
+    }
+
+    @Test
+    void createStack_snsSqsFifoWithContentBasedDeduplicationAndSubscription() {
+        String stackName = "cfn-sns-sqs-fifo-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-test-topic.fifo",
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-test-queue.fifo",
+                    "FifoQueue": true,
+                    "ContentBasedDeduplication": true
+                  }
+                },
+                "MySubscription": {
+                  "Type": "AWS::SNS::Subscription",
+                  "Properties": {
+                    "TopicArn": {"Ref": "MyTopic"},
+                    "Protocol": "sqs",
+                    "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]},
+                    "RawMessageDelivery": true
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 1. Verify SNS Topic attributes
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetTopicAttributes")
+            .formParam("TopicArn", "arn:aws:sns:us-east-1:000000000000:cfn-test-topic.fifo")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ContentBasedDeduplication"))
+            .body(containsString("<value>true</value>"))
+            .body(containsString("FifoTopic"));
+
+        // 2. Verify SQS Queue attributes
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueAttributes")
+            .formParam("QueueUrl", "http://localhost:4566/000000000000/cfn-test-queue.fifo")
+            .formParam("AttributeName.1", "All")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("ContentBasedDeduplication"))
+            .body(containsString("<Value>true</Value>"))
+            .body(containsString("FifoQueue"));
+
+        // 3. Verify SNS Subscription attributes
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String subArn = physicalIdByLogicalId(resourcesXml, "MySubscription");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", subArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("RawMessageDelivery"))
+            .body(containsString("<value>true</value>"))
+            .body(containsString("sqs"));
+    }
+
+    @Test
+    void createStack_snsSubscriptionWithFilterPolicyAndRedrivePolicy() {
+        String stackName = "cfn-sns-sub-policies-stack";
+        String template = """
+            {
+              "Resources": {
+                "MyTopic": {
+                  "Type": "AWS::SNS::Topic",
+                  "Properties": {
+                    "TopicName": "cfn-sub-policies-topic"
+                  }
+                },
+                "MyQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-policies-queue"
+                  }
+                },
+                "MyDLQ": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "cfn-sub-policies-dlq"
+                  }
+                },
+                "MySubscription": {
+                  "Type": "AWS::SNS::Subscription",
+                  "Properties": {
+                    "TopicArn": {"Ref": "MyTopic"},
+                    "Protocol": "sqs",
+                    "Endpoint": {"Fn::GetAtt": ["MyQueue", "Arn"]},
+                    "FilterPolicy": {
+                      "price_usd": [{"numeric": [">=", 100]}]
+                    },
+                    "RedrivePolicy": {
+                      "deadLetterTargetArn": {"Fn::GetAtt": ["MyDLQ", "Arn"]}
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String subArn = physicalIdByLogicalId(resourcesXml, "MySubscription");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetSubscriptionAttributes")
+            .formParam("SubscriptionArn", subArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("FilterPolicy"))
+            .body(containsString("price_usd"))
+            .body(containsString("RedrivePolicy"))
+            .body(containsString("deadLetterTargetArn"))
+            .body(containsString("cfn-sub-policies-dlq"));
+    }
+
+    @Test
+    void createStack_withCognitoUserPoolAndClient() {
+        String template = """
+            {
+              "Resources": {
+                "UserPool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cfn-test-pool",
+                    "UserPoolTags": [
+                      { "Key": "env", "Value": "test" },
+                      { "Key": "team", "Value": "auth" }
+                    ]
+                  }
+                },
+                "UserPoolClient": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {
+                    "ClientName": "cfn-test-client",
+                    "UserPoolId": { "Ref": "UserPool" },
+                    "GenerateSecret": true
+                  }
+                }
+              },
+              "Outputs": {
+                "PoolId": { "Value": { "Ref": "UserPool" } },
+                "PoolArn": { "Value": { "Fn::GetAtt": ["UserPool", "Arn"] } },
+                "ClientId": { "Value": { "Ref": "UserPoolClient" } }
+              }
+            }
+            """;
+
+        String stackName = "cognito-test-stack";
+
+        // 1. Create Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // 2. Describe Stacks and capture outputs
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        String poolId = describeXml.split("<OutputKey>PoolId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String poolArn = describeXml.split("<OutputKey>PoolArn</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String clientId = describeXml.split("<OutputKey>ClientId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+
+        assertThat(poolId, startsWith("us-east-1_"));
+        assertThat(poolArn, startsWith("arn:aws:cognito-idp:"));
+        assertThat(clientId, notNullValue());
+
+        // 3. Verify UserPool via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPool.Name", equalTo("cfn-test-pool"))
+            .body("UserPool.UserPoolTags.env", equalTo("test"))
+            .body("UserPool.UserPoolTags.team", equalTo("auth"));
+
+        // 4. Verify UserPoolClient via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientName", equalTo("cfn-test-client"))
+            .body("UserPoolClient.UserPoolId", equalTo(poolId))
+            .body("UserPoolClient.ClientSecret", notNullValue());
+
+        // 5. Delete Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 6. Verify resources are deleted
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPool")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    void createStack_withNestedStack_resourcesAreProvisioned() {
+        String childTemplate = """
+            {
+              "Resources": {
+                "ChildQueue": {
+                  "Type": "AWS::SQS::Queue",
+                  "Properties": {
+                    "QueueName": "nested-stack-child-queue"
+                  }
+                }
+              },
+              "Outputs": {
+                "QueueUrl": {
+                  "Value": {"Ref": "ChildQueue"}
+                }
+              }
+            }
+            """;
+
+        // Upload child template to S3
+        given().when().put("/nested-stack-templates").then().statusCode(200);
+        given()
+            .contentType("application/json")
+            .body(childTemplate)
+        .when()
+            .put("/nested-stack-templates/child.json")
+        .then()
+            .statusCode(200);
+
+        String parentTemplate = """
+            {
+              "Resources": {
+                "ChildStack": {
+                  "Type": "AWS::CloudFormation::Stack",
+                  "Properties": {
+                    "TemplateURL": "http://localhost/nested-stack-templates/child.json"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "parent-nested-stack")
+            .formParam("TemplateBody", parentTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // Parent stack reaches CREATE_COMPLETE
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "parent-nested-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // Nested stack resource itself is CREATE_COMPLETE
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "parent-nested-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceType>AWS::CloudFormation::Stack</ResourceType>"))
+            .body(containsString("<ResourceStatus>CREATE_COMPLETE</ResourceStatus>"));
+
+        // SQS queue defined in the nested template actually exists
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "GetQueueUrl")
+            .formParam("QueueName", "nested-stack-child-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("nested-stack-child-queue"));
     }
 
 }

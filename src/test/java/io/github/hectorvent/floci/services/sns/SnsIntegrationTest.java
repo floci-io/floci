@@ -212,6 +212,68 @@ class SnsIntegrationTest {
     }
 
     @Test
+    @Order(18)
+    void publish_fanOutPreservesBinaryMessageAttribute() {
+        drainQueue(sqsQueueUrl);
+
+        // "somebinarydata" base64-encoded -> c29tZWJpbmFyeWRhdGE=
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "hello")
+            .formParam("MessageAttributes.entry.1.Name", "content")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "String")
+            .formParam("MessageAttributes.entry.1.Value.StringValue", "somecontent")
+            .formParam("MessageAttributes.entry.2.Name", "binarycontent")
+            .formParam("MessageAttributes.entry.2.Value.DataType", "Binary")
+            .formParam("MessageAttributes.entry.2.Value.BinaryValue", "c29tZWJpbmFyeWRhdGE=")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+
+        String jsonBodyInResponse = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ReceiveMessage")
+            .formParam("QueueUrl", sqsQueueUrl)
+            .formParam("MaxNumberOfMessages", "1")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("hello"))
+            .extract().xmlPath().getString(
+                    "ReceiveMessageResponse.ReceiveMessageResult.Message.Body");
+
+        assertTrue(jsonBodyInResponse.contains("\"binarycontent\""),
+                "Binary attribute should be present in delivered envelope: " + jsonBodyInResponse);
+        assertTrue(jsonBodyInResponse.contains("\"Binary\""),
+                "Binary attribute Type should be present: " + jsonBodyInResponse);
+        assertTrue(jsonBodyInResponse.contains("c29tZWJpbmFyeWRhdGE="),
+                "Binary attribute Value should be base64-encoded: " + jsonBodyInResponse);
+    }
+
+    @Test
+    @Order(19)
+    void publish_invalidBinaryAttributeReturns400() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "hello")
+            .formParam("MessageAttributes.entry.1.Name", "binarycontent")
+            .formParam("MessageAttributes.entry.1.Value.DataType", "Binary")
+            .formParam("MessageAttributes.entry.1.Value.BinaryValue", "not valid base64!!!")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidParameterValue"));
+    }
+
+    @Test
     @Order(10)
     void publishBatch() {
         given()

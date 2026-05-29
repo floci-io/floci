@@ -3,22 +3,26 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
-import org.mockito.Mockito;
 
 import java.util.Collection;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class RdsServiceTest {
@@ -43,7 +47,9 @@ class RdsServiceTest {
         when(rdsConfig.proxyBasePort()).thenReturn(7000);
         when(rdsConfig.proxyMaxPort()).thenReturn(7099);
 
-        rdsService = new RdsService(containerManager, proxyManager, regionResolver, config);
+        rdsService = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>());
 
         when(containerManager.start(any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432));
@@ -168,5 +174,107 @@ class RdsServiceTest {
                 rdsService.getDbClusterParameterGroup("nonexistent"));
 
         assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+    }
+
+    @Test
+    void restorePersistedRuntimeRestartsStandaloneInstanceWithSameVolumeAndProxyPort() {
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        StorageBackend<String, DbParameterGroup> parameterGroups = new InMemoryStorage<>();
+        StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups = new InMemoryStorage<>();
+
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("initial-container", "mydb", "localhost", 5432));
+
+        RdsService initialService = newService(containerManager, proxyManager,
+                instances, clusters, parameterGroups, clusterParameterGroups);
+        DbInstance created = initialService.createDbInstance("mydb", "postgres", "16.3",
+                "admin", "secret", "app", "db.t3.micro",
+                20, false, null, null);
+
+        String persistedVolumeId = created.getVolumeId();
+        int persistedProxyPort = created.getProxyPort();
+
+        RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
+        RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
+        when(restoredContainerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("restored-container", "mydb", "127.0.0.1", 15432));
+
+        RdsService restoredService = newService(restoredContainerManager, restoredProxyManager,
+                instances, clusters, parameterGroups, clusterParameterGroups);
+        restoredService.restorePersistedRuntime();
+
+        DbInstance restored = restoredService.getDbInstance("mydb");
+        assertEquals(persistedVolumeId, restored.getVolumeId());
+        assertEquals("floci-rds-" + persistedVolumeId, restored.getDockerVolumeName());
+        assertEquals(persistedProxyPort, restored.getProxyPort());
+        assertEquals(persistedProxyPort, restored.getEndpoint().port());
+        assertEquals("restored-container", restored.getContainerId());
+        assertEquals("127.0.0.1", restored.getContainerHost());
+        assertEquals(15432, restored.getContainerPort());
+
+        verify(restoredContainerManager).start(eq("mydb"), eq(persistedVolumeId),
+                eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("secret"), eq("app"));
+        verify(restoredProxyManager).startProxy(eq("mydb"), eq(DatabaseEngine.POSTGRES),
+                eq(false), eq(persistedProxyPort), eq("127.0.0.1"), eq(15432),
+                eq("admin"), eq("secret"), eq("app"), any());
+    }
+
+    @Test
+    void restorePersistedRuntimeRestoresClusterAndMemberInstance() {
+        StorageBackend<String, DbInstance> instances = new InMemoryStorage<>();
+        StorageBackend<String, DbCluster> clusters = new InMemoryStorage<>();
+        StorageBackend<String, DbParameterGroup> parameterGroups = new InMemoryStorage<>();
+        StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups = new InMemoryStorage<>();
+
+        when(containerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("initial-cluster-container", "cluster1", "localhost", 5432));
+
+        RdsService initialService = newService(containerManager, proxyManager,
+                instances, clusters, parameterGroups, clusterParameterGroups);
+        DbCluster cluster = initialService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", false, null);
+        DbInstance member = initialService.createDbInstance("member1", "aurora-postgresql", "16.3",
+                "admin", "secret", "app", "db.t3.medium",
+                20, false, null, "cluster1");
+
+        RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
+        RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
+        when(restoredContainerManager.start(any(), any(), any(), any(), any(), any(), any()))
+                .thenReturn(new RdsContainerHandle("restored-cluster-container", "cluster1", "127.0.0.1", 15432));
+
+        RdsService restoredService = newService(restoredContainerManager, restoredProxyManager,
+                instances, clusters, parameterGroups, clusterParameterGroups);
+        restoredService.restorePersistedRuntime();
+
+        DbCluster restoredCluster = restoredService.getDbCluster("cluster1");
+        DbInstance restoredMember = restoredService.getDbInstance("member1");
+
+        assertEquals(cluster.getVolumeId(), restoredCluster.getVolumeId());
+        assertEquals(cluster.getProxyPort(), restoredCluster.getProxyPort());
+        assertEquals(member.getProxyPort(), restoredMember.getProxyPort());
+        assertEquals("restored-cluster-container", restoredCluster.getContainerId());
+        assertEquals("restored-cluster-container", restoredMember.getContainerId());
+        assertEquals("127.0.0.1", restoredMember.getContainerHost());
+        assertEquals(15432, restoredMember.getContainerPort());
+
+        verify(restoredContainerManager).start(eq("cluster1"), eq(cluster.getVolumeId()),
+                eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("secret"), eq("app"));
+        verify(restoredProxyManager).startProxy(eq("cluster1"), eq(DatabaseEngine.POSTGRES),
+                eq(false), eq(cluster.getProxyPort()), eq("127.0.0.1"), eq(15432),
+                eq("admin"), eq("secret"), eq("app"), any());
+        verify(restoredProxyManager).startProxy(eq("member1"), eq(DatabaseEngine.POSTGRES),
+                eq(false), eq(member.getProxyPort()), eq("127.0.0.1"), eq(15432),
+                eq("admin"), eq("secret"), eq("app"), any());
+    }
+
+    private RdsService newService(RdsContainerManager containerManager,
+                                  RdsProxyManager proxyManager,
+                                  StorageBackend<String, DbInstance> instances,
+                                  StorageBackend<String, DbCluster> clusters,
+                                  StorageBackend<String, DbParameterGroup> parameterGroups,
+                                  StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups) {
+        return new RdsService(containerManager, proxyManager, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups);
     }
 }

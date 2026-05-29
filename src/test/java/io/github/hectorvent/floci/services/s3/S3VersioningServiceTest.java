@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -202,6 +203,47 @@ class S3VersioningServiceTest {
     }
 
     @Test
+    void deleteMarkerByVersionIdRestoresPreviousVersion() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "file",
+                "original".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        S3Object marker = s3Service.deleteObject("versioned-bucket", "file");
+        assertThrows(AwsException.class, () -> s3Service.getObject("versioned-bucket", "file"));
+
+        s3Service.deleteObject("versioned-bucket", "file", marker.getVersionId());
+
+        S3Object restored = s3Service.getObject("versioned-bucket", "file");
+        assertEquals("original", new String(restored.getData()));
+        assertEquals(v1.getVersionId(), restored.getVersionId());
+    }
+
+    @Test
+    void deleteOnlyVersionByVersionIdClearsLatestPointer() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "sole",
+                "data".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        s3Service.deleteObject("versioned-bucket", "sole", v1.getVersionId());
+
+        assertThrows(AwsException.class, () -> s3Service.getObject("versioned-bucket", "sole"));
+    }
+
+    @Test
+    void deleteNonLatestVersionByVersionIdLeavesLatestUnchanged() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = s3Service.putObject("versioned-bucket", "multi",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObject("versioned-bucket", "multi",
+                "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        s3Service.deleteObject("versioned-bucket", "multi", v1.getVersionId());
+
+        S3Object latest = s3Service.getObject("versioned-bucket", "multi");
+        assertEquals("v2", new String(latest.getData()));
+    }
+
+    @Test
     void listObjectsExcludesDeleteMarkers() {
         s3Service.putBucketVersioning("versioned-bucket", "Enabled");
         s3Service.putObject("versioned-bucket", "keep.txt",
@@ -213,5 +255,63 @@ class S3VersioningServiceTest {
         List<S3Object> objects = s3Service.listObjects("versioned-bucket", null, null, 100);
         assertEquals(1, objects.size());
         assertEquals("keep.txt", objects.get(0).getKey());
+    }
+
+    @Test
+    void copyObjectPreservesSourceTagsByDefault() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "key",
+                "v1".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        s3Service.putObjectTagging("versioned-bucket", "key", Map.of("version", "v1-tag"));
+
+        S3Object v2 = s3Service.putObject("versioned-bucket", "key",
+                "v2".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        // Copy v2 to itself without specifying TaggingDirective — source tags should be preserved
+        // First tag v2
+        s3Service.putObjectTagging("versioned-bucket", "key", Map.of("version", "v2-tag"));
+
+        s3Service.copyObject("versioned-bucket", "key", "versioned-bucket", "key",
+                v2.getVersionId(), new CopyObjectOptions());
+
+        Map<String, String> tags = s3Service.getObjectTagging("versioned-bucket", "key");
+        assertEquals("v2-tag", tags.get("version"),
+                "copyObject without TaggingDirective should copy source tags to destination");
+    }
+
+    @Test
+    void copyObjectWithReplaceTaggerReplacesSourceTags() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "replace-key",
+                "content".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObjectTagging("versioned-bucket", "replace-key", Map.of("original", "tag"));
+
+        s3Service.copyObject("versioned-bucket", "replace-key", "versioned-bucket", "replace-key",
+                null,
+                new CopyObjectOptions()
+                        .withTaggingDirective("REPLACE")
+                        .withReplacementTagging(Map.of("new", "value")));
+
+        Map<String, String> tags = s3Service.getObjectTagging("versioned-bucket", "replace-key");
+        assertEquals("value", tags.get("new"), "REPLACE should apply replacement tags");
+        assertNull(tags.get("original"), "REPLACE should not preserve source tags");
+    }
+
+    @Test
+    void copyObjectWithReplaceTaggerAndNoTagsClearsTags() {
+        s3Service.putBucketVersioning("versioned-bucket", "Enabled");
+        s3Service.putObject("versioned-bucket", "clear-key",
+                "content".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        s3Service.putObjectTagging("versioned-bucket", "clear-key", Map.of("should", "disappear"));
+
+        s3Service.copyObject("versioned-bucket", "clear-key", "versioned-bucket", "clear-key",
+                null,
+                new CopyObjectOptions()
+                        .withTaggingDirective("REPLACE")
+                        .withReplacementTagging(Map.of()));
+
+        Map<String, String> tags = s3Service.getObjectTagging("versioned-bucket", "clear-key");
+        assertTrue(tags.isEmpty(), "REPLACE with empty tags should clear all source tags");
     }
 }

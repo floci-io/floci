@@ -777,6 +777,44 @@ class DynamoDbIntegrationTest {
             .body("Table.GlobalSecondaryIndexes", nullValue());
     }
 
+    /**
+     * AWS DynamoDB DeleteTable returns the table description with its current status (ACTIVE)
+     * at the time of the call. The transition to DELETING happens asynchronously after the response.
+     *
+     * @see <a href="https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_DeleteTable.html">DeleteTable API Reference</a>
+     */
+    @Test
+    @Order(26)
+    void deleteTableReturnsActiveStatus() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "DeleteStatusTestTable",
+                    "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.TableStatus", equalTo("ACTIVE"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "DeleteStatusTestTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.TableStatus", equalTo("ACTIVE"));
+    }
+
     // --- Cleanup ---
 
     @Test
@@ -792,7 +830,7 @@ class DynamoDbIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("TableDescription.TableStatus", equalTo("DELETING"));
+            .body("TableDescription.TableStatus", equalTo("ACTIVE"));
 
         // Verify it's gone
         given()
@@ -1328,6 +1366,240 @@ given()
             .contentType(DYNAMODB_CONTENT_TYPE)
             .body("""
                 {"TableName": "ConditionCheckTable2"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateItemLegacyExpectedAttributeMissing() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable1",
+                    "KeySchema": [
+                        {"AttributeName": "PK", "KeyType": "HASH"},
+                        {"AttributeName": "SK", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "PK", "AttributeType": "S"},
+                        {"AttributeName": "SK", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // UpdateItem with Expected on a non-existent item → ConditionalCheckFailedException
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable1",
+                    "Key": {"PK": {"S": "k1"}, "SK": {"S": "s1"}},
+                    "Expected": {"MEM_NO": {"ComparisonOperator": "EQ", "Value": {"N": "1"}}},
+                    "AttributeUpdates": {
+                        "SESSION_DATA": {"Action": "PUT", "Value": {"S": "{}"}},
+                        "VERSION":      {"Action": "ADD", "Value": {"N": "1"}}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"))
+            .body("message", equalTo("The conditional request failed"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable1"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateItemLegacyExpectedValueMismatch() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "KeySchema": [
+                        {"AttributeName": "PK", "KeyType": "HASH"},
+                        {"AttributeName": "SK", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "PK", "AttributeType": "S"},
+                        {"AttributeName": "SK", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Put an item with MEM_NO = 2
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "Item": {"PK": {"S": "k2"}, "SK": {"S": "s1"}, "MEM_NO": {"N": "2"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // UpdateItem expecting MEM_NO == 1, but actual is 2 → ConditionalCheckFailedException
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "Key": {"PK": {"S": "k2"}, "SK": {"S": "s1"}},
+                    "Expected": {"MEM_NO": {"ComparisonOperator": "EQ", "Value": {"N": "1"}}},
+                    "AttributeUpdates": {
+                        "SESSION_DATA": {"Action": "PUT", "Value": {"S": "{}"}},
+                        "VERSION":      {"Action": "ADD", "Value": {"N": "1"}}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ConditionalCheckFailedException"))
+            .body("message", equalTo("The conditional request failed"));
+
+        // Item must be unmodified
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable2",
+                    "Key": {"PK": {"S": "k2"}, "SK": {"S": "s1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.MEM_NO.N", equalTo("2"))
+            .body("Item.SESSION_DATA", is(nullValue()));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable2"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void updateItemLegacyExpectedMatchSucceeds() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "KeySchema": [
+                        {"AttributeName": "PK", "KeyType": "HASH"},
+                        {"AttributeName": "SK", "KeyType": "RANGE"}
+                    ],
+                    "AttributeDefinitions": [
+                        {"AttributeName": "PK", "AttributeType": "S"},
+                        {"AttributeName": "SK", "AttributeType": "S"}
+                    ],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "Item": {"PK": {"S": "k3"}, "SK": {"S": "s1"}, "MEM_NO": {"N": "1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // UpdateItem with Expected MEM_NO == 1 (matches) → success
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.UpdateItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "Key": {"PK": {"S": "k3"}, "SK": {"S": "s1"}},
+                    "Expected": {"MEM_NO": {"ComparisonOperator": "EQ", "Value": {"N": "1"}}},
+                    "AttributeUpdates": {
+                        "SESSION_DATA": {"Action": "PUT", "Value": {"S": "{}"}}
+                    }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify the update was applied
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.GetItem")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "LegacyExpectedTable3",
+                    "Key": {"PK": {"S": "k3"}, "SK": {"S": "s1"}}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Item.SESSION_DATA.S", equalTo("{}"))
+            .body("Item.MEM_NO.N", equalTo("1"));
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "LegacyExpectedTable3"}
                 """)
         .when()
             .post("/")
@@ -1901,5 +2173,100 @@ given()
         assertEquals(5, allCollected.size(), "Expected 5 items total, got: " + allCollected);
         assertEquals(Set.of("ITEM_a", "ITEM_b", "ITEM_c", "ITEM_d", "ITEM_e"), new HashSet<>(allCollected));
         assertEquals(3, pages, "Expected ceil(5/2)=3 pages");
+    }
+
+    @Test
+    void partiqlSelectWithoutWhereClausePerformsScan() throws Exception {
+        ObjectMapper mapper = new ObjectMapper();
+        String tableName = "PartiqlScanTable";
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "%s",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST"
+                }
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
+
+        for (String pk : new String[]{"a", "b", "c"}) {
+            given()
+                .header("X-Amz-Target", "DynamoDB_20120810.PutItem")
+                .contentType(DYNAMODB_CONTENT_TYPE)
+                .body("""
+                    {
+                        "TableName": "%s",
+                        "Item": {"pk": {"S": "%s"}, "data": {"S": "val-%s"}}
+                    }
+                    """.formatted(tableName, pk, pk))
+            .when().post("/")
+            .then().statusCode(200);
+        }
+
+        // SELECT * without WHERE → full table scan, all 3 items
+        String selectAll = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"Statement": "SELECT * FROM \\"%s\\""}
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        JsonNode selectAllResult = mapper.readTree(selectAll);
+        assertEquals(3, selectAllResult.path("Items").size(),
+                "SELECT * without WHERE should return all items");
+
+        // SELECT * with Limit=2 → 2 items + NextToken
+        String limitedSelect = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"Statement": "SELECT * FROM \\"%s\\"", "Limit": 2}
+                """.formatted(tableName))
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        JsonNode limitedResult = mapper.readTree(limitedSelect);
+        assertEquals(2, limitedResult.path("Items").size(),
+                "SELECT * with Limit=2 should return 2 items");
+        assertNotNull(limitedResult.get("NextToken"),
+                "Paginated response must include NextToken");
+
+        // Use NextToken to get the remaining item
+        String nextToken = limitedResult.get("NextToken").asText();
+        String nextPage = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.ExecuteStatement")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"Statement": "SELECT * FROM \\"%s\\"", "NextToken": "%s"}
+                """.formatted(tableName, nextToken))
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .extract().body().asString();
+
+        JsonNode nextPageResult = mapper.readTree(nextPage);
+        assertEquals(1, nextPageResult.path("Items").size(),
+                "Second page should return the remaining 1 item");
+
+        // Cleanup
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "%s"}
+                """.formatted(tableName))
+        .when().post("/")
+        .then().statusCode(200);
     }
 }

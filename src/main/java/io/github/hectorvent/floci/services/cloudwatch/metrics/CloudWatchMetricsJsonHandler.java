@@ -1,16 +1,17 @@
 package io.github.hectorvent.floci.services.cloudwatch.metrics;
 
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
-import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricDatum;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
+import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -25,6 +26,7 @@ import java.util.Map;
 @ApplicationScoped
 public class CloudWatchMetricsJsonHandler {
 
+    private static final Logger LOG = Logger.getLogger(CloudWatchMetricsJsonHandler.class);
     private final CloudWatchMetricsService metricsService;
     private final ObjectMapper objectMapper;
 
@@ -56,7 +58,10 @@ public class CloudWatchMetricsJsonHandler {
 
     private Response handlePutMetricData(JsonNode request, String region) {
         String namespace = request.path("Namespace").asText();
+        LOG.infov("JSON PutMetricData raw: {0}", request);
         List<MetricDatum> datums = parseMetricDataJson(request.path("MetricData"));
+        LOG.infov("JSON PutMetricData parsed {0} datums, sums={1}", datums.size(),
+                datums.stream().map(d -> d.getMetricName() + "=" + d.getSum()).toList());
         metricsService.putMetricData(namespace, datums, region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
@@ -320,7 +325,7 @@ public class CloudWatchMetricsJsonHandler {
                 datum.setMinimum(statsValues.path("Minimum").asDouble(0));
                 datum.setMaximum(statsValues.path("Maximum").asDouble(0));
             }
-            
+
             datums.add(datum);
         }
         return datums;
@@ -335,7 +340,9 @@ public class CloudWatchMetricsJsonHandler {
         return dims;
     }
 
-    /** Parse a JsonNode that may be a numeric epoch (long/double) or an ISO-8601 string. */
+    /**
+     * Parse a JsonNode that may be a numeric epoch (long/double) or an ISO-8601 string.
+     */
     private Instant parseInstantNode(JsonNode node) {
         if (node == null || node.isMissingNode() || node.isNull()) return null;
         if (node.isNumber()) {

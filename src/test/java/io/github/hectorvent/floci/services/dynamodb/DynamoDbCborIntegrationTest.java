@@ -171,6 +171,6 @@ class DynamoDbCborIntegrationTest {
             .extract().asByteArray();
 
         JsonNode response = CBOR_MAPPER.readTree(responseBytes);
-        assertThat(response.path("TableDescription").path("TableStatus").asText(), equalTo("DELETING"));
+        assertThat(response.path("TableDescription").path("TableStatus").asText(), equalTo("ACTIVE"));
     }
 }

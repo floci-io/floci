@@ -2,27 +2,46 @@ package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
+import io.github.hectorvent.floci.services.eventbridge.model.Target;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.sns.SnsService;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
-import static org.mockito.Mockito.mock;
+import static org.mockito.ArgumentMatchers.*;
+import static org.mockito.Mockito.*;
 
 class EventBridgeInvokerTest {
 
     private EventBridgeInvoker invoker;
+    private SqsService sqsService;
 
     @BeforeEach
     void setUp() {
+        LambdaService lambdaService = mock(LambdaService.class);
+        sqsService = mock(SqsService.class);
+        SnsService snsService = mock(SnsService.class);
         invoker = new EventBridgeInvoker(
-                mock(io.github.hectorvent.floci.services.lambda.LambdaService.class),
-                mock(io.github.hectorvent.floci.services.sqs.SqsService.class),
-                mock(io.github.hectorvent.floci.services.sns.SnsService.class),
+                lambdaService,
+                sqsService,
+                snsService,
                 new ObjectMapper(),
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
         );
+    }
+
+    @Test
+    void invokeTarget_sqsTarget_usesSuppliedRegion() {
+        Target target = new Target("id1", "arn:aws:sqs:eu-west-1:000000000000:my-queue", null, null);
+        String event = "{\"test\": \"data\"}";
+
+        invoker.invokeTarget(target, event, "eu-west-1");
+
+        verify(sqsService).sendMessage(anyString(), eq(event), anyInt(), isNull(), isNull(), eq("eu-west-1"));
     }
 
     @Test

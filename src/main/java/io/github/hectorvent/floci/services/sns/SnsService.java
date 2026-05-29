@@ -21,6 +21,10 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.math.BigDecimal;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
@@ -28,6 +32,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Collections;
 import java.util.HexFormat;
 import java.util.List;
@@ -52,6 +57,7 @@ public class SnsService {
     private final LambdaService lambdaService;
     private final String baseUrl;
     private final ObjectMapper objectMapper;
+    private final HttpClient httpClient;
     private final Map<String, Instant> fifoDeduplicationCache = new ConcurrentHashMap<>();
     private static final HexFormat HEX = HexFormat.of();
     
@@ -75,14 +81,20 @@ public class SnsService {
     }
 
     /**
-     * Package-private constructor for testing.
+     * Package-private constructor for testing (no HTTP client — HTTP delivery is skipped).
      */
     SnsService(StorageBackend<String, Topic> topicStore,
                StorageBackend<String, Subscription> subscriptionStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
-        this(topicStore, subscriptionStore, regionResolver, sqsService, lambdaService, "http://localhost:4566",
-                new ObjectMapper());
+        this.topicStore = topicStore;
+        this.subscriptionStore = subscriptionStore;
+        this.regionResolver = regionResolver;
+        this.sqsService = sqsService;
+        this.lambdaService = lambdaService;
+        this.baseUrl = "http://localhost:4566";
+        this.objectMapper = new ObjectMapper();
+        this.httpClient = null;
     }
 
     SnsService(StorageBackend<String, Topic> topicStore,
@@ -96,6 +108,7 @@ public class SnsService {
         this.lambdaService = lambdaService;
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
+        this.httpClient = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
     }
 
     public Topic createTopic(String name, Map<String, String> attributes,
@@ -115,7 +128,11 @@ public class SnsService {
 
         if (name.endsWith(".fifo")) {
             topic.getAttributes().put("FifoTopic", "true");
-            topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
+                topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "true");
+            } else {
+                topic.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            }
         }
 
         topicStore.put(key, topic);
@@ -190,6 +207,11 @@ public class SnsService {
         if (protocol == null || protocol.isBlank()) {
             throw new AwsException("InvalidParameter", "Protocol is required.", 400);
         }
+        if (("http".equals(protocol) && endpoint != null && !endpoint.startsWith("http://"))
+                || ("https".equals(protocol) && endpoint != null && !endpoint.startsWith("https://"))) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Endpoint scheme does not match protocol '" + protocol + "'.", 400);
+        }
 
         for (Subscription existing : subscriptionsByTopic(topicArn, region)) {
             if (protocol.equals(existing.getProtocol())
@@ -219,6 +241,11 @@ public class SnsService {
         } else {
             LOG.infov("Subscribed {0} ({1}) to topic {2} in {3} with attributes: {4}", endpoint, protocol, topicArn, region, attributes);
         }
+
+        if (("http".equals(protocol) || "https".equals(protocol)) && endpoint != null) {
+            sendSubscriptionConfirmation(subscription, topicArn, region);
+        }
+
         return subscription;
     }
 
@@ -274,9 +301,10 @@ public class SnsService {
     public String publish(String topicArn, String targetArn, String phoneNumber, String message,
                           String subject, Map<String, MessageAttributeValue> messageAttributes,
                           String messageGroupId, String messageDeduplicationId, String region) {
-        int payloadSize = computePublishSize(message, subject, messageAttributes);
+        int messageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
+        int payloadSize = computePublishSize(messageBytes, subject, messageAttributes);
         if (payloadSize > MAX_PUBLISH_SIZE) {
-            throw new AwsException("InvalidParameterException",
+            throw new AwsException("InvalidParameter",
                     "Invalid parameter: Message too long", 400);
         }
 
@@ -314,12 +342,18 @@ public class SnsService {
         }
 
         String messageId = UUID.randomUUID().toString();
+        JsonNode parsedBody = null;
+        boolean bodyParseAttempted = false;
         for (Subscription sub : subscriptionsByTopic(effectiveArn, region)) {
             if ("true".equals(sub.getAttributes().get("PendingConfirmation"))) {
                 LOG.debugv("Skipping delivery to pending subscription {0}", sub.getSubscriptionArn());
                 continue;
             }
-            if (!matchesFilterPolicy(sub, messageAttributes)) {
+            if (!bodyParseAttempted && isMessageBodyScope(sub)) {
+                parsedBody = tryParseBody(message);
+                bodyParseAttempted = true;
+            }
+            if (!matchesFilterPolicy(sub, parsedBody, messageAttributes)) {
                 continue;
             }
             deliverMessage(sub, message, subject, messageAttributes, messageId, effectiveArn, messageGroupId, dedupId);
@@ -370,7 +404,8 @@ public class SnsService {
             @SuppressWarnings("unchecked")
             Map<String, MessageAttributeValue> attrs =
                     (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
-            batchSize += computePublishSize(message, subject, attrs);
+            int entryMessageBytes = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
+            batchSize += computePublishSize(entryMessageBytes, subject, attrs);
         }
         if (batchSize > MAX_PUBLISH_SIZE) {
             throw new AwsException("BatchRequestTooLong",
@@ -408,9 +443,15 @@ public class SnsService {
             String messageId = UUID.randomUUID().toString();
             @SuppressWarnings("unchecked")
             Map<String, MessageAttributeValue> attrs = (Map<String, MessageAttributeValue>) entry.get("MessageAttributes");
+            JsonNode parsedBody = null;
+            boolean bodyParseAttempted = false;
             for (Subscription sub : subscriptionsByTopic(topicArn, region)) {
                 if ("true".equals(sub.getAttributes().get("PendingConfirmation"))) continue;
-                if (!matchesFilterPolicy(sub, attrs)) continue;
+                if (!bodyParseAttempted && isMessageBodyScope(sub)) {
+                    parsedBody = tryParseBody(message);
+                    bodyParseAttempted = true;
+                }
+                if (!matchesFilterPolicy(sub, parsedBody, attrs)) continue;
                 deliverMessage(sub, message, subject, attrs, messageId, topicArn, messageGroupId, messageDeduplicationId);
             }
             LOG.debugv("Batch published message {0} (id={1}) to {2}", messageId, id, topicArn);
@@ -450,27 +491,68 @@ public class SnsService {
      * Returns {@code true} if no filter policy is set.
      * Returns {@code false} for malformed filter policies (fail closed).
      * <p>
-     * Only {@code FilterPolicyScope=MessageAttributes} is supported. When scope is
-     * {@code MessageBody}, filtering is skipped and the message is delivered (to avoid
-     * incorrectly dropping messages for an unsupported scope).
+     * {@code FilterPolicyScope=MessageAttributes} (default) evaluates the policy against
+     * the message attribute map. {@code FilterPolicyScope=MessageBody} parses the message
+     * body as JSON and evaluates the policy against the parsed tree (with nested-key
+     * descent and type-aware matching). A body that is not valid JSON fails closed.
      * <p>
      * All keys in the policy must match (AND logic). Within each key's rule array,
      * any matching element is sufficient (OR logic).
      */
-    private boolean matchesFilterPolicy(Subscription sub, Map<String, MessageAttributeValue> messageAttributes) {
+    private static boolean isMessageBodyScope(Subscription sub) {
+        return "MessageBody".equals(
+                sub.getAttributes().getOrDefault("FilterPolicyScope", "MessageAttributes"));
+    }
+
+    /**
+     * Per AWS SNS docs, {@code exists:true} requires the key to have a non-null and
+     * non-empty value. Empty strings, empty arrays, and empty objects do not count as
+     * "exists". Numbers and booleans are always considered non-empty.
+     */
+    private static boolean isNonEmptyValue(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return false;
+        }
+        if (node.isTextual()) {
+            return !node.asText().isEmpty();
+        }
+        if (node.isContainerNode()) {
+            return !node.isEmpty();
+        }
+        return true;
+    }
+
+    private JsonNode tryParseBody(String message) {
+        if (message == null || message.isEmpty()) {
+            return null;
+        }
+        try {
+            return objectMapper.readTree(message);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    boolean matchesFilterPolicy(Subscription sub, JsonNode parsedBody,
+                                Map<String, MessageAttributeValue> messageAttributes) {
         String filterPolicyJson = sub.getAttributes().get("FilterPolicy");
         if (filterPolicyJson == null || filterPolicyJson.isBlank()) {
             return true;
         }
         String scope = sub.getAttributes().getOrDefault("FilterPolicyScope", "MessageAttributes");
-        if ("MessageBody".equals(scope)) {
-            return true;
-        }
         try {
             JsonNode filterPolicy = objectMapper.readTree(filterPolicyJson);
             if (!filterPolicy.isObject()) {
                 LOG.warnv("Invalid FilterPolicy (not a JSON object) for {0}", sub.getSubscriptionArn());
                 return false;
+            }
+            if ("MessageBody".equals(scope)) {
+                if (parsedBody == null) {
+                    LOG.debugv("FilterPolicyScope=MessageBody but body is not valid JSON for {0}; not delivering",
+                            sub.getSubscriptionArn());
+                    return false;
+                }
+                return matchesBodyPolicy(filterPolicy, parsedBody);
             }
             Map<String, MessageAttributeValue> attrs = messageAttributes != null ? messageAttributes : Map.of();
             var fields = filterPolicy.fields();
@@ -489,6 +571,137 @@ public class SnsService {
             LOG.warnv("Failed to parse filter policy for {0}: {1}", sub.getSubscriptionArn(), e.getMessage());
             return false;
         }
+    }
+
+    /**
+     * Evaluates a filter policy object against a parsed JSON body. Each policy key must
+     * match (AND); a key's value is either a rule array (terminal) or an object (nested
+     * descent into the body at the same key).
+     */
+    private boolean matchesBodyPolicy(JsonNode policy, JsonNode body) {
+        if (!policy.isObject()) {
+            return false;
+        }
+        var fields = policy.fields();
+        while (fields.hasNext()) {
+            var entry = fields.next();
+            String key = entry.getKey();
+            JsonNode ruleOrNested = entry.getValue();
+            JsonNode bodyValue = (body != null && body.isObject()) ? body.get(key) : null;
+            if (ruleOrNested.isArray()) {
+                if (!matchesBodyRules(bodyValue, ruleOrNested)) {
+                    return false;
+                }
+            } else if (ruleOrNested.isObject()) {
+                if (!matchesBodyPolicy(ruleOrNested, bodyValue)) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    /**
+     * Evaluates a rule array against a body value. When the body value is itself an array,
+     * the rules are applied to each element (OR over elements), with {@code exists:true}
+     * additionally matching the array as a whole.
+     */
+    private boolean matchesBodyRules(JsonNode actual, JsonNode rules) {
+        if (!rules.isArray()) {
+            return false;
+        }
+        if (actual != null && actual.isArray()) {
+            boolean nonEmpty = !actual.isEmpty();
+            for (JsonNode rule : rules) {
+                if (rule.isObject() && rule.has("exists")) {
+                    if (rule.get("exists").asBoolean() == nonEmpty) {
+                        return true;
+                    }
+                } else {
+                    for (JsonNode element : actual) {
+                        if (matchesSingleBodyRule(element, rule)) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        }
+        for (JsonNode rule : rules) {
+            if (matchesSingleBodyRule(actual, rule)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean matchesSingleBodyRule(JsonNode actual, JsonNode rule) {
+        if (rule.isTextual()) {
+            return actual != null && actual.isTextual() && rule.asText().equals(actual.asText());
+        }
+        if (rule.isNumber()) {
+            if (actual == null || !actual.isNumber()) {
+                return false;
+            }
+            try {
+                return new BigDecimal(actual.asText()).compareTo(rule.decimalValue()) == 0;
+            } catch (NumberFormatException e) {
+                return false;
+            }
+        }
+        if (rule.isBoolean()) {
+            return actual != null && actual.isBoolean() && rule.booleanValue() == actual.booleanValue();
+        }
+        if (rule.isNull()) {
+            return actual != null && actual.isNull();
+        }
+        if (rule.isObject()) {
+            return matchesObjectRuleForNode(rule, actual);
+        }
+        return false;
+    }
+
+    private boolean matchesObjectRuleForNode(JsonNode rule, JsonNode actual) {
+        if (rule.has("exists")) {
+            return rule.get("exists").asBoolean() == isNonEmptyValue(actual);
+        }
+        boolean present = actual != null && !actual.isMissingNode() && !actual.isNull();
+        String stringValue = present && actual.isTextual() ? actual.asText() : null;
+        if (rule.has("prefix")) {
+            return stringValue != null && stringValue.startsWith(rule.get("prefix").asText());
+        }
+        if (rule.has("anything-but")) {
+            return matchesAnythingButForNode(rule.get("anything-but"), actual, stringValue, present);
+        }
+        if (rule.has("numeric") && present && actual.isNumber()) {
+            return evaluateNumericCondition(actual.decimalValue(), rule.get("numeric"));
+        }
+        return false;
+    }
+
+    private boolean matchesAnythingButForNode(JsonNode anythingBut, JsonNode actual,
+                                              String stringValue, boolean present) {
+        if (!present) {
+            return false;
+        }
+        if (anythingBut.isArray()) {
+            for (JsonNode v : anythingBut) {
+                if (v.isTextual() && stringValue != null && v.asText().equals(stringValue)) {
+                    return false;
+                }
+                if (v.isNumber() && actual.isNumber()
+                        && actual.decimalValue().compareTo(v.decimalValue()) == 0) {
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (anythingBut.isTextual()) {
+            return stringValue == null || !stringValue.equals(anythingBut.asText());
+        }
+        return false;
     }
 
     /**
@@ -682,6 +895,31 @@ public class SnsService {
                     lambdaService.invoke(region, fnName, eventJson.getBytes(), InvocationType.Event);
                     LOG.debugv("Delivered SNS message to Lambda: {0}", sub.getEndpoint());
                 }
+                case "http", "https" -> {
+                    if (httpClient == null) break;
+                    boolean rawDelivery = "true".equalsIgnoreCase(sub.getAttributes().get("RawMessageDelivery"));
+                    String body = rawDelivery
+                            ? message
+                            : buildSnsHttpNotification(message, subject, messageAttributes, topicArn, messageId, sub.getSubscriptionArn());
+                    var requestBuilder = HttpRequest.newBuilder()
+                            .uri(URI.create(sub.getEndpoint()))
+                            .timeout(Duration.ofSeconds(5))
+                            .header("Content-Type", "text/plain; charset=UTF-8")
+                            .header("x-amz-sns-message-type", "Notification")
+                            .header("x-amz-sns-message-id", messageId)
+                            .header("x-amz-sns-topic-arn", topicArn)
+                            .header("x-amz-sns-subscription-arn", sub.getSubscriptionArn());
+                    if (rawDelivery) {
+                        requestBuilder.header("x-amz-sns-rawdelivery", "true");
+                    }
+                    HttpRequest request = requestBuilder
+                            .POST(HttpRequest.BodyPublishers.ofString(body))
+                            .build();
+                    String endpoint = sub.getEndpoint();
+                    httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                            .thenAccept(response -> logHttpResult("Delivered SNS notification", endpoint, response.statusCode()))
+                            .exceptionally(ex -> { LOG.warnv("Failed to deliver SNS message to {0}: {1}", endpoint, ex.getMessage()); return null; });
+                }
                 case "email", "email-json" -> LOG.infov("SNS email delivery (stub): to={0}, subject={1}, message={2}",
                         sub.getEndpoint(), subject, message);
                 case "sms" -> LOG.infov("SNS SMS delivery (stub): to={0}, message={1}", sub.getEndpoint(), message);
@@ -718,7 +956,12 @@ public class SnsService {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
-                    attr.put("Value", entry.getValue().getStringValue());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        attr.put("Value", Base64.getEncoder()
+                                .encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        attr.put("Value", entry.getValue().getStringValue());
+                    }
                 }
             }
             ObjectNode record = objectMapper.createObjectNode();
@@ -774,12 +1017,99 @@ public class SnsService {
                 for (var entry : messageAttributes.entrySet()) {
                     ObjectNode attr = attrs.putObject(entry.getKey());
                     attr.put("Type", entry.getValue().getDataType());
-                    attr.put("Value", entry.getValue().getStringValue());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        attr.put("Value", Base64.getEncoder()
+                                .encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        attr.put("Value", entry.getValue().getStringValue());
+                    }
                 }
             }
             return objectMapper.writeValueAsString(node);
         } catch (Exception e) {
             return "{}";
+        }
+    }
+
+    private String buildSnsHttpNotification(String message, String subject,
+                                             Map<String, MessageAttributeValue> messageAttributes,
+                                             String topicArn, String messageId, String subscriptionArn) {
+        try {
+            String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("Type", "Notification");
+            node.put("MessageId", messageId);
+            node.put("TopicArn", topicArn);
+            node.put("Timestamp", timestamp);
+            if (subject != null) {
+                node.put("Subject", subject);
+            }
+            node.put("Message", message);
+            node.put("SignatureVersion", "1");
+            node.put("Signature", "EXAMPLE");
+            node.put("SigningCertURL", "EXAMPLE");
+            node.put("UnsubscribeURL", baseUrl + "/?Action=Unsubscribe&SubscriptionArn=" + subscriptionArn);
+            ObjectNode attrs = node.putObject("MessageAttributes");
+            if (messageAttributes != null) {
+                for (var entry : messageAttributes.entrySet()) {
+                    ObjectNode attr = attrs.putObject(entry.getKey());
+                    attr.put("Type", entry.getValue().getDataType());
+                    if (entry.getValue().getBinaryValue() != null) {
+                        attr.put("Value", Base64.getEncoder()
+                                .encodeToString(entry.getValue().getBinaryValue()));
+                    } else {
+                        attr.put("Value", entry.getValue().getStringValue());
+                    }
+                }
+            }
+            return objectMapper.writeValueAsString(node);
+        } catch (Exception e) {
+            return "{}";
+        }
+    }
+
+    private void logHttpResult(String action, String endpoint, int statusCode) {
+        if (statusCode >= 200 && statusCode < 300) {
+            LOG.debugv("{0} to {1}, status={2}", action, endpoint, statusCode);
+        } else {
+            LOG.warnv("{0} to {1} returned non-success status {2}", action, endpoint, statusCode);
+        }
+    }
+
+    private void sendSubscriptionConfirmation(Subscription subscription, String topicArn, String region) {
+        if (httpClient == null) return;
+        try {
+            String token = subscription.getAttributes().get("ConfirmationToken");
+            String subscribeUrl = baseUrl + "/?Action=ConfirmSubscription&TopicArn=" + topicArn + "&Token=" + token;
+            String timestamp = DateTimeFormatter.ISO_INSTANT.format(Instant.now());
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("Type", "SubscriptionConfirmation");
+            node.put("MessageId", UUID.randomUUID().toString());
+            node.put("TopicArn", topicArn);
+            node.put("Timestamp", timestamp);
+            node.put("Message", "You have chosen to subscribe to the topic " + topicArn + ".\nTo confirm the subscription, visit the SubscribeURL included in this message.");
+            node.put("SubscribeURL", subscribeUrl);
+            node.put("Token", token);
+            node.put("SignatureVersion", "1");
+            node.put("Signature", "EXAMPLE");
+            node.put("SigningCertURL", "EXAMPLE");
+            String body = objectMapper.writeValueAsString(node);
+
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(subscription.getEndpoint()))
+                    .timeout(Duration.ofSeconds(5))
+                    .header("Content-Type", "text/plain; charset=UTF-8")
+                    .header("x-amz-sns-message-type", "SubscriptionConfirmation")
+                    .header("x-amz-sns-topic-arn", topicArn)
+                    .header("x-amz-sns-subscription-arn", "PendingConfirmation")
+                    .POST(HttpRequest.BodyPublishers.ofString(body))
+                    .build();
+            String endpoint = subscription.getEndpoint();
+            httpClient.sendAsync(request, HttpResponse.BodyHandlers.discarding())
+                    .thenAccept(response -> logHttpResult("Sent SubscriptionConfirmation", endpoint, response.statusCode()))
+                    .exceptionally(ex -> { LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", endpoint, ex.getMessage()); return null; });
+        } catch (Exception e) {
+            LOG.warnv("Failed to send SubscriptionConfirmation to {0}: {1}", subscription.getEndpoint(), e.getMessage());
         }
     }
 
@@ -790,9 +1120,9 @@ public class SnsService {
         return AwsArnUtils.arnToQueueUrl(arn, baseUrl);
     }
 
-    private static int computePublishSize(String message, String subject,
+    private static int computePublishSize(int messageBytes, String subject,
                                           Map<String, MessageAttributeValue> attributes) {
-        int total = message == null ? 0 : message.getBytes(StandardCharsets.UTF_8).length;
+        int total = messageBytes;
         if (subject != null) {
             total += subject.getBytes(StandardCharsets.UTF_8).length;
         }

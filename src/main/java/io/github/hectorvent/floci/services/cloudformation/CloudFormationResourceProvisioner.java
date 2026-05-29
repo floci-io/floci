@@ -28,6 +28,9 @@ import io.github.hectorvent.floci.services.ssm.SsmService;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
+import io.github.hectorvent.floci.services.cognito.CognitoService;
+import io.github.hectorvent.floci.services.cognito.model.UserPool;
+import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -73,6 +76,7 @@ public class CloudFormationResourceProvisioner {
     private final ApiGatewayV2Service apiGatewayV2Service;
     private final EcrService ecrService;
     private final PipesService pipesService;
+    private final CognitoService cognitoService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -84,7 +88,8 @@ public class CloudFormationResourceProvisioner {
                                              ApiGatewayService apiGatewayService,
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
-                                             PipesService pipesService) {
+                                             PipesService pipesService,
+                                             CognitoService cognitoService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -99,6 +104,7 @@ public class CloudFormationResourceProvisioner {
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.ecrService = ecrService;
         this.pipesService = pipesService;
+        this.cognitoService = cognitoService;
     }
 
     /**
@@ -133,6 +139,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::S3::Bucket" -> provisionS3Bucket(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SQS::Queue" -> provisionSqsQueue(resource, properties, engine, region, accountId, stackName);
                 case "AWS::SNS::Topic" -> provisionSnsTopic(resource, properties, engine, region, accountId, stackName);
+                case "AWS::SNS::Subscription" -> provisionSnsSubscription(resource, properties, engine, region);
                 case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" ->
                         provisionDynamoTable(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
@@ -146,7 +153,6 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::KMS::Key" -> provisionKmsKey(resource, properties, engine, region, accountId);
                 case "AWS::KMS::Alias" -> provisionKmsAlias(resource, properties, engine, region);
                 case "AWS::SecretsManager::Secret" -> provisionSecret(resource, properties, engine, region, accountId, stackName);
-                case "AWS::CloudFormation::Stack" -> provisionNestedStack(resource, properties, engine, region);
                 case "AWS::CDK::Metadata" -> provisionCdkMetadata(resource);
                 case "AWS::S3::BucketPolicy" -> provisionS3BucketPolicy(resource, properties, engine);
                 case "AWS::SQS::QueuePolicy" -> provisionSqsQueuePolicy(resource, properties, engine);
@@ -168,6 +174,10 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Pipes::Pipe" -> provisionPipe(resource, properties, engine, region, stackName);
                 case "AWS::Lambda::EventSourceMapping" ->
                         provisionLambdaEventSourceMapping(resource, properties, engine, region);
+                case "AWS::Cognito::UserPool" ->
+                        provisionCognitoUserPool(resource, properties, engine, region, accountId, stackName);
+                case "AWS::Cognito::UserPoolClient" ->
+                        provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
                 default -> {
                     LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
                     resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
@@ -189,6 +199,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::S3::Bucket" -> s3Service.deleteBucket(physicalId);
                 case "AWS::SQS::Queue" -> sqsService.deleteQueue(physicalId, region);
                 case "AWS::SNS::Topic" -> snsService.deleteTopic(physicalId, region);
+                case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
                 case "AWS::DynamoDB::Table" -> dynamoDbService.deleteTable(physicalId, region);
                 case "AWS::Lambda::Function" -> lambdaService.deleteFunction(region, physicalId);
                 case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
@@ -207,6 +218,8 @@ public class CloudFormationResourceProvisioner {
                         ecrService.deleteRepository(physicalId, null, true, region);
                 case "AWS::Pipes::Pipe" -> pipesService.deletePipe(physicalId, region);
                 case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
+                case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
+                case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -240,8 +253,13 @@ public class CloudFormationResourceProvisioner {
             queueName = generatePhysicalName(stackName, r.getLogicalId(), 80, false);
         }
         Map<String, String> attrs = new HashMap<>();
-        if (props != null && props.has("VisibilityTimeout")) {
-            attrs.put("VisibilityTimeout", engine.resolve(props.get("VisibilityTimeout")));
+        if (props != null) {
+            if(props.has("VisibilityTimeout")) {
+                attrs.put("VisibilityTimeout", engine.resolve(props.get("VisibilityTimeout")));
+            }
+            if(props.has("ContentBasedDeduplication")) {
+                attrs.put("ContentBasedDeduplication", engine.resolve(props.get("ContentBasedDeduplication")));
+            }
         }
         var queue = sqsService.createQueue(queueName, attrs, region);
         // QueueArn is computed on demand in SqsService#getQueueAttributes and is not
@@ -259,13 +277,45 @@ public class CloudFormationResourceProvisioner {
     private void provisionSnsTopic(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                    String region, String accountId, String stackName) {
         String topicName = resolveOptional(props, "TopicName", engine);
+        String contentBasedDedupFlag = resolveOptional(props, "ContentBasedDeduplication", engine);
         if (topicName == null || topicName.isBlank()) {
             topicName = generatePhysicalName(stackName, r.getLogicalId(), 256, false);
         }
-        var topic = snsService.createTopic(topicName, Map.of(), Map.of(), region);
+
+        Map<String, String> attributes = new HashMap<>();
+
+        if (contentBasedDedupFlag != null && !contentBasedDedupFlag.isBlank()) {
+            attributes.put("ContentBasedDeduplication", contentBasedDedupFlag);
+        }
+
+        var topic = snsService.createTopic(topicName, attributes, Map.of(), region);
         r.setPhysicalId(topic.getTopicArn());
         r.getAttributes().put("Arn", topic.getTopicArn());
         r.getAttributes().put("TopicName", topicName);
+    }
+
+    private void provisionSnsSubscription(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String topicArn = engine.resolve(props.path("TopicArn"));
+        String protocol = engine.resolve(props.path("Protocol"));
+        String endpoint = engine.resolve(props.path("Endpoint"));
+
+        Map<String, String> attributes = new HashMap<>();
+        if (props.has("FilterPolicy") && !props.path("FilterPolicy").isNull()) {
+            attributes.put("FilterPolicy", engine.resolveNode(props.path("FilterPolicy")).toString());
+        }
+        if (props.has("FilterPolicyScope")) {
+            attributes.put("FilterPolicyScope", engine.resolve(props.path("FilterPolicyScope")));
+        }
+        if (props.has("RawMessageDelivery")) {
+            attributes.put("RawMessageDelivery", engine.resolve(props.path("RawMessageDelivery")));
+        }
+        if (props.has("RedrivePolicy") && !props.path("RedrivePolicy").isNull()) {
+            attributes.put("RedrivePolicy", engine.resolveNode(props.path("RedrivePolicy")).toString());
+        }
+
+        var sub = snsService.subscribe(topicArn, protocol, endpoint, region, attributes);
+        r.setPhysicalId(sub.getSubscriptionArn());
+        r.getAttributes().put("Arn", sub.getSubscriptionArn());
     }
 
     // ── DynamoDB ──────────────────────────────────────────────────────────────
@@ -1129,17 +1179,6 @@ public class CloudFormationResourceProvisioner {
         return password;
     }
 
-    // ── Nested Stack ──────────────────────────────────────────────────────────
-
-    private void provisionNestedStack(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
-                                      String region) {
-        // Nested stacks are stubbed — return a synthetic stack ID
-        String nestedId = AwsArnUtils.Arn.of("cloudformation", region, "", "stack/nested-" + UUID.randomUUID().toString().substring(0, 8) + "/").toString();
-        r.setPhysicalId(nestedId);
-        r.getAttributes().put("Arn", nestedId);
-        r.getAttributes().put("Outputs.BootstrapVersion", "21");
-    }
-
     // ── EventBridge ─────────────────────────────────────────────────────────
 
     private void provisionEventBridgeRule(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -1542,6 +1581,71 @@ public class CloudFormationResourceProvisioner {
 
         Deployment deployment = apiGatewayV2Service.createDeployment(region, apiId, req);
         r.setPhysicalId(deployment.getDeploymentId());
+    }
+
+    // ── Cognito ──────────────────────────────────────────────────────────────
+
+    private void provisionCognitoUserPool(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                          String region, String accountId, String stackName) {
+        String poolName = resolveOptional(props, "UserPoolName", engine);
+        if (poolName == null || poolName.isBlank()) {
+            poolName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+
+        Map<String, Object> req = new HashMap<>();
+        if (props != null) {
+            req.putAll(jsonObjectToMap(engine.resolveNode(props)));
+        }
+        req.put("PoolName", poolName);
+
+        // Handle Tags
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("UserPoolTags") : null, engine);
+        if (!tags.isEmpty()) {
+            req.put("UserPoolTags", tags);
+        }
+
+        UserPool pool;
+        if (r.getPhysicalId() == null) {
+            pool = cognitoService.createUserPool(req, region);
+        } else {
+            req.put("UserPoolId", r.getPhysicalId());
+            pool = cognitoService.updateUserPool(req, region);
+        }
+
+        r.setPhysicalId(pool.getId());
+        r.getAttributes().put("Arn", pool.getArn());
+        r.getAttributes().put("UserPoolId", pool.getId());
+        r.getAttributes().put("ProviderName", pool.getName());
+        r.getAttributes().put("ProviderURL", cognitoService.getIssuer(pool.getId()));
+    }
+
+    private void provisionCognitoUserPoolClient(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                                String region, String accountId, String stackName) {
+        String userPoolId = resolveOptional(props, "UserPoolId", engine);
+        String clientName = resolveOptional(props, "ClientName", engine);
+        if (clientName == null || clientName.isBlank()) {
+            clientName = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+        boolean generateSecret = Boolean.parseBoolean(resolveOrDefault(props, "GenerateSecret", engine, "false"));
+        boolean allowedOAuthFlowsUserPoolClient = Boolean.parseBoolean(resolveOrDefault(props, "AllowedOAuthFlowsUserPoolClient", engine, "false"));
+        List<String> allowedOAuthFlows = resolveStringListOrEmpty(props, "AllowedOAuthFlows", engine);
+        List<String> allowedOAuthScopes = resolveStringListOrEmpty(props, "AllowedOAuthScopes", engine);
+
+        UserPoolClient client;
+        if (r.getPhysicalId() == null) {
+            client = cognitoService.createUserPoolClient(userPoolId, clientName, generateSecret,
+                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+        } else {
+            client = cognitoService.updateUserPoolClient(userPoolId, r.getPhysicalId(), clientName,
+                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+        }
+
+        r.setPhysicalId(client.getClientId());
+        r.getAttributes().put("ClientId", client.getClientId());
+        r.getAttributes().put("ClientName", client.getClientName());
+        if (client.getClientSecret() != null) {
+            r.getAttributes().put("ClientSecret", client.getClientSecret());
+        }
     }
 
     private String resolveOptional(JsonNode props, String name, CloudFormationTemplateEngine engine) {

@@ -30,6 +30,7 @@ public class ApiGatewayV2Service {
     private final StorageBackend<String, RouteResponse> routeResponseStore;
     private final StorageBackend<String, IntegrationResponse> integrationResponseStore;
     private final StorageBackend<String, Model> modelStore;
+    private final StorageBackend<String, VpcLink> vpcLinkStore;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -51,6 +52,8 @@ public class ApiGatewayV2Service {
         this.integrationResponseStore = storageFactory.create("apigatewayv2", "apigatewayv2-integrationresponses.json",
                 new TypeReference<>() {});
         this.modelStore = storageFactory.create("apigatewayv2", "apigatewayv2-models.json",
+                new TypeReference<>() {});
+        this.vpcLinkStore = storageFactory.create("apigatewayv2", "apigatewayv2-vpclinks.json",
                 new TypeReference<>() {});
         this.regionResolver = regionResolver;
     }
@@ -98,6 +101,12 @@ public class ApiGatewayV2Service {
             api.setTags(tags);
         }
 
+        @SuppressWarnings("unchecked")
+        Map<String, Object> corsConfig = (Map<String, Object>) request.get("corsConfiguration");
+        if (corsConfig != null) {
+            api.setCorsConfiguration(toCors(corsConfig));
+        }
+
         apiStore.put(apiKey(region, api.getApiId()), api);
         LOG.infov("Created {0} API: {1} ({2}) in {3}", protocolType, api.getName(), api.getApiId(), region);
         return api;
@@ -138,9 +147,30 @@ public class ApiGatewayV2Service {
             Map<String, String> tags = (Map<String, String>) request.get("tags");
             api.setTags(tags);
         }
+        if (request.containsKey("corsConfiguration")) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> corsConfig = (Map<String, Object>) request.get("corsConfiguration");
+            api.setCorsConfiguration(corsConfig == null ? null : toCors(corsConfig));
+        }
 
         apiStore.put(apiKey(region, apiId), api);
         return api;
+    }
+
+    private static Api.Cors toCors(Map<String, Object> m) {
+        @SuppressWarnings("unchecked")
+        List<String> allowOrigins = (List<String>) m.get("allowOrigins");
+        @SuppressWarnings("unchecked")
+        List<String> allowMethods = (List<String>) m.get("allowMethods");
+        @SuppressWarnings("unchecked")
+        List<String> allowHeaders = (List<String>) m.get("allowHeaders");
+        @SuppressWarnings("unchecked")
+        List<String> exposeHeaders = (List<String>) m.get("exposeHeaders");
+        Integer maxAge = m.get("maxAge") == null ? null : ((Number) m.get("maxAge")).intValue();
+        Boolean allowCredentials = m.get("allowCredentials") == null
+                ? null
+                : Boolean.parseBoolean(String.valueOf(m.get("allowCredentials")));
+        return new Api.Cors(allowOrigins, allowMethods, allowHeaders, exposeHeaders, maxAge, allowCredentials);
     }
 
     // ──────────────────────────── Authorizer CRUD ────────────────────────────
@@ -174,6 +204,9 @@ public class ApiGatewayV2Service {
         auth.setAuthorizerPayloadFormatVersion((String) request.get("authorizerPayloadFormatVersion"));
         if (request.get("authorizerResultTtlInSeconds") != null) {
             auth.setAuthorizerResultTtlInSeconds(((Number) request.get("authorizerResultTtlInSeconds")).intValue());
+        }
+        if (request.get("enableSimpleResponses") != null) {
+            auth.setEnableSimpleResponses(Boolean.parseBoolean(String.valueOf(request.get("enableSimpleResponses"))));
         }
 
         authorizerStore.put(authorizerKey(region, apiId, auth.getAuthorizerId()), auth);
@@ -232,6 +265,9 @@ public class ApiGatewayV2Service {
         }
         if (request.containsKey("authorizerResultTtlInSeconds") && request.get("authorizerResultTtlInSeconds") != null) {
             auth.setAuthorizerResultTtlInSeconds(((Number) request.get("authorizerResultTtlInSeconds")).intValue());
+        }
+        if (request.containsKey("enableSimpleResponses") && request.get("enableSimpleResponses") != null) {
+            auth.setEnableSimpleResponses(Boolean.parseBoolean(String.valueOf(request.get("enableSimpleResponses"))));
         }
 
         authorizerStore.put(authorizerKey(region, apiId, authorizerId), auth);
@@ -338,7 +374,8 @@ public class ApiGatewayV2Service {
         if (space < 0) return false;
         String method = routeKey.substring(0, space);
         String pattern = routeKey.substring(space + 1);
-        if (!method.equalsIgnoreCase(httpMethod)) return false;
+        // ANY is the AWS wildcard method — matches any inbound HTTP method.
+        if (!"ANY".equalsIgnoreCase(method) && !method.equalsIgnoreCase(httpMethod)) return false;
 
         // Build regex from path template: {proxy+} -> .+, {param} -> [^/]+
         // Quote literal segments to avoid regex injection from path patterns
@@ -363,6 +400,7 @@ public class ApiGatewayV2Service {
         integration.setIntegrationId(shortId(8));
         integration.setIntegrationType((String) request.get("integrationType"));
         integration.setIntegrationUri((String) request.get("integrationUri"));
+        integration.setConnectionType((String) request.get("connectionType"));
         integration.setPayloadFormatVersion((String) request.getOrDefault("payloadFormatVersion", "2.0"));
         integration.setIntegrationMethod((String) request.get("integrationMethod"));
         integration.setTemplateSelectionExpression((String) request.get("templateSelectionExpression"));
@@ -378,6 +416,12 @@ public class ApiGatewayV2Service {
         @SuppressWarnings("unchecked")
         Map<String, String> responseTemplates = (Map<String, String>) request.get("responseTemplates");
         integration.setResponseTemplates(responseTemplates);
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
+        integration.setRequestParameters(requestParameters);
+
+        integration.setConnectionId((String) request.get("connectionId"));
 
         integrationStore.put(integrationKey(region, apiId, integration.getIntegrationId()), integration);
         return integration;
@@ -408,6 +452,9 @@ public class ApiGatewayV2Service {
         if (request.containsKey("integrationUri") && request.get("integrationUri") != null) {
             integration.setIntegrationUri((String) request.get("integrationUri"));
         }
+        if (request.containsKey("connectionType") && request.get("connectionType") != null) {
+            integration.setConnectionType((String) request.get("connectionType"));
+        }
         if (request.containsKey("payloadFormatVersion") && request.get("payloadFormatVersion") != null) {
             integration.setPayloadFormatVersion((String) request.get("payloadFormatVersion"));
         }
@@ -429,6 +476,14 @@ public class ApiGatewayV2Service {
             @SuppressWarnings("unchecked")
             Map<String, String> responseTemplates = (Map<String, String>) request.get("responseTemplates");
             integration.setResponseTemplates(responseTemplates);
+        }
+        if (request.containsKey("requestParameters") && request.get("requestParameters") != null) {
+            @SuppressWarnings("unchecked")
+            Map<String, String> requestParameters = (Map<String, String>) request.get("requestParameters");
+            integration.setRequestParameters(requestParameters);
+        }
+        if (request.containsKey("connectionId") && request.get("connectionId") != null) {
+            integration.setConnectionId((String) request.get("connectionId"));
         }
 
         integrationStore.put(integrationKey(region, apiId, integrationId), integration);
@@ -728,6 +783,51 @@ public class ApiGatewayV2Service {
         modelStore.delete(modelKey(region, apiId, modelId));
     }
 
+    // ──────────────────────────── VPC Link CRUD ────────────────────────────
+
+    public VpcLink createVpcLink(String region, Map<String, Object> request) {
+        VpcLink link = new VpcLink();
+        link.setVpcLinkId(shortId(10));
+        link.setName((String) request.get("name"));
+
+        @SuppressWarnings("unchecked")
+        List<String> subnetIds = (List<String>) request.get("subnetIds");
+        link.setSubnetIds(subnetIds);
+
+        @SuppressWarnings("unchecked")
+        List<String> securityGroupIds = (List<String>) request.get("securityGroupIds");
+        link.setSecurityGroupIds(securityGroupIds);
+
+        // Floci has no real VPC — provision the link as AVAILABLE immediately.
+        link.setVpcLinkStatus("AVAILABLE");
+        link.setCreatedDate(System.currentTimeMillis());
+
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("tags");
+        if (tags != null) {
+            link.setTags(tags);
+        }
+
+        vpcLinkStore.put(vpcLinkKey(region, link.getVpcLinkId()), link);
+        LOG.infov("Created VPC Link: {0} ({1}) in {2}", link.getName(), link.getVpcLinkId(), region);
+        return link;
+    }
+
+    public VpcLink getVpcLink(String region, String vpcLinkId) {
+        return vpcLinkStore.get(vpcLinkKey(region, vpcLinkId))
+                .orElseThrow(() -> new AwsException("NotFoundException", "VpcLink not found", 404));
+    }
+
+    public List<VpcLink> getVpcLinks(String region) {
+        String prefix = region + "::";
+        return vpcLinkStore.scan(k -> k.startsWith(prefix));
+    }
+
+    public void deleteVpcLink(String region, String vpcLinkId) {
+        getVpcLink(region, vpcLinkId);
+        vpcLinkStore.delete(vpcLinkKey(region, vpcLinkId));
+    }
+
     // ──────────────────────────── Standalone Tagging ────────────────────────────
 
     /**
@@ -826,6 +926,10 @@ public class ApiGatewayV2Service {
 
     private String modelKey(String region, String apiId, String modelId) {
         return region + "::" + apiId + "::" + modelId;
+    }
+
+    private String vpcLinkKey(String region, String vpcLinkId) {
+        return region + "::" + vpcLinkId;
     }
 
     private static String shortId(int length) {

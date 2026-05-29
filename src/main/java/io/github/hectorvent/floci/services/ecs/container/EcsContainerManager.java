@@ -173,6 +173,64 @@ public class EcsContainerManager {
         return envVars;
     }
 
+    /**
+     * Resolves the host address at which a running task container is reachable from the
+     * Floci process — used to register the container as an ELBv2 target.
+     * <p>
+     * Native mode: the container's port is published to a host port, reachable at
+     * {@code 127.0.0.1}. Floci-in-Docker mode: the container is reached by its IP on the
+     * shared Docker network. Returns {@code 127.0.0.1} as a safe fallback.
+     */
+    public String resolveContainerHost(Container container) {
+        if (!containerDetector.isRunningInContainer()) {
+            return "127.0.0.1";
+        }
+        String dockerId = container.getDockerId();
+        if (dockerId == null || dockerId.isBlank()) {
+            return "127.0.0.1";
+        }
+        try {
+            var inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            var networks = inspect.getNetworkSettings().getNetworks();
+
+            // A container can be on multiple networks; getNetworks() is unordered.
+            // Pick an IP that the Floci/ELBv2 process can actually route to:
+            // 1. the explicitly-configured ECS Docker network, if set;
+            // 2. otherwise any user-defined network (Floci joins one when in Docker)
+            //    in preference to the default bridge;
+            // 3. otherwise the first non-blank IP.
+            String configured = config.services().ecs().dockerNetwork().orElse(null);
+            if (configured != null && !configured.isBlank()) {
+                var net = networks.get(configured);
+                if (net != null && isUsableIp(net.getIpAddress())) {
+                    return net.getIpAddress();
+                }
+            }
+            for (var entry : networks.entrySet()) {
+                if (!isDefaultDockerNetwork(entry.getKey())
+                        && isUsableIp(entry.getValue().getIpAddress())) {
+                    return entry.getValue().getIpAddress();
+                }
+            }
+            for (var net : networks.values()) {
+                if (isUsableIp(net.getIpAddress())) {
+                    return net.getIpAddress();
+                }
+            }
+        } catch (Exception e) {
+            LOG.warnv("Could not resolve container IP for {0}: {1}", dockerId, e.getMessage());
+        }
+        return "127.0.0.1";
+    }
+
+    private static boolean isUsableIp(String ip) {
+        return ip != null && !ip.isBlank();
+    }
+
+    private static boolean isDefaultDockerNetwork(String name) {
+        return "bridge".equals(name) || "host".equals(name) || "none".equals(name);
+    }
+
     private List<NetworkBinding> resolveNetworkBindings(String dockerId, ContainerDefinition def) {
         List<NetworkBinding> bindings = new ArrayList<>();
         if (def.getPortMappings() == null || def.getPortMappings().isEmpty()) {

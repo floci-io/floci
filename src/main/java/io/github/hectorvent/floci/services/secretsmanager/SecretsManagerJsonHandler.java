@@ -38,6 +38,7 @@ public class SecretsManagerJsonHandler {
             case "DescribeSecret" -> handleDescribeSecret(request, region);
             case "ListSecrets" -> handleListSecrets(request, region);
             case "DeleteSecret" -> handleDeleteSecret(request, region);
+            case "RestoreSecret" -> handleRestoreSecret(request, region);
             case "RotateSecret" -> handleRotateSecret(request, region);
             case "TagResource" -> handleTagResource(request, region);
             case "UntagResource" -> handleUntagResource(request, region);
@@ -295,6 +296,16 @@ public class SecretsManagerJsonHandler {
         if (secret.getDeletedDate() != null) {
             response.put("DeletionDate", secret.getDeletedDate().toEpochMilli() / 1000.0);
         }
+        return Response.ok(response).build();
+    }
+
+    private Response handleRestoreSecret(JsonNode request, String region) {
+        String secretId = request.path("SecretId").asText();
+        Secret secret = service.restoreSecret(secretId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ARN", secret.getArn());
+        response.put("Name", secret.getName());
         return Response.ok(response).build();
     }
 

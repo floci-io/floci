@@ -183,6 +183,11 @@ public class LambdaConcurrencyLimiter {
                 int otherReserved = regionTotal(region).get() - currentForThis;
                 int maxAllowed = regionLimit - unreservedMin - otherReserved;
                 if (target > maxAllowed) {
+                    LOG.warnv("Region {0} reservation pool exhausted: requested={1}, "
+                            + "alreadyReserved={2}, regionLimit={3}, unreservedMin={4}. "
+                            + "Raise FLOCI_SERVICES_LAMBDA_REGION_CONCURRENCY_LIMIT (e.g. 10000) "
+                            + "or lower the function's ReservedConcurrentExecutions.",
+                            region, target, otherReserved, regionLimit, unreservedMin);
                     throw new AwsException("LimitExceededException",
                             "Specified ReservedConcurrentExecutions for function decreases account's "
                             + "UnreservedConcurrentExecution below its minimum value of ["

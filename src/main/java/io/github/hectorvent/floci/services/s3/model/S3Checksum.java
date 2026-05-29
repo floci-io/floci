@@ -5,9 +5,14 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.Base64;
+import java.util.zip.CRC32;
+import java.util.zip.CRC32C;
 
 @RegisterForReflection
 public class S3Checksum {
+
+    private static final long CRC64_NVME_POLY = 0x9a6c9329ac4bc9b5L;
+    private static final long[] CRC64_TABLE = buildCrc64Table();
 
     private String checksumCRC32;
     private String checksumCRC32C;
@@ -39,6 +44,40 @@ public class S3Checksum {
                 || checksumSHA1 != null || checksumSHA256 != null;
     }
 
+    public static String crc32Base64(byte[] data) {
+        CRC32 crc = new CRC32();
+        crc.update(data);
+        long value = crc.getValue();
+        byte[] bytes = new byte[]{
+            (byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte) value
+        };
+        return Base64.getEncoder().encodeToString(bytes);
+    }
+
+    public static String crc32cBase64(byte[] data) {
+        CRC32C crc = new CRC32C();
+        crc.update(data);
+        long value = crc.getValue();
+        byte[] bytes = new byte[]{
+            (byte)(value >> 24), (byte)(value >> 16), (byte)(value >> 8), (byte) value
+        };
+        return Base64.getEncoder().encodeToString(bytes);
+    }
+
+    public static String crc64NvmeBase64(byte[] data) {
+        long crc = 0xFFFFFFFFFFFFFFFFL;
+        for (byte b : data) {
+            int idx = (int)((crc ^ b) & 0xFF);
+            crc = CRC64_TABLE[idx] ^ (crc >>> 8);
+        }
+        crc ^= 0xFFFFFFFFFFFFFFFFL;
+        byte[] bytes = new byte[]{
+            (byte)(crc >> 56), (byte)(crc >> 48), (byte)(crc >> 40), (byte)(crc >> 32),
+            (byte)(crc >> 24), (byte)(crc >> 16), (byte)(crc >> 8),  (byte) crc
+        };
+        return Base64.getEncoder().encodeToString(bytes);
+    }
+
     public static String sha256Base64(byte[] data) {
         return digestBase64("SHA-256", data);
     }
@@ -54,5 +93,21 @@ public class S3Checksum {
         } catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("Missing digest algorithm: " + algorithm, e);
         }
+    }
+
+    private static long[] buildCrc64Table() {
+        long[] table = new long[256];
+        for (int i = 0; i < 256; i++) {
+            long crc = i;
+            for (int j = 0; j < 8; j++) {
+                if ((crc & 1) != 0) {
+                    crc = (crc >>> 1) ^ CRC64_NVME_POLY;
+                } else {
+                    crc >>>= 1;
+                }
+            }
+            table[i] = crc;
+        }
+        return table;
     }
 }

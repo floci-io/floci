@@ -100,22 +100,36 @@ public class EksClusterManager {
         ContainerInfo info = lifecycleManager.createAndStart(spec);
         cluster.setContainerId(info.containerId());
 
-        // Set a preliminary endpoint (will be confirmed after readiness check)
+        // Public endpoint uses the container name (DNS-resolvable on user-defined networks).
+        // Internal endpoint uses the resolved IP from ContainerLifecycleManager so the
+        // readiness poller works on the default bridge network where container-name DNS
+        // is not available.
         if (containerDetector.isRunningInContainer()) {
             cluster.setEndpoint("https://" + containerName + ":" + K3S_API_SERVER_PORT);
+            ContainerLifecycleManager.EndpointInfo ep = info.getEndpoint(K3S_API_SERVER_PORT);
+            if (ep != null) {
+                cluster.setInternalEndpoint("https://" + ep.host() + ":" + ep.port());
+            } else {
+                cluster.setInternalEndpoint(cluster.getEndpoint());
+            }
         } else {
             cluster.setEndpoint("https://localhost:" + hostPort);
+            cluster.setInternalEndpoint(cluster.getEndpoint());
         }
 
-        LOG.infov("k3s container {0} started for cluster {1} on port {2}",
-                info.containerId(), cluster.getName(), hostPort);
+        LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
+                info.containerId(), cluster.getName(), hostPort, cluster.getInternalEndpoint());
     }
 
     /**
      * Checks whether the k3s API server is ready by polling its /readyz endpoint.
      */
     public boolean isReady(Cluster cluster) {
-        String endpoint = cluster.getEndpoint();
+        // Prefer internalEndpoint (IP-based) for connectivity — works on both user-defined
+        // networks and the default bridge where container-name DNS is unavailable.
+        String endpoint = cluster.getInternalEndpoint() != null
+                ? cluster.getInternalEndpoint()
+                : cluster.getEndpoint();
         if (endpoint == null || cluster.getContainerId() == null) {
             return false;
         }

@@ -20,6 +20,9 @@ class S3VirtualHostIntegrationTest {
     private static final String BUCKET = "vhost-bucket";
     private static final String HOST = BUCKET + ".localhost";
 
+    private static final String REGION_BUCKET = "vhost-region-bucket";
+    private static final String REGION_HOST = REGION_BUCKET + ".s3.us-east-1.localhost";
+
     @Test
     @Order(1)
     void createBucketViaVirtualHost() {
@@ -189,6 +192,62 @@ class S3VirtualHostIntegrationTest {
     }
 
     @Test
+    @Order(13)
+    void headBucketReturns404ForMissingRegionQualifiedHost() {
+        given()
+            .header("Host", REGION_HOST)
+        .when()
+            .head("/")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(14)
+    void createBucketViaRegionQualifiedVirtualHost() {
+        given()
+            .header("Host", REGION_HOST)
+        .when()
+            .put("/")
+        .then()
+            .statusCode(200)
+            .header("Location", equalTo("/" + REGION_BUCKET));
+    }
+
+    @Test
+    @Order(15)
+    void headBucketViaRegionQualifiedVirtualHost() {
+        given()
+            .header("Host", REGION_HOST)
+        .when()
+            .head("/")
+        .then()
+            .statusCode(200)
+            .header("x-amz-bucket-region", notNullValue());
+    }
+
+    @Test
+    @Order(16)
+    void putAndGetObjectViaRegionQualifiedVirtualHost() {
+        given()
+            .header("Host", REGION_HOST)
+            .contentType("text/plain")
+            .body("region-qualified content")
+        .when()
+            .put("/region.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Host", REGION_HOST)
+        .when()
+            .get("/region.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("region-qualified content"));
+    }
+
+    @Test
     @Order(20)
     void cleanupAndDeleteBucket() {
         given().header("Host", HOST).delete("/hello.txt");
@@ -196,6 +255,14 @@ class S3VirtualHostIntegrationTest {
 
         given()
             .header("Host", HOST)
+        .when()
+            .delete("/")
+        .then()
+            .statusCode(204);
+
+        given().header("Host", REGION_HOST).delete("/region.txt");
+        given()
+            .header("Host", REGION_HOST)
         .when()
             .delete("/")
         .then()

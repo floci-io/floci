@@ -1,20 +1,41 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import org.jboss.logging.Logger;
+
 import com.fasterxml.jackson.core.type.TypeReference;
+
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
-import io.github.hectorvent.floci.services.apigateway.model.*;
+import io.github.hectorvent.floci.services.apigateway.model.Account;
+import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
+import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
+import io.github.hectorvent.floci.services.apigateway.model.Authorizer;
+import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
+import io.github.hectorvent.floci.services.apigateway.model.MethodSetting;
+import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigateway.model.Deployment;
+import io.github.hectorvent.floci.services.apigateway.model.Integration;
+import io.github.hectorvent.floci.services.apigateway.model.IntegrationResponse;
+import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
+import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
+import io.github.hectorvent.floci.services.apigateway.model.Model;
+import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
+import io.github.hectorvent.floci.services.apigateway.model.RestApi;
+import io.github.hectorvent.floci.services.apigateway.model.Stage;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlan;
+import io.github.hectorvent.floci.services.apigateway.model.UsagePlanKey;
 import io.swagger.v3.oas.models.OpenAPI;
 import io.swagger.v3.oas.models.PathItem;
 import io.swagger.v3.parser.core.models.SwaggerParseResult;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
-
-import java.util.*;
 
 @ApplicationScoped
 public class ApiGatewayService {
@@ -31,12 +52,12 @@ public class ApiGatewayService {
     private final StorageBackend<String, UsagePlanKey> usagePlanKeyStore;
     private final StorageBackend<String, RequestValidator> requestValidatorStore;
     private final StorageBackend<String, Model> modelStore;
+    private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
-    private final RegionResolver regionResolver;
 
     @Inject
-    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
+    public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config) {
         this.apiStore = storageFactory.create("apigateway", "apigateway-apis.json",
                 new TypeReference<>() {
                 });
@@ -67,13 +88,70 @@ public class ApiGatewayService {
         this.modelStore = storageFactory.create("apigateway", "apigateway-models.json",
                 new TypeReference<>() {
                 });
+        this.accountStore = storageFactory.create("apigateway", "apigateway-account.json",
+            new TypeReference<>() {
+            });
         this.domainStore = storageFactory.create("apigateway", "apigateway-domains.json",
                 new TypeReference<>() {
                 });
         this.basePathMappingStore = storageFactory.create("apigateway", "apigateway-mappings.json",
                 new TypeReference<>() {
                 });
-        this.regionResolver = regionResolver;
+    }
+
+    // ──────────────────────────── Account ────────────────────────────
+
+    public Account getAccount(String region) {
+        String key = accountKey(region);
+        // GET must be read-only: return default account without persisting.
+        return accountStore.get(key).orElse(new Account());
+    }
+
+    public Account updateAccount(String region, List<Map<String, String>> patchOperations) {
+        Account existing = getAccount(region);
+
+        // Work on a defensive copy so updates are atomic: validate/apply all
+        // operations first and only persist after success.
+        Account copy = new Account();
+        copy.setApiKeyVersion(existing.getApiKeyVersion());
+        copy.setCloudwatchRoleArn(existing.getCloudwatchRoleArn());
+        copy.setFeatures(existing.getFeatures() == null ? null : List.copyOf(existing.getFeatures()));
+        // ThrottleSettings are immutable for our purposes here — reuse existing instance.
+        copy.setThrottleSettings(existing.getThrottleSettings());
+
+        if (patchOperations != null) {
+            for (Map<String, String> op : patchOperations) {
+                String opType = op.get("op");
+                String path = op.getOrDefault("path", "");
+                String value = op.get("value");
+
+                if (!"replace".equals(opType) && !"add".equals(opType) && !"remove".equals(opType)) {
+                    throw new AwsException("BadRequestException",
+                            "Unsupported patch operation: " + opType, 400);
+                }
+
+                switch (path) {
+                    case "/cloudwatchRoleArn" -> {
+                        if ("remove".equals(opType)) {
+                            copy.setCloudwatchRoleArn(null);
+                        } else {
+                            copy.setCloudwatchRoleArn(value);
+                        }
+                    }
+                    default -> {
+                        if (path.startsWith("/throttleSettings")) {
+                            throw new AwsException("BadRequestException",
+                                    "/throttleSettings value cannot be changed this way", 400);
+                        }
+                        throw new AwsException("BadRequestException",
+                                "Unsupported patch path: " + path, 400);
+                    }
+                }
+            }
+        }
+
+        accountStore.put(accountKey(region), copy);
+        return copy;
     }
 
     // ──────────────────────────── REST API CRUD ────────────────────────────
@@ -392,12 +470,72 @@ public class ApiGatewayService {
                     String varKey = path.substring("/variables/" .length());
                     LOG.infov("Setting stage variable {0} = {1}", varKey, value);
                     stage.getVariables().put(varKey, value);
+                } else {
+                    applyMethodSettingPatch(stage, path, value);
                 }
             }
         }
         stage.setLastUpdatedDate(System.currentTimeMillis() / 1000L);
         stageStore.put(stageKey(region, apiId, stageName), stage);
         return stage;
+    }
+
+    private static final List<String> METHOD_SETTING_KEYS = List.of(
+            "metrics/enabled",
+            "logging/loglevel",
+            "logging/dataTrace",
+            "throttling/burstLimit",
+            "throttling/rateLimit",
+            "caching/enabled",
+            "caching/ttlInSeconds",
+            "caching/dataEncrypted",
+            "caching/requireAuthorizationForCacheControl",
+            "caching/unauthorizedCacheControlHeaderStrategy"
+    );
+
+    /**
+     * Applies a method-settings patch operation in the form
+     * <code>/{resourcePath}/{httpMethod}/{settingKey}</code>, e.g.
+     * <code>/*&#47;*&#47;metrics/enabled</code> or
+     * <code>/pets/GET/throttling/burstLimit</code>. Unknown setting keys are
+     * silently ignored to match real API Gateway's lenient PATCH semantics.
+     */
+    private void applyMethodSettingPatch(Stage stage, String path, String value) {
+        for (String settingKey : METHOD_SETTING_KEYS) {
+            String suffix = "/" + settingKey;
+            if (!path.endsWith(suffix)) continue;
+
+            String prefix = path.substring(1, path.length() - suffix.length());
+            int lastSlash = prefix.lastIndexOf('/');
+            if (lastSlash < 0) return;
+            String resourcePath = prefix.substring(0, lastSlash);
+            String httpMethod = prefix.substring(lastSlash + 1);
+            String methodKey = resourcePath + "/" + httpMethod;
+
+            MethodSetting setting = stage.getMethodSettings()
+                    .computeIfAbsent(methodKey, k -> new MethodSetting());
+            applyMethodSettingValue(setting, settingKey, value);
+            return;
+        }
+    }
+
+    private void applyMethodSettingValue(MethodSetting setting, String settingKey, String value) {
+        if (value == null) return;
+        switch (settingKey) {
+            case "metrics/enabled" -> setting.setMetricsEnabled(Boolean.parseBoolean(value));
+            case "logging/loglevel" -> setting.setLoggingLevel(value);
+            case "logging/dataTrace" -> setting.setDataTraceEnabled(Boolean.parseBoolean(value));
+            case "throttling/burstLimit" -> setting.setThrottlingBurstLimit(Integer.parseInt(value));
+            case "throttling/rateLimit" -> setting.setThrottlingRateLimit(Double.parseDouble(value));
+            case "caching/enabled" -> setting.setCachingEnabled(Boolean.parseBoolean(value));
+            case "caching/ttlInSeconds" -> setting.setCacheTtlInSeconds(Integer.parseInt(value));
+            case "caching/dataEncrypted" -> setting.setCacheDataEncrypted(Boolean.parseBoolean(value));
+            case "caching/requireAuthorizationForCacheControl" ->
+                    setting.setRequireAuthorizationForCacheControl(Boolean.parseBoolean(value));
+            case "caching/unauthorizedCacheControlHeaderStrategy" ->
+                    setting.setUnauthorizedCacheControlHeaderStrategy(value);
+            default -> { /* unreachable: caller pre-filters by METHOD_SETTING_KEYS */ }
+        }
     }
 
     public void deleteStage(String region, String apiId, String stageName) {
@@ -609,6 +747,13 @@ public class ApiGatewayService {
         String domainName = (String) request.get("domainName");
         if (domainName == null) throw new AwsException("BadRequestException", "domainName is required", 400);
 
+        // AWS enforces global uniqueness of custom domain names across all regions
+        boolean exists = !domainStore.scan(k -> k.endsWith("::" + domainName)).isEmpty();
+        if (exists) {
+            throw new AwsException("ConflictException",
+                    "The domain name you provided already exists.", 409);
+        }
+
         CustomDomain domain = new CustomDomain();
         domain.setDomainName(domainName);
         domain.setCertificateName((String) request.get("certificateName"));
@@ -671,6 +816,91 @@ public class ApiGatewayService {
         basePathMappingStore.delete(mappingKey(region, domainName, path));
     }
 
+    // ──────────────────────────── Custom Domain Resolution ────────────────────────────
+
+    /**
+     * Resolves a custom domain by its regionalDomainName (e.g., "my-domain.regional.local").
+     * Derives the domain name from the regionalDomainName and performs a key-based lookup.
+     *
+     * @return the CustomDomain if found, or null if no domain matches
+     */
+    public CustomDomain findDomainByRegionalHostname(String regionalDomainName) {
+        if (!regionalDomainName.endsWith(".regional.local")) {
+            return null;
+        }
+        String domainName = regionalDomainName.substring(0,
+                regionalDomainName.length() - ".regional.local".length());
+        return findDomainByName(domainName);
+    }
+
+    /**
+     * Resolves a custom domain by its actual domain name (e.g., "api.example.com").
+     * Domain names are globally unique across regions.
+     *
+     * @return the CustomDomain if found, or null if no domain matches
+     */
+    public CustomDomain findDomainByName(String domainName) {
+        List<CustomDomain> results = domainStore.scan(k -> k.endsWith("::" + domainName));
+        return results.isEmpty() ? null : results.get(0);
+    }
+
+    /**
+     * Resolves the base path mapping for a given domain and request path.
+     * Uses longest-prefix matching on the base path.
+     *
+     * @param domainName the custom domain name
+     * @param requestPath the incoming request path (e.g., "/v1/items/123")
+     * @return the matching BasePathMapping, or null if none matches
+     */
+    public BasePathMapping resolveBasePathMapping(String domainName, String requestPath) {
+        // Get all mappings across all regions for this domain
+        List<BasePathMapping> allMappings = basePathMappingStore.scan(k -> k.contains("::" + domainName + "::"));
+
+        if (allMappings.isEmpty()) {
+            return null;
+        }
+
+        // Find the best match using longest-prefix matching
+        BasePathMapping bestMatch = null;
+        int bestLength = -1;
+
+        for (BasePathMapping mapping : allMappings) {
+            String basePath = mapping.getBasePath();
+            if ("(none)".equals(basePath)) {
+                // Catch-all mapping — matches if no better mapping exists
+                if (bestLength < 0) {
+                    bestMatch = mapping;
+                    bestLength = 0;
+                }
+            } else {
+                String prefix = "/" + basePath;
+                if (requestPath.equals(prefix) || requestPath.startsWith(prefix + "/")) {
+                    if (basePath.length() > bestLength) {
+                        bestMatch = mapping;
+                        bestLength = basePath.length();
+                    }
+                }
+            }
+        }
+
+        return bestMatch;
+    }
+
+    /**
+     * Returns the remaining path after stripping the matched base path prefix.
+     */
+    public String stripBasePath(String requestPath, BasePathMapping mapping) {
+        String basePath = mapping.getBasePath();
+        if ("(none)".equals(basePath)) {
+            return requestPath;
+        }
+        String prefix = "/" + basePath;
+        if (requestPath.equals(prefix)) {
+            return "/";
+        }
+        return requestPath.substring(prefix.length());
+    }
+
     // ──────────────────────────── Update Methods ────────────────────────────
 
     public RestApi updateRestApi(String region, String apiId, List<Map<String, String>> patchOperations) {
@@ -717,9 +947,11 @@ public class ApiGatewayService {
                 if (!"replace" .equals(op.get("op"))) continue;
                 String path = op.getOrDefault("path", "");
                 String value = op.get("value");
-                if ("/type" .equals(path)) integration.setType(value);
-                else if ("/httpMethod" .equals(path)) integration.setHttpMethod(value);
-                else if ("/uri" .equals(path)) integration.setUri(value);
+                switch (path) {
+                    case "/type" -> integration.setType(value);
+                    case "/httpMethod" -> integration.setHttpMethod(value);
+                    case "/uri" -> integration.setUri(value);
+                }
             }
         }
         resourceStore.put(resourceKey(region, apiId, resourceId), getResource(region, apiId, resourceId));
@@ -821,7 +1053,7 @@ public class ApiGatewayService {
                 try {
                     // Use swagger's own JSON serializer to produce clean JSON Schema
                     modelReq.put("schema", io.swagger.v3.core.util.Json.mapper().writeValueAsString(schema));
-                } catch (Exception e) {
+                } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
                     modelReq.put("schema", "{}");
                 }
                 createModel(region, apiId, modelReq);
@@ -1049,6 +1281,10 @@ public class ApiGatewayService {
 
     private String modelKey(String region, String apiId, String modelName) {
         return region + "::" + apiId + "::" + modelName;
+    }
+
+    private String accountKey(String region) {
+        return region + "::account";
     }
 
     private String apiKeyGlobalKey(String region, String apiKeyId) {

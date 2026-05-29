@@ -278,6 +278,11 @@ public class CognitoService {
         return clientStore.scan(k -> clientStore.get(k).map(c -> c.getUserPoolId().equals(userPoolId)).orElse(false));
     }
 
+    public void deleteUserPoolClient(String clientId) {
+        clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+        clientStore.delete(clientId);
+    }
+
     public void deleteUserPoolClient(String userPoolId, String clientId) {
         describeUserPoolClient(userPoolId, clientId);
         clientStore.delete(clientId);
@@ -754,7 +759,7 @@ public class CognitoService {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
         String userPoolId = client.getUserPoolId();
-        describeUserPool(userPoolId);
+        UserPool pool = describeUserPool(userPoolId);
 
         String key = userKey(userPoolId, username);
         if (userStore.get(key).isPresent()) {
@@ -770,13 +775,34 @@ public class CognitoService {
             user.getAttributes().putAll(attributes);
         }
 
-        // Ensure sub attribute is present
+        // Ensure sub attribute is present (required by PreSignUp event)
         if (!user.getAttributes().containsKey("sub")) {
             user.getAttributes().put("sub", UUID.randomUUID().toString());
         }
 
+        // Fire PreSignUp BEFORE persisting — allows the trigger to block signup
+        // (via lambda error) or auto-confirm/auto-verify the user (via response).
+        CognitoAuthFlowHandler.PreSignUpResponse preSignUp = authFlowHandler.firePreSignUp(
+                pool, client, user, Map.of(), Map.of(), "PreSignUp_SignUp");
+        if (preSignUp.autoConfirmUser()) {
+            user.setUserStatus("CONFIRMED");
+        }
+        if (preSignUp.autoVerifyEmail()) {
+            user.getAttributes().put("email_verified", "true");
+        }
+        if (preSignUp.autoVerifyPhone()) {
+            user.getAttributes().put("phone_number_verified", "true");
+        }
+
         userStore.put(key, user);
-        LOG.infov("Signed up user {0} in pool {1}", username, userPoolId);
+        LOG.infov("Signed up user {0} in pool {1} (status={2})",
+                username, userPoolId, user.getUserStatus());
+
+        // When PreSignUp auto-confirms, AWS Cognito also fires PostConfirmation.
+        // See: docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-sign-up.html
+        if (preSignUp.autoConfirmUser()) {
+            authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
+        }
         return user;
     }
 
@@ -787,6 +813,18 @@ public class CognitoService {
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(client.getUserPoolId(), user.getUsername()), user);
+
+        UserPool pool = poolStore.get(client.getUserPoolId())
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
+        authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
+    }
+
+    public void adminConfirmSignUp(String userPoolId, String username) {
+        CognitoUser user = adminGetUser(userPoolId, username);
+        user.setUserStatus("CONFIRMED");
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Admin confirmed sign up for user {0} in pool {1}", username, userPoolId);
     }
 
     // ──────────────────────────── Auth ────────────────────────────
@@ -1015,10 +1053,33 @@ public class CognitoService {
         if (!user.getGroupNames().isEmpty()) {
             claims.put("cognito:groups", new ArrayList<>(user.getGroupNames()));
         }
+        if ("id".equals(type)) {
+            addUserAttributeClaims(claims, user);
+        }
 
         applyClaimsOverride(claims, override, type);
 
         return signJwt(header, encodeJsonBase64Url(claims), getSigningPrivateKey(pool));
+    }
+
+    private static void addUserAttributeClaims(Map<String, Object> claims, CognitoUser user) {
+        for (Map.Entry<String, String> e : user.getAttributes().entrySet()) {
+            String name = e.getKey();
+            String value = e.getValue();
+            if (name == null || name.isEmpty() || value == null) continue;
+            if (claims.containsKey(name)) continue;
+            switch (name) {
+                case "email_verified", "phone_number_verified" -> claims.put(name, Boolean.parseBoolean(value));
+                case "updated_at" -> {
+                    try {
+                        claims.put(name, Long.parseLong(value));
+                    } catch (NumberFormatException _) {
+                        // OIDC requires updated_at to be a JSON number; omit invalid values.
+                    }
+                }
+                default -> claims.put(name, value);
+            }
+        }
     }
 
     private static void applyClaimsOverride(Map<String, Object> claims, ClaimsOverride override, String tokenType) {

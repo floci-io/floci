@@ -56,6 +56,7 @@ public class SqsQueryHandler {
             case "ListDeadLetterSourceQueues" -> handleListDeadLetterSourceQueues(params, region);
             case "StartMessageMoveTask" -> handleStartMessageMoveTask(params, region);
             case "ListMessageMoveTasks" -> handleListMessageMoveTasks(params, region);
+            case "CancelMessageMoveTask" -> handleCancelMessageMoveTask(params, region);
             case "AddPermission" -> handleAddPermission(params, region);
             case "RemovePermission" -> handleRemovePermission(params, region);
             default -> AwsQueryResponse.error("UnsupportedOperation",
@@ -116,6 +117,10 @@ public class SqsQueryHandler {
         if (msg.getMessageDeduplicationId() != null && (all || requested.contains("MessageDeduplicationId"))) {
             xml.start("Attribute").elem("Name", "MessageDeduplicationId")
                     .elem("Value", msg.getMessageDeduplicationId()).end("Attribute");
+        }
+        if (msg.getAwsTraceHeader() != null && (all || requested.contains("AWSTraceHeader"))) {
+            xml.start("Attribute").elem("Name", "AWSTraceHeader")
+                    .elem("Value", msg.getAwsTraceHeader()).end("Attribute");
         }
     }
 
@@ -212,7 +217,20 @@ public class SqsQueryHandler {
             }
         }
 
-        Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, messageAttributes, region);
+        // The AWS SDK only allows AWSTraceHeader to be set via MessageSystemAttributes;
+        // capture it (if present) so ReceiveMessage can return it as a system attribute.
+        String awsTraceHeader = null;
+        for (int i = 1; ; i++) {
+            String name = getParam(params, "MessageSystemAttribute." + i + ".Name");
+            if (name == null) break;
+            if ("AWSTraceHeader".equals(name)) {
+                awsTraceHeader = getParam(params, "MessageSystemAttribute." + i + ".Value.StringValue");
+                break;
+            }
+        }
+
+        Message msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId,
+                messageDeduplicationId, messageAttributes, awsTraceHeader, region);
 
         var xml = new XmlBuilder()
                 .elem("MessageId", msg.getMessageId())
@@ -313,6 +331,11 @@ public class SqsQueryHandler {
         String queueUrl = getParam(params, "QueueUrl");
         var xml = new XmlBuilder();
 
+        record ParsedEntry(String id, String body, int delay, String groupId, String dedupId,
+                           Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
+
+        List<ParsedEntry> parsedEntries = new ArrayList<>();
+        int totalSize = 0;
         for (int i = 1; ; i++) {
             String id = getParam(params, "SendMessageBatchRequestEntry." + i + ".Id");
             if (id == null) break;
@@ -338,8 +361,30 @@ public class SqsQueryHandler {
                 }
             }
 
+            String entryAwsTraceHeader = null;
+            for (int k = 1; ; k++) {
+                String name = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageSystemAttribute." + k + ".Name");
+                if (name == null) break;
+                if ("AWSTraceHeader".equals(name)) {
+                    entryAwsTraceHeader = getParam(params,
+                            "SendMessageBatchRequestEntry." + i + ".MessageSystemAttribute." + k + ".Value.StringValue");
+                    break;
+                }
+            }
+
+            totalSize += SqsService.computeMessageSize(body, messageAttributes);
+            parsedEntries.add(new ParsedEntry(id, body, delaySeconds, messageGroupId,
+                    messageDeduplicationId, messageAttributes, entryAwsTraceHeader));
+        }
+
+        sqsService.validateBatchPayloadSize(queueUrl, region, totalSize);
+
+        for (ParsedEntry parsed : parsedEntries) {
+            String id = parsed.id();
             try {
-                var msg = sqsService.sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, messageAttributes, region);
+                var msg = sqsService.sendMessage(queueUrl, parsed.body(), parsed.delay(),
+                        parsed.groupId(), parsed.dedupId(), parsed.attributes(),
+                        parsed.awsTraceHeader(), region);
                 xml.start("SendMessageBatchResultEntry")
                    .elem("Id", id)
                    .elem("MessageId", msg.getMessageId())
@@ -377,16 +422,44 @@ public class SqsQueryHandler {
     private Response handleStartMessageMoveTask(MultivaluedMap<String, String> params, String region) {
         String sourceArn = getParam(params, "SourceArn");
         String destinationArn = getParam(params, "DestinationArn");
-        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, region);
+        int maxRate = getIntParam(params, "MaxNumberOfMessagesPerSecond", 0);
+        String taskHandle = sqsService.startMessageMoveTask(sourceArn, destinationArn, maxRate, region);
         var xml = new XmlBuilder().elem("TaskHandle", taskHandle);
         return Response.ok(AwsQueryResponse.envelope("StartMessageMoveTask", null, xml.build())).build();
     }
 
     private Response handleListMessageMoveTasks(MultivaluedMap<String, String> params, String region) {
         String sourceArn = getParam(params, "SourceArn");
-        sqsService.listMessageMoveTasks(sourceArn, region);
-        var xml = new XmlBuilder(); // Empty list for mock
+        int maxResults = getIntParam(params, "MaxResults", 10);
+        List<SqsService.MoveTask> tasks = sqsService.listMessageMoveTasks(sourceArn, region);
+        var xml = new XmlBuilder();
+        int count = 0;
+        for (SqsService.MoveTask t : tasks) {
+            if (count++ >= maxResults) break;
+            xml.start("member")
+               .elem("TaskHandle", t.taskHandle())
+               .elem("SourceArn", t.sourceArn());
+            if (t.destinationArn() != null) {
+                xml.elem("DestinationArn", t.destinationArn());
+            }
+            xml.elem("MaxNumberOfMessagesPerSecond", t.maxNumberOfMessagesPerSecond())
+               .elem("Status", t.status())
+               .elem("ApproximateNumberOfMessagesMoved", t.approximateNumberOfMessagesMoved())
+               .elem("ApproximateNumberOfMessagesToMove", t.approximateNumberOfMessagesToMove())
+               .elem("StartedTimestamp", t.startedTimestampMillis());
+            if (t.failureReason() != null) {
+                xml.elem("FailureReason", t.failureReason());
+            }
+            xml.end("member");
+        }
         return Response.ok(AwsQueryResponse.envelope("ListMessageMoveTasks", null, xml.build())).build();
+    }
+
+    private Response handleCancelMessageMoveTask(MultivaluedMap<String, String> params, String region) {
+        String taskHandle = getParam(params, "TaskHandle");
+        long moved = sqsService.cancelMessageMoveTask(taskHandle, region);
+        var xml = new XmlBuilder().elem("ApproximateNumberOfMessagesMoved", moved);
+        return Response.ok(AwsQueryResponse.envelope("CancelMessageMoveTask", null, xml.build())).build();
     }
 
     private Response handlePurgeQueue(MultivaluedMap<String, String> params, String region) {

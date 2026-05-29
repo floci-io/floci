@@ -12,6 +12,7 @@ public class Stage {
     private String deploymentId;
     private String description;
     private Map<String, String> variables = new HashMap<>();
+    private Map<String, MethodSetting> methodSettings = new HashMap<>();
     private long createdDate;
     private long lastUpdatedDate;
 
@@ -45,6 +46,14 @@ public class Stage {
 
     public void setVariables(Map<String, String> variables) {
         this.variables = variables != null ? variables : new HashMap<>();
+    }
+
+    public Map<String, MethodSetting> getMethodSettings() {
+        return methodSettings;
+    }
+
+    public void setMethodSettings(Map<String, MethodSetting> methodSettings) {
+        this.methodSettings = methodSettings != null ? methodSettings : new HashMap<>();
     }
 
     public long getCreatedDate() {

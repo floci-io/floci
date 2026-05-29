@@ -69,6 +69,7 @@ public class CognitoJsonHandler {
             case "AdminRespondToAuthChallenge" -> handleAdminRespondToAuthChallenge(request);
             case "SignUp" -> handleSignUp(request);
             case "ConfirmSignUp" -> handleConfirmSignUp(request);
+            case "AdminConfirmSignUp" -> handleAdminConfirmSignUp(request);
             case "ChangePassword" -> handleChangePassword(request);
             case "ForgotPassword" -> handleForgotPassword(request);
             case "ConfirmForgotPassword" -> handleConfirmForgotPassword(request);
@@ -453,6 +454,14 @@ public class CognitoJsonHandler {
     private Response handleConfirmSignUp(JsonNode request) {
         service.confirmSignUp(
                 request.path("ClientId").asText(),
+                request.path("Username").asText()
+        );
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleAdminConfirmSignUp(JsonNode request) {
+        service.adminConfirmSignUp(
+                request.path("UserPoolId").asText(),
                 request.path("Username").asText()
         );
         return Response.ok(objectMapper.createObjectNode()).build();

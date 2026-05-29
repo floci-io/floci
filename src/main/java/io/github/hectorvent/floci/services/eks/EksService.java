@@ -100,7 +100,12 @@ public class EksService implements TagHandler {
             cluster.setStatus(ClusterStatus.ACTIVE);
             cluster.setEndpoint("https://localhost:" + config.services().eks().apiServerBasePort());
         } else {
-            clusterManager.startCluster(cluster);
+            try {
+                clusterManager.startCluster(cluster);
+            } catch (Exception e) {
+                LOG.errorv("Failed to start k3s container for cluster {0}: {1}", name, e.getMessage());
+                cluster.setStatus(ClusterStatus.FAILED);
+            }
         }
 
         storage.put(name, cluster);

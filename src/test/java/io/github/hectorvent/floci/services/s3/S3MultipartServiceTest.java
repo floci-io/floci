@@ -172,6 +172,6 @@ class S3MultipartServiceTest {
         assertEquals(1, attributes.getObjectParts().getParts().size());
         assertTrue(attributes.getObjectParts().isTruncated());
         assertEquals(1, attributes.getObjectParts().getNextPartNumberMarker());
-        assertNotNull(attributes.getObjectParts().getParts().get(0).getChecksum().getChecksumSHA256());
+        assertNotNull(attributes.getObjectParts().getParts().get(0).getChecksum().getChecksumCRC64NVME());
     }
 }

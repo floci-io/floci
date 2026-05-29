@@ -38,10 +38,30 @@ public class SqsService {
     private final ConcurrentHashMap<String, Object> queueLocks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, RedrivePolicy> redrivePolicyCache = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Instant>> deduplicationCache = new ConcurrentHashMap<>();
+    /** Move tasks keyed by opaque task handle. */
+    private final ConcurrentHashMap<String, MoveTask> moveTasksByHandle = new ConcurrentHashMap<>();
+    /** Per-task cancellation flag the move worker polls between iterations. */
+    private final ConcurrentHashMap<String, java.util.concurrent.atomic.AtomicBoolean> moveTaskCancellation =
+            new ConcurrentHashMap<>();
+    /** Move tasks execute on a background thread so MaxNumberOfMessagesPerSecond can throttle
+     * and CancelMessageMoveTask has something to interrupt. One thread per task is sufficient. */
+    private final java.util.concurrent.ExecutorService moveTaskExecutor =
+            java.util.concurrent.Executors.newCachedThreadPool(r -> {
+                Thread t = new Thread(r, "sqs-move-task");
+                t.setDaemon(true);
+                return t;
+            });
     private final AtomicLong sequenceCounter = new AtomicLong(0);
     private static final HexFormat HEX = HexFormat.of();
 
     private record RedrivePolicy(int maxReceiveCount, String deadLetterTargetArn) {
+    }
+
+    public record MoveTask(String taskHandle, String sourceArn, String destinationArn,
+                           int maxNumberOfMessagesPerSecond, String status,
+                           long approximateNumberOfMessagesMoved,
+                           long approximateNumberOfMessagesToMove,
+                           long startedTimestampMillis, String failureReason) {
     }
 
     private final int defaultVisibilityTimeout;
@@ -230,7 +250,11 @@ public class SqsService {
         queue.getAttributes().putIfAbsent("DelaySeconds", "0");
         queue.getAttributes().putIfAbsent("MessageRetentionPeriod", "345600");
         if (queue.isFifo()) {
-            queue.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            if (attributes != null && attributes.containsKey("ContentBasedDeduplication") && "true".equals(attributes.get("ContentBasedDeduplication"))) {
+                queue.getAttributes().putIfAbsent("ContentBasedDeduplication", "true");
+            } else {
+                queue.getAttributes().putIfAbsent("ContentBasedDeduplication", "false");
+            }
         }
 
         queueStore.put(storageKey, queue);
@@ -354,6 +378,15 @@ public class SqsService {
                                String messageGroupId, String messageDeduplicationId,
                                Map<String, MessageAttributeValue> messageAttributes,
                                String region) {
+        return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId,
+                messageAttributes, null, region);
+    }
+
+    public Message sendMessage(String queueUrl, String body, int delaySeconds,
+                               String messageGroupId, String messageDeduplicationId,
+                               Map<String, MessageAttributeValue> messageAttributes,
+                               String awsTraceHeader,
+                               String region) {
         String storageKey = regionKey(region, queueUrl);
         Queue queue = getQueueByUrl(storageKey, queueUrl)
                 .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
@@ -400,18 +433,27 @@ public class SqsService {
                 }
             }
 
-            // Check deduplication window — atomic putIfAbsent to avoid race condition
+            // Check deduplication window — atomic putIfAbsent to avoid race condition.
+            // When DeduplicationScope=messageGroup, dedup is scoped per MessageGroupId,
+            // so two messages with the same MessageDeduplicationId in different groups
+            // are not duplicates and must both be accepted.
+            boolean groupScoped = "messageGroup".equalsIgnoreCase(
+                    queue.getAttributes().get("DeduplicationScope"));
+            // Use NUL as the delimiter — it is outside the SQS-allowed character set for
+            // MessageGroupId/MessageDeduplicationId, so the composite key is unambiguous.
+            String dedupCacheKey = groupScoped ? messageGroupId + "\0" + dedupId : dedupId;
             cleanupDeduplicationCache(storageKey);
             var dedupMap = deduplicationCache.computeIfAbsent(storageKey, k -> new ConcurrentHashMap<>());
             Instant expiry = Instant.now().plusSeconds(DEDUP_WINDOW_SECONDS);
-            Instant previous = dedupMap.putIfAbsent(dedupId, expiry);
+            Instant previous = dedupMap.putIfAbsent(dedupCacheKey, expiry);
             persistDedup(storageKey);
             if (previous != null && Instant.now().isBefore(previous)) {
                 // Duplicate within window — keep the original messageId and
                 // sequenceNumber but compute response MD5s from this request's
                 // body and attributes, otherwise SDK clients (which validate
                 // MD5 against what they sent) reject the response.
-                Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(dedupId);
+                Message existing = getOrCreateQueue(storageKey).findByDeduplicationId(
+                        dedupId, groupScoped ? messageGroupId : null);
                 if (existing != null) {
                     Message response = new Message(body);
                     response.setMessageId(existing.getMessageId());
@@ -430,6 +472,7 @@ public class SqsService {
             message.setMessageGroupId(messageGroupId);
             message.setMessageDeduplicationId(dedupId);
             message.setSequenceNumber(sequenceCounter.incrementAndGet());
+            message.setAwsTraceHeader(awsTraceHeader);
             if (effectiveDelaySeconds > 0) {
                 message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
             }
@@ -449,6 +492,7 @@ public class SqsService {
 
         // Standard queue
         Message message = new Message(body);
+        message.setAwsTraceHeader(awsTraceHeader);
         if (effectiveDelaySeconds > 0) {
             message.setVisibleAt(Instant.now().plusSeconds(effectiveDelaySeconds));
         }
@@ -477,10 +521,29 @@ public class SqsService {
     }
 
     /**
+     * Validate that the combined payload of a {@code SendMessageBatch} call fits within
+     * the queue's {@code MaximumMessageSize}. AWS counts the batch limit as the sum of
+     * all entries (body + attributes) and returns {@code BatchRequestTooLong} as a
+     * top-level error -- not as per-entry failures -- when the total exceeds the limit.
+     */
+    public void validateBatchPayloadSize(String queueUrl, String region, int totalBytes) {
+        String storageKey = regionKey(region, queueUrl);
+        Queue queue = getQueueByUrl(storageKey, queueUrl)
+                .orElseThrow(() -> new AwsException("AWS.SimpleQueueService.NonExistentQueue",
+                        "The specified queue does not exist.", 400));
+        int max = parseMaxMessageSize(queue.getAttributes().get("MaximumMessageSize"));
+        if (totalBytes > max) {
+            throw new AwsException("BatchRequestTooLong",
+                    "Batch requests cannot be longer than " + max + " bytes. "
+                            + "You have sent " + totalBytes + " bytes.", 400);
+        }
+    }
+
+    /**
      * Total wire-level message size, in bytes, matching AWS SQS accounting:
      * UTF-8 body bytes + per-attribute (name UTF-8 + type UTF-8 + value bytes).
      */
-    private static int computeMessageSize(String body, Map<String, MessageAttributeValue> attributes) {
+    public static int computeMessageSize(String body, Map<String, MessageAttributeValue> attributes) {
         int total = body == null ? 0 : body.getBytes(java.nio.charset.StandardCharsets.UTF_8).length;
         if (attributes == null || attributes.isEmpty()) {
             return total;
@@ -642,6 +705,9 @@ public class SqsService {
                 for (Message msg : dlqCandidates) {
                     msg.setVisibleAt(null);
                     msg.setReceiptHandle(null);
+                    // Remember where the message came from so StartMessageMoveTask
+                    // with no DestinationArn can put it back.
+                    msg.setOriginalSourceQueueUrl(queue.getQueueUrl());
                 }
                 String dlqStorageKey = regionKey(region, dlqUrl);
                 getOrCreateQueue(dlqStorageKey).addAll(dlqCandidates);
@@ -760,8 +826,7 @@ public class SqsService {
         List<String> sourceQueues = new ArrayList<>();
         String prefix = region + "::";
         for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
-            String redrive = q.getAttributes().get("RedrivePolicy");
-            if (redrive != null && redrive.contains(targetArn)) {
+            if (targetArn.equals(redriveDlqArn(q))) {
                 sourceQueues.add(q.getQueueUrl());
             }
         }
@@ -769,29 +834,238 @@ public class SqsService {
     }
 
     public String startMessageMoveTask(String sourceArn, String destinationArn, String region) {
-        String sourceUrl = queueUrlFromArn(sourceArn, region);
-        String destUrl = destinationArn != null ? queueUrlFromArn(destinationArn, region) : null;
-        if (sourceUrl == null) {
-            throw new AwsException("InvalidParameterValue", "Invalid source ARN", 400);
-        }
-
-        String srcKey = regionKey(region, sourceUrl);
-        ensureQueueExists(srcKey);
-
-        var srcQueue = getOrCreateQueue(srcKey);
-        List<Message> drained = srcQueue.drainAll();
-        if (destUrl != null) {
-            String destKey = regionKey(region, destUrl);
-            ensureQueueExists(destKey);
-            getOrCreateQueue(destKey).addAll(drained);
-        }
-
-        LOG.infov("Moved messages from {0} to {1}", sourceArn, destinationArn != null ? destinationArn : "original source");
-        return "task-" + UUID.randomUUID().toString();
+        return startMessageMoveTask(sourceArn, destinationArn, 0, region);
     }
 
-    public List<Map<String, Object>> listMessageMoveTasks(String sourceArn, String region) {
-        return Collections.emptyList();
+    public String startMessageMoveTask(String sourceArn, String destinationArn,
+                                       int maxNumberOfMessagesPerSecond, String region) {
+        if (sourceArn == null) {
+            throw new AwsException("InvalidParameterValue", "SourceArn is required.", 400);
+        }
+        String sourceUrl = queueUrlFromArn(sourceArn, region);
+        if (sourceUrl == null) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid source ARN: " + sourceArn, 400);
+        }
+        String srcKey = regionKey(region, sourceUrl);
+        if (queueStore.get(srcKey).isEmpty()) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The resource that you specified for the SourceArn parameter does not exist.", 404);
+        }
+        // Source must be referenced as a DLQ by some other queue's RedrivePolicy.
+        if (!isDeadLetterQueue(sourceArn, region)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Source queue is not configured as a dead-letter queue.", 400);
+        }
+        // Reject a second task that races against a still-active one for the same source.
+        // The move runs on a background worker, so RUNNING is the canonical "active" check;
+        // the additional 1-second window covers the small gap between StartMessageMoveTask
+        // returning and the worker flipping the task to RUNNING (so back-to-back start
+        // calls that AWS would reject can't slip through).
+        long now = System.currentTimeMillis();
+        for (MoveTask existing : moveTasksByHandle.values()) {
+            if (!sourceArn.equals(existing.sourceArn())) {
+                continue;
+            }
+            if ("RUNNING".equals(existing.status())
+                    || (now - existing.startedTimestampMillis()) < 1_000) {
+                throw new AwsException("InvalidParameterValue",
+                        "There is already a task running. Only one active task is allowed for a source queue arn at a given time.",
+                        400);
+            }
+        }
+
+        String destUrl = null;
+        if (destinationArn != null) {
+            destUrl = queueUrlFromArn(destinationArn, region);
+            if (destUrl == null) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The resource that you specified for the DestinationArn parameter does not exist.", 404);
+            }
+            String destKey = regionKey(region, destUrl);
+            if (queueStore.get(destKey).isEmpty()) {
+                throw new AwsException("ResourceNotFoundException",
+                        "The resource that you specified for the DestinationArn parameter does not exist.", 404);
+            }
+        }
+
+        var srcQueueInitial = getOrCreateQueue(srcKey);
+        long toMove = srcQueueInitial.messageCounts().visible()
+                + srcQueueInitial.messageCounts().inFlight();
+
+        String taskHandle = "task-" + UUID.randomUUID();
+        moveTasksByHandle.put(taskHandle, new MoveTask(
+                taskHandle, sourceArn, destinationArn,
+                maxNumberOfMessagesPerSecond, "RUNNING",
+                0L, toMove, System.currentTimeMillis(), null));
+        var cancelled = new java.util.concurrent.atomic.AtomicBoolean(false);
+        moveTaskCancellation.put(taskHandle, cancelled);
+
+        // Move the first message synchronously inside the request scope so callers
+        // that poll the destination immediately after StartMessageMoveTask returns
+        // see motion without racing against the executor's thread startup. The
+        // remainder runs on the background worker at the requested rate, draining
+        // one message at a time so the source queue stays observably populated.
+        long initialMoved = 0;
+        Message firstMsg = srcQueueInitial.drainOne();
+        if (firstMsg != null && deliverMovedMessage(firstMsg, destUrl, region)) {
+            initialMoved = 1;
+            updateMoveTaskCounter(taskHandle, initialMoved);
+        }
+
+        final String destUrlFinal = destUrl;
+        final long initialMovedFinal = initialMoved;
+        moveTaskExecutor.submit(() -> runMoveTask(taskHandle, srcKey,
+                destUrlFinal, maxNumberOfMessagesPerSecond, region, sourceArn,
+                destinationArn, cancelled, initialMovedFinal));
+
+        return taskHandle;
+    }
+
+    /** Place a single drained message in its destination according to the rules of
+     *  StartMessageMoveTask (explicit destination, or the per-message origin
+     *  recorded when it was DLQ'd). Resets per-receive state so the message
+     *  starts a fresh life. Returns true when the message was placed. */
+    private boolean deliverMovedMessage(Message msg, String destUrl, String region) {
+        msg.setReceiveCount(0);
+        msg.setFirstReceiveTimestamp(null);
+        msg.setReceiptHandle(null);
+        msg.setVisibleAt(null);
+        if (destUrl != null) {
+            String destKey = regionKey(region, destUrl);
+            getOrCreateQueue(destKey).addAll(List.of(msg));
+            return true;
+        }
+        if (msg.getOriginalSourceQueueUrl() != null) {
+            // No request scope on the background worker, so queueStore.get() resolves
+            // to the default account prefix and can't verify the destination. The
+            // in-memory messagesByQueue map is keyed by the full URL (which carries
+            // the account), so addAll on the right storage key lands the message in
+            // the queue any future receive will see.
+            String originKey = regionKey(region, msg.getOriginalSourceQueueUrl());
+            getOrCreateQueue(originKey).addAll(List.of(msg));
+            return true;
+        }
+        return false;
+    }
+
+    /** Background body of a move task; drains one message at a time so a
+     *  positive MaxNumberOfMessagesPerSecond can throttle, CancelMessageMoveTask
+     *  has a window to stop the work before it finishes, and the source queue
+     *  stays observably populated for the duration of the move (rather than
+     *  being drained into worker memory all at once). */
+    private void runMoveTask(String taskHandle, String srcKey, String destUrl,
+                             int maxRate, String region, String sourceArn,
+                             String destinationArn,
+                             java.util.concurrent.atomic.AtomicBoolean cancelled,
+                             long initialMoved) {
+        long intervalMillis = maxRate > 0 ? Math.max(1L, 1000L / maxRate) : 0L;
+        long moved = initialMoved;
+        try {
+            var srcQueue = getOrCreateQueue(srcKey);
+            while (!cancelled.get()) {
+                if (intervalMillis > 0) {
+                    try {
+                        Thread.sleep(intervalMillis);
+                    } catch (InterruptedException ie) {
+                        Thread.currentThread().interrupt();
+                        return;
+                    }
+                    if (cancelled.get()) {
+                        break;
+                    }
+                }
+                Message msg = srcQueue.drainOne();
+                if (msg == null) {
+                    break;
+                }
+                if (deliverMovedMessage(msg, destUrl, region)) {
+                    moved++;
+                    updateMoveTaskCounter(taskHandle, moved);
+                }
+            }
+        } finally {
+            MoveTask cur = moveTasksByHandle.get(taskHandle);
+            if (cur != null) {
+                String status = cancelled.get() ? "CANCELLED" : "COMPLETED";
+                moveTasksByHandle.put(taskHandle, new MoveTask(
+                        cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                        cur.maxNumberOfMessagesPerSecond(), status,
+                        moved, cur.approximateNumberOfMessagesToMove(),
+                        cur.startedTimestampMillis(), cur.failureReason()));
+            }
+            LOG.infov("Move task {0} {1}: moved {2} messages from {3} to {4}", taskHandle,
+                    cancelled.get() ? "cancelled" : "completed", moved, sourceArn,
+                    destinationArn != null ? destinationArn : "original source");
+        }
+    }
+
+    private void updateMoveTaskCounter(String taskHandle, long moved) {
+        MoveTask cur = moveTasksByHandle.get(taskHandle);
+        if (cur == null) {
+            return;
+        }
+        moveTasksByHandle.put(taskHandle, new MoveTask(
+                cur.taskHandle(), cur.sourceArn(), cur.destinationArn(),
+                cur.maxNumberOfMessagesPerSecond(), cur.status(),
+                moved, cur.approximateNumberOfMessagesToMove(),
+                cur.startedTimestampMillis(), cur.failureReason()));
+    }
+
+    public List<MoveTask> listMessageMoveTasks(String sourceArn, String region) {
+        if (sourceArn == null) {
+            return List.of();
+        }
+        List<MoveTask> matching = new ArrayList<>();
+        for (MoveTask t : moveTasksByHandle.values()) {
+            if (sourceArn.equals(t.sourceArn())) {
+                matching.add(t);
+            }
+        }
+        matching.sort(Comparator.comparingLong(MoveTask::startedTimestampMillis).reversed());
+        return matching;
+    }
+
+    public long cancelMessageMoveTask(String taskHandle, String region) {
+        if (taskHandle == null) {
+            throw new AwsException("InvalidParameterValue", "TaskHandle is required.", 400);
+        }
+        MoveTask task = moveTasksByHandle.get(taskHandle);
+        if (task == null) {
+            throw new AwsException("ResourceNotFoundException",
+                    "The task you specified does not exist.", 404);
+        }
+        // Signal the background worker to stop. The worker flips status to CANCELLED in
+        // its finally block and updates the moved counter; read both back here.
+        var flag = moveTaskCancellation.get(taskHandle);
+        if (flag != null) {
+            flag.set(true);
+        }
+        return moveTasksByHandle.getOrDefault(taskHandle, task).approximateNumberOfMessagesMoved();
+    }
+
+    private boolean isDeadLetterQueue(String queueArn, String region) {
+        String prefix = region + "::";
+        for (Queue q : queueStore.scan(k -> k.startsWith(prefix))) {
+            if (queueArn.equals(redriveDlqArn(q))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String redriveDlqArn(Queue queue) {
+        String raw = queue.getAttributes().get("RedrivePolicy");
+        if (raw == null) {
+            return null;
+        }
+        try {
+            JsonNode policy = new com.fasterxml.jackson.databind.ObjectMapper().readTree(raw);
+            JsonNode dlqArn = policy.get("deadLetterTargetArn");
+            return dlqArn != null && !dlqArn.isNull() ? dlqArn.asText() : null;
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     public record ChangeVisibilityBatchEntry(String id, String receiptHandle, int visibilityTimeout) {
@@ -983,12 +1257,29 @@ public class SqsService {
      * default account.
      */
     public String senderIdFor(String queueUrl) {
-        String fromUrl = accountFromQueueUrl(queueUrl);
+        String fromUrl = accountFromQueueUrl(normalizeQueueUrl(queueUrl));
         return fromUrl != null ? fromUrl : regionResolver.getAccountId();
     }
 
-    private static String regionKey(String region, String queueUrl) {
-        return region + "::" + extractQueuePath(queueUrl);
+    /**
+     * Accepts a full queue URL or a bare queue name and returns a canonical
+     * full URL.  AWS SQS allows clients to pass either form in the QueueUrl
+     * field; this mirrors that behavior so lookups succeed regardless of what
+     * the caller supplied.
+     */
+    private String normalizeQueueUrl(String queueUrl) {
+        if (queueUrl == null) {
+            return null;
+        }
+        if (queueUrl.contains("://")) {
+            return queueUrl;
+        }
+        // Bare queue name — construct the full URL the same way createQueue does.
+        return baseUrl + "/" + regionResolver.getAccountId() + "/" + queueUrl;
+    }
+
+    private String regionKey(String region, String queueUrl) {
+        return region + "::" + extractQueuePath(normalizeQueueUrl(queueUrl));
     }
 
     /**
@@ -1025,7 +1316,7 @@ public class SqsService {
      */
     private Optional<Queue> getQueueByUrl(String storageKey, String queueUrl) {
         if (queueStore instanceof AccountAwareStorageBackend<Queue> aware) {
-            String accountId = accountFromQueueUrl(queueUrl);
+            String accountId = accountFromQueueUrl(normalizeQueueUrl(queueUrl));
             if (accountId != null) {
                 return aware.getForAccount(accountId, storageKey);
             }

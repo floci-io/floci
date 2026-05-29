@@ -1,6 +1,13 @@
 ARG VERSION=latest
 FROM floci/floci:${VERSION}
 
+LABEL org.opencontainers.image.title="Floci (compat)" \
+      org.opencontainers.image.description="Floci compatibility image with AWS CLI and boto3 pre-installed" \
+      org.opencontainers.image.url="https://floci.io" \
+      org.opencontainers.image.source="https://github.com/floci-io/floci" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.vendor="Floci"
+
 ENV AWS_DEFAULT_REGION=us-east-1
 ENV AWS_ACCESS_KEY_ID=test
 ENV AWS_SECRET_ACCESS_KEY=test

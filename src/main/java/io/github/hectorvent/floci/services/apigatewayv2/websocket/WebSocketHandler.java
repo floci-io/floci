@@ -75,7 +75,7 @@ public class WebSocketHandler {
      */
     void init(@Observes Router router) {
         router.route("/ws/*").handler(this::handleWebSocketUpgrade);
-        LOG.info("Registered WebSocket handler on /ws/*");
+        LOG.debug("Registered WebSocket handler on /ws/*");
     }
 
     /**

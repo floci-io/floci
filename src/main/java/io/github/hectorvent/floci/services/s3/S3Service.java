@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
@@ -157,6 +158,11 @@ public class S3Service {
     public Bucket createBucket(String bucketName, String region) {
         var existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
+            Bucket bucket = existing.get();
+            if (isDefaultS3Region(bucket.getRegion()) && isDefaultS3Region(region)) {
+                LOG.infov("Bucket already exists in default region, treating CreateBucket as idempotent: {0}", bucketName);
+                return bucket;
+            }
             throw new AwsException("BucketAlreadyOwnedByYou",
                     "Your previous request to create the named bucket succeeded and you already own it.", 409);
         }
@@ -166,6 +172,10 @@ public class S3Service {
         bucketStore.put(bucketName, bucket);
         LOG.infov("Created bucket: {0} in region: {1}", bucketName, region);
         return bucket;
+    }
+
+    private static boolean isDefaultS3Region(String region) {
+        return region == null || region.isBlank() || "us-east-1".equalsIgnoreCase(region);
     }
 
     public void deleteBucket(String bucketName) {
@@ -277,13 +287,19 @@ public class S3Service {
             object.getMetadata().putAll(metadata);
         }
         object.setStorageClass(ObjectAttributeName.normalizeStorageClass(effectiveOptions.getStorageClass()));
-        object.setChecksum(checksum != null ? copyChecksum(checksum) : buildChecksum(data, parts, false));
+        S3Checksum resolvedChecksum = checksum != null ? copyChecksum(checksum)
+                : effectiveOptions.getClientChecksum() != null ? copyChecksum(effectiveOptions.getClientChecksum())
+                : buildChecksum(data, parts, false, effectiveOptions.getChecksumAlgorithm());
+        object.setChecksum(resolvedChecksum);
         object.setParts(copyParts(parts));
         object.setContentEncoding(effectiveOptions.getContentEncoding());
         object.setContentDisposition(effectiveOptions.getContentDisposition());
         object.setCacheControl(effectiveOptions.getCacheControl());
         object.setServerSideEncryption(normalizedServerSideEncryption);
         object.setAcl(cannedObjectAclXml(effectiveOptions.getAcl()));
+        if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
+            object.setTags(new HashMap<>(effectiveOptions.getTagging()));
+        }
 
         if (bucket.isVersioningEnabled()) {
             String versionId = UUID.randomUUID().toString();
@@ -505,16 +521,33 @@ public class S3Service {
             fireNotifications(bucketName, key, "ObjectRemoved:DeleteMarkerCreated", deleteMarker);
             return deleteMarker;
         } else if (versionId != null) {
-            // Check lock on the specific version before permanent deletion
-            objectStore.get(versionedKey(bucketName, key, versionId)).ifPresent(obj -> {
-                if (!obj.isDeleteMarker()) {
-                    checkLockProtection(obj, bypassGovernance);
-                }
-            });
+            // Get the specific version before permanent deletion
+            S3Object toDelete = objectStore.get(versionedKey(bucketName, key, versionId)).orElse(null);
+            if (toDelete != null && !toDelete.isDeleteMarker()) {
+                checkLockProtection(toDelete, bypassGovernance);
+            }
             // Permanently delete a specific version
             objectStore.delete(versionedKey(bucketName, key, versionId));
             LOG.debugv("Permanently deleted version: {0}/{1} v={2}", bucketName, key, versionId);
-            return null;
+            // Promote the next most-recent version when the deleted one was the latest
+            String latestKey = objectKey(bucketName, key);
+            objectStore.get(latestKey).ifPresent(latest -> {
+                if (versionId.equals(latest.getVersionId())) {
+                    String vPrefix = versionedKey(bucketName, key, "");
+                    List<S3Object> remaining = objectStore.scan(k -> k.startsWith(vPrefix));
+                    if (remaining.isEmpty()) {
+                        objectStore.delete(latestKey);
+                    } else {
+                        S3Object newLatest = remaining.stream()
+                                .max(Comparator.comparing(S3Object::getLastModified))
+                                .orElseThrow();
+                        newLatest.setLatest(true);
+                        objectStore.put(versionedKey(bucketName, key, newLatest.getVersionId()), newLatest);
+                        objectStore.put(latestKey, newLatest);
+                    }
+                }
+            });
+            return toDelete;
         } else {
             // Check lock on the non-versioned object before delete
             objectStore.get(objectKey(bucketName, key)).ifPresent(obj -> {
@@ -937,6 +970,10 @@ public class S3Service {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+        if (!bucket.isObjectLockEnabled()) {
+            throw new AwsException("ObjectLockConfigurationNotFoundError",
+                    "Object Lock configuration does not exist for this bucket", 404);
+        }
         return bucket.getDefaultRetention();
     }
 
@@ -1482,6 +1519,46 @@ public class S3Service {
         bucketStore.put(bucketName, bucket);
     }
 
+    /**
+     * Stores the bucket Request Payment configuration. AWS only allows the values
+     * {@code BucketOwner} and {@code Requester}; we accept either and reject anything
+     * else with {@code MalformedXML} to match the real S3 behavior.
+     */
+    public void putBucketRequestPayment(String bucketName, String requestPaymentXml) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        String payer = XmlParser.extractFirst(requestPaymentXml, "Payer", null);
+        if (payer == null) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        payer = payer.trim();
+        if (!"BucketOwner".equals(payer) && !"Requester".equals(payer)) {
+            throw new AwsException("MalformedXML",
+                    "The XML you provided was not well-formed or did not validate against our published schema.",
+                    400);
+        }
+        bucket.setRequestPaymentPayer(payer);
+        bucketStore.put(bucketName, bucket);
+    }
+
+    /**
+     * Returns the bucket Request Payment configuration as XML. Buckets that have
+     * never been configured return the AWS default ({@code BucketOwner}); this matches
+     * real S3, which never returns 404 for {@code GetBucketRequestPayment}.
+     */
+    public String getBucketRequestPayment(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+        String payer = bucket.getRequestPaymentPayer() != null ? bucket.getRequestPaymentPayer() : "BucketOwner";
+        return new XmlBuilder()
+                .start("RequestPaymentConfiguration", AwsNamespaces.S3)
+                .elem("Payer", payer)
+                .end("RequestPaymentConfiguration")
+                .build();
+    }
+
     public void restoreObject(String bucketName, String key, String versionId, String restoreXml) {
         // Validation only - stub implementation
         getObject(bucketName, key, versionId);
@@ -1803,9 +1880,19 @@ public class S3Service {
     }
 
     private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload) {
+        return buildChecksum(data, parts, multipartUpload, null);
+    }
+
+    private static S3Checksum buildChecksum(byte[] data, List<Part> parts, boolean multipartUpload, String algorithm) {
         S3Checksum checksum = new S3Checksum();
-        checksum.setChecksumSHA1(S3Checksum.sha1Base64(data));
-        checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
+        String algo = (algorithm != null) ? algorithm.toUpperCase() : "CRC64NVME";
+        switch (algo) {
+            case "CRC32"     -> checksum.setChecksumCRC32(S3Checksum.crc32Base64(data));
+            case "CRC32C"    -> checksum.setChecksumCRC32C(S3Checksum.crc32cBase64(data));
+            case "SHA1"      -> checksum.setChecksumSHA1(S3Checksum.sha1Base64(data));
+            case "SHA256"    -> checksum.setChecksumSHA256(S3Checksum.sha256Base64(data));
+            default          -> checksum.setChecksumCRC64NVME(S3Checksum.crc64NvmeBase64(data));
+        }
         checksum.setChecksumType(multipartUpload || (parts != null && parts.size() > 1)
                 ? "COMPOSITE"
                 : "FULL_OBJECT");
@@ -2048,6 +2135,11 @@ public class S3Service {
         String effectiveServerSideEncryption = normalizedServerSideEncryption != null
                 ? normalizedServerSideEncryption
                 : source.getServerSideEncryption();
+        boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
+        Map<String, String> effectiveTags = replaceTags
+                ? effectiveOptions.getReplacementTagging()
+                : source.getTags();
+
         S3Object copy = storeObject(destBucket, destKey, source.getData(), effectiveContentType, metadata,
                 source.getChecksum(), source.getParts(),
                 new PutObjectOptions()
@@ -2056,7 +2148,8 @@ public class S3Service {
                         .withContentDisposition(effectiveContentDisposition)
                         .withCacheControl(effectiveCacheControl)
                         .withServerSideEncryption(effectiveServerSideEncryption)
-                        .withAcl(effectiveOptions.getAcl()));
+                        .withAcl(effectiveOptions.getAcl())
+                        .withTagging(effectiveTags));
         copy.setETag(source.getETag());
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
         fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);

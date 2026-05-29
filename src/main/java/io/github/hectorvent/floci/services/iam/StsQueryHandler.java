@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -27,10 +28,12 @@ public class StsQueryHandler {
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     private final IamService iamService;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public StsQueryHandler(IamService iamService) {
+    public StsQueryHandler(IamService iamService, RegionResolver regionResolver) {
         this.iamService = iamService;
+        this.regionResolver = regionResolver;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -66,7 +69,7 @@ public class StsQueryHandler {
         String roleName = roleArn != null && roleArn.contains("/")
                 ? roleArn.substring(roleArn.lastIndexOf('/') + 1)
                 : "UnknownRole";
-        String accountId = iamService.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
@@ -86,7 +89,7 @@ public class StsQueryHandler {
     }
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
-        String accountId = iamService.getAccountId();
+        String accountId = regionResolver.getAccountId();
         String result = new XmlBuilder()
                 .elem("UserId", accountId)
                 .elem("Account", accountId)
@@ -122,7 +125,7 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String accountId = iamService.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
         String provider = providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com";
@@ -159,7 +162,7 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String accountId = iamService.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
@@ -193,7 +196,7 @@ public class StsQueryHandler {
         String secretKey = randomSecret(40);
         String sessionToken = randomSecret(200);
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
-        String accountId = iamService.getAccountId();
+        String accountId = regionResolver.getAccountId();
         String federatedUserId = accountId + ":" + name;
         String federatedUserArn = AwsArnUtils.Arn.of("sts", "", accountId, "federated-user/" + name).toString();
 

@@ -17,6 +17,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.net.URI;
+import java.time.Clock;
 import java.time.Instant;
 import java.util.*;
 import java.util.regex.Matcher;
@@ -35,6 +36,7 @@ public class CloudFormationService {
     private static final Logger LOG = Logger.getLogger(CloudFormationService.class);
 
     private final ConcurrentHashMap<String, Stack> stacks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, DeletedStackEntry> deletedStacks = new ConcurrentHashMap<>();
     // Global exports registry: region:exportName -> exportValue
     private final ConcurrentHashMap<String, String> exports = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newCachedThreadPool();
@@ -44,23 +46,27 @@ public class CloudFormationService {
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final SamTransformProcessor samTransformProcessor;
+    private final Clock clock;
 
     @Inject
     public CloudFormationService(CloudFormationResourceProvisioner provisioner, S3Service s3Service,
                                  ObjectMapper objectMapper, EmulatorConfig config,
-                                 RegionResolver regionResolver) {
+                                 RegionResolver regionResolver, Clock clock) {
         this.provisioner = provisioner;
         this.s3Service = s3Service;
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.samTransformProcessor = new SamTransformProcessor(objectMapper);
+        this.clock = clock;
     }
 
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
     public List<Stack> describeStacks(String stackName, String region) {
         if (stackName != null && !stackName.isBlank()) {
-            Stack stack = resolveStack(stackName, region);
+            Stack stack = resolveStackForDescribe(stackName, region);
             if (stack == null) {
                 throw new AwsException("ValidationError",
                         "Stack with id " + stackName + " does not exist", 400);
@@ -129,7 +135,7 @@ public class CloudFormationService {
                 "CREATE_IN_PROGRESS".equals(stack.getStatus());
 
         stack.setStatus(isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS");
-        stack.setLastUpdatedTime(Instant.now());
+        stack.setLastUpdatedTime(now());
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
 
@@ -156,6 +162,7 @@ public class CloudFormationService {
     // ── DeleteStack ───────────────────────────────────────────────────────────
 
     public void deleteStack(String stackName, String region) {
+        purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region);
         if (stack == null) {
             return; // Already gone — no-op
@@ -177,7 +184,11 @@ public class CloudFormationService {
     // ── DescribeStackEvents ───────────────────────────────────────────────────
 
     public List<StackEvent> describeStackEvents(String stackName, String region) {
-        Stack stack = getStackOrThrow(stackName, region);
+        Stack stack = resolveStackForDescribe(stackName, region);
+        if (stack == null) {
+            throw new AwsException("ValidationError",
+                    "Stack with id " + stackName + " does not exist", 400);
+        }
         List<StackEvent> events = new ArrayList<>(stack.getEvents());
         Collections.reverse(events);
         return events;
@@ -260,6 +271,15 @@ public class CloudFormationService {
                                  boolean isCreate, String region, String accountId) {
         try {
             JsonNode template = parseTemplate(templateBody);
+
+            // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
+            if (samTransformProcessor.hasSamTransform(template)) {
+                LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
+                template = samTransformProcessor.expandSamTemplate(template);
+                // Store the expanded template so GetTemplate returns the transformed version
+                templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
+            }
+
             stack.setTemplateBody(templateBody);
 
             // Merge default parameter values from the template with caller-supplied params
@@ -307,9 +327,15 @@ public class CloudFormationService {
                     }
 
                     addEvent(stack, logicalId, null, type, "CREATE_IN_PROGRESS", null);
-                    resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
-                            engine, region, accountId, stack.getStackName(),
-                            resource.getPhysicalId(), resource.getAttributes());
+                    if ("AWS::CloudFormation::Stack".equals(type)) {
+                        resource = executeNestedStack(stack, logicalId,
+                                props.isMissingNode() ? null : props,
+                                engine, region, accountId, isCreate);
+                    } else {
+                        resource = provisioner.provision(logicalId, type, props.isMissingNode() ? null : props,
+                                engine, region, accountId, stack.getStackName(),
+                                resource.getPhysicalId(), resource.getAttributes());
+                    }
                     stack.getResources().put(logicalId, resource);
 
                     physicalIds.put(logicalId, resource.getPhysicalId());
@@ -364,7 +390,7 @@ public class CloudFormationService {
 
             String completeStatus = isCreate ? "CREATE_COMPLETE" : "UPDATE_COMPLETE";
             stack.setStatus(completeStatus);
-            stack.setLastUpdatedTime(Instant.now());
+            stack.setLastUpdatedTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", completeStatus, null);
             LOG.infov("Stack {0} execution complete: {1}", stack.getStackName(), completeStatus);
@@ -400,6 +426,9 @@ public class CloudFormationService {
                     "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
             removeStackExports(stack, region);
             stacks.remove(key(stack.getStackName(), region));
+            deletedStacks.put(stack.getStackId(), new DeletedStackEntry(
+                    stack,
+                    now().plusSeconds(config.services().cloudformation().deletedStackRetentionSeconds())));
             LOG.infov("Stack {0} deleted", stack.getStackName());
 
         } catch (Exception e) {
@@ -562,6 +591,49 @@ public class CloudFormationService {
                 && normalizedHost.endsWith("." + normalizedSuffix);
     }
 
+    private StackResource executeNestedStack(Stack parentStack, String logicalId, JsonNode props,
+                                             CloudFormationTemplateEngine engine, String region,
+                                             String accountId, boolean isCreate) {
+        StackResource resource = new StackResource();
+        resource.setLogicalId(logicalId);
+        resource.setResourceType("AWS::CloudFormation::Stack");
+
+        String templateUrl = props != null ? engine.resolve(props.path("TemplateURL")) : null;
+        if (templateUrl == null || templateUrl.isBlank()) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason("Missing TemplateURL");
+            return resource;
+        }
+
+        String childTemplate = fetchTemplateFromS3(templateUrl);
+        String childStackName = parentStack.getStackName() + "-" + logicalId;
+
+        Stack childStack = newStack(childStackName, region);
+        childStack.setStatus("CREATE_IN_PROGRESS");
+        stacks.put(key(childStackName, region), childStack);
+
+        Map<String, String> childParams = new LinkedHashMap<>();
+        if (props != null && props.has("Parameters") && props.get("Parameters").isObject()) {
+            props.get("Parameters").fields().forEachRemaining(e ->
+                    childParams.put(e.getKey(), engine.resolve(e.getValue())));
+        }
+
+        executeTemplate(childStack, childTemplate, childParams, isCreate, region, accountId);
+
+        resource.setPhysicalId(childStack.getStackId());
+        resource.getAttributes().put("Arn", childStack.getStackId());
+        childStack.getOutputs().forEach((k, v) -> resource.getAttributes().put("Outputs." + k, v));
+
+        if ("CREATE_FAILED".equals(childStack.getStatus()) || "UPDATE_FAILED".equals(childStack.getStatus())) {
+            resource.setStatus("CREATE_FAILED");
+            resource.setStatusReason("Nested stack " + childStackName + " failed: " + childStack.getStatusReason());
+        } else {
+            resource.setStatus("CREATE_COMPLETE");
+        }
+
+        return resource;
+    }
+
     private Stack newStack(String stackName, String region) {
         Stack stack = new Stack();
         stack.setStackName(stackName);
@@ -569,7 +641,7 @@ public class CloudFormationService {
         stack.setStatus("REVIEW_IN_PROGRESS");
         String stackId = AwsArnUtils.Arn.of("cloudformation", region, regionResolver.getAccountId(), "stack/" + stackName + "/" + UUID.randomUUID()).toString();
         stack.setStackId(stackId);
-        stack.setCreationTime(Instant.now());
+        stack.setCreationTime(now());
         return stack;
     }
 
@@ -593,6 +665,41 @@ public class CloudFormationService {
                     "Stack with id " + stackNameOrArn + " does not exist", 400);
         }
         return stack;
+    }
+
+    private Stack resolveStackForDescribe(String stackNameOrArn, String region) {
+        Stack stack = resolveStack(stackNameOrArn, region);
+        if (stack != null) {
+            return stack;
+        }
+        if (stackNameOrArn != null && stackNameOrArn.startsWith("arn:")) {
+            DeletedStackEntry deleted = deletedStacks.get(stackNameOrArn);
+            if (deleted != null) {
+                if (deleted.isExpired(now())) {
+                    deletedStacks.remove(stackNameOrArn, deleted);
+                    return null;
+                }
+                if (region.equals(deleted.stack().getRegion())) {
+                    return deleted.stack();
+                }
+            }
+        }
+        return null;
+    }
+
+    private Instant now() {
+        return Instant.now(clock);
+    }
+
+    private void purgeExpiredDeletedStacks() {
+        Instant current = now();
+        deletedStacks.entrySet().removeIf(entry -> entry.getValue().isExpired(current));
+    }
+
+    private record DeletedStackEntry(Stack stack, Instant expiresAt) {
+        private boolean isExpired(Instant now) {
+            return now.isAfter(expiresAt);
+        }
     }
 
     /**

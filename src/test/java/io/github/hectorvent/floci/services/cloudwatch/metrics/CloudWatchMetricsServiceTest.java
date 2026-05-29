@@ -85,6 +85,30 @@ class CloudWatchMetricsServiceTest {
     }
 
     @Test
+    void putMetricDataWithStatisticValues() {
+        MetricDatum d = new MetricDatum();
+        d.setMetricName("AggregatedMetric");
+        d.setSampleCount(5.0);
+        d.setSum(150.0);
+        d.setMinimum(20.0);
+        d.setMaximum(40.0);
+        service.putMetricData(NAMESPACE, List.of(d), REGION);
+
+        Instant start = Instant.now().minusSeconds(60);
+        Instant end = Instant.now().plusSeconds(60);
+        List<CloudWatchMetricsService.Datapoint> points = service.getMetricStatistics(
+                NAMESPACE, "AggregatedMetric", null, start, end, 60,
+                List.of("Sum", "SampleCount", "Average", "Minimum", "Maximum"), null, REGION);
+
+        assertFalse(points.isEmpty());
+        assertEquals(150.0, points.getFirst().sum());
+        assertEquals(5.0, points.getFirst().sampleCount());
+        assertEquals(20.0, points.getFirst().minimum());
+        assertEquals(40.0, points.getFirst().maximum());
+        assertEquals(30.0, points.getFirst().average());
+    }
+
+    @Test
     void putMetricDataAutoFillsStatistics() {
         service.putMetricData(NAMESPACE, List.of(datum("Requests", 5.0)), REGION);
 

@@ -25,6 +25,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 @ApplicationScoped
 public class StepFunctionsService {
@@ -355,13 +357,118 @@ public class StepFunctionsService {
 
     // ──────────────────────────── Validation ────────────────────────────
 
+    public record Diagnostic(String severity, String code, String message, String location) {}
+    public record ValidationResult(boolean valid, List<Diagnostic> diagnostics, boolean truncated) {}
+
+    private static final int MAX_DEFINITION_LENGTH = 1_048_576;
+    private static final String PARSE_ERROR_MARKER = "INVALID_JSON_DESCRIPTION:";
+
+    // Parse the structured location out of the validator's flat error strings,
+    // which currently encode it as "...field 'X' is only supported... at /States/Y".
+    // AWS's published Diagnostic.location format is "/States/<StateName>/<FieldName>".
+    private static final Pattern FIELD_PATTERN = Pattern.compile("field '([^']+)' is only supported");
+    private static final Pattern LOCATION_SUFFIX_PATTERN = Pattern.compile(" at (/States/\\S+)$");
+
+    /**
+     * Exposes the existing ASL validator as a public, non-throwing API for
+     * AWS {@code ValidateStateMachineDefinition}. Errors are returned as
+     * diagnostics rather than thrown; no state machine is created. Mirrors
+     * the wire shape of the AWS API.
+     */
+    public ValidationResult validateStateMachineDefinition(String definition, String type,
+                                                           String severity, Integer maxResults) {
+        if (definition == null || definition.isBlank()) {
+            throw new AwsException("ValidationException", "definition is required.", 400);
+        }
+        if (definition.length() > MAX_DEFINITION_LENGTH) {
+            throw new AwsException("ValidationException",
+                    "definition exceeds maximum length of " + MAX_DEFINITION_LENGTH + " characters.", 400);
+        }
+        if (maxResults != null && (maxResults < 0 || maxResults > 100)) {
+            throw new AwsException("ValidationException",
+                    "maxResults must be between 0 and 100.", 400);
+        }
+        if (severity != null && !severity.isBlank()
+                && !"ERROR".equals(severity) && !"WARNING".equals(severity)) {
+            throw new AwsException("ValidationException",
+                    "severity must be ERROR or WARNING.", 400);
+        }
+        if (type != null && !type.isBlank()
+                && !"STANDARD".equals(type) && !"EXPRESS".equals(type)) {
+            throw new AwsException("ValidationException",
+                    "type must be STANDARD or EXPRESS.", 400);
+        }
+        // Per AWS spec: maxResults=0 (or absent/null) → use default of 100.
+        // Out-of-range values are rejected above; no clamping needed here.
+        int cap = (maxResults == null || maxResults == 0) ? 100 : maxResults;
+        List<String> errors = collectValidationErrors(definition);
+        List<Diagnostic> all = errors.stream()
+                .map(StepFunctionsService::toDiagnostic)
+                .toList();
+
+        // Apply the severity filter per spec: ERROR (the default) returns only
+        // error diagnostics; WARNING returns both warnings and errors. Floci's
+        // validator only emits ERROR today so the filter is currently a no-op,
+        // but it's wired now so adding warning-level checks later doesn't break
+        // the contract for callers who passed severity=ERROR.
+        String effectiveSeverity = severity == null || severity.isBlank() ? "ERROR" : severity;
+        List<Diagnostic> filtered = "WARNING".equals(effectiveSeverity)
+                ? all
+                : all.stream().filter(d -> "ERROR".equals(d.severity())).toList();
+
+        boolean truncated = filtered.size() > cap;
+        List<Diagnostic> page = truncated ? filtered.subList(0, cap) : filtered;
+        // valid == "no ERROR-level diagnostics". Floci only produces ERRORs today;
+        // explicit check future-proofs us when warnings are added.
+        boolean valid = page.stream().noneMatch(d -> "ERROR".equals(d.severity()));
+        return new ValidationResult(valid, page, truncated);
+    }
+
+    private static Diagnostic toDiagnostic(String error) {
+        boolean isParseError = error.startsWith(PARSE_ERROR_MARKER);
+        String code = isParseError ? "INVALID_JSON_DESCRIPTION" : "SCHEMA_VALIDATION_FAILED";
+        String message = isParseError
+                ? error.substring(PARSE_ERROR_MARKER.length()).trim() : error;
+        // null when there's no specific location to point to — handler omits the
+        // field from the response in that case, matching AWS's "optional" semantics.
+        String location = null;
+        if (!isParseError) {
+            Matcher locM = LOCATION_SUFFIX_PATTERN.matcher(message);
+            Matcher fieldM = FIELD_PATTERN.matcher(message);
+            if (locM.find() && fieldM.find()) {
+                // Build the structured location and strip the redundant suffix
+                // from the message, matching AWS's wire format.
+                location = locM.group(1) + "/" + fieldM.group(1);
+                message = message.substring(0, locM.start()).trim();
+            }
+        }
+        return new Diagnostic("ERROR", code, message, location);
+    }
+
     private void validateDefinition(String definition) {
+        List<String> errors = collectValidationErrors(definition);
+        if (errors.isEmpty()) {
+            return;
+        }
+        String first = errors.get(0);
+        if (first.startsWith(PARSE_ERROR_MARKER)) {
+            // Preserve historical wire shape for parse errors triggered via CreateStateMachine.
+            throw new AwsException("InvalidDefinition",
+                    "Invalid State Machine Definition: '" + first.substring(PARSE_ERROR_MARKER.length()).trim() + "'", 400);
+        }
+        throw new AwsException("InvalidDefinition",
+                "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: "
+                        + String.join(", ", errors) + "'", 400);
+    }
+
+    private List<String> collectValidationErrors(String definition) {
+        List<String> errors = new ArrayList<>();
         JsonNode def;
         try {
             def = objectMapper.readTree(definition);
         } catch (Exception e) {
-            throw new AwsException("InvalidDefinition",
-                    "Invalid State Machine Definition: '" + e.getMessage() + "'", 400);
+            errors.add(PARSE_ERROR_MARKER + e.getMessage());
+            return errors;
         }
 
         String topLevelQL = def.path("QueryLanguage").asText("JSONPath");
@@ -370,17 +477,12 @@ public class StepFunctionsService {
 
         if (states.isObject()) {
             var fields = states.fields();
-            List<String> errors = new ArrayList<>();
             while (fields.hasNext()) {
                 var entry = fields.next();
                 validateState(entry.getKey(), entry.getValue(), topLevelJsonata, errors);
             }
-            if (!errors.isEmpty()) {
-                throw new AwsException("InvalidDefinition",
-                        "Invalid State Machine Definition: 'SCHEMA_VALIDATION_FAILED: "
-                                + String.join(", ", errors) + "'", 400);
-            }
         }
+        return errors;
     }
 
     private void validateState(String stateName, JsonNode stateDef, boolean topLevelJsonata, List<String> errors) {

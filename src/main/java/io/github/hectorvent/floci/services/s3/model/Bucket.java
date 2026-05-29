@@ -26,6 +26,7 @@ public class Bucket {
     private String encryptionConfiguration; // XML string
     private String publicAccessBlockConfiguration; // XML string
     private String ownershipControlsConfiguration; // XML string
+    private String requestPaymentPayer; // "BucketOwner" (default) or "Requester"; null until first PUT
     private String region;
     private WebsiteConfiguration websiteConfiguration;
 
@@ -94,6 +95,9 @@ public class Bucket {
     public void setOwnershipControlsConfiguration(String ownershipControlsConfiguration) {
         this.ownershipControlsConfiguration = ownershipControlsConfiguration;
     }
+
+    public String getRequestPaymentPayer() { return requestPaymentPayer; }
+    public void setRequestPaymentPayer(String requestPaymentPayer) { this.requestPaymentPayer = requestPaymentPayer; }
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }

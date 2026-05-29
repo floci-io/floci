@@ -14,7 +14,9 @@ Domain metadata is stored in-process. No Docker containers are started. Domains 
 
 ### Real mode (`mock: false`, default)
 
-Floci starts an **OpenSearch** (`opensearchproject/opensearch:2`) Docker container per domain. The container is exposed on a host port from the configured range (`9400–9499`). Once `/_cluster/health` returns `green` or `yellow`, the domain transitions to `Created: true` and the `Endpoint` field is populated with the container's address.
+Floci starts an **OpenSearch** Docker container per domain, choosing the image based on the requested `EngineVersion` (e.g. `OpenSearch_3.6` → `opensearchproject/opensearch:3.6.0`, `Elasticsearch_7.10` → `docker.elastic.co/elasticsearch/elasticsearch-oss:7.10.2`). The container is exposed on a host port from the configured range (`9400–9499`). Once `/_cluster/health` returns `green` or `yellow`, the domain transitions to `Created: true` and the `Endpoint` field is populated with the container's address.
+
+OpenSearch 2.12+ requires an initial admin password even when the security plugin is disabled; Floci sets `OPENSEARCH_INITIAL_ADMIN_PASSWORD=FlociAdmin1!` automatically for those versions. The security plugin itself stays disabled.
 
 !!! note "Docker socket required"
     Real mode starts Docker containers. Mount the Docker socket and set the Docker network so containers can reach each other. For private registry authentication and other Docker settings see [Docker Configuration](../configuration/docker.md).
@@ -83,7 +85,7 @@ services:
 |---|---|---|
 | `FLOCI_SERVICES_OPENSEARCH_ENABLED` | `true` | Enable/disable the service |
 | `FLOCI_SERVICES_OPENSEARCH_MOCK` | `false` | `true` = metadata only (no Docker) |
-| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` | Docker image for real mode |
+| `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | *(unset)* | Optional fixed image used for every domain regardless of `EngineVersion`. Useful for private registry mirrors. When unset, images resolve per-version from the built-in version map. |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_BASE_PORT` | `9400` | Port range start for real mode |
 | `FLOCI_SERVICES_OPENSEARCH_PROXY_MAX_PORT` | `9499` | Port range end for real mode |
 | `FLOCI_SERVICES_OPENSEARCH_KEEP_RUNNING_ON_SHUTDOWN` | `false` | Leave containers running after Floci stops |
@@ -110,9 +112,11 @@ services:
 - **Domain ID format:** `{accountId}/{domainName}`
 - **`Created` flag:** `true` immediately in mock mode; set to `true` by the readiness poller in real mode once `/_cluster/health` reports `green` or `yellow`.
 - **`Processing` flag:** `false` immediately in mock mode; `true` until the container is ready in real mode.
-- **Engine version default:** `OpenSearch_2.11`
-- **Supported engine versions:** `OpenSearch_2.13`, `OpenSearch_2.11`, `OpenSearch_2.9`, `OpenSearch_2.7`, `OpenSearch_2.5`, `OpenSearch_2.3`, `OpenSearch_1.3`, `OpenSearch_1.2`, `Elasticsearch_7.10`, `Elasticsearch_7.9`, `Elasticsearch_7.8`
+- **Engine version default:** `OpenSearch_2.19`
+- **Supported engine versions:** `OpenSearch_3.6`, `OpenSearch_3.5`, `OpenSearch_3.4`, `OpenSearch_3.3`, `OpenSearch_3.2`, `OpenSearch_3.1`, `OpenSearch_3.0`, `OpenSearch_2.19`, `OpenSearch_2.17`, `OpenSearch_2.15`, `OpenSearch_2.13`, `OpenSearch_2.11`, `OpenSearch_2.9`, `OpenSearch_2.7`, `OpenSearch_2.5`, `OpenSearch_2.3`, `OpenSearch_1.3`, `OpenSearch_1.2`, `Elasticsearch_7.10`, `Elasticsearch_7.9`, `Elasticsearch_7.8`
+- **Version validation:** `CreateDomain`, `UpdateDomainConfig`, and `UpgradeDomain` reject unknown engine versions with `ValidationException`. `UpgradeDomain` also rejects targets that aren't reachable from the current version per AWS's documented upgrade matrix.
 - **Cluster defaults:** `m5.large.search`, 1 instance, EBS enabled with 10 GiB `gp2` volume.
+- **Instance type families:** `t3.*` / `m5/m6g/m7g.*` / `r5/r6g/r7g.*` / `c5/c6g/c7g.*` are EBS-backed (3584 GiB max). `i3.*` are local-NVMe instance-store. `or1.*` are S3-backed and surface a much larger volume ceiling on `DescribeInstanceTypeLimits` (8–36 TiB depending on size). Floci still boots one Docker container per domain regardless of family — the metadata fidelity matters for SDK clients that introspect, not for runtime data placement.
 - **Container storage:** each domain gets a named Docker volume (`floci-opensearch-{volumeId}`) created automatically. In memory mode the volume is removed on domain delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 
 ## Examples
@@ -232,5 +236,6 @@ os_client.delete_domain(DomainName="my-search")
 
 - In mock mode, no data-plane endpoints (`/_search`, `/_index`, etc.) are served — only the management API is emulated.
 - No Elasticsearch-compatible management endpoints (`/2015-01-01/es/domain/...`).
-- VPC options, fine-grained access control, encryption-at-rest, and cross-cluster connections are accepted in the request but silently ignored.
-- All unsupported operations (VPC endpoints, reserved instances, packages, applications, data sources) return `UnsupportedOperationException`.
+- `VPCOptions`, `AdvancedSecurityOptions`, `EncryptionAtRestOptions`, `NodeToNodeEncryptionOptions`, and `DomainEndpointOptions` round-trip on `CreateDomain` / `UpdateDomainConfig` / `DescribeDomain` / `DescribeDomainConfig`, but are not enforced by the running container — Floci serves the domain over plain HTTP with the security plugin disabled regardless. Round-tripping is enough for SDK clients (Terraform, CDK, Pulumi) to detect drift correctly.
+- Master passwords for `AdvancedSecurityOptions.MasterUserOptions` are accepted but never echoed back, matching AWS behavior.
+- Cross-cluster connections, VPC endpoints, packages, applications, and data sources are not supported and return `UnsupportedOperationException`.

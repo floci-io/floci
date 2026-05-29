@@ -76,7 +76,9 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
     }
 
     private java.util.Optional<ServiceProtocol> inferProtocol(ContainerRequestContext ctx) {
-        String contentType = ctx.getMediaType() != null ? ctx.getMediaType().toString() : "";
+        // Use the raw header string to avoid IllegalArgumentException when Content-Type is empty.
+        String contentType = ctx.getHeaderString("Content-Type");
+        if (contentType == null) contentType = "";
         if (contentType.contains("cbor")) {
             return java.util.Optional.of(ServiceProtocol.CBOR);
         }
