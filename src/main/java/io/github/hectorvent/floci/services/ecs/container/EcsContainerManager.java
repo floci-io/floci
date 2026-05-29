@@ -169,9 +169,9 @@ public class EcsContainerManager {
     }
 
     /**
-     * Stops all containers, captures their exit codes before removal, and returns
-     * a map of container-name → exit code. Containers that have already exited
-     * are inspected then removed without a redundant stop call.
+     * Stops all containers, captures their exit codes, then removes them.
+     * Stop happens before inspect so the exit code reflects the actual stop
+     * signal (e.g. 137 for SIGKILL), not a stale pre-stop value.
      */
     public Map<String, Integer> stopTaskAndCollectExitCodes(EcsTaskHandle handle) {
         Map<String, Integer> exitCodes = new LinkedHashMap<>();
@@ -186,13 +186,27 @@ public class EcsContainerManager {
             }
         }
 
+        // Phase 1: stop all containers (no-op for those already exited).
+        for (String dockerId : handle.getContainerIds().values()) {
+            try {
+                lifecycleManager.getDockerClient().stopContainerCmd(dockerId).withTimeout(5).exec();
+            } catch (NotFoundException ignored) {
+            } catch (Exception e) {
+                LOG.warnv("Error stopping ECS container {0}: {1}", dockerId, e.getMessage());
+            }
+        }
+
+        // Phase 2: inspect exit codes, then remove.
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
             String name = entry.getKey();
             String dockerId = entry.getValue();
-            // Capture the exit code before stopAndRemove deletes the container record.
-            Integer code = getExitCodeIfStopped(dockerId);
-            lifecycleManager.stopAndRemove(dockerId, null);
-            exitCodes.put(name, code);
+            exitCodes.put(name, getExitCodeIfStopped(dockerId));
+            try {
+                lifecycleManager.getDockerClient().removeContainerCmd(dockerId).withForce(true).exec();
+            } catch (NotFoundException ignored) {
+            } catch (Exception e) {
+                LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
+            }
         }
         return exitCodes;
     }
