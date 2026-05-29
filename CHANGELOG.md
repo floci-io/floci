@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.20] - 2026-05-29
+
+### Added
+
+- **cors:** global CORS filter for browser-based local development — allows `OPTIONS` preflight and injects CORS headers on all responses ([#849](https://github.com/floci-io/floci/pull/849))
+- **kms:** `CreateGrant`, `RetireGrant`, `RevokeGrant`, `ListGrants`, `ListRetirableGrants`, and `DescribeKey` grant enumeration ([#1073](https://github.com/floci-io/floci/pull/1073))
+- **opensearch:** round-trip VPC config, security options, encryption-at-rest, node-to-node encryption, and per-family instance type metadata ([#1039](https://github.com/floci-io/floci/pull/1039))
+- **opensearch:** support OpenSearch 3.x, validate engine versions, use real ES 7.10 OSS image ([#1025](https://github.com/floci-io/floci/pull/1025))
+- **cloudformation:** SAM Transform support — `AWS::Serverless-2016-10-31` templates are now transformed before stack deployment ([#1012](https://github.com/floci-io/floci/pull/1012))
+
+### Fixed
+
+- **ecs:** reconcile task lifecycle when container exits naturally — tasks reach `STOPPED` state correctly without manual intervention ([#1078](https://github.com/floci-io/floci/pull/1078))
+- **s3:** clean up versioned file data on permanent version deletion to prevent stale data accumulation ([#1045](https://github.com/floci-io/floci/pull/1045))
+- **apigateway:** resolve APIs created outside the default region so cross-region requests are routed correctly ([#1032](https://github.com/floci-io/floci/pull/1032))
+- **eventbridge:** enforce `$or` negation in event pattern matching — negative `$or` conditions now correctly exclude matching events ([#1068](https://github.com/floci-io/floci/pull/1068))
+- **apigw-v2:** populate `pathParameters` in Lambda proxy event for HTTP API integrations ([#1067](https://github.com/floci-io/floci/pull/1067))
+- **ec2:** skip terminated instances in `DescribeNetworkInterfaces` ([#1074](https://github.com/floci-io/floci/pull/1074))
+- **ec2:** return `volumeId` in `BlockDeviceMapping` and `disableApiStop`/`disableApiTermination` in `DescribeInstanceAttribute` ([#1028](https://github.com/floci-io/floci/pull/1028))
+- **ec2:** fix `DescribeNetworkInterfaces` response shape — missing fields and incorrect filtering ([#1035](https://github.com/floci-io/floci/pull/1035))
+- **ecr:** shut down registry manager on observable shutdown event to prevent port leaks ([#1063](https://github.com/floci-io/floci/pull/1063))
+- **s3:** omit whole-object checksum headers on range (`GET` with `Range:`) responses ([#1040](https://github.com/floci-io/floci/pull/1040))
+- **s3:** apply `TaggingDirective=COPY` default in `CopyObject` — tags are now copied when directive is omitted ([#1049](https://github.com/floci-io/floci/pull/1049))
+- **elbv2:** offload Lambda invocation to a worker thread to avoid blocking the event loop ([#1034](https://github.com/floci-io/floci/pull/1034))
+- **cloudformation:** implement nested stack deployment via `AWS::CloudFormation::Stack` ([#1052](https://github.com/floci-io/floci/pull/1052))
+- **cloudformation:** retain deleted stacks briefly for destroy-polling so SDKs can observe `DELETE_COMPLETE` status ([#1029](https://github.com/floci-io/floci/pull/1029))
+- **lambda:** fix WarmPool timeout when stopping multiple containers — containers now shut down in parallel ([#1055](https://github.com/floci-io/floci/pull/1055))
+
+### Documentation
+
+- **neptune:** add Neptune service page and fix missing index entries ([#1056](https://github.com/floci-io/floci/pull/1056))
+
 ## [1.5.19] - 2026-05-24
 
 ### Added
@@ -748,7 +780,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.19...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.20...HEAD
+[1.5.20]: https://github.com/floci-io/floci/compare/1.5.19...1.5.20
 [1.5.19]: https://github.com/floci-io/floci/compare/1.5.18...1.5.19
 [1.5.18]: https://github.com/floci-io/floci/compare/1.5.17...1.5.18
 [1.5.17]: https://github.com/floci-io/floci/compare/1.5.16...1.5.17

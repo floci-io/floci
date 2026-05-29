@@ -84,7 +84,6 @@ floci:
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
-      cloudfront:
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -97,6 +96,15 @@ floci:
   auth:
     validate-signatures: false
     presign-secret: local-emulator-secret
+
+  security:
+    # Comma-separated browser origins allowed by the global CORS filter.
+    # Env var: EXTRA_CORS_ALLOWED_ORIGINS=http://localhost:3000
+    # extra-cors-allowed-origins:
+    # Extra request/response CORS header names for browser clients.
+    # extra-cors-allowed-headers:
+    # extra-cors-expose-headers:
+    disable-cors-headers: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
@@ -194,7 +202,6 @@ floci:
       enabled: true
     cloudformation:
       enabled: true
-      deleted-stack-retention-seconds: 30
     acm:
       enabled: true
       validation-wait-seconds: 0

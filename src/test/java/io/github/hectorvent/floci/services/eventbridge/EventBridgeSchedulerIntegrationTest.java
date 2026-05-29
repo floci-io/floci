@@ -303,6 +303,8 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public AuthConfig auth() { return null; }
             @Override
+            public SecurityConfig security() { return null; }
+            @Override
             public ServicesConfig services() { return null; }
             @Override
             public DockerConfig docker() { return null; }

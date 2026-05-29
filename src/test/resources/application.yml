@@ -40,6 +40,9 @@ floci:
     validate-signatures: false
     presign-secret: test-secret
 
+  security:
+    disable-cors-headers: false
+
   init-hooks:
     shell-executable: /bin/sh
     timeout-seconds: 5
