@@ -509,7 +509,7 @@ public class SesService {
         validateEventDestinationName(eventDestinationName);
         validateEventDestination(dest);
         ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        if (findEventDestination(cs, eventDestinationName) != null) {
+        if (indexOfEventDestination(cs.getEventDestinations(), eventDestinationName) >= 0) {
             throw new AwsException("AlreadyExists",
                     "An event destination with name <" + eventDestinationName
                             + "> already exists for configuration set <" + configSetName + ">.", 400);
@@ -522,7 +522,7 @@ public class SesService {
     }
 
     public List<EventDestination> getConfigurationSetEventDestinations(String configSetName, String region) {
-        return getConfigurationSet(configSetName, region).getEventDestinations();
+        return List.copyOf(getConfigurationSet(configSetName, region).getEventDestinations());
     }
 
     public void updateConfigurationSetEventDestination(String configSetName, String eventDestinationName,
@@ -530,14 +530,14 @@ public class SesService {
         validateEventDestinationName(eventDestinationName);
         validateEventDestination(dest);
         ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        if (findEventDestination(cs, eventDestinationName) == null) {
+        int index = indexOfEventDestination(cs.getEventDestinations(), eventDestinationName);
+        if (index < 0) {
             throw new AwsException("NotFoundException",
                     "An event destination with name <" + eventDestinationName
                             + "> does not exist for configuration set <" + configSetName + ">.", 404);
         }
         dest.setName(eventDestinationName);
-        cs.getEventDestinations().removeIf(ed -> eventDestinationName.equals(ed.getName()));
-        cs.getEventDestinations().add(dest);
+        cs.getEventDestinations().set(index, dest);
         configSetStore.put(configSetKey(region, configSetName), cs);
         LOG.infov("Updated SES event destination {0} on configuration set {1} in region {2}",
                 eventDestinationName, configSetName, region);
@@ -558,13 +558,13 @@ public class SesService {
                 eventDestinationName, configSetName, region);
     }
 
-    private static EventDestination findEventDestination(ConfigurationSet cs, String name) {
-        for (EventDestination ed : cs.getEventDestinations()) {
-            if (name != null && name.equals(ed.getName())) {
-                return ed;
+    private static int indexOfEventDestination(List<EventDestination> destinations, String name) {
+        for (int i = 0; i < destinations.size(); i++) {
+            if (name != null && name.equals(destinations.get(i).getName())) {
+                return i;
             }
         }
-        return null;
+        return -1;
     }
 
     static void validateEventDestinationName(String name) {

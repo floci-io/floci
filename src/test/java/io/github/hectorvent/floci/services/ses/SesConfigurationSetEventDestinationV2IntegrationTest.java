@@ -306,4 +306,68 @@ class SesConfigurationSetEventDestinationV2IntegrationTest {
             .body("message", equalTo("Invalid event destination name <bad.name>: only alphanumeric ASCII "
                     + "characters, '_', and '-' are allowed."));
     }
+
+    @Test
+    @Order(15)
+    void updateEventDestination_preservesOrderAmongMultiple() {
+        String cs = "v2-cs-ed-multi";
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"" + cs + "\"}")
+        .when()
+            .post("/v2/email/configuration-sets")
+        .then()
+            .statusCode(200);
+
+        for (String n : new String[]{"ed-a", "ed-b"}) {
+            given()
+                .contentType("application/json")
+                .header("Authorization", AUTH_HEADER)
+                .body("""
+                    {
+                      "EventDestinationName": "%s",
+                      "EventDestination": {
+                        "Enabled": true,
+                        "MatchingEventTypes": ["SEND"],
+                        "SnsDestination": {"TopicArn": "arn:aws:sns:us-east-1:000000000000:%s"}
+                      }
+                    }
+                    """.formatted(n, n))
+            .when()
+                .post("/v2/email/configuration-sets/" + cs + "/event-destinations")
+            .then()
+                .statusCode(200);
+        }
+
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                  "EventDestination": {
+                    "Enabled": false,
+                    "MatchingEventTypes": ["DELIVERY"],
+                    "SnsDestination": {"TopicArn": "arn:aws:sns:us-east-1:000000000000:ed-a-updated"}
+                  }
+                }
+                """)
+        .when()
+            .put("/v2/email/configuration-sets/" + cs + "/event-destinations/ed-a")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/configuration-sets/" + cs + "/event-destinations")
+        .then()
+            .statusCode(200)
+            .body("EventDestinations", hasSize(2))
+            .body("EventDestinations[0].Name", equalTo("ed-a"))
+            .body("EventDestinations[1].Name", equalTo("ed-b"))
+            .body("EventDestinations[0].Enabled", equalTo(false))
+            .body("EventDestinations[0].SnsDestination.TopicArn",
+                    equalTo("arn:aws:sns:us-east-1:000000000000:ed-a-updated"));
+    }
 }
