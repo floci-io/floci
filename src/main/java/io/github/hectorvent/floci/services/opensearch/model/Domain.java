@@ -38,6 +38,21 @@ public class Domain {
     @JsonProperty("EBSOptions")
     private EbsOptions ebsOptions = new EbsOptions();
 
+    @JsonProperty("VPCOptions")
+    private VpcOptions vpcOptions;
+
+    @JsonProperty("AdvancedSecurityOptions")
+    private AdvancedSecurityOptions advancedSecurityOptions;
+
+    @JsonProperty("EncryptionAtRestOptions")
+    private EncryptionAtRestOptions encryptionAtRestOptions;
+
+    @JsonProperty("NodeToNodeEncryptionOptions")
+    private NodeToNodeEncryptionOptions nodeToNodeEncryptionOptions;
+
+    @JsonProperty("DomainEndpointOptions")
+    private DomainEndpointOptions domainEndpointOptions;
+
     @JsonProperty("Endpoint")
     private String endpoint = "";
 
@@ -121,6 +136,46 @@ public class Domain {
 
     public void setEbsOptions(EbsOptions ebsOptions) {
         this.ebsOptions = ebsOptions;
+    }
+
+    public VpcOptions getVpcOptions() {
+        return vpcOptions;
+    }
+
+    public void setVpcOptions(VpcOptions vpcOptions) {
+        this.vpcOptions = vpcOptions;
+    }
+
+    public AdvancedSecurityOptions getAdvancedSecurityOptions() {
+        return advancedSecurityOptions;
+    }
+
+    public void setAdvancedSecurityOptions(AdvancedSecurityOptions advancedSecurityOptions) {
+        this.advancedSecurityOptions = advancedSecurityOptions;
+    }
+
+    public EncryptionAtRestOptions getEncryptionAtRestOptions() {
+        return encryptionAtRestOptions;
+    }
+
+    public void setEncryptionAtRestOptions(EncryptionAtRestOptions encryptionAtRestOptions) {
+        this.encryptionAtRestOptions = encryptionAtRestOptions;
+    }
+
+    public NodeToNodeEncryptionOptions getNodeToNodeEncryptionOptions() {
+        return nodeToNodeEncryptionOptions;
+    }
+
+    public void setNodeToNodeEncryptionOptions(NodeToNodeEncryptionOptions nodeToNodeEncryptionOptions) {
+        this.nodeToNodeEncryptionOptions = nodeToNodeEncryptionOptions;
+    }
+
+    public DomainEndpointOptions getDomainEndpointOptions() {
+        return domainEndpointOptions;
+    }
+
+    public void setDomainEndpointOptions(DomainEndpointOptions domainEndpointOptions) {
+        this.domainEndpointOptions = domainEndpointOptions;
     }
 
     public String getEndpoint() {

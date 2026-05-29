@@ -1558,6 +1558,11 @@ public class Ec2Service {
         Set<String> foundIds = new HashSet<>();
         for (Instance inst : instances.values()) {
             if (!inst.getRegion().equals(region)) continue;
+            if (inst.getState() != null
+                    && inst.getState().getName() != null
+                    && "terminated".equals(inst.getState().getName())) {
+                continue;
+            }
             for (InstanceNetworkInterface eni : inst.getNetworkInterfaces()) {
                 if (!networkInterfaceIds.isEmpty()
                         && !networkInterfaceIds.contains(eni.getNetworkInterfaceId())) {

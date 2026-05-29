@@ -7,9 +7,14 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.opensearch.model.AdvancedSecurityOptions;
 import io.github.hectorvent.floci.services.opensearch.model.ClusterConfig;
 import io.github.hectorvent.floci.services.opensearch.model.Domain;
+import io.github.hectorvent.floci.services.opensearch.model.DomainEndpointOptions;
 import io.github.hectorvent.floci.services.opensearch.model.EbsOptions;
+import io.github.hectorvent.floci.services.opensearch.model.EncryptionAtRestOptions;
+import io.github.hectorvent.floci.services.opensearch.model.NodeToNodeEncryptionOptions;
+import io.github.hectorvent.floci.services.opensearch.model.VpcOptions;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -73,10 +78,34 @@ public class OpenSearchService {
         }
     }
 
+    /**
+     * Bag of optional configuration blocks parsed by {@link OpenSearchController}
+     * and round-tripped on Describe. Any field can be null when the request
+     * omitted the corresponding block — the service treats null as "leave the
+     * existing value untouched" on update and "feature unset" on create.
+     */
+    public record DomainOptions(
+            VpcOptions vpcOptions,
+            AdvancedSecurityOptions advancedSecurityOptions,
+            EncryptionAtRestOptions encryptionAtRestOptions,
+            NodeToNodeEncryptionOptions nodeToNodeEncryptionOptions,
+            DomainEndpointOptions domainEndpointOptions) {
+
+        public static final DomainOptions EMPTY = new DomainOptions(null, null, null, null, null);
+    }
+
     public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
                                 EbsOptions ebsOptions, Map<String, String> tags, String region) {
+        return createDomain(domainName, engineVersion, clusterConfig, ebsOptions, tags,
+                DomainOptions.EMPTY, region);
+    }
+
+    public Domain createDomain(String domainName, String engineVersion, ClusterConfig clusterConfig,
+                                EbsOptions ebsOptions, Map<String, String> tags,
+                                DomainOptions options, String region) {
         validateDomainName(domainName);
         OpenSearchVersions.validate(engineVersion);
+        validateOptions(options);
 
         if (domainStore.get(domainName).isPresent()) {
             throw new AwsException("ResourceAlreadyExistsException",
@@ -105,6 +134,7 @@ public class OpenSearchService {
         if (tags != null) {
             domain.setTags(tags);
         }
+        applyDomainOptions(domain, options);
 
         if (config.services().opensearch().mock()) {
             domain.setProcessing(false);
@@ -143,8 +173,16 @@ public class OpenSearchService {
     public Domain updateDomainConfig(String domainName, String engineVersion,
                                       ClusterConfig clusterConfig, EbsOptions ebsOptions,
                                       String region) {
+        return updateDomainConfig(domainName, engineVersion, clusterConfig, ebsOptions,
+                DomainOptions.EMPTY, region);
+    }
+
+    public Domain updateDomainConfig(String domainName, String engineVersion,
+                                      ClusterConfig clusterConfig, EbsOptions ebsOptions,
+                                      DomainOptions options, String region) {
         Domain domain = describeDomain(domainName);
         OpenSearchVersions.validate(engineVersion);
+        validateOptions(options);
 
         if (engineVersion != null && !engineVersion.isBlank()) {
             domain.setEngineVersion(engineVersion);
@@ -170,6 +208,7 @@ public class OpenSearchService {
                 existing.setVolumeSize(ebsOptions.getVolumeSize());
             }
         }
+        applyDomainOptions(domain, options);
 
         domainStore.put(domainName, domain);
         return domain;
@@ -231,6 +270,62 @@ public class OpenSearchService {
         if (!name.matches("[a-z][a-z0-9\\-]*")) {
             throw new AwsException("ValidationException",
                     "Domain name must start with a lowercase letter and contain only lowercase letters, numbers, and hyphens.", 400);
+        }
+    }
+
+    /**
+     * Cross-block validation: only the cases where a wrong combination is
+     * deterministically rejected by AWS land here. Per-field syntax checks
+     * stay in the controller's parsers.
+     */
+    private void validateOptions(DomainOptions options) {
+        if (options == null) {
+            return;
+        }
+        VpcOptions vpc = options.vpcOptions();
+        if (vpc != null && !vpc.getSubnetIds().isEmpty() && vpc.getSubnetIds().stream().anyMatch(String::isBlank)) {
+            throw new AwsException("ValidationException",
+                    "VPCOptions.SubnetIds may not contain blank entries.", 400);
+        }
+        AdvancedSecurityOptions adv = options.advancedSecurityOptions();
+        if (adv != null && adv.isEnabled() && adv.isInternalUserDatabaseEnabled()) {
+            // AWS rejects internal user db without a master user — keep
+            // emulator-side parity so Terraform plans surface the same error.
+            if (adv.getMasterUserOptions() == null
+                    || adv.getMasterUserOptions().getMasterUserName() == null
+                    || adv.getMasterUserOptions().getMasterUserName().isBlank()) {
+                throw new AwsException("ValidationException",
+                        "AdvancedSecurityOptions.MasterUserOptions.MasterUserName is required "
+                                + "when InternalUserDatabaseEnabled=true.", 400);
+            }
+        }
+        DomainEndpointOptions deo = options.domainEndpointOptions();
+        if (deo != null && deo.isCustomEndpointEnabled()
+                && (deo.getCustomEndpoint() == null || deo.getCustomEndpoint().isBlank())) {
+            throw new AwsException("ValidationException",
+                    "DomainEndpointOptions.CustomEndpoint is required when CustomEndpointEnabled=true.", 400);
+        }
+    }
+
+    /** Copy non-null fields from {@code options} onto {@code domain}. Null leaves the field untouched. */
+    private void applyDomainOptions(Domain domain, DomainOptions options) {
+        if (options == null) {
+            return;
+        }
+        if (options.vpcOptions() != null) {
+            domain.setVpcOptions(options.vpcOptions());
+        }
+        if (options.advancedSecurityOptions() != null) {
+            domain.setAdvancedSecurityOptions(options.advancedSecurityOptions());
+        }
+        if (options.encryptionAtRestOptions() != null) {
+            domain.setEncryptionAtRestOptions(options.encryptionAtRestOptions());
+        }
+        if (options.nodeToNodeEncryptionOptions() != null) {
+            domain.setNodeToNodeEncryptionOptions(options.nodeToNodeEncryptionOptions());
+        }
+        if (options.domainEndpointOptions() != null) {
+            domain.setDomainEndpointOptions(options.domainEndpointOptions());
         }
     }
 

@@ -116,6 +116,7 @@ services:
 - **Supported engine versions:** `OpenSearch_3.6`, `OpenSearch_3.5`, `OpenSearch_3.4`, `OpenSearch_3.3`, `OpenSearch_3.2`, `OpenSearch_3.1`, `OpenSearch_3.0`, `OpenSearch_2.19`, `OpenSearch_2.17`, `OpenSearch_2.15`, `OpenSearch_2.13`, `OpenSearch_2.11`, `OpenSearch_2.9`, `OpenSearch_2.7`, `OpenSearch_2.5`, `OpenSearch_2.3`, `OpenSearch_1.3`, `OpenSearch_1.2`, `Elasticsearch_7.10`, `Elasticsearch_7.9`, `Elasticsearch_7.8`
 - **Version validation:** `CreateDomain`, `UpdateDomainConfig`, and `UpgradeDomain` reject unknown engine versions with `ValidationException`. `UpgradeDomain` also rejects targets that aren't reachable from the current version per AWS's documented upgrade matrix.
 - **Cluster defaults:** `m5.large.search`, 1 instance, EBS enabled with 10 GiB `gp2` volume.
+- **Instance type families:** `t3.*` / `m5/m6g/m7g.*` / `r5/r6g/r7g.*` / `c5/c6g/c7g.*` are EBS-backed (3584 GiB max). `i3.*` are local-NVMe instance-store. `or1.*` are S3-backed and surface a much larger volume ceiling on `DescribeInstanceTypeLimits` (8–36 TiB depending on size). Floci still boots one Docker container per domain regardless of family — the metadata fidelity matters for SDK clients that introspect, not for runtime data placement.
 - **Container storage:** each domain gets a named Docker volume (`floci-opensearch-{volumeId}`) created automatically. In memory mode the volume is removed on domain delete; in persistent modes it is retained unless `FLOCI_STORAGE_PRUNE_VOLUMES_ON_DELETE=true`.
 
 ## Examples
@@ -235,5 +236,6 @@ os_client.delete_domain(DomainName="my-search")
 
 - In mock mode, no data-plane endpoints (`/_search`, `/_index`, etc.) are served — only the management API is emulated.
 - No Elasticsearch-compatible management endpoints (`/2015-01-01/es/domain/...`).
-- VPC options, fine-grained access control, encryption-at-rest, and cross-cluster connections are accepted in the request but silently ignored.
-- All unsupported operations (VPC endpoints, reserved instances, packages, applications, data sources) return `UnsupportedOperationException`.
+- `VPCOptions`, `AdvancedSecurityOptions`, `EncryptionAtRestOptions`, `NodeToNodeEncryptionOptions`, and `DomainEndpointOptions` round-trip on `CreateDomain` / `UpdateDomainConfig` / `DescribeDomain` / `DescribeDomainConfig`, but are not enforced by the running container — Floci serves the domain over plain HTTP with the security plugin disabled regardless. Round-tripping is enough for SDK clients (Terraform, CDK, Pulumi) to detect drift correctly.
+- Master passwords for `AdvancedSecurityOptions.MasterUserOptions` are accepted but never echoed back, matching AWS behavior.
+- Cross-cluster connections, VPC endpoints, packages, applications, and data sources are not supported and return `UnsupportedOperationException`.

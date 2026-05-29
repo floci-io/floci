@@ -240,6 +240,12 @@ public class ApiGatewayExecuteController {
             return dispatchV2(httpMethod, apiId, stageName, proxy, headers, uriInfo, body, region);
         }
 
+        // Resolve region for unsigned data-plane requests
+        String auth = headers.getHeaderString("Authorization");
+        if (auth == null || auth.isBlank()) {
+            region = apiGatewayService.resolveRestApiRegion(region, apiId);
+        }
+
         // Verify API and stage exist
         Stage stage;
         try {
@@ -1734,7 +1740,7 @@ public class ApiGatewayExecuteController {
         };
     }
 
-    private String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
+    String buildV2ProxyEvent(String httpMethod, String path, String routeKey,
                                      String apiId, String stageName,
                                      HttpHeaders headers, UriInfo uriInfo,
                                      byte[] body, String requestId) {
@@ -1757,6 +1763,12 @@ public class ApiGatewayExecuteController {
             for (Map.Entry<String, java.util.List<String>> e : queryParams.entrySet()) {
                 if (!e.getValue().isEmpty()) qsp.put(e.getKey(), e.getValue().get(0));
             }
+        }
+
+        Map<String, String> pathParams = extractV2PathParams(routeKey, path);
+        if (!pathParams.isEmpty()) {
+            ObjectNode pp = event.putObject("pathParameters");
+            pathParams.forEach(pp::put);
         }
 
         ObjectNode ctx = event.putObject("requestContext");

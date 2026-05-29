@@ -25,6 +25,15 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_AUTH_VALIDATE_SIGNATURES` | `false` | When `true`, verifies AWS Signature V4 on every request. Leave `false` for local development |
 | `FLOCI_AUTH_PRESIGN_SECRET` | `local-emulator-secret` | Secret used to sign and verify pre-signed URLs |
 
+## Browser CORS
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SECURITY_EXTRA_CORS_ALLOWED_ORIGINS` | _(none)_ | Comma-separated browser origins allowed to call Floci directly. Alias: `EXTRA_CORS_ALLOWED_ORIGINS` |
+| `FLOCI_SECURITY_EXTRA_CORS_ALLOWED_HEADERS` | _(none)_ | Additional header names to include in `Access-Control-Allow-Headers`. Alias: `EXTRA_CORS_ALLOWED_HEADERS` |
+| `FLOCI_SECURITY_EXTRA_CORS_EXPOSE_HEADERS` | _(none)_ | Additional header names to include in `Access-Control-Expose-Headers`. Alias: `EXTRA_CORS_EXPOSE_HEADERS` |
+| `FLOCI_SECURITY_DISABLE_CORS_HEADERS` | `false` | Disable Floci's global CORS response headers. Alias: `DISABLE_CORS_HEADERS` |
+
 ---
 
 ## TLS / HTTPS

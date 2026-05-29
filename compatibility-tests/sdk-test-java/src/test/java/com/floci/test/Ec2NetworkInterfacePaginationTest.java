@@ -110,12 +110,17 @@ class Ec2NetworkInterfacePaginationTest {
         }
     }
 
+    private DescribeNetworkInterfacesRequest.Builder vpcFilter() {
+        return DescribeNetworkInterfacesRequest.builder()
+                .filters(Filter.builder().name("vpc-id").values(vpcId).build());
+    }
+
     @Test
     @Order(1)
     @DisplayName("DescribeNetworkInterfaces without pagination returns all 6 ENIs")
     void describeNetworkInterfacesAll() {
         DescribeNetworkInterfacesResponse resp = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder().build());
+                vpcFilter().build());
 
         assertThat(resp.networkInterfaces()).hasSize(6);
         assertThat(resp.nextToken()).isNull();
@@ -126,9 +131,7 @@ class Ec2NetworkInterfacePaginationTest {
     @DisplayName("MaxResults=5 truncates first page and returns nextToken")
     void describeNetworkInterfacesFirstPage() {
         DescribeNetworkInterfacesResponse resp = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder()
-                        .maxResults(5)
-                        .build());
+                vpcFilter().maxResults(5).build());
 
         assertThat(resp.networkInterfaces()).hasSize(5);
         assertThat(resp.nextToken()).isNotNull().isNotEmpty();
@@ -140,17 +143,12 @@ class Ec2NetworkInterfacePaginationTest {
     void describeNetworkInterfacesContinuation() {
         // Page 1: get nextToken
         DescribeNetworkInterfacesResponse page1 = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder()
-                        .maxResults(5)
-                        .build());
+                vpcFilter().maxResults(5).build());
         assertThat(page1.nextToken()).isNotNull();
 
         // Page 2: use nextToken
         DescribeNetworkInterfacesResponse page2 = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder()
-                        .maxResults(5)
-                        .nextToken(page1.nextToken())
-                        .build());
+                vpcFilter().maxResults(5).nextToken(page1.nextToken()).build());
 
         assertThat(page2.networkInterfaces()).hasSize(1);
         assertThat(page2.nextToken()).isNull();
@@ -175,25 +173,17 @@ class Ec2NetworkInterfacePaginationTest {
     void describeNetworkInterfacesTokenPastEnd() {
         // Get a valid token from first page
         DescribeNetworkInterfacesResponse page1 = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder()
-                        .maxResults(5)
-                        .build());
+                vpcFilter().maxResults(5).build());
         String token = page1.nextToken();
 
         // Use it to get the last page
         DescribeNetworkInterfacesResponse page2 = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder()
-                        .maxResults(5)
-                        .nextToken(token)
-                        .build());
+                vpcFilter().maxResults(5).nextToken(token).build());
 
         // Using the token from page2 (which is null since it's the last page)
         // would be invalid, but using a valid token again should still work
         DescribeNetworkInterfacesResponse repeat = ec2.describeNetworkInterfaces(
-                DescribeNetworkInterfacesRequest.builder()
-                        .maxResults(5)
-                        .nextToken(token)
-                        .build());
+                vpcFilter().maxResults(5).nextToken(token).build());
 
         assertThat(repeat.networkInterfaces()).hasSize(1);
         assertThat(repeat.nextToken()).isNull();
