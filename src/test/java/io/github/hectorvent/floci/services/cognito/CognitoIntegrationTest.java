@@ -1317,6 +1317,90 @@ class CognitoIntegrationTest {
 
     @Test
     @Order(93)
+    void addCustomAttributesValidationAndDeveloperPrefix() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "SchemaValidationPool"
+                }
+                """);
+        String poolId = poolResponse.path("UserPool").path("Id").asText();
+
+        // 1. Happy path developer attribute
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    {
+                      "Name": "devattr",
+                      "AttributeDataType": "String",
+                      "DeveloperOnlyAttribute": true
+                    }
+                  ]
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(200);
+
+        JsonNode describeResponse = cognitoJson("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(poolId));
+
+        JsonNode schema = describeResponse.path("UserPool").path("SchemaAttributes");
+        boolean hasDevAttr = false;
+        for (JsonNode attr : schema) {
+            if ("dev:devattr".equals(attr.path("Name").asText())) {
+                hasDevAttr = true;
+                break;
+            }
+        }
+        assertTrue(hasDevAttr, "dev:devattr should be in the user pool schema with dev: prefix");
+
+        // 2. Reject duplicate attribute
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    {
+                      "Name": "devattr",
+                      "AttributeDataType": "String",
+                      "DeveloperOnlyAttribute": true
+                    }
+                  ]
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400);
+
+        // 3. Reject name longer than 20 characters (after stripping prefix)
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    {
+                      "Name": "custom:thisNameIsWayTooLongForCognitoAttributeLimits",
+                      "AttributeDataType": "String"
+                    }
+                  ]
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400);
+
+        // 4. Reject empty attributes list
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": []
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    @Order(94)
     void deleteUserAttributesAndVerifyDeleted() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """
                 {

@@ -137,11 +137,40 @@ public class CognitoService {
             schema = new ArrayList<>();
         }
         for (Map<String, Object> attr : customAttributes) {
+            attr = new HashMap<>(attr);
             String name = (String) attr.get("Name");
-            if (name != null && !name.startsWith("custom:")) {
-                attr = new HashMap<>(attr);
-                attr.put("Name", "custom:" + name);
+            if (name == null || name.isEmpty()) {
+                throw new AwsException("InvalidParameterException", "Attribute name is required.", 400);
             }
+
+            // Strip prefix to validate name length and pattern
+            String strippedName = name;
+            if (strippedName.startsWith("custom:")) {
+                strippedName = strippedName.substring("custom:".length());
+            } else if (strippedName.startsWith("dev:")) {
+                strippedName = strippedName.substring("dev:".length());
+            }
+
+            if (strippedName.isEmpty() || strippedName.length() > 20) {
+                throw new AwsException("InvalidParameterException", "Attribute name length must be between 1 and 20 characters.", 400);
+            }
+
+            if (!strippedName.matches("[\\p{L}\\p{M}\\p{S}\\p{N}\\p{P}]+")) {
+                throw new AwsException("InvalidParameterException", "Attribute name contains invalid characters.", 400);
+            }
+
+            boolean developerOnly = Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"));
+            String prefix = developerOnly ? "dev:" : "custom:";
+            if (!name.startsWith("custom:") && !name.startsWith("dev:")) {
+                attr.put("Name", prefix + name);
+            }
+
+            String finalName = (String) attr.get("Name");
+            boolean exists = schema.stream().anyMatch(existing -> finalName.equals(existing.get("Name")));
+            if (exists) {
+                throw new AwsException("InvalidParameterException", "Attribute already exists in schema: " + finalName, 400);
+            }
+
             schema.add(attr);
         }
         pool.setSchemaAttributes(schema);

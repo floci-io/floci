@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.cognito;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -136,10 +138,12 @@ public class CognitoJsonHandler {
         JsonNode attrsNode = request.path("CustomAttributes");
         if (attrsNode.isArray()) {
             for (JsonNode attrNode : attrsNode) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> attr = objectMapper.convertValue(attrNode, Map.class);
+                Map<String, Object> attr = objectMapper.convertValue(attrNode, new TypeReference<Map<String, Object>>() {});
                 customAttributes.add(attr);
             }
+        }
+        if (customAttributes.isEmpty() || customAttributes.size() > 25) {
+            throw new AwsException("InvalidParameterException", "CustomAttributes list size must be between 1 and 25.", 400);
         }
         service.addCustomAttributes(userPoolId, customAttributes);
         return Response.ok(objectMapper.createObjectNode()).build();
