@@ -46,6 +46,7 @@ public class CloudFormationService {
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final SamTransformProcessor samTransformProcessor;
     private final Clock clock;
 
     @Inject
@@ -57,6 +58,7 @@ public class CloudFormationService {
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.samTransformProcessor = new SamTransformProcessor(objectMapper);
         this.clock = clock;
     }
 
@@ -269,6 +271,15 @@ public class CloudFormationService {
                                  boolean isCreate, String region, String accountId) {
         try {
             JsonNode template = parseTemplate(templateBody);
+
+            // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
+            if (samTransformProcessor.hasSamTransform(template)) {
+                LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
+                template = samTransformProcessor.expandSamTemplate(template);
+                // Store the expanded template so GetTemplate returns the transformed version
+                templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
+            }
+
             stack.setTemplateBody(templateBody);
 
             // Merge default parameter values from the template with caller-supplied params

@@ -2,9 +2,14 @@ package io.github.hectorvent.floci.services.opensearch;
 
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.opensearch.model.AdvancedSecurityOptions;
 import io.github.hectorvent.floci.services.opensearch.model.ClusterConfig;
 import io.github.hectorvent.floci.services.opensearch.model.Domain;
+import io.github.hectorvent.floci.services.opensearch.model.DomainEndpointOptions;
 import io.github.hectorvent.floci.services.opensearch.model.EbsOptions;
+import io.github.hectorvent.floci.services.opensearch.model.EncryptionAtRestOptions;
+import io.github.hectorvent.floci.services.opensearch.model.NodeToNodeEncryptionOptions;
+import io.github.hectorvent.floci.services.opensearch.model.VpcOptions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -31,20 +36,6 @@ public class OpenSearchController {
 
     private static final Logger LOG = Logger.getLogger(OpenSearchController.class);
 
-    private static final List<String> INSTANCE_TYPES = List.of(
-            "t3.small.search", "t3.medium.search",
-            "m5.large.search", "m5.xlarge.search", "m5.2xlarge.search",
-            "m6g.large.search", "m6g.xlarge.search", "m6g.2xlarge.search",
-            "m7g.large.search", "m7g.xlarge.search", "m7g.2xlarge.search",
-            "r5.large.search", "r5.xlarge.search", "r5.2xlarge.search",
-            "r6g.large.search", "r6g.xlarge.search", "r6g.2xlarge.search",
-            "r7g.large.search", "r7g.xlarge.search", "r7g.2xlarge.search",
-            "c5.large.search", "c5.xlarge.search", "c5.2xlarge.search",
-            "c6g.large.search", "c6g.xlarge.search", "c6g.2xlarge.search",
-            "c7g.large.search", "c7g.xlarge.search", "c7g.2xlarge.search",
-            "or1.medium.search", "or1.large.search", "or1.xlarge.search", "or1.2xlarge.search"
-    );
-
     private final OpenSearchService service;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -69,8 +60,15 @@ public class OpenSearchController {
             EbsOptions ebsOptions = parseEbsOptions(req.path("EBSOptions"));
             Map<String, String> tags = parseTags(req.path("TagList"));
 
+            OpenSearchService.DomainOptions options = new OpenSearchService.DomainOptions(
+                    parseVpcOptions(req.path("VPCOptions")),
+                    parseAdvancedSecurityOptions(req.path("AdvancedSecurityOptions")),
+                    parseEncryptionAtRestOptions(req.path("EncryptionAtRestOptions")),
+                    parseNodeToNodeEncryptionOptions(req.path("NodeToNodeEncryptionOptions")),
+                    parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
+
             Domain domain = service.createDomain(domainName, engineVersion, clusterConfig,
-                    ebsOptions, tags, region);
+                    ebsOptions, tags, options, region);
 
             ObjectNode response = objectMapper.createObjectNode();
             response.set("DomainStatus", toDomainStatusNode(domain));
@@ -151,6 +149,8 @@ public class OpenSearchController {
         versionSection.put("Options", domain.getEngineVersion());
         versionSection.set("Status", configStatusNode(epochSeconds));
 
+        attachDomainOptionConfigs(domainConfig, domain, epochSeconds);
+
         return Response.ok(response).build();
     }
 
@@ -166,8 +166,15 @@ public class OpenSearchController {
             ClusterConfig clusterConfig = parseClusterConfig(req.path("ClusterConfig"));
             EbsOptions ebsOptions = parseEbsOptions(req.path("EBSOptions"));
 
+            OpenSearchService.DomainOptions options = new OpenSearchService.DomainOptions(
+                    parseVpcOptions(req.path("VPCOptions")),
+                    parseAdvancedSecurityOptions(req.path("AdvancedSecurityOptions")),
+                    parseEncryptionAtRestOptions(req.path("EncryptionAtRestOptions")),
+                    parseNodeToNodeEncryptionOptions(req.path("NodeToNodeEncryptionOptions")),
+                    parseDomainEndpointOptions(req.path("DomainEndpointOptions")));
+
             Domain domain = service.updateDomainConfig(domainName, engineVersion, clusterConfig,
-                    ebsOptions, region);
+                    ebsOptions, options, region);
 
             long epochSeconds = domain.getCreatedAt() != null ? domain.getCreatedAt().getEpochSecond() : 0;
             ObjectNode response = objectMapper.createObjectNode();
@@ -184,6 +191,8 @@ public class OpenSearchController {
             ObjectNode versionSection = domainConfig.putObject("EngineVersion");
             versionSection.put("Options", domain.getEngineVersion());
             versionSection.set("Status", configStatusNode(epochSeconds));
+
+            attachDomainOptionConfigs(domainConfig, domain, epochSeconds);
 
             return Response.ok(response).build();
         } catch (AwsException e) {
@@ -307,15 +316,16 @@ public class OpenSearchController {
                                              @PathParam("engineVersion") String engineVersion) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode details = response.putArray("InstanceTypeDetails");
-        for (String instanceType : INSTANCE_TYPES) {
+        for (String instanceType : OpenSearchInstanceTypes.listAll()) {
+            OpenSearchInstanceTypes.InstanceTypeSpec spec = OpenSearchInstanceTypes.specOf(instanceType);
             ObjectNode detail = objectMapper.createObjectNode();
-            detail.put("InstanceType", instanceType);
-            detail.put("EncryptionEnabled", true);
-            detail.put("CognitoEnabled", false);
-            detail.put("AppLogsEnabled", true);
-            detail.put("AdvancedSecurityEnabled", false);
+            detail.put("InstanceType", spec.instanceType());
+            detail.put("EncryptionEnabled", spec.encryptionEnabled());
+            detail.put("CognitoEnabled", spec.cognitoEnabled());
+            detail.put("AppLogsEnabled", spec.appLogsEnabled());
+            detail.put("AdvancedSecurityEnabled", spec.advancedSecurityEnabled());
             ArrayNode roles = detail.putArray("InstanceRole");
-            roles.add("Data");
+            OpenSearchInstanceTypes.DATA_ROLE.forEach(roles::add);
             details.add(detail);
         }
         return Response.ok(response).build();
@@ -326,29 +336,35 @@ public class OpenSearchController {
     public Response describeInstanceTypeLimits(@Context HttpHeaders headers,
                                                 @PathParam("engineVersion") String engineVersion,
                                                 @PathParam("instanceType") String instanceType) {
+        OpenSearchInstanceTypes.InstanceTypeSpec spec = OpenSearchInstanceTypes.specOf(instanceType);
+        if (spec == null) {
+            // Generic fallback so freshly announced types don't 404 here.
+            spec = OpenSearchInstanceTypes.genericFallback(instanceType);
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         ObjectNode limitsByRole = response.putObject("LimitsByRole");
         ObjectNode dataRole = limitsByRole.putObject("data");
 
         ArrayNode storageTypes = dataRole.putArray("StorageTypes");
         ObjectNode storageType = objectMapper.createObjectNode();
-        storageType.put("StorageTypeName", "ebs");
-        storageType.put("StorageSubTypeName", "standard");
+        storageType.put("StorageTypeName", spec.storageType());
+        storageType.put("StorageSubTypeName", spec.ebsAttachable() ? "standard" : "managed");
         ArrayNode storageTypeLimits = storageType.putArray("StorageTypeLimits");
         ObjectNode minLimit = objectMapper.createObjectNode();
         minLimit.put("LimitName", "MinimumVolumeSize");
-        minLimit.putArray("LimitValues").add("10");
+        minLimit.putArray("LimitValues").add(String.valueOf(spec.minVolumeSizeGib()));
         storageTypeLimits.add(minLimit);
         ObjectNode maxLimit = objectMapper.createObjectNode();
         maxLimit.put("LimitName", "MaximumVolumeSize");
-        maxLimit.putArray("LimitValues").add("3584");
+        maxLimit.putArray("LimitValues").add(String.valueOf(spec.maxVolumeSizeGib()));
         storageTypeLimits.add(maxLimit);
         storageTypes.add(storageType);
 
         ObjectNode instanceLimits = dataRole.putObject("InstanceLimits");
         ObjectNode instanceCountLimits = instanceLimits.putObject("InstanceCountLimits");
-        instanceCountLimits.put("MinimumInstanceCount", 1);
-        instanceCountLimits.put("MaximumInstanceCount", 20);
+        instanceCountLimits.put("MinimumInstanceCount", spec.minInstanceCount());
+        instanceCountLimits.put("MaximumInstanceCount", spec.maxInstanceCount());
 
         dataRole.putArray("AdditionalLimits");
 
@@ -478,6 +494,119 @@ public class OpenSearchController {
         node.put("Endpoint", domain.getEndpoint() != null ? domain.getEndpoint() : "");
         node.set("ClusterConfig", toClusterConfigNode(domain.getClusterConfig()));
         node.set("EBSOptions", toEbsOptionsNode(domain.getEbsOptions()));
+        if (domain.getVpcOptions() != null) {
+            node.set("VPCOptions", toVpcOptionsNode(domain.getVpcOptions()));
+        }
+        if (domain.getAdvancedSecurityOptions() != null) {
+            node.set("AdvancedSecurityOptions", toAdvancedSecurityNode(domain.getAdvancedSecurityOptions()));
+        }
+        if (domain.getEncryptionAtRestOptions() != null) {
+            node.set("EncryptionAtRestOptions", toEncryptionAtRestNode(domain.getEncryptionAtRestOptions()));
+        }
+        if (domain.getNodeToNodeEncryptionOptions() != null) {
+            node.set("NodeToNodeEncryptionOptions", toNodeToNodeEncryptionNode(domain.getNodeToNodeEncryptionOptions()));
+        }
+        if (domain.getDomainEndpointOptions() != null) {
+            node.set("DomainEndpointOptions", toDomainEndpointOptionsNode(domain.getDomainEndpointOptions()));
+        }
+        return node;
+    }
+
+    /**
+     * Attach optional config sections to {@code DescribeDomainConfig} /
+     * {@code UpdateDomainConfig} responses. Only emit entries that the domain
+     * actually carries — AWS omits the keys entirely when the feature is
+     * unset, rather than emitting empty objects.
+     */
+    private void attachDomainOptionConfigs(ObjectNode domainConfig, Domain domain, long epochSeconds) {
+        if (domain.getVpcOptions() != null) {
+            ObjectNode section = domainConfig.putObject("VPCOptions");
+            section.set("Options", toVpcOptionsNode(domain.getVpcOptions()));
+            section.set("Status", configStatusNode(epochSeconds));
+        }
+        if (domain.getAdvancedSecurityOptions() != null) {
+            ObjectNode section = domainConfig.putObject("AdvancedSecurityOptions");
+            section.set("Options", toAdvancedSecurityNode(domain.getAdvancedSecurityOptions()));
+            section.set("Status", configStatusNode(epochSeconds));
+        }
+        if (domain.getEncryptionAtRestOptions() != null) {
+            ObjectNode section = domainConfig.putObject("EncryptionAtRestOptions");
+            section.set("Options", toEncryptionAtRestNode(domain.getEncryptionAtRestOptions()));
+            section.set("Status", configStatusNode(epochSeconds));
+        }
+        if (domain.getNodeToNodeEncryptionOptions() != null) {
+            ObjectNode section = domainConfig.putObject("NodeToNodeEncryptionOptions");
+            section.set("Options", toNodeToNodeEncryptionNode(domain.getNodeToNodeEncryptionOptions()));
+            section.set("Status", configStatusNode(epochSeconds));
+        }
+        if (domain.getDomainEndpointOptions() != null) {
+            ObjectNode section = domainConfig.putObject("DomainEndpointOptions");
+            section.set("Options", toDomainEndpointOptionsNode(domain.getDomainEndpointOptions()));
+            section.set("Status", configStatusNode(epochSeconds));
+        }
+    }
+
+    private ObjectNode toVpcOptionsNode(VpcOptions vpc) {
+        ObjectNode node = objectMapper.createObjectNode();
+        ArrayNode subnets = node.putArray("SubnetIds");
+        vpc.getSubnetIds().forEach(subnets::add);
+        ArrayNode sgs = node.putArray("SecurityGroupIds");
+        vpc.getSecurityGroupIds().forEach(sgs::add);
+        ArrayNode azs = node.putArray("AvailabilityZones");
+        vpc.getAvailabilityZones().forEach(azs::add);
+        if (vpc.getVpcId() != null) {
+            node.put("VPCId", vpc.getVpcId());
+        }
+        return node;
+    }
+
+    private ObjectNode toAdvancedSecurityNode(AdvancedSecurityOptions adv) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Enabled", adv.isEnabled());
+        node.put("InternalUserDatabaseEnabled", adv.isInternalUserDatabaseEnabled());
+        node.put("AnonymousAuthEnabled", adv.isAnonymousAuthEnabled());
+        if (adv.getAnonymousAuthDisableDate() != null) {
+            node.put("AnonymousAuthDisableDate", adv.getAnonymousAuthDisableDate());
+        }
+        // Only echo username + ARN — never master password (AWS doesn't either).
+        if (adv.getMasterUserOptions() != null) {
+            ObjectNode mu = node.putObject("MasterUserOptions");
+            if (adv.getMasterUserOptions().getMasterUserName() != null) {
+                mu.put("MasterUserName", adv.getMasterUserOptions().getMasterUserName());
+            }
+            if (adv.getMasterUserOptions().getMasterUserArn() != null) {
+                mu.put("MasterUserARN", adv.getMasterUserOptions().getMasterUserArn());
+            }
+        }
+        return node;
+    }
+
+    private ObjectNode toEncryptionAtRestNode(EncryptionAtRestOptions enc) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Enabled", enc.isEnabled());
+        if (enc.getKmsKeyId() != null) {
+            node.put("KmsKeyId", enc.getKmsKeyId());
+        }
+        return node;
+    }
+
+    private ObjectNode toNodeToNodeEncryptionNode(NodeToNodeEncryptionOptions n2n) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("Enabled", n2n.isEnabled());
+        return node;
+    }
+
+    private ObjectNode toDomainEndpointOptionsNode(DomainEndpointOptions deo) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("EnforceHTTPS", deo.isEnforceHttps());
+        node.put("TLSSecurityPolicy", deo.getTlsSecurityPolicy());
+        node.put("CustomEndpointEnabled", deo.isCustomEndpointEnabled());
+        if (deo.getCustomEndpoint() != null) {
+            node.put("CustomEndpoint", deo.getCustomEndpoint());
+        }
+        if (deo.getCustomEndpointCertificateArn() != null) {
+            node.put("CustomEndpointCertificateArn", deo.getCustomEndpointCertificateArn());
+        }
         return node;
     }
 
@@ -554,6 +683,110 @@ public class OpenSearchController {
             ebs.setVolumeSize(node.get("VolumeSize").asInt());
         }
         return ebs;
+    }
+
+    private VpcOptions parseVpcOptions(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        VpcOptions opts = new VpcOptions();
+        List<String> subnets = new ArrayList<>();
+        node.path("SubnetIds").forEach(n -> subnets.add(n.asText()));
+        opts.setSubnetIds(subnets);
+        List<String> sgs = new ArrayList<>();
+        node.path("SecurityGroupIds").forEach(n -> sgs.add(n.asText()));
+        opts.setSecurityGroupIds(sgs);
+        // AvailabilityZones / VPCId are AWS-derived in real life (placement
+        // engine reads them from the subnets), but Terraform plans round-trip
+        // whatever was last seen, so accept them on update too.
+        List<String> azs = new ArrayList<>();
+        node.path("AvailabilityZones").forEach(n -> azs.add(n.asText()));
+        opts.setAvailabilityZones(azs);
+        if (node.has("VPCId")) {
+            opts.setVpcId(node.get("VPCId").asText());
+        }
+        return opts;
+    }
+
+    private AdvancedSecurityOptions parseAdvancedSecurityOptions(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        AdvancedSecurityOptions opts = new AdvancedSecurityOptions();
+        if (node.has("Enabled")) {
+            opts.setEnabled(node.get("Enabled").asBoolean());
+        }
+        if (node.has("InternalUserDatabaseEnabled")) {
+            opts.setInternalUserDatabaseEnabled(node.get("InternalUserDatabaseEnabled").asBoolean());
+        }
+        if (node.has("AnonymousAuthEnabled")) {
+            opts.setAnonymousAuthEnabled(node.get("AnonymousAuthEnabled").asBoolean());
+        }
+        if (node.has("AnonymousAuthDisableDate")) {
+            opts.setAnonymousAuthDisableDate(node.get("AnonymousAuthDisableDate").asText());
+        }
+        JsonNode mu = node.path("MasterUserOptions");
+        if (!mu.isMissingNode() && !mu.isNull()) {
+            AdvancedSecurityOptions.MasterUserOptions m = new AdvancedSecurityOptions.MasterUserOptions();
+            if (mu.has("MasterUserName")) {
+                m.setMasterUserName(mu.get("MasterUserName").asText());
+            }
+            if (mu.has("MasterUserARN")) {
+                m.setMasterUserArn(mu.get("MasterUserARN").asText());
+            }
+            // Master password intentionally not stored — AWS never echoes it
+            // back and we have no use for it without a real security plugin.
+            opts.setMasterUserOptions(m);
+        }
+        return opts;
+    }
+
+    private EncryptionAtRestOptions parseEncryptionAtRestOptions(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        EncryptionAtRestOptions opts = new EncryptionAtRestOptions();
+        if (node.has("Enabled")) {
+            opts.setEnabled(node.get("Enabled").asBoolean());
+        }
+        if (node.has("KmsKeyId")) {
+            opts.setKmsKeyId(node.get("KmsKeyId").asText());
+        }
+        return opts;
+    }
+
+    private NodeToNodeEncryptionOptions parseNodeToNodeEncryptionOptions(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        NodeToNodeEncryptionOptions opts = new NodeToNodeEncryptionOptions();
+        if (node.has("Enabled")) {
+            opts.setEnabled(node.get("Enabled").asBoolean());
+        }
+        return opts;
+    }
+
+    private DomainEndpointOptions parseDomainEndpointOptions(JsonNode node) {
+        if (node == null || node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        DomainEndpointOptions opts = new DomainEndpointOptions();
+        if (node.has("EnforceHTTPS")) {
+            opts.setEnforceHttps(node.get("EnforceHTTPS").asBoolean());
+        }
+        if (node.has("TLSSecurityPolicy")) {
+            opts.setTlsSecurityPolicy(node.get("TLSSecurityPolicy").asText());
+        }
+        if (node.has("CustomEndpointEnabled")) {
+            opts.setCustomEndpointEnabled(node.get("CustomEndpointEnabled").asBoolean());
+        }
+        if (node.has("CustomEndpoint")) {
+            opts.setCustomEndpoint(node.get("CustomEndpoint").asText());
+        }
+        if (node.has("CustomEndpointCertificateArn")) {
+            opts.setCustomEndpointCertificateArn(node.get("CustomEndpointCertificateArn").asText());
+        }
+        return opts;
     }
 
     private Map<String, String> parseTags(JsonNode node) {
