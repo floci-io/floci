@@ -21,6 +21,9 @@ public class ConfigurationSet {
     @JsonProperty("Tags")
     private List<Tag> tags = new ArrayList<>();
 
+    @JsonProperty("EventDestinations")
+    private List<EventDestination> eventDestinations = new ArrayList<>();
+
     public ConfigurationSet() {}
 
     public ConfigurationSet(String name) {
@@ -36,4 +39,9 @@ public class ConfigurationSet {
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags != null ? tags : new ArrayList<>(); }
+
+    public List<EventDestination> getEventDestinations() { return eventDestinations; }
+    public void setEventDestinations(List<EventDestination> eventDestinations) {
+        this.eventDestinations = eventDestinations != null ? eventDestinations : new ArrayList<>();
+    }
 }

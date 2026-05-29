@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -645,6 +646,95 @@ public class SesController {
         try {
             sesService.deleteConfigurationSet(name, region);
             LOG.infov("SES V2 DeleteConfigurationSet: {0}", name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    // ──────────────── Configuration Set Event Destinations ────────────────
+
+    @POST
+    @Path("/configuration-sets/{configurationSetName}/event-destinations")
+    public Response createConfigurationSetEventDestination(@Context HttpHeaders headers,
+                                                           @PathParam("configurationSetName") String configurationSetName,
+                                                           String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = objectMapper.readTree(body);
+            String edName = request.path("EventDestinationName").asText(null);
+            if (edName == null || edName.isBlank()) {
+                throw new AwsException("BadRequestException", "EventDestinationName is required.", 400);
+            }
+            JsonNode edNode = request.path("EventDestination");
+            if (!edNode.isObject()) {
+                throw new AwsException("BadRequestException", "EventDestination is required.", 400);
+            }
+            EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
+            sesService.createConfigurationSetEventDestination(configurationSetName, edName, dest, region);
+            LOG.infov("SES V2 CreateConfigurationSetEventDestination: {0} on {1}", edName, configurationSetName);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (Exception e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/configuration-sets/{configurationSetName}/event-destinations")
+    public Response getConfigurationSetEventDestinations(@Context HttpHeaders headers,
+                                                         @PathParam("configurationSetName") String configurationSetName) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            List<EventDestination> dests =
+                    sesService.getConfigurationSetEventDestinations(configurationSetName, region);
+            ObjectNode result = objectMapper.createObjectNode();
+            ArrayNode arr = result.putArray("EventDestinations");
+            for (EventDestination ed : dests) {
+                arr.add(objectMapper.valueToTree(ed));
+            }
+            return Response.ok(result).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/event-destinations/{eventDestinationName}")
+    public Response updateConfigurationSetEventDestination(@Context HttpHeaders headers,
+                                                           @PathParam("configurationSetName") String configurationSetName,
+                                                           @PathParam("eventDestinationName") String eventDestinationName,
+                                                           String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = objectMapper.readTree(body);
+            JsonNode edNode = request.path("EventDestination");
+            if (!edNode.isObject()) {
+                throw new AwsException("BadRequestException", "EventDestination is required.", 400);
+            }
+            EventDestination dest = objectMapper.treeToValue(edNode, EventDestination.class);
+            sesService.updateConfigurationSetEventDestination(configurationSetName, eventDestinationName, dest, region);
+            LOG.infov("SES V2 UpdateConfigurationSetEventDestination: {0} on {1}",
+                    eventDestinationName, configurationSetName);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (Exception e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @DELETE
+    @Path("/configuration-sets/{configurationSetName}/event-destinations/{eventDestinationName}")
+    public Response deleteConfigurationSetEventDestination(@Context HttpHeaders headers,
+                                                           @PathParam("configurationSetName") String configurationSetName,
+                                                           @PathParam("eventDestinationName") String eventDestinationName) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            sesService.deleteConfigurationSetEventDestination(configurationSetName, eventDestinationName, region);
+            LOG.infov("SES V2 DeleteConfigurationSetEventDestination: {0} on {1}",
+                    eventDestinationName, configurationSetName);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);

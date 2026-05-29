@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
@@ -453,7 +454,7 @@ public class SesService {
     public ConfigurationSet getConfigurationSet(String name, String region) {
         return configSetStore.get(configSetKey(region, name))
                 .orElseThrow(() -> new AwsException("ConfigurationSetDoesNotExist",
-                        "Configuration set " + name + " does not exist.", 400));
+                        "Configuration set <" + name + "> does not exist.", 400));
     }
 
     public List<ConfigurationSet> listConfigurationSets(String region) {
@@ -470,7 +471,7 @@ public class SesService {
         String key = configSetKey(region, name);
         if (configSetStore.get(key).isEmpty()) {
             throw new AwsException("ConfigurationSetDoesNotExist",
-                    "Configuration set " + name + " does not exist.", 400);
+                    "Configuration set <" + name + "> does not exist.", 400);
         }
         configSetStore.delete(key);
         LOG.infov("Deleted SES configuration set: {0} in region {1}", name, region);
@@ -493,6 +494,150 @@ public class SesService {
                     "ConfigurationSetName must be 1-64 characters and may only contain "
                             + "alphanumeric characters, underscores, and hyphens.", 400);
         }
+    }
+
+    private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
+
+    private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
+
+    private static final List<String> VALID_EVENT_TYPES = List.of(
+            "SEND", "REJECT", "BOUNCE", "COMPLAINT", "DELIVERY", "OPEN", "CLICK",
+            "RENDERING_FAILURE", "DELIVERY_DELAY", "SUBSCRIPTION");
+
+    public void createConfigurationSetEventDestination(String configSetName, String eventDestinationName,
+                                                       EventDestination dest, String region) {
+        validateEventDestinationName(eventDestinationName);
+        validateEventDestination(dest);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (indexOfEventDestination(cs.getEventDestinations(), eventDestinationName) >= 0) {
+            throw new AwsException("AlreadyExists",
+                    "An event destination with name <" + eventDestinationName
+                            + "> already exists for configuration set <" + configSetName + ">.", 400);
+        }
+        dest.setName(eventDestinationName);
+        cs.getEventDestinations().add(dest);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Created SES event destination {0} on configuration set {1} in region {2}",
+                eventDestinationName, configSetName, region);
+    }
+
+    public List<EventDestination> getConfigurationSetEventDestinations(String configSetName, String region) {
+        return List.copyOf(getConfigurationSet(configSetName, region).getEventDestinations());
+    }
+
+    public void updateConfigurationSetEventDestination(String configSetName, String eventDestinationName,
+                                                       EventDestination dest, String region) {
+        validateEventDestinationName(eventDestinationName);
+        validateEventDestination(dest);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        int index = indexOfEventDestination(cs.getEventDestinations(), eventDestinationName);
+        if (index < 0) {
+            throw new AwsException("NotFoundException",
+                    "An event destination with name <" + eventDestinationName
+                            + "> does not exist for configuration set <" + configSetName + ">.", 404);
+        }
+        dest.setName(eventDestinationName);
+        cs.getEventDestinations().set(index, dest);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated SES event destination {0} on configuration set {1} in region {2}",
+                eventDestinationName, configSetName, region);
+    }
+
+    public void deleteConfigurationSetEventDestination(String configSetName, String eventDestinationName,
+                                                       String region) {
+        validateEventDestinationName(eventDestinationName);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        boolean removed = cs.getEventDestinations().removeIf(ed -> eventDestinationName.equals(ed.getName()));
+        if (!removed) {
+            throw new AwsException("NotFoundException",
+                    "An event destination with name <" + eventDestinationName
+                            + "> does not exist for configuration set <" + configSetName + ">.", 404);
+        }
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Deleted SES event destination {0} on configuration set {1} in region {2}",
+                eventDestinationName, configSetName, region);
+    }
+
+    private static int indexOfEventDestination(List<EventDestination> destinations, String name) {
+        for (int i = 0; i < destinations.size(); i++) {
+            if (name != null && name.equals(destinations.get(i).getName())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    static void validateEventDestinationName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "EventDestinationName is required.", 400);
+        }
+        if (!EVENT_DESTINATION_NAME_CHARS.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid event destination name <" + name + ">: only alphanumeric ASCII characters, "
+                            + "'_', and '-' are allowed.", 400);
+        }
+        if (name.length() > MAX_EVENT_DESTINATION_NAME_LENGTH) {
+            throw new AwsException("InvalidParameterValue",
+                    "Event destination name cannot exceed 64 characters.", 400);
+        }
+    }
+
+    static void validateEventDestination(EventDestination dest) {
+        if (dest == null) {
+            throw new AwsException("InvalidParameterValue", "EventDestination is required.", 400);
+        }
+        List<String> types = dest.getMatchingEventTypes();
+        if (types == null || types.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "At least one event type must be specified.", 400);
+        }
+        for (String t : types) {
+            if (t == null || !VALID_EVENT_TYPES.contains(t)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid event type: " + t + ". Valid values are " + VALID_EVENT_TYPES + ".", 400);
+            }
+        }
+        int destinationCount = countDestinations(dest);
+        if (destinationCount == 0) {
+            throw new AwsException("InvalidParameterValue", "Event destination is not provided.", 400);
+        }
+        if (destinationCount > 1) {
+            throw new AwsException("InvalidParameterValue",
+                    "Please provide only one destination with each request. Either a Firehose Destination "
+                            + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.", 400);
+        }
+        if (dest.getCloudWatchDestination() != null
+                && (dest.getCloudWatchDestination().getDimensionConfigurations() == null
+                || dest.getCloudWatchDestination().getDimensionConfigurations().isEmpty())) {
+            throw new AwsException("InvalidParameterValue",
+                    "CloudWatch metrics dimension configuration list cannot be empty.", 400);
+        }
+        if (dest.getPinpointDestination() != null
+                && (dest.getPinpointDestination().getApplicationArn() == null
+                || dest.getPinpointDestination().getApplicationArn().isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid Pinpoint application ARN provided: "
+                            + dest.getPinpointDestination().getApplicationArn() + ".", 400);
+        }
+    }
+
+    private static int countDestinations(EventDestination dest) {
+        int count = 0;
+        if (dest.getSnsDestination() != null) {
+            count++;
+        }
+        if (dest.getCloudWatchDestination() != null) {
+            count++;
+        }
+        if (dest.getKinesisFirehoseDestination() != null) {
+            count++;
+        }
+        if (dest.getEventBridgeDestination() != null) {
+            count++;
+        }
+        if (dest.getPinpointDestination() != null) {
+            count++;
+        }
+        return count;
     }
 
     public List<Tag> listResourceTags(String arn, String region) {

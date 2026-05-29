@@ -204,10 +204,7 @@ public class Ec2Service {
         // Resolve subnet
         Subnet subnet = null;
         if (subnetId != null && !subnetId.isEmpty()) {
-            subnet = subnets.get(key(region, subnetId));
-            if (subnet == null) {
-                throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
-            }
+            subnet = getRequiredSubnet(region, subnetId);
         } else {
             // Pick first default subnet
             subnet = subnets.values().stream()
@@ -224,10 +221,7 @@ public class Ec2Service {
         List<GroupIdentifier> sgIdentifiers = new ArrayList<>();
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             for (String sgId : securityGroupIds) {
-                SecurityGroup sg = securityGroups.get(key(region, sgId));
-                if (sg == null) {
-                    throw new AwsException("InvalidGroup.NotFound", "The security group '" + sgId + "' does not exist", 400);
-                }
+                SecurityGroup sg = getRequiredSecurityGroup(region, sgId);
                 sgIdentifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
             }
         } else {
@@ -324,7 +318,15 @@ public class Ec2Service {
 
         return reservation;
     }
+    
+    private Subnet getRequiredSubnet(String region, String subnetId) {
+        Subnet subnet = subnets.get(key(region, subnetId));
+        if (subnet == null) 
+            throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
 
+        return subnet;
+    }
+    
     private String assignPrivateIp(String region, String subnetId) {
         if (subnetId == null) {
             return "172.31.0." + (10 + new Random().nextInt(200));
@@ -346,12 +348,10 @@ public class Ec2Service {
         ensureDefaultResources(region);
         if (!instanceIds.isEmpty()) {
             for (String id : instanceIds) {
-                if (instances.get(key(region, id)) == null) {
-                    throw new AwsException("InvalidInstanceID.NotFound",
-                            "The instance ID '" + id + "' does not exist", 400);
-                }
+                getRequiredInstance(region, id);
             }
         }
+
         if (config.services().ec2().mock()) {
             instances.values().stream()
                     .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
@@ -379,10 +379,8 @@ public class Ec2Service {
         ensureDefaultResources(region);
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
-            Instance inst = instances.get(key(region, id));
-            if (inst == null) {
-                throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
-            }
+            Instance inst = getRequiredInstance(region, id);
+            
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
             }
@@ -412,10 +410,8 @@ public class Ec2Service {
         ensureDefaultResources(region);
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
-            Instance inst = instances.get(key(region, id));
-            if (inst == null) {
-                throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
-            }
+            Instance inst = getRequiredInstance(region, id);
+            
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
             }
@@ -440,10 +436,8 @@ public class Ec2Service {
         ensureDefaultResources(region);
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
-            Instance inst = instances.get(key(region, id));
-            if (inst == null) {
-                throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
-            }
+           Instance inst = getRequiredInstance(region, id);
+
             if ("terminated".equals(inst.getState().getName())) {
                 throw new AwsException("IncorrectInstanceState",
                         "The instance '" + id + "' is not in a state from which it can be started.", 400);
@@ -468,10 +462,8 @@ public class Ec2Service {
     public void rebootInstances(String region, List<String> instanceIds) {
         ensureDefaultResources(region);
         for (String id : instanceIds) {
-            Instance inst = instances.get(key(region, id));
-            if (inst == null) {
-                throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + id + "' does not exist", 400);
-            }
+            Instance inst = getRequiredInstance(region, id);
+
             if (!config.services().ec2().mock()) {
                 containerManager.reboot(inst);
             }
@@ -506,25 +498,29 @@ public class Ec2Service {
 
     public Instance describeInstanceAttribute(String region, String instanceId, String attribute) {
         ensureDefaultResources(region);
-        Instance inst = instances.get(key(region, instanceId));
-        if (inst == null) {
-            throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + instanceId + "' does not exist", 400);
-        }
+        Instance inst = getRequiredInstance(region, instanceId);
+
         return inst;
     }
 
     public void modifyInstanceAttribute(String region, String instanceId, String attribute, String value) {
         ensureDefaultResources(region);
-        Instance inst = instances.get(key(region, instanceId));
-        if (inst == null) {
-            throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + instanceId + "' does not exist", 400);
-        }
+        Instance inst = getRequiredInstance(region, instanceId);
+
         // basic attribute modifications
         switch (attribute) {
             case "instanceType" -> inst.setInstanceType(value);
             case "sourceDestCheck" -> inst.setSourceDestCheck(Boolean.parseBoolean(value));
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
         }
+    }
+
+    private Instance getRequiredInstance(String region, String instanceId) {
+        Instance inst = instances.get(key(region, instanceId));
+        if (inst == null) 
+            throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + instanceId + "' does not exist", 400);
+        
+        return inst;
     }
 
     // ─── VPCs ──────────────────────────────────────────────────────────────────
@@ -549,10 +545,7 @@ public class Ec2Service {
         ensureDefaultResources(region);
         if (!vpcIds.isEmpty()) {
             for (String id : vpcIds) {
-                if (vpcs.get(key(region, id)) == null) {
-                    throw new AwsException("InvalidVpcID.NotFound",
-                            "The vpc ID '" + id + "' does not exist", 400);
-                }
+                getRequiredVpc(region, id);
             }
         }
         return vpcs.values().stream()
@@ -564,19 +557,15 @@ public class Ec2Service {
 
     public void deleteVpc(String region, String vpcId) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        getRequiredVpc(region, vpcId);
+
         vpcs.remove(key(region, vpcId));
     }
 
     public void modifyVpcAttribute(String region, String vpcId, String attribute, String value) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = getRequiredVpc(region, vpcId);
+
         switch (attribute) {
             case "enableDnsSupport"                    -> vpc.setEnableDnsSupport(Boolean.parseBoolean(value));
             case "enableDnsHostnames"                  -> vpc.setEnableDnsHostnames(Boolean.parseBoolean(value));
@@ -587,10 +576,8 @@ public class Ec2Service {
 
     public Vpc describeVpcAttribute(String region, String vpcId, String attribute) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = getRequiredVpc(region, vpcId);
+
         return vpc;
     }
 
@@ -605,10 +592,8 @@ public class Ec2Service {
 
     public VpcCidrBlockAssociation associateVpcCidrBlock(String region, String vpcId, String cidrBlock) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = getRequiredVpc(region, vpcId);
+
         VpcCidrBlockAssociation assoc = new VpcCidrBlockAssociation(
                 "vpc-cidr-assoc-" + randomHex(8), cidrBlock);
         vpc.getCidrBlockAssociationSet().add(assoc);
@@ -628,10 +613,8 @@ public class Ec2Service {
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        getRequiredVpc(region, vpcId);
+
         String subnetId = "subnet-" + randomHex(8);
         Subnet subnet = new Subnet();
         subnet.setSubnetId(subnetId);
@@ -666,10 +649,7 @@ public class Ec2Service {
 
     public void modifySubnetAttribute(String region, String subnetId, String attribute, String value) {
         ensureDefaultResources(region);
-        Subnet subnet = subnets.get(key(region, subnetId));
-        if (subnet == null) {
-            throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
-        }
+        Subnet subnet = getRequiredSubnet(region, subnetId);
         switch (attribute) {
             case "mapPublicIpOnLaunch"           -> subnet.setMapPublicIpOnLaunch(Boolean.parseBoolean(value));
             case "assignIpv6AddressOnCreation"   -> subnet.setAssignIpv6AddressOnCreation(Boolean.parseBoolean(value));
@@ -683,9 +663,7 @@ public class Ec2Service {
     public SecurityGroup createSecurityGroup(String region, String groupName, String description, String vpcId) {
         ensureDefaultResources(region);
         if (vpcId != null && !vpcId.isEmpty()) {
-            if (vpcs.get(key(region, vpcId)) == null) {
-                throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-            }
+            getRequiredVpc(region, vpcId);
         } else {
             vpcId = "vpc-default";
         }
@@ -734,10 +712,8 @@ public class Ec2Service {
 
     public List<SecurityGroupRule> authorizeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = securityGroups.get(key(region, groupId));
-        if (sg == null) {
-            throw new AwsException("InvalidGroup.NotFound", "The security group '" + groupId + "' does not exist", 400);
-        }
+        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+
         List<SecurityGroupRule> rules = new ArrayList<>();
         for (IpPermission perm : permissions) {
             sg.getIpPermissions().add(perm);
@@ -748,10 +724,8 @@ public class Ec2Service {
 
     public List<SecurityGroupRule> authorizeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = securityGroups.get(key(region, groupId));
-        if (sg == null) {
-            throw new AwsException("InvalidGroup.NotFound", "The security group '" + groupId + "' does not exist", 400);
-        }
+        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+
         List<SecurityGroupRule> rules = new ArrayList<>();
         for (IpPermission perm : permissions) {
             sg.getIpPermissionsEgress().add(perm);
@@ -795,20 +769,24 @@ public class Ec2Service {
 
     public void revokeSecurityGroupIngress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = securityGroups.get(key(region, groupId));
-        if (sg == null) {
-            throw new AwsException("InvalidGroup.NotFound", "The security group '" + groupId + "' does not exist", 400);
-        }
+        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+
         sg.getIpPermissions().removeIf(p -> matchesAnyPermission(p, permissions));
     }
 
     public void revokeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {
         ensureDefaultResources(region);
-        SecurityGroup sg = securityGroups.get(key(region, groupId));
-        if (sg == null) {
-            throw new AwsException("InvalidGroup.NotFound", "The security group '" + groupId + "' does not exist", 400);
-        }
+        SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+
         sg.getIpPermissionsEgress().removeIf(p -> matchesAnyPermission(p, permissions));
+    }
+
+    private SecurityGroup getRequiredSecurityGroup(String region, String groupId) {
+        SecurityGroup sg = securityGroups.get(key(region, groupId));
+        if (sg == null)
+            throw new AwsException("InvalidGroup.NotFound", "The security group '" + groupId + "' does not exist", 400);
+        
+        return sg;
     }
 
     private boolean matchesAnyPermission(IpPermission existing, List<IpPermission> toRemove) {
@@ -1092,30 +1070,32 @@ public class Ec2Service {
 
     public void attachInternetGateway(String region, String igwId, String vpcId) {
         ensureDefaultResources(region);
-        InternetGateway igw = internetGateways.get(key(region, igwId));
-        if (igw == null) {
-            throw new AwsException("InvalidInternetGatewayID.NotFound", "The internet gateway '" + igwId + "' does not exist", 400);
-        }
+        InternetGateway igw = getRequiredInternetGateway(region, igwId);
+
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
     }
 
     public void detachInternetGateway(String region, String igwId, String vpcId) {
         ensureDefaultResources(region);
-        InternetGateway igw = internetGateways.get(key(region, igwId));
-        if (igw == null) {
-            throw new AwsException("InvalidInternetGatewayID.NotFound", "The internet gateway '" + igwId + "' does not exist", 400);
-        }
+        InternetGateway igw = getRequiredInternetGateway(region, igwId);
+
         igw.getAttachments().removeIf(a -> a.getVpcId().equals(vpcId));
+    }
+
+    private InternetGateway getRequiredInternetGateway(String region, String igwId) {
+        InternetGateway igw = internetGateways.get(key(region, igwId));
+        if (igw == null) 
+            throw new AwsException("InvalidInternetGatewayID.NotFound", "The internet gateway '" + igwId + "' does not exist", 400);
+        
+        return igw; 
     }
 
     // ─── Route Tables ──────────────────────────────────────────────────────────
 
     public RouteTable createRouteTable(String region, String vpcId) {
         ensureDefaultResources(region);
-        Vpc vpc = vpcs.get(key(region, vpcId));
-        if (vpc == null) {
-            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
-        }
+        Vpc vpc = getRequiredVpc(region, vpcId); 
+
         String rtId = "rtb-" + randomHex(8);
         RouteTable rt = new RouteTable();
         rt.setRouteTableId(rtId);
@@ -1126,6 +1106,14 @@ public class Ec2Service {
         routeTables.put(key(region, rtId), rt);
         return rt;
     }
+
+    private Vpc getRequiredVpc(String region, String vpcId) {
+        Vpc vpc = vpcs.get(key(region, vpcId));
+        if (vpc == null)
+            throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
+
+        return vpc;
+    }       
 
     public List<RouteTable> describeRouteTables(String region, List<String> routeTableIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
@@ -1145,10 +1133,8 @@ public class Ec2Service {
 
     public RouteTableAssociation associateRouteTable(String region, String routeTableId, String subnetId) {
         ensureDefaultResources(region);
-        RouteTable rt = routeTables.get(key(region, routeTableId));
-        if (rt == null) {
-            throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
-        }
+        RouteTable rt = getRequiredRouteTable(region, routeTableId);
+
         String assocId = "rtbassoc-" + randomHex(8);
         RouteTableAssociation assoc = new RouteTableAssociation();
         assoc.setRouteTableAssociationId(assocId);
@@ -1171,20 +1157,24 @@ public class Ec2Service {
 
     public void createRoute(String region, String routeTableId, String destinationCidrBlock, String gatewayId) {
         ensureDefaultResources(region);
-        RouteTable rt = routeTables.get(key(region, routeTableId));
-        if (rt == null) {
-            throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
-        }
+        RouteTable rt = getRequiredRouteTable(region, routeTableId);
+
         rt.getRoutes().add(new Route(destinationCidrBlock, gatewayId, "CreateRoute"));
     }
 
     public void deleteRoute(String region, String routeTableId, String destinationCidrBlock) {
         ensureDefaultResources(region);
-        RouteTable rt = routeTables.get(key(region, routeTableId));
-        if (rt == null) {
-            throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
-        }
+        RouteTable rt = getRequiredRouteTable(region, routeTableId);
+
         rt.getRoutes().removeIf(r -> r.getDestinationCidrBlock().equals(destinationCidrBlock));
+    }
+
+    private RouteTable getRequiredRouteTable(String region, String routeTableId) {
+        RouteTable rt = routeTables.get(key(region, routeTableId));
+        if (rt == null) 
+            throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
+        
+        return rt;
     }
 
     // ─── Elastic IPs ───────────────────────────────────────────────────────────
@@ -1203,12 +1193,18 @@ public class Ec2Service {
 
     public Address associateAddress(String region, String allocationId, String instanceId) {
         ensureDefaultResources(region);
-        Address addr = addresses.get(key(region, allocationId));
-        if (addr == null) {
-            throw new AwsException("InvalidAllocationID.NotFound", "The allocation ID '" + allocationId + "' does not exist", 400);
-        }
+        Address addr = getRequiredAddress(region, allocationId);
+
         addr.setInstanceId(instanceId);
         addr.setAssociationId("eipassoc-" + randomHex(17));
+        return addr;
+    }
+
+    private Address getRequiredAddress(String region, String allocationId) {
+        Address addr = addresses.get(key(region, allocationId));
+        if (addr == null) 
+            throw new AwsException("InvalidAllocationID.NotFound", "The allocation ID '" + allocationId + "' does not exist", 400);
+        
         return addr;
     }
 
