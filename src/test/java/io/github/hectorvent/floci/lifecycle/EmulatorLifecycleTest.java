@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoll
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
@@ -56,6 +57,7 @@ class EmulatorLifecycleTest {
     @Mock private DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
+    @Mock private EcrRegistryManager ecrRegistryManager;
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
 
@@ -74,7 +76,7 @@ class EmulatorLifecycleTest {
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, initLifecycleState);
+                pipesService, ec2MetadataServer, ecrRegistryManager, initLifecycleState);
     }
 
     private void stubStorageConfig() {

@@ -526,8 +526,9 @@ public class S3Service {
             if (toDelete != null && !toDelete.isDeleteMarker()) {
                 checkLockProtection(toDelete, bypassGovernance);
             }
-            // Permanently delete a specific version
+            // Permanently delete a specific version (metadata + file data)
             objectStore.delete(versionedKey(bucketName, key, versionId));
+            deleteVersionedFile(bucketName, key, versionId);
             LOG.debugv("Permanently deleted version: {0}/{1} v={2}", bucketName, key, versionId);
             // Promote the next most-recent version when the deleted one was the latest
             String latestKey = objectKey(bucketName, key);
@@ -537,6 +538,7 @@ public class S3Service {
                     List<S3Object> remaining = objectStore.scan(k -> k.startsWith(vPrefix));
                     if (remaining.isEmpty()) {
                         objectStore.delete(latestKey);
+                        deleteFile(bucketName, key);
                     } else {
                         S3Object newLatest = remaining.stream()
                                 .max(Comparator.comparing(S3Object::getLastModified))
@@ -544,6 +546,17 @@ public class S3Service {
                         newLatest.setLatest(true);
                         objectStore.put(versionedKey(bucketName, key, newLatest.getVersionId()), newLatest);
                         objectStore.put(latestKey, newLatest);
+                        // Delete markers have no versioned file — readVersionedFile throws in persistent mode.
+                        if (newLatest.isDeleteMarker()) {
+                            deleteFile(bucketName, key);
+                        } else {
+                            byte[] promotedData = readVersionedFile(bucketName, key, newLatest.getVersionId());
+                            if (promotedData != null) {
+                                writeFile(bucketName, key, promotedData);
+                            } else {
+                                deleteFile(bucketName, key);
+                            }
+                        }
                     }
                 }
             });
@@ -2090,6 +2103,18 @@ public class S3Service {
         }
     }
 
+    private void deleteVersionedFile(String bucketName, String key, String versionId) {
+        if (inMemory) {
+            memoryDataStore.remove(versionedKey(bucketName, key, versionId));
+            return;
+        }
+        try {
+            Files.deleteIfExists(resolveVersionedPath(bucketName, key, versionId));
+        } catch (IOException e) {
+            LOG.errorv(e, "Failed to delete versioned S3 object file: {0}/{1} v={2}", bucketName, key, versionId);
+        }
+    }
+
     private void deleteDirectory(Path dir) {
         if (!Files.exists(dir)) return;
         try (var walk = Files.walk(dir)) {
@@ -2135,6 +2160,11 @@ public class S3Service {
         String effectiveServerSideEncryption = normalizedServerSideEncryption != null
                 ? normalizedServerSideEncryption
                 : source.getServerSideEncryption();
+        boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
+        Map<String, String> effectiveTags = replaceTags
+                ? effectiveOptions.getReplacementTagging()
+                : source.getTags();
+
         S3Object copy = storeObject(destBucket, destKey, source.getData(), effectiveContentType, metadata,
                 source.getChecksum(), source.getParts(),
                 new PutObjectOptions()
@@ -2143,7 +2173,8 @@ public class S3Service {
                         .withContentDisposition(effectiveContentDisposition)
                         .withCacheControl(effectiveCacheControl)
                         .withServerSideEncryption(effectiveServerSideEncryption)
-                        .withAcl(effectiveOptions.getAcl()));
+                        .withAcl(effectiveOptions.getAcl())
+                        .withTagging(effectiveTags));
         copy.setETag(source.getETag());
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
         fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);

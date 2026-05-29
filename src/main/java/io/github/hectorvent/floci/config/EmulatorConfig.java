@@ -62,6 +62,8 @@ public interface EmulatorConfig {
 
     AuthConfig auth();
 
+    SecurityConfig security();
+
     ServicesConfig services();
 
     DockerConfig docker();
@@ -89,6 +91,15 @@ public interface EmulatorConfig {
          * </pre>
          */
         Optional<List<String>> extraSuffixes();
+    }
+
+    interface SecurityConfig {
+        Optional<List<String>> extraCorsAllowedOrigins();
+        Optional<List<String>> extraCorsAllowedHeaders();
+        Optional<List<String>> extraCorsExposeHeaders();
+
+        @WithDefault("false")
+        boolean disableCorsHeaders();
     }
 
     interface StorageConfig {
@@ -577,6 +588,9 @@ public interface EmulatorConfig {
     interface CloudFormationServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("30")
+        long deletedStackRetentionSeconds();
     }
 
     interface AcmServiceConfig {
@@ -639,8 +653,14 @@ public interface EmulatorConfig {
         @WithDefault("false")
         boolean mock();
 
-        @WithDefault("opensearchproject/opensearch:2")
-        String defaultImage();
+        /**
+         * Optional fixed image used for every domain regardless of the
+         * requested {@code EngineVersion}. Useful for operators running a
+         * private registry mirror or pinning a specific patch tag. When unset
+         * (the common case), images resolve from
+         * {@code OpenSearchVersions.imageFor(...)} per the requested version.
+         */
+        Optional<String> defaultImage();
 
         @WithDefault("9400")
         int proxyBasePort();

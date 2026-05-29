@@ -84,7 +84,6 @@ floci:
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
-      cloudfront:
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
@@ -97,6 +96,15 @@ floci:
   auth:
     validate-signatures: false
     presign-secret: local-emulator-secret
+
+  security:
+    # Comma-separated browser origins allowed by the global CORS filter.
+    # Env var: EXTRA_CORS_ALLOWED_ORIGINS=http://localhost:3000
+    # extra-cors-allowed-origins:
+    # Extra request/response CORS header names for browser clients.
+    # extra-cors-allowed-headers:
+    # extra-cors-expose-headers:
+    disable-cors-headers: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
@@ -215,7 +223,10 @@ floci:
     opensearch:
       enabled: true
       mock: false
-      default-image: "opensearchproject/opensearch:2"
+      # default-image: optional override; uncomment to lock every domain to a
+      # single image (e.g. private registry mirror). When unset, the image is
+      # picked from OpenSearchVersions.imageFor(EngineVersion).
+      # default-image: "registry.example.com/opensearch:2.19.5"
       proxy-base-port: 9400
       proxy-max-port: 9499
       keep-running-on-shutdown: false

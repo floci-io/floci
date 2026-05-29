@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
+import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -40,6 +41,11 @@ public class KmsJsonHandler {
             case "GetPublicKey" -> handleGetPublicKey(request, region);
             case "DescribeKey" -> handleDescribeKey(request, region);
             case "ListKeys" -> handleListKeys(request, region);
+            case "CreateGrant" -> handleCreateGrant(request, region);
+            case "ListGrants" -> handleListGrants(request, region);
+            case "ListRetirableGrants" -> handleListRetirableGrants(request, region);
+            case "RevokeGrant" -> handleRevokeGrant(request, region);
+            case "RetireGrant" -> handleRetireGrant(request, region);
             case "Encrypt" -> handleEncrypt(request, region);
             case "Decrypt" -> handleDecrypt(request, region);
             case "ReEncrypt" -> handleReEncrypt(request, region);
@@ -139,6 +145,107 @@ public class KmsJsonHandler {
         }
         response.put("Truncated", false);
         return Response.ok(response).build();
+    }
+
+    private Response handleListGrants(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText();
+        String marker = request.path("Marker").isMissingNode() ? null : request.path("Marker").asText(null);
+        Integer limit = request.path("Limit").isMissingNode() ? null : request.path("Limit").asInt();
+        String grantId = request.path("GrantId").isMissingNode() ? null : request.path("GrantId").asText(null);
+        String granteePrincipal = request.path("GranteePrincipal").isMissingNode() ? null : request.path("GranteePrincipal").asText(null);
+
+        Map<String, Object> result = service.listGrants(keyId, region, marker, limit, grantId, granteePrincipal);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> grants = (List<Map<String, Object>>) result.get("Grants");
+        ArrayNode array = response.putArray("Grants");
+        for (Map<String, Object> grant : grants) {
+            ObjectNode entry = array.addObject();
+            entry.put("GrantId", (String) grant.get("GrantId"));
+            entry.put("KeyId", (String) grant.get("KeyId"));
+            entry.put("GranteePrincipal", (String) grant.get("GranteePrincipal"));
+            entry.put("CreationDate", ((Number) grant.get("CreationDate")).longValue());
+            ArrayNode operations = entry.putArray("Operations");
+            @SuppressWarnings("unchecked")
+            List<String> operationValues = (List<String>) grant.get("Operations");
+            operationValues.forEach(operations::add);
+            if (grant.get("RetiringPrincipal") != null) {
+                entry.put("RetiringPrincipal", (String) grant.get("RetiringPrincipal"));
+            }
+        }
+        response.put("Truncated", (boolean) result.get("Truncated"));
+        if (Boolean.TRUE.equals(result.get("Truncated"))) {
+            response.put("NextMarker", (String) result.get("NextMarker"));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleListRetirableGrants(JsonNode request, String region) {
+        String retiringPrincipal = request.path("RetiringPrincipal").asText(null);
+        String marker = request.path("Marker").isMissingNode() ? null : request.path("Marker").asText(null);
+        Integer limit = request.path("Limit").isMissingNode() ? null : request.path("Limit").asInt();
+
+        Map<String, Object> result = service.listRetirableGrants(retiringPrincipal, region, marker, limit);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> grants = (List<Map<String, Object>>) result.get("Grants");
+        ArrayNode array = response.putArray("Grants");
+        for (Map<String, Object> grant : grants) {
+            ObjectNode entry = array.addObject();
+            entry.put("GrantId", (String) grant.get("GrantId"));
+            entry.put("KeyId", (String) grant.get("KeyId"));
+            entry.put("GranteePrincipal", (String) grant.get("GranteePrincipal"));
+            entry.put("CreationDate", ((Number) grant.get("CreationDate")).longValue());
+            ArrayNode operations = entry.putArray("Operations");
+            @SuppressWarnings("unchecked")
+            List<String> operationValues = (List<String>) grant.get("Operations");
+            operationValues.forEach(operations::add);
+            if (grant.get("RetiringPrincipal") != null) {
+                entry.put("RetiringPrincipal", (String) grant.get("RetiringPrincipal"));
+            }
+        }
+        response.put("Truncated", (boolean) result.get("Truncated"));
+        if (Boolean.TRUE.equals(result.get("Truncated"))) {
+            response.put("NextMarker", (String) result.get("NextMarker"));
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleCreateGrant(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText(null);
+        String granteePrincipal = request.path("GranteePrincipal").asText(null);
+        List<String> operations = new java.util.ArrayList<>();
+        request.path("Operations").forEach(operation -> operations.add(operation.asText()));
+        String retiringPrincipal = request.path("RetiringPrincipal").isMissingNode()
+                ? null : request.path("RetiringPrincipal").asText(null);
+
+        KmsGrant grant = service.createGrant(keyId, granteePrincipal, operations, retiringPrincipal, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("GrantId", grant.getGrantId());
+        response.put("GrantToken", grant.getGrantToken());
+        return Response.ok(response).build();
+    }
+
+    private Response handleRevokeGrant(JsonNode request, String region) {
+        String keyId = request.path("KeyId").asText(null);
+        String grantId = request.path("GrantId").asText(null);
+
+        service.revokeGrant(keyId, grantId, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleRetireGrant(JsonNode request, String region) {
+        String grantToken = request.path("GrantToken").isMissingNode()
+                ? null : request.path("GrantToken").asText(null);
+        String keyId = request.path("KeyId").isMissingNode()
+                ? null : request.path("KeyId").asText(null);
+        String grantId = request.path("GrantId").isMissingNode()
+                ? null : request.path("GrantId").asText(null);
+
+        service.retireGrant(grantToken, keyId, grantId, region);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleEncrypt(JsonNode request, String region) {

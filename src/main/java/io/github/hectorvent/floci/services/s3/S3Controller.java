@@ -653,7 +653,8 @@ public class S3Controller {
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        appendObjectHeaders(resp, obj, overrides);
+        // includeChecksum=false: the stored checksum covers the whole object, not this range.
+        appendObjectHeaders(resp, obj, overrides, false);
         return resp.build();
     }
 
@@ -1547,6 +1548,14 @@ public class S3Controller {
     }
 
     private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides) {
+        appendObjectHeaders(resp, obj, overrides, true);
+    }
+
+    // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
+    // whole-object checksum, which does not match the range bytes returned. SDKs that
+    // validate it against the received body fail. Real S3 omits it on ranged responses.
+    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides,
+                                     boolean includeChecksum) {
         if (obj.getStorageClass() != null) {
             resp.header("x-amz-storage-class", obj.getStorageClass());
         }
@@ -1576,7 +1585,9 @@ public class S3Controller {
                 resp.header("x-amz-meta-" + entry.getKey(), entry.getValue());
             }
         }
-        appendChecksumHeaders(resp, obj.getChecksum());
+        if (includeChecksum) {
+            appendChecksumHeaders(resp, obj.getChecksum());
+        }
         appendLockHeaders(resp, obj);
     }
 
@@ -1619,11 +1630,18 @@ public class S3Controller {
         String copyCacheControl = httpHeaders.getHeaderString("Cache-Control");
         String copyServerSideEncryption = httpHeaders.getHeaderString("x-amz-server-side-encryption");
         String cannedAcl = httpHeaders.getHeaderString("x-amz-acl");
+        String taggingDirective = httpHeaders.getHeaderString("x-amz-tagging-directive");
+        String taggingHeader = httpHeaders.getHeaderString("x-amz-tagging");
+        Map<String, String> replacementTagging = "REPLACE".equalsIgnoreCase(taggingDirective)
+                ? (taggingHeader != null ? parseInlineTaggingHeader(taggingHeader) : Map.of())
+                : null;
         S3Object copy = s3Service.copyObject(sourceBucket, sourceObject.objectKey(), destBucket, destKey,
                 sourceObject.versionId(),
                 new CopyObjectOptions()
                         .withMetadataDirective(httpHeaders.getHeaderString("x-amz-metadata-directive"))
                         .withReplacementMetadata(extractUserMetadata(httpHeaders))
+                        .withTaggingDirective(taggingDirective)
+                        .withReplacementTagging(replacementTagging)
                         .withStorageClass(httpHeaders.getHeaderString("x-amz-storage-class"))
                         .withContentType(contentType)
                         .withContentEncoding(copyContentEncoding)
