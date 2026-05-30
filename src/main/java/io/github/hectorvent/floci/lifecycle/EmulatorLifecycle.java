@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoll
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.Quarkus;
@@ -49,6 +50,7 @@ public class EmulatorLifecycle {
     private final ElastiCacheProxyManager elastiCacheProxyManager;
     private final RdsContainerManager rdsContainerManager;
     private final RdsProxyManager rdsProxyManager;
+    private final RdsService rdsService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
@@ -66,6 +68,7 @@ public class EmulatorLifecycle {
                              ElastiCacheProxyManager elastiCacheProxyManager,
                              RdsContainerManager rdsContainerManager,
                              RdsProxyManager rdsProxyManager,
+                             RdsService rdsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
@@ -82,6 +85,7 @@ public class EmulatorLifecycle {
         this.elastiCacheProxyManager = elastiCacheProxyManager;
         this.rdsContainerManager = rdsContainerManager;
         this.rdsProxyManager = rdsProxyManager;
+        this.rdsService = rdsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
@@ -117,6 +121,7 @@ public class EmulatorLifecycle {
         kinesisPoller.startPersistedPollers();
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
+        rdsService.restorePersistedRuntime();
 
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.start().exceptionally(ex -> {
