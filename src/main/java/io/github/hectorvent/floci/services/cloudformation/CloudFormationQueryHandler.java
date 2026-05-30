@@ -212,7 +212,7 @@ public class CloudFormationQueryHandler {
         String stackName = params.getFirst("StackName");
         String changeSetName = params.getFirst("ChangeSetName");
         try {
-            cfnService.executeChangeSet(stackName, changeSetName, region);
+            awaitExecution(cfnService.executeChangeSet(stackName, changeSetName, region));
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
         }
