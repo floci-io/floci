@@ -13,7 +13,7 @@
     <description>Fast, free, open-source local AWS emulator supporting SSM, SQS, SNS, SES, S3, DynamoDB, Lambda, API Gateway, Cognito, KMS, Kinesis, Secrets Manager, CloudFormation, Step Functions, IAM, STS, ElastiCache, RDS, EventBridge, and CloudWatch</description>
 
     <properties>
-        <maven.compiler.release>25</maven.compiler.release>
+        <maven.compiler.release>24</maven.compiler.release>
         <maven.compiler.compilerArgs>--enable-preview</maven.compiler.compilerArgs>
         <argLine>--enable-preview</argLine>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
@@ -266,6 +266,27 @@
                     </systemPropertyVariables>
                 </configuration>
             </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <id>enforce-java</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[25,26)</version>
+                                    <message>Floci requires JDK 25. Set JAVA_HOME to JDK 25.</message>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
         </plugins>
     </build>
 
@@ -280,7 +301,6 @@
             <properties>
                 <skipITs>true</skipITs>
                 <quarkus.native.enabled>true</quarkus.native.enabled>
-                <maven.compiler.release>24</maven.compiler.release>
             </properties>
         </profile>
     </profiles>
