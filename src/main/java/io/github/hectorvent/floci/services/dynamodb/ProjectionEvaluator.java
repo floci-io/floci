@@ -142,15 +142,17 @@ final class ProjectionEvaluator {
         if (child == null) return;
 
         if (idx == segments.size() - 1) {
-            // Leaf: copy the whole attribute node
-            dest.set(seg, child);
+            // Leaf: deep-copy to avoid placing a live source reference into the
+            // destination, which could be mutated by a subsequent sibling path.
+            dest.set(seg, child.deepCopy());
         } else {
             String nextSeg = segments.get(idx + 1);
             if (nextSeg.matches("\\[\\d+\\]")) {
-                // Next is a list index — extract just that element
+                // Next is a list index — extract just that element.
+                // Reuse existing wrapper if already projected (same fix as the M branch).
                 int listIdx = Integer.parseInt(nextSeg.substring(1, nextSeg.length() - 1));
                 JsonNode listNode = child.has("L") ? child.get("L") : child;
-                if (listNode.isArray() && listIdx < listNode.size()) {
+                if (listNode.isArray() && listIdx < listNode.size() && !dest.has(seg)) {
                     JsonNode element = listNode.get(listIdx);
                     // Build {"L": [element]} wrapper
                     ObjectNode wrapper = MAPPER.createObjectNode();
@@ -160,16 +162,25 @@ final class ProjectionEvaluator {
                     dest.set(seg, wrapper);
                 }
             } else if (child.has("M")) {
-                // Nested map — recurse
-                ObjectNode nestedDest = MAPPER.createObjectNode();
+                // Nested map — reuse existing projected map if present
+                ObjectNode existing = dest.has(seg) && dest.get(seg).has("M")
+                        ? (ObjectNode) dest.get(seg).get("M") : null;
+                ObjectNode nestedDest = existing != null ? existing : MAPPER.createObjectNode();
                 copyPath(child.get("M"), nestedDest, segments, idx + 1);
-                ObjectNode wrapper = MAPPER.createObjectNode();
-                wrapper.set("M", nestedDest);
-                dest.set(seg, wrapper);
+                if (existing == null) {
+                    ObjectNode wrapper = MAPPER.createObjectNode();
+                    wrapper.set("M", nestedDest);
+                    dest.set(seg, wrapper);
+                }
             } else if (child.isObject()) {
-                ObjectNode nestedDest = MAPPER.createObjectNode();
+                // Reuse existing nested object if present
+                ObjectNode existing = dest.has(seg) && dest.get(seg).isObject()
+                        ? (ObjectNode) dest.get(seg) : null;
+                ObjectNode nestedDest = existing != null ? existing : MAPPER.createObjectNode();
                 copyPath(child, nestedDest, segments, idx + 1);
-                dest.set(seg, nestedDest);
+                if (existing == null) {
+                    dest.set(seg, nestedDest);
+                }
             } else {
                 dest.set(seg, child);
             }
