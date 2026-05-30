@@ -256,4 +256,103 @@ class EventBridgeTagResourceIntegrationTest {
         .then()
             .statusCode(200);
     }
+
+    /**
+     * Regression test for #963 — a rule on a custom bus whose name contains the
+     * substring "event-bus" must be tagged/listed/untagged as a rule, not a bus.
+     */
+    @Test
+    @Order(8)
+    void tagRuleOnBusNamedWithEventBusSubstring() {
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.CreateEventBus")
+            .body("{\"Name\":\"my-event-bus\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.PutRule")
+            .body("{\"Name\":\"regression-rule\",\"EventBusName\":\"my-event-bus\",\"EventPattern\":\"{\\\"source\\\":[\\\"test\\\"]}\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String ruleArn = given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.DescribeRule")
+            .body("{\"Name\":\"regression-rule\",\"EventBusName\":\"my-event-bus\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("Arn");
+
+        // Tag the rule — before the fix this matched the bus branch and failed.
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.TagResource")
+            .body("""
+                {
+                    "ResourceARN": "%s",
+                    "Tags": [{"Key": "env", "Value": "dev"}]
+                }
+                """.formatted(ruleArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.ListTagsForResource")
+            .body("{\"ResourceARN\":\"" + ruleArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags.find { it.Key == 'env' }.Value", equalTo("dev"));
+
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.UntagResource")
+            .body("""
+                {
+                    "ResourceARN": "%s",
+                    "TagKeys": ["env"]
+                }
+                """.formatted(ruleArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.ListTagsForResource")
+            .body("{\"ResourceARN\":\"" + ruleArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(0));
+
+        // Cleanup
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.DeleteRule")
+            .body("{\"Name\":\"regression-rule\",\"EventBusName\":\"my-event-bus\"}")
+        .when().post("/").then().statusCode(200);
+
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+            .body("{\"Name\":\"my-event-bus\"}")
+        .when().post("/").then().statusCode(200);
+    }
 }
