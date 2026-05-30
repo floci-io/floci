@@ -227,6 +227,7 @@ class ElastiCacheTest {
     @Order(9)
     void modifyUserRotatesPassword() throws Exception {
         requireUser();
+        requireGroup();
 
         var response = elasticache.modifyUser(ModifyUserRequest.builder()
                 .userId(userId)
