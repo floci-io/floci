@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.appsync;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.model.*;
@@ -26,10 +27,10 @@ public class AppSyncService {
     private final StorageBackend<String, FunctionConfiguration> functionStore;
     private final StorageBackend<String, ApiKey> apiKeyStore;
     private final StorageBackend<String, AppSyncType> typeStore;
-    private final String accountId;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public AppSyncService(StorageFactory storageFactory, EmulatorConfig config) {
+    public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
         this.apiStore = storageFactory.create("appsync", "appsync-apis.json", new TypeReference<>() {});
         this.schemaStore = storageFactory.create("appsync", "appsync-schemas.json", new TypeReference<>() {});
         this.schemaStatusStore = storageFactory.create("appsync", "appsync-schema-status.json", new TypeReference<>() {});
@@ -38,7 +39,7 @@ public class AppSyncService {
         this.functionStore = storageFactory.create("appsync", "appsync-functions.json", new TypeReference<>() {});
         this.apiKeyStore = storageFactory.create("appsync", "appsync-apikeys.json", new TypeReference<>() {});
         this.typeStore = storageFactory.create("appsync", "appsync-types.json", new TypeReference<>() {});
-        this.accountId = config.defaultAccountId();
+        this.regionResolver = regionResolver;
     }
 
     // ──────────────────────────── GraphQL API ────────────────────────────
@@ -542,11 +543,11 @@ public class AppSyncService {
     }
 
     private String buildApiArn(String apiId, String region) {
-        return "arn:aws:appsync:" + region + ":" + accountId + ":apis/" + apiId;
+        return regionResolver.buildArn("appsync", region, "apis/" + apiId);
     }
 
     private String buildFunctionArn(String apiId, String functionId, String region) {
-        return "arn:aws:appsync:" + region + ":" + accountId + ":apis/" + apiId + "/functions/" + functionId;
+        return regionResolver.buildArn("appsync", region, "apis/" + apiId + "/functions/" + functionId);
     }
 
     private String extractApiIdFromArn(String arn) {
