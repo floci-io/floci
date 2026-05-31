@@ -168,7 +168,7 @@ public class EcrRegistryManager {
             this.containerId = info.containerId();
             this.hostPort = chosenPort;
             this.started = true;
-            LOG.infov("Started ECR backing registry {0} on host port {1}", name, chosenPort);
+            LOG.infov("Started ECR backing registry {0} on host port {1}", name, String.valueOf(chosenPort));
 
             // Attach log streaming (new feature)
             attachLogStream();
@@ -324,7 +324,7 @@ public class EcrRegistryManager {
             }
             this.started = true;
             LOG.infov("Adopted existing ECR registry container {0} on host port {1}",
-                    containerId, hostPort);
+                    containerId, String.valueOf(hostPort));
 
             // Attach log streaming to adopted container
             attachLogStream();

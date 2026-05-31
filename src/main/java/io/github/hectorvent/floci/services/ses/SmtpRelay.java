@@ -61,7 +61,7 @@ public class SmtpRelay {
             });
             String host = config.services().ses().smtpHost().get();
             int port = config.services().ses().smtpPort();
-            LOG.infov("SES SMTP relay enabled: {0}:{1}", host, port);
+            LOG.infov("SES SMTP relay enabled: {0}:{1}", host, String.valueOf(port));
 
             MailConfig mailConfig = new MailConfig()
                     .setHostname(host)

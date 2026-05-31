@@ -167,7 +167,7 @@ public class Ec2ContainerManager {
 
                 instance.setState(InstanceState.running());
                 LOG.infov("EC2 instance {0} running in container {1} (SSH host port {2})",
-                        instanceId, containerId, sshHostPort);
+                        instanceId, containerId, String.valueOf(sshHostPort));
 
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();

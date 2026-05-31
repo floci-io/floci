@@ -385,7 +385,7 @@ public class ContainerLifecycleManager {
                 }
 
                 ports.bind(ExposedPort.tcp(containerPort), Ports.Binding.bindPort(hostPort));
-                LOG.debugv("Port binding: {0} -> {1}", containerPort, hostPort);
+                LOG.debugv("Port binding: {0} -> {1}", String.valueOf(containerPort), String.valueOf(hostPort));
             }
             hostConfig.withPortBindings(ports);
         }
