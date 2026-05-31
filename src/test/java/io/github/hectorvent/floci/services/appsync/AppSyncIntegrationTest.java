@@ -711,6 +711,539 @@ class AppSyncIntegrationTest {
             .body("environmentVariables.TABLE_NAME", nullValue());
     }
 
+    // ── Error Handling ─────────────────────────────────────────────────────
+
+    @Test
+    @Order(100)
+    void createGraphqlApiMissingNameReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"authenticationType": "API_KEY"}
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(101)
+    void createGraphqlApiBlankNameReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "  ", "authenticationType": "API_KEY"}
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(102)
+    void createGraphqlApiInvalidAuthTypeReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "test-api", "authenticationType": "INVALID_TYPE"}
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(103)
+    void createDataSourceMissingNameReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"type": "NONE"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(104)
+    void createDataSourceMissingTypeReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "no-type-ds"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(105)
+    void createDataSourceInvalidTypeReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "bad-ds", "type": "NOT_A_REAL_TYPE"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(106)
+    void createResolverMissingFieldNameReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"dataSourceName": "none-ds"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(107)
+    void createResolverMissingDataSourceReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"fieldName": "missingDs"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(108)
+    void createTypeMissingNameReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"definition": "type Foo { id: ID }"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(109)
+    void createFunctionMissingNameReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"dataSourceName": "none-ds"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/functions")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(110)
+    void getNonExistentApiReturns404() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/doesnotexist12345678901234")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(111)
+    void getNonExistentDataSourceReturns404() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources/nonexistent-ds")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(112)
+    void getNonExistentTypeReturns404() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/types/NonExistentType")
+        .then()
+            .statusCode(404);
+    }
+
+    // ── Delete Standalone ──────────────────────────────────────────────────
+
+    @Test
+    @Order(120)
+    void deleteResolverStandalone() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "fieldName": "tempResolver",
+                  "dataSourceName": "none-ds"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/types/Query/resolvers/tempResolver")
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/types/Query/resolvers/tempResolver")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(121)
+    void deleteDataSourceStandalone() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "temp-ds-delete",
+                  "type": "NONE"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/datasources/temp-ds-delete")
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources/temp-ds-delete")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(122)
+    void deleteFunctionStandalone() {
+        String tempFnId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "temp-fn-delete",
+                  "dataSourceName": "none-ds"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/functions")
+        .then()
+            .statusCode(200)
+            .extract().path("functionConfiguration.functionId");
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/functions/" + tempFnId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/functions/" + tempFnId)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(123)
+    void deleteTypeStandalone() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "StandaloneDeleteType",
+                  "definition": "type StandaloneDeleteType { id: ID }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/types/StandaloneDeleteType")
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/types/StandaloneDeleteType")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(124)
+    void deleteApiKeyStandalone() {
+        String tempKeyId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"description": "temp-key-delete"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/apikeys")
+        .then()
+            .statusCode(200)
+            .extract().path("apiKey.id");
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/apikeys/" + tempKeyId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/apikeys/" + tempKeyId)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(125)
+    void listDataSourcesAfterDeleteReturnsExpectedCount() {
+        int before = given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getList("dataSources").size();
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "count-check-ds", "type": "NONE"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/datasources/count-check-ds")
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(200)
+            .body("dataSources.size()", equalTo(before));
+    }
+
+    // ── Cascade Verification ───────────────────────────────────────────────
+
+    @Test
+    @Order(130)
+    void deleteApiCascadeDeletesDataSources() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "cascade-test-api",
+                  "authenticationType": "API_KEY"
+                }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "cascade-ds", "type": "NONE"}
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/datasources")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + tempApiId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + tempApiId + "/datasources/cascade-ds")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(131)
+    void deleteApiCascadeDeletesFunctions() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "cascade-fn-test-api",
+                  "authenticationType": "API_KEY"
+                }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String fnId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "cascade-fn",
+                  "dataSourceName": "none-ds"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/functions")
+        .then()
+            .statusCode(200)
+            .extract().path("functionConfiguration.functionId");
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + tempApiId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + tempApiId + "/functions/" + fnId)
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(132)
+    void deleteFunctionVerifyResolverStillExists() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "fieldName": "fnCascadeField",
+                  "dataSourceName": "none-ds"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(200);
+
+        String fnId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "fn-for-cascade-test",
+                  "dataSourceName": "none-ds"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/functions")
+        .then()
+            .statusCode(200)
+            .extract().path("functionConfiguration.functionId");
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/functions/" + fnId)
+        .then()
+            .statusCode(204);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/types/Query/resolvers/fnCascadeField")
+        .then()
+            .statusCode(200)
+            .body("resolver.fieldName", equalTo("fnCascadeField"));
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/types/Query/resolvers/fnCascadeField")
+        .then()
+            .statusCode(204);
+    }
+
     // ── Teardown ─────────────────────────────────────────────────────────────
 
     @Test
