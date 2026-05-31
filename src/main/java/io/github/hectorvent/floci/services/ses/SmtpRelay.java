@@ -278,6 +278,56 @@ public class SmtpRelay {
         }
     }
 
+    /**
+     * Structured headers extracted from a raw RFC 5322 MIME message:
+     * subject and separate To / Cc / Bcc address lists. Empty fields when the
+     * corresponding header is missing.
+     */
+    public record RawMessageHeaders(String subject, List<String> to, List<String> cc, List<String> bcc) {
+        public static RawMessageHeaders empty() {
+            return new RawMessageHeaders("", List.of(), List.of(), List.of());
+        }
+    }
+
+    /**
+     * Parses a raw RFC 5322 MIME message (plain or base64-encoded) into
+     * {@link RawMessageHeaders}. Returns an empty result when the input is blank
+     * or unparseable.
+     */
+    public static RawMessageHeaders parseRawHeaders(String rawMessage) {
+        if (rawMessage == null || rawMessage.isBlank()) {
+            return RawMessageHeaders.empty();
+        }
+        try {
+            byte[] mimeBytes = tryBase64Decode(rawMessage);
+            var builder = new DefaultMessageBuilder();
+            var message = builder.parseMessage(new ByteArrayInputStream(mimeBytes));
+            String subject = message.getSubject() != null ? message.getSubject() : "";
+            List<String> to = message.getTo() != null
+                    ? toMailboxAddresses(message.getTo().flatten()) : List.of();
+            List<String> cc = message.getCc() != null
+                    ? toMailboxAddresses(message.getCc().flatten()) : List.of();
+            List<String> bcc = message.getBcc() != null
+                    ? toMailboxAddresses(message.getBcc().flatten()) : List.of();
+            return new RawMessageHeaders(subject, to, cc, bcc);
+        } catch (Exception e) {
+            return RawMessageHeaders.empty();
+        }
+    }
+
+    /**
+     * Returns the flat list of recipients (To + Cc + Bcc) parsed from a raw RFC 5322
+     * MIME message. Convenience wrapper around {@link #parseRawHeaders}.
+     */
+    public static List<String> parseRawRecipients(String rawMessage) {
+        RawMessageHeaders h = parseRawHeaders(rawMessage);
+        List<String> all = new ArrayList<>();
+        all.addAll(h.to());
+        all.addAll(h.cc());
+        all.addAll(h.bcc());
+        return all;
+    }
+
     private static List<String> toMailboxAddresses(MailboxList list) {
         List<String> addresses = new ArrayList<>();
         for (Mailbox mailbox : list) {

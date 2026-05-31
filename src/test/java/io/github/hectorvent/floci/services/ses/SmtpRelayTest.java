@@ -275,4 +275,62 @@ class SmtpRelayTest {
         assertDoesNotThrow(() -> relay.relayRaw("from@example.com",
                 List.of("to@example.com"), "Subject: X\r\n\r\nBody"));
     }
+
+    @Test
+    void parseRawRecipients_extractsToCcBcc() {
+        String raw = "From: sender@example.com\r\n"
+                + "To: to1@example.com, to2@example.com\r\n"
+                + "Cc: cc@example.com\r\n"
+                + "Bcc: bcc@example.com\r\n"
+                + "Subject: test\r\n\r\nbody";
+        List<String> recipients = SmtpRelay.parseRawRecipients(raw);
+        assertEquals(List.of("to1@example.com", "to2@example.com", "cc@example.com", "bcc@example.com"),
+                recipients);
+    }
+
+    @Test
+    void parseRawRecipients_acceptsBase64Encoded() {
+        String raw = "From: a@example.com\r\nTo: only@example.com\r\nSubject: x\r\n\r\nbody";
+        String b64 = java.util.Base64.getEncoder().encodeToString(
+                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(List.of("only@example.com"), SmtpRelay.parseRawRecipients(b64));
+    }
+
+    @Test
+    void parseRawRecipients_blankOrUnparseable_returnsEmpty() {
+        assertTrue(SmtpRelay.parseRawRecipients(null).isEmpty());
+        assertTrue(SmtpRelay.parseRawRecipients("").isEmpty());
+        assertTrue(SmtpRelay.parseRawRecipients("   ").isEmpty());
+    }
+
+    @Test
+    void parseRawRecipients_noRecipientHeaders_returnsEmpty() {
+        String raw = "From: a@example.com\r\nSubject: x\r\n\r\nbody";
+        assertTrue(SmtpRelay.parseRawRecipients(raw).isEmpty());
+    }
+
+    @Test
+    void parseRawHeaders_extractsSubjectAndStructuredRecipients() {
+        String raw = "From: sender@example.com\r\n"
+                + "To: to1@example.com, to2@example.com\r\n"
+                + "Cc: cc@example.com\r\n"
+                + "Bcc: bcc@example.com\r\n"
+                + "Subject: Hello world\r\n\r\nbody";
+        String b64 = java.util.Base64.getEncoder().encodeToString(
+                raw.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        SmtpRelay.RawMessageHeaders h = SmtpRelay.parseRawHeaders(b64);
+        assertEquals("Hello world", h.subject());
+        assertEquals(List.of("to1@example.com", "to2@example.com"), h.to());
+        assertEquals(List.of("cc@example.com"), h.cc());
+        assertEquals(List.of("bcc@example.com"), h.bcc());
+    }
+
+    @Test
+    void parseRawHeaders_blank_returnsEmptyRecord() {
+        SmtpRelay.RawMessageHeaders h = SmtpRelay.parseRawHeaders(null);
+        assertEquals("", h.subject());
+        assertTrue(h.to().isEmpty());
+        assertTrue(h.cc().isEmpty());
+        assertTrue(h.bcc().isEmpty());
+    }
 }

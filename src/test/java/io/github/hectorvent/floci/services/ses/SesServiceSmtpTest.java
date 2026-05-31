@@ -49,7 +49,7 @@ class SesServiceSmtpTest {
                 List.of("cc@example.com"),
                 List.of("bcc@example.com"),
                 List.of("reply@example.com"),
-                "Subject", "text body", "<p>html</p>", "us-east-1");
+                "Subject", "text body", "<p>html</p>", null, List.of(), List.of(), "us-east-1");
 
         verify(smtpRelay).relay(
                 "from@example.com",
@@ -64,7 +64,7 @@ class SesServiceSmtpTest {
     void sendEmail_storesAndRelays() {
         String messageId = service.sendEmail("from@example.com",
                 List.of("to@example.com"), null, null, null,
-                "Subject", "text", null, "us-east-1");
+                "Subject", "text", null, null, List.of(), List.of(), "us-east-1");
 
         assertNotNull(messageId);
         assertFalse(emailStore.scan(k -> true).isEmpty());
@@ -74,7 +74,7 @@ class SesServiceSmtpTest {
     @Test
     void sendRawEmail_callsRelayRaw() {
         service.sendRawEmail("from@example.com",
-                List.of("to@example.com"), "raw MIME", "us-east-1");
+                List.of("to@example.com"), "raw MIME", null, List.of(), "us-east-1");
 
         verify(smtpRelay).relayRaw(
                 "from@example.com",
@@ -85,7 +85,7 @@ class SesServiceSmtpTest {
     @Test
     void sendRawEmail_storesAndRelays() {
         String messageId = service.sendRawEmail("from@example.com",
-                List.of("to@example.com"), "raw", "us-east-1");
+                List.of("to@example.com"), "raw", null, List.of(), "us-east-1");
 
         assertNotNull(messageId);
         assertFalse(emailStore.scan(k -> true).isEmpty());
@@ -97,7 +97,7 @@ class SesServiceSmtpTest {
         service.sendEmail("from@example.com",
                 List.of("to@example.com"),
                 null, null, null,
-                "Subject", null, "<p>html only</p>", "us-east-1");
+                "Subject", null, "<p>html only</p>", null, List.of(), List.of(), "us-east-1");
 
         verify(smtpRelay).relay(
                 "from@example.com",

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -158,9 +159,12 @@ public class SesQueryHandler {
         String subject = getParam(params, "Message.Subject.Data");
         String bodyText = getParam(params, "Message.Body.Text.Data");
         String bodyHtml = getParam(params, "Message.Body.Html.Data");
+        String configurationSetName = getParam(params, "ConfigurationSetName");
+        List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
         String messageId = sesService.sendEmail(source, toAddresses, ccAddresses, bccAddresses,
-                replyToAddresses, subject, bodyText, bodyHtml, region);
+                replyToAddresses, subject, bodyText, bodyHtml, configurationSetName,
+                emailTags, List.of(), region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendEmail", AwsNamespaces.SES, result)).build();
@@ -174,8 +178,11 @@ public class SesQueryHandler {
         String source = getParam(params, "Source");
         List<String> destinations = extractMembers(params, "Destinations");
         String rawMessage = getParam(params, "RawMessage.Data");
+        String configurationSetName = getParam(params, "ConfigurationSetName");
+        List<MessageTag> emailTags = extractMessageTags(params, "Tags");
 
-        String messageId = sesService.sendRawEmail(source, destinations, rawMessage, region);
+        String messageId = sesService.sendRawEmail(source, destinations, rawMessage,
+                configurationSetName, emailTags, region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendRawEmail", AwsNamespaces.SES, result)).build();
@@ -436,8 +443,11 @@ public class SesQueryHandler {
         String resolvedName = hasName ? templateName : SesService.templateNameFromArn(templateArn);
 
         JsonNode templateData = parseTemplateData(templateDataRaw);
+        String configurationSetName = getParam(params, "ConfigurationSetName");
+        List<MessageTag> emailTags = extractMessageTags(params, "Tags");
         String messageId = sesService.sendTemplatedEmail(source, toAddresses, ccAddresses,
-                bccAddresses, replyToAddresses, resolvedName, templateData, region);
+                bccAddresses, replyToAddresses, resolvedName, templateData,
+                configurationSetName, emailTags, List.of(), region);
 
         String result = new XmlBuilder().elem("MessageId", messageId).build();
         return Response.ok(AwsQueryResponse.envelope("SendTemplatedEmail", AwsNamespaces.SES, result)).build();
@@ -485,19 +495,25 @@ public class SesQueryHandler {
             List<String> cc = extractMembers(params, destPrefix + ".Destination.CcAddresses");
             List<String> bcc = extractMembers(params, destPrefix + ".Destination.BccAddresses");
             String replacementRaw = getParam(params, destPrefix + ".ReplacementTemplateData");
-            if (to.isEmpty() && cc.isEmpty() && bcc.isEmpty() && replacementRaw == null) {
+            List<MessageTag> replacementTags = extractMessageTags(params, destPrefix + ".ReplacementTags");
+            if (to.isEmpty() && cc.isEmpty() && bcc.isEmpty()
+                    && replacementRaw == null && replacementTags.isEmpty()) {
                 break;
             }
-            entries.add(new BulkEmailEntry(to, cc, bcc, parseTemplateData(replacementRaw)));
+            entries.add(new BulkEmailEntry(to, cc, bcc,
+                    parseTemplateData(replacementRaw), replacementTags, List.of()));
         }
         if (entries.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination is required.", 400);
         }
 
+        String configurationSetName = getParam(params, "ConfigurationSetName");
+        List<MessageTag> defaultEmailTags = extractMessageTags(params, "DefaultTags");
         List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(source, replyToAddresses,
                 template.getSubject(), template.getTextPart(), template.getHtmlPart(),
-                defaultTemplateData, entries, region);
+                defaultTemplateData, entries, configurationSetName,
+                defaultEmailTags, List.of(), region);
 
         XmlBuilder xml = new XmlBuilder().start("Status");
         for (BulkEmailEntryResult result : results) {
@@ -592,6 +608,26 @@ public class SesQueryHandler {
             members.add(value);
         }
         return members;
+    }
+
+    /**
+     * Parse a V1 SES {@code MessageTag} list ({@code <prefix>.member.N.Name} /
+     * {@code .Value}) into a list of {@link MessageTag} records. Returns an empty list when
+     * no members are present.
+     */
+    private List<MessageTag> extractMessageTags(MultivaluedMap<String, String> params, String prefix) {
+        List<MessageTag> tags = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String name = getParam(params, prefix + ".member." + i + ".Name");
+            String value = getParam(params, prefix + ".member." + i + ".Value");
+            if (name == null && value == null) break;
+            if (name == null || name.isBlank()) {
+                throw new AwsException("InvalidParameterValue",
+                        "The tag name must be specified.", 400);
+            }
+            tags.add(new MessageTag(name, value));
+        }
+        return tags;
     }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {
