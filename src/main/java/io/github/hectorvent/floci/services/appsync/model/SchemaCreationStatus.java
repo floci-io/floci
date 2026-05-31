@@ -8,11 +8,11 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 @JsonIgnoreProperties(ignoreUnknown = true)
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class SchemaCreationStatus {
-    private String status;
+    private SchemaCreationStatusType status;
     private String details;
 
-    public String getStatus() { return status; }
-    public void setStatus(String status) { this.status = status; }
+    public SchemaCreationStatusType getStatus() { return status; }
+    public void setStatus(SchemaCreationStatusType status) { this.status = status; }
 
     public String getDetails() { return details; }
     public void setDetails(String details) { this.details = details; }

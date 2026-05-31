@@ -12,7 +12,7 @@ public class AppSyncType {
     private String definition;
     private String description;
     private String apiId;
-    private String format;
+    private TypeFormat format;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -26,6 +26,6 @@ public class AppSyncType {
     public String getApiId() { return apiId; }
     public void setApiId(String apiId) { this.apiId = apiId; }
 
-    public String getFormat() { return format; }
-    public void setFormat(String format) { this.format = format; }
+    public TypeFormat getFormat() { return format; }
+    public void setFormat(TypeFormat format) { this.format = format; }
 }

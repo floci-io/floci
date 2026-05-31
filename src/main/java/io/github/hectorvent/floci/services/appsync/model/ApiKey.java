@@ -10,7 +10,7 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 public class ApiKey {
     private String id;
     private String description;
-    private String expires;
+    private Long expires;
     private String apiId;
     private String apiKey;
 
@@ -20,8 +20,8 @@ public class ApiKey {
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
 
-    public String getExpires() { return expires; }
-    public void setExpires(String expires) { this.expires = expires; }
+    public Long getExpires() { return expires; }
+    public void setExpires(Long expires) { this.expires = expires; }
 
     public String getApiId() { return apiId; }
     public void setApiId(String apiId) { this.apiId = apiId; }

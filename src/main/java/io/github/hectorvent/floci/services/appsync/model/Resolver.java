@@ -14,7 +14,7 @@ public class Resolver {
     private String dataSourceName;
     private String requestMappingTemplate;
     private String responseMappingTemplate;
-    private String kind;
+    private ResolverKind kind;
     private String code;
     private ResolverRuntime runtime;
 
@@ -36,8 +36,8 @@ public class Resolver {
     public String getResponseMappingTemplate() { return responseMappingTemplate; }
     public void setResponseMappingTemplate(String template) { this.responseMappingTemplate = template; }
 
-    public String getKind() { return kind; }
-    public void setKind(String kind) { this.kind = kind; }
+    public ResolverKind getKind() { return kind; }
+    public void setKind(ResolverKind kind) { this.kind = kind; }
 
     public String getCode() { return code; }
     public void setCode(String code) { this.code = code; }
@@ -49,11 +49,11 @@ public class Resolver {
     @JsonIgnoreProperties(ignoreUnknown = true)
     @JsonInclude(JsonInclude.Include.NON_NULL)
     public static class ResolverRuntime {
-        private String name;
+        private ResolverRuntimeName name;
         private String runtimeVersion;
 
-        public String getName() { return name; }
-        public void setName(String name) { this.name = name; }
+        public ResolverRuntimeName getName() { return name; }
+        public void setName(ResolverRuntimeName name) { this.name = name; }
 
         public String getRuntimeVersion() { return runtimeVersion; }
         public void setRuntimeVersion(String runtimeVersion) { this.runtimeVersion = runtimeVersion; }

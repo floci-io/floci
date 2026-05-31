@@ -12,7 +12,7 @@ import java.util.Map;
 public class DataSource {
     private String name;
     private String description;
-    private String type;
+    private DataSourceType type;
     private String serviceRoleArn;
     private Map<String, Object> dynamodbConfig;
     private Map<String, Object> lambdaConfig;
@@ -28,8 +28,8 @@ public class DataSource {
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
 
-    public String getType() { return type; }
-    public void setType(String type) { this.type = type; }
+    public DataSourceType getType() { return type; }
+    public void setType(DataSourceType type) { this.type = type; }
 
     public String getServiceRoleArn() { return serviceRoleArn; }
     public void setServiceRoleArn(String serviceRoleArn) { this.serviceRoleArn = serviceRoleArn; }
