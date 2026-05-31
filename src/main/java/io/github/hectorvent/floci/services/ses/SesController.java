@@ -1243,6 +1243,10 @@ public class SesController {
         }
         List<MessageTag> out = new ArrayList<>();
         for (JsonNode t : tagsNode) {
+            if (!t.isObject()) {
+                throw new AwsException("BadRequestException",
+                        fieldName + " entries must be JSON objects.", 400);
+            }
             String name = t.path("Name").asText(null);
             String value = t.path("Value").asText(null);
             if (name == null || name.isBlank()) {

@@ -265,9 +265,11 @@ public class SesService {
 
     /**
      * Validate that a non-blank {@code ConfigurationSetName} refers to a configuration set
-     * that exists in the given region. Mirrors AWS SES behaviour: invalid set name fails
-     * fast with {@code ConfigurationSetDoesNotExist} (404 in V2, 400 in V1) instead of
-     * silently storing/relaying the message and skipping event publishing later.
+     * that exists in the given region. Always raises {@code ConfigurationSetDoesNotExist}
+     * with {@code httpStatus = 400}; the V2 REST controller's {@code remapV1Exception}
+     * then translates that into a {@code NotFoundException 404}, while V1 Query keeps the
+     * original code/status. Mirrors AWS SES behaviour: invalid set name fails fast instead
+     * of silently storing/relaying the message and skipping event publishing later.
      */
     private void validateConfigurationSet(String configurationSetName, String region) {
         if (configurationSetName == null || configurationSetName.isBlank()) {
@@ -1339,14 +1341,14 @@ public class SesService {
         LinkedHashMap<String, MessageHeader> byLowerName = new LinkedHashMap<>();
         if (hasDefault) {
             for (MessageHeader h : defaults) {
-                if (h != null && h.name() != null) {
+                if (h != null && h.name() != null && !h.name().isBlank()) {
                     byLowerName.put(h.name().toLowerCase(Locale.ROOT), h);
                 }
             }
         }
         if (hasReplacement) {
             for (MessageHeader h : replacement) {
-                if (h != null && h.name() != null) {
+                if (h != null && h.name() != null && !h.name().isBlank()) {
                     byLowerName.put(h.name().toLowerCase(Locale.ROOT), h);
                 }
             }
@@ -1363,14 +1365,14 @@ public class SesService {
         LinkedHashMap<String, MessageTag> byName = new LinkedHashMap<>();
         if (hasDefault) {
             for (MessageTag t : defaults) {
-                if (t != null && t.name() != null) {
+                if (t != null && t.name() != null && !t.name().isBlank()) {
                     byName.put(t.name(), t);
                 }
             }
         }
         if (hasReplacement) {
             for (MessageTag t : replacement) {
-                if (t != null && t.name() != null) {
+                if (t != null && t.name() != null && !t.name().isBlank()) {
                     byName.put(t.name(), t);
                 }
             }
