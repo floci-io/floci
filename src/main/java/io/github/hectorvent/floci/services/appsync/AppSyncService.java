@@ -381,7 +381,7 @@ public class AppSyncService {
         }
         AppSyncType type = new AppSyncType();
         type.setApiId(apiId);
-        type.setName((String) request.get("name"));
+        type.setName(name);
         type.setDefinition((String) request.get("definition"));
         type.setDescription((String) request.get("description"));
         type.setFormat(parseEnum(TypeFormat.class, request.getOrDefault("format", "SDL")));
