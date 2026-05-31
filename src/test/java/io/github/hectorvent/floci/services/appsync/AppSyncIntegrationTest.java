@@ -1244,6 +1244,157 @@ class AppSyncIntegrationTest {
             .statusCode(204);
     }
 
+    // ── Pagination ──────────────────────────────────────────────────────────
+
+    @Test
+    @Order(140)
+    void listApisWithMaxResults() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "pagination-api-1", "authenticationType": "API_KEY"}
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "pagination-api-2", "authenticationType": "API_KEY"}
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 2)
+        .when()
+            .get("/v1/apis")
+        .then()
+            .statusCode(200)
+            .body("graphqlApis", hasSize(greaterThanOrEqualTo(2)))
+            .body("nextToken", notNullValue());
+    }
+
+    @Test
+    @Order(141)
+    void listApisWithNextToken() {
+        String firstPageToken = given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 2)
+        .when()
+            .get("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("nextToken");
+
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 2)
+            .queryParam("nextToken", firstPageToken)
+        .when()
+            .get("/v1/apis")
+        .then()
+            .statusCode(200)
+            .body("graphqlApis", hasSize(greaterThanOrEqualTo(1)));
+    }
+
+    @Test
+    @Order(142)
+    void listApisWithoutPaginationReturnsAll() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis")
+        .then()
+            .statusCode(200)
+            .body("graphqlApis", hasSize(greaterThanOrEqualTo(1)))
+            .body("nextToken", nullValue());
+    }
+
+    @Test
+    @Order(143)
+    void listDataSourcesWithMaxResults() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(200)
+            .body("dataSources", hasSize(1));
+    }
+
+    @Test
+    @Order(144)
+    void listTypesWithMaxResults() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v1/apis/" + apiId + "/types")
+        .then()
+            .statusCode(200)
+            .body("types", hasSize(1));
+    }
+
+    @Test
+    @Order(145)
+    void listFunctionsWithMaxResults() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v1/apis/" + apiId + "/functions")
+        .then()
+            .statusCode(200)
+            .body("functions", hasSize(1));
+    }
+
+    @Test
+    @Order(146)
+    void listApiKeysWithMaxResults() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v1/apis/" + apiId + "/apikeys")
+        .then()
+            .statusCode(200)
+            .body("apiKeys", hasSize(1));
+    }
+
+    @Test
+    @Order(147)
+    void listResolversWithMaxResults() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(200)
+            .body("resolvers", hasSize(1));
+    }
+
+    @Test
+    @Order(148)
+    void listWithInvalidNextTokenReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("nextToken", "!!!invalid-token!!!")
+        .when()
+            .get("/v1/apis")
+        .then()
+            .statusCode(400);
+    }
+
     // ── Teardown ─────────────────────────────────────────────────────────────
 
     @Test
