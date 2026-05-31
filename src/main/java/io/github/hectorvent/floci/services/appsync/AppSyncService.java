@@ -43,10 +43,14 @@ public class AppSyncService {
     // ──────────────────────────── GraphQL API ────────────────────────────
 
     public GraphqlApi createGraphqlApi(Map<String, Object> request, String region) {
+        String name = (String) request.get("name");
+        if (name == null || name.isBlank()) {
+            throw new AwsException("BadRequestException", "A GraphQL API name is required", 400);
+        }
         String apiId = generateApiId();
         GraphqlApi api = new GraphqlApi();
         api.setApiId(apiId);
-        api.setName((String) request.get("name"));
+        api.setName(name);
         api.setAuthenticationType(parseEnum(AuthenticationType.class, request.get("authenticationType")));
         Object xrayValue = request.get("xrayEnabled");
         if (xrayValue instanceof Boolean b) {
@@ -162,8 +166,15 @@ public class AppSyncService {
 
     public DataSource createDataSource(String apiId, Map<String, Object> request) {
         getGraphqlApi(apiId);
+        String name = (String) request.get("name");
+        if (name == null || name.isBlank()) {
+            throw new AwsException("BadRequestException", "A data source name is required", 400);
+        }
+        if (request.get("type") == null) {
+            throw new AwsException("BadRequestException", "A data source type is required", 400);
+        }
         DataSource ds = new DataSource();
-        ds.setName((String) request.get("name"));
+        ds.setName(name);
         ds.setDescription((String) request.get("description"));
         ds.setType(parseEnum(DataSourceType.class, request.get("type")));
         ds.setServiceRoleArn((String) request.get("serviceRoleArn"));
@@ -224,6 +235,14 @@ public class AppSyncService {
 
     public Resolver createResolver(String apiId, Map<String, Object> request) {
         getGraphqlApi(apiId);
+        String fieldName = (String) request.get("fieldName");
+        if (fieldName == null || fieldName.isBlank()) {
+            throw new AwsException("BadRequestException", "A resolver field name is required", 400);
+        }
+        String dataSourceName = (String) request.get("dataSourceName");
+        if (dataSourceName == null || dataSourceName.isBlank()) {
+            throw new AwsException("BadRequestException", "A data source name is required for the resolver", 400);
+        }
         Resolver resolver = new Resolver();
         resolver.setApiId(apiId);
         resolver.setTypeName((String) request.get("typeName"));
@@ -296,6 +315,10 @@ public class AppSyncService {
 
     public FunctionConfiguration createFunction(String apiId, Map<String, Object> request, String region) {
         getGraphqlApi(apiId);
+        String name = (String) request.get("name");
+        if (name == null || name.isBlank()) {
+            throw new AwsException("BadRequestException", "A function name is required", 400);
+        }
         FunctionConfiguration fn = new FunctionConfiguration();
         fn.setFunctionId(generateShortId());
         fn.setName((String) request.get("name"));
@@ -346,6 +369,10 @@ public class AppSyncService {
 
     public AppSyncType createType(String apiId, Map<String, Object> request) {
         getGraphqlApi(apiId);
+        String name = (String) request.get("name");
+        if (name == null || name.isBlank()) {
+            throw new AwsException("BadRequestException", "A type name is required", 400);
+        }
         AppSyncType type = new AppSyncType();
         type.setApiId(apiId);
         type.setName((String) request.get("name"));
