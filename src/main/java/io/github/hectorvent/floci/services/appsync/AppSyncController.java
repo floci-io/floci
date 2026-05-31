@@ -108,7 +108,7 @@ public class AppSyncController {
         }
         service.startSchemaCreation(apiId, definition);
         SchemaCreationStatus status = new SchemaCreationStatus();
-        status.setStatus("ACTIVE");
+        status.setStatus(SchemaCreationStatusType.ACTIVE);
         return Response.ok(status).build();
     }
 
@@ -260,10 +260,12 @@ public class AppSyncController {
 
     @POST
     @Path("/v1/apis/{apiId}/functions")
-    public Response createFunction(@PathParam("apiId") String apiId, String body) throws IOException {
+    public Response createFunction(@Context HttpHeaders headers,
+                                   @PathParam("apiId") String apiId, String body) throws IOException {
+        String region = regionResolver.resolveRegion(headers);
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
-        FunctionConfiguration fn = service.createFunction(apiId, request);
+        FunctionConfiguration fn = service.createFunction(apiId, request, region);
         ObjectNode root = objectMapper.createObjectNode();
         root.set("functionConfiguration", objectMapper.valueToTree(fn));
         return Response.status(200).entity(root).build();

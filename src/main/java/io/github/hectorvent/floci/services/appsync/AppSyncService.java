@@ -47,14 +47,27 @@ public class AppSyncService {
         GraphqlApi api = new GraphqlApi();
         api.setApiId(apiId);
         api.setName((String) request.get("name"));
-        api.setAuthenticationType((String) request.get("authenticationType"));
-        api.setXrayEnabled((String) request.getOrDefault("xrayEnabled", "false"));
-        api.setLogConfig((String) request.get("logConfig"));
+        api.setAuthenticationType(parseEnum(AuthenticationType.class, request.get("authenticationType")));
+        Object xrayValue = request.get("xrayEnabled");
+        if (xrayValue instanceof Boolean b) {
+            api.setXrayEnabled(b);
+        } else if (xrayValue instanceof String s) {
+            api.setXrayEnabled(Boolean.parseBoolean(s));
+        } else {
+            api.setXrayEnabled(false);
+        }
+        api.setLogConfig((Map<String, Object>) request.get("logConfig"));
 
-        Map<String, Object> additional = (Map<String, Object>) request.get("additionalAuthenticationProviders");
-        if (additional != null) {
-            Map<String, String> providers = new HashMap<>();
-            additional.forEach((k, v) -> providers.put(k, String.valueOf(v)));
+        Object additionalObj = request.get("additionalAuthenticationProviders");
+        if (additionalObj instanceof List<?> additionalList) {
+            List<Map<String, Object>> providers = new ArrayList<>();
+            for (Object item : additionalList) {
+                if (item instanceof Map<?, ?> map) {
+                    @SuppressWarnings("unchecked")
+                    Map<String, Object> casted = (Map<String, Object>) map;
+                    providers.add(casted);
+                }
+            }
             api.setAdditionalAuthenticationProviders(providers);
         }
 
@@ -90,9 +103,16 @@ public class AppSyncService {
     public GraphqlApi updateGraphqlApi(String apiId, Map<String, Object> request, String region) {
         GraphqlApi existing = getGraphqlApi(apiId);
         if (request.containsKey("name")) existing.setName((String) request.get("name"));
-        if (request.containsKey("authenticationType")) existing.setAuthenticationType((String) request.get("authenticationType"));
-        if (request.containsKey("xrayEnabled")) existing.setXrayEnabled((String) request.get("xrayEnabled"));
-        if (request.containsKey("logConfig")) existing.setLogConfig((String) request.get("logConfig"));
+        if (request.containsKey("authenticationType")) existing.setAuthenticationType(parseEnum(AuthenticationType.class, request.get("authenticationType")));
+        if (request.containsKey("xrayEnabled")) {
+            Object xrayValue = request.get("xrayEnabled");
+            if (xrayValue instanceof Boolean b) {
+                existing.setXrayEnabled(b);
+            } else if (xrayValue instanceof String s) {
+                existing.setXrayEnabled(Boolean.parseBoolean(s));
+            }
+        }
+        if (request.containsKey("logConfig")) existing.setLogConfig((Map<String, Object>) request.get("logConfig"));
         if (request.containsKey("tags")) {
             Map<String, Object> tags = (Map<String, Object>) request.get("tags");
             Map<String, String> tagMap = new HashMap<>();
@@ -122,8 +142,7 @@ public class AppSyncService {
         getGraphqlApi(apiId);
         schemaStore.put(apiId, definition);
         SchemaCreationStatus status = new SchemaCreationStatus();
-        status.setStatus("ACTIVE");
-        status.setDetails("Schema successfully parsed");
+        status.setStatus(SchemaCreationStatusType.ACTIVE);
         schemaStatusStore.put(apiId, status);
         LOG.infov("Schema creation completed for API {0}", apiId);
     }
@@ -146,7 +165,7 @@ public class AppSyncService {
         DataSource ds = new DataSource();
         ds.setName((String) request.get("name"));
         ds.setDescription((String) request.get("description"));
-        ds.setType((String) request.get("type"));
+        ds.setType(parseEnum(DataSourceType.class, request.get("type")));
         ds.setServiceRoleArn((String) request.get("serviceRoleArn"));
         ds.setDynamodbConfig((Map<String, Object>) request.get("dynamodbConfig"));
         ds.setLambdaConfig((Map<String, Object>) request.get("lambdaConfig"));
@@ -172,7 +191,7 @@ public class AppSyncService {
     public DataSource updateDataSource(String apiId, String dataSourceName, Map<String, Object> request) {
         DataSource existing = getDataSource(apiId, dataSourceName);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
-        if (request.containsKey("type")) existing.setType((String) request.get("type"));
+        if (request.containsKey("type")) existing.setType(parseEnum(DataSourceType.class, request.get("type")));
         if (request.containsKey("serviceRoleArn")) existing.setServiceRoleArn((String) request.get("serviceRoleArn"));
         if (request.containsKey("dynamodbConfig")) existing.setDynamodbConfig((Map<String, Object>) request.get("dynamodbConfig"));
         if (request.containsKey("lambdaConfig")) existing.setLambdaConfig((Map<String, Object>) request.get("lambdaConfig"));
@@ -212,13 +231,13 @@ public class AppSyncService {
         resolver.setDataSourceName((String) request.get("dataSourceName"));
         resolver.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
         resolver.setResponseMappingTemplate((String) request.get("responseMappingTemplate"));
-        resolver.setKind((String) request.getOrDefault("kind", "UNIT"));
+        resolver.setKind(parseEnum(ResolverKind.class, request.getOrDefault("kind", "UNIT")));
         resolver.setCode((String) request.get("code"));
 
         Map<String, Object> runtime = (Map<String, Object>) request.get("runtime");
         if (runtime != null) {
             Resolver.ResolverRuntime rt = new Resolver.ResolverRuntime();
-            rt.setName((String) runtime.get("name"));
+            rt.setName(parseEnum(ResolverRuntimeName.class, runtime.get("name")));
             rt.setRuntimeVersion((String) runtime.get("runtimeVersion"));
             resolver.setRuntime(rt);
         }
@@ -250,12 +269,12 @@ public class AppSyncService {
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
         if (request.containsKey("requestMappingTemplate")) existing.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
         if (request.containsKey("responseMappingTemplate")) existing.setResponseMappingTemplate((String) request.get("responseMappingTemplate"));
-        if (request.containsKey("kind")) existing.setKind((String) request.get("kind"));
+        if (request.containsKey("kind")) existing.setKind(parseEnum(ResolverKind.class, request.get("kind")));
         if (request.containsKey("code")) existing.setCode((String) request.get("code"));
         if (request.containsKey("runtime")) {
             Map<String, Object> runtime = (Map<String, Object>) request.get("runtime");
             Resolver.ResolverRuntime rt = new Resolver.ResolverRuntime();
-            rt.setName((String) runtime.get("name"));
+            rt.setName(parseEnum(ResolverRuntimeName.class, runtime.get("name")));
             rt.setRuntimeVersion((String) runtime.get("runtimeVersion"));
             existing.setRuntime(rt);
         }
@@ -275,7 +294,7 @@ public class AppSyncService {
 
     // ──────────────────────────── Functions ────────────────────────────
 
-    public FunctionConfiguration createFunction(String apiId, Map<String, Object> request) {
+    public FunctionConfiguration createFunction(String apiId, Map<String, Object> request, String region) {
         getGraphqlApi(apiId);
         FunctionConfiguration fn = new FunctionConfiguration();
         fn.setFunctionId(generateShortId());
@@ -285,7 +304,7 @@ public class AppSyncService {
         fn.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
         fn.setResponseMappingTemplate((String) request.get("responseMappingTemplate"));
         fn.setFunctionVersion((String) request.getOrDefault("functionVersion", "2018-05-29"));
-        fn.setArn(buildFunctionArn(apiId, fn.getFunctionId()));
+        fn.setArn(buildFunctionArn(apiId, fn.getFunctionId(), region));
         fn.setCode((String) request.get("code"));
 
         functionStore.put(apiKey(apiId, fn.getFunctionId()), fn);
@@ -332,7 +351,7 @@ public class AppSyncService {
         type.setName((String) request.get("name"));
         type.setDefinition((String) request.get("definition"));
         type.setDescription((String) request.get("description"));
-        type.setFormat((String) request.getOrDefault("format", "SDL"));
+        type.setFormat(parseEnum(TypeFormat.class, request.getOrDefault("format", "SDL")));
 
         typeStore.put(apiKey(apiId, type.getName()), type);
         return type;
@@ -351,7 +370,7 @@ public class AppSyncService {
         AppSyncType existing = getType(apiId, typeName);
         if (request.containsKey("definition")) existing.setDefinition((String) request.get("definition"));
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
-        if (request.containsKey("format")) existing.setFormat((String) request.get("format"));
+        if (request.containsKey("format")) existing.setFormat(parseEnum(TypeFormat.class, request.get("format")));
         typeStore.put(apiKey(apiId, typeName), existing);
         return existing;
     }
@@ -374,7 +393,19 @@ public class AppSyncService {
         key.setId(generateShortId());
         key.setApiId(apiId);
         key.setDescription((String) request.get("description"));
-        key.setExpires(coerceString(request.get("expires")));
+        Object expiresValue = request.get("expires");
+        if (expiresValue instanceof Long l) {
+            key.setExpires(l);
+        } else if (expiresValue instanceof Number n) {
+            key.setExpires(n.longValue());
+        } else if (expiresValue instanceof String s) {
+            try {
+                key.setExpires(Long.parseLong(s));
+            } catch (NumberFormatException e) {
+                // try parsing as ISO date and convert to epoch seconds
+                key.setExpires(null);
+            }
+        }
 
         // Generate a simple API key string
         key.setApiKey("da2-" + generateShortId());
@@ -395,7 +426,20 @@ public class AppSyncService {
     public ApiKey updateApiKey(String apiId, String keyId, Map<String, Object> request) {
         ApiKey existing = getApiKey(apiId, keyId);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
-        if (request.containsKey("expires")) existing.setExpires(coerceString(request.get("expires")));
+        if (request.containsKey("expires")) {
+            Object expiresValue = request.get("expires");
+            if (expiresValue instanceof Long l) {
+                existing.setExpires(l);
+            } else if (expiresValue instanceof Number n) {
+                existing.setExpires(n.longValue());
+            } else if (expiresValue instanceof String s) {
+                try {
+                    existing.setExpires(Long.parseLong(s));
+                } catch (NumberFormatException e) {
+                    // keep existing
+                }
+            }
+        }
         apiKeyStore.put(apiKey(apiId, keyId), existing);
         return existing;
     }
@@ -468,8 +512,8 @@ public class AppSyncService {
         return "arn:aws:appsync:" + region + ":" + accountId + ":apis/" + apiId;
     }
 
-    private String buildFunctionArn(String apiId, String functionId) {
-        return "arn:aws:appsync:" + accountId + ":apis/" + apiId + "/functions/" + functionId;
+    private String buildFunctionArn(String apiId, String functionId, String region) {
+        return "arn:aws:appsync:" + region + ":" + accountId + ":apis/" + apiId + "/functions/" + functionId;
     }
 
     private String extractApiIdFromArn(String arn) {
@@ -483,5 +527,16 @@ public class AppSyncService {
         if (value == null) return null;
         if (value instanceof String s) return s;
         return String.valueOf(value);
+    }
+
+    private <E extends Enum<E>> E parseEnum(Class<E> enumClass, Object value) {
+        if (value == null) return null;
+        String str = value instanceof String s ? s : String.valueOf(value);
+        try {
+            return Enum.valueOf(enumClass, str);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequestException",
+                    "Invalid value '" + str + "' for " + enumClass.getSimpleName(), 400);
+        }
     }
 }
