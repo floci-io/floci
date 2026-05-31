@@ -372,6 +372,10 @@ public class AppSyncService {
     public AppSyncType createType(String apiId, Map<String, Object> request) {
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
+        String definition = (String) request.get("definition");
+        if (name == null || name.isBlank()) {
+            name = extractTypeNameFromDefinition(definition);
+        }
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "A type name is required", 400);
         }
@@ -602,5 +606,16 @@ public class AppSyncService {
         } catch (IllegalArgumentException e) {
             return -1;
         }
+    }
+
+    static String extractTypeNameFromDefinition(String definition) {
+        if (definition == null || definition.isBlank()) return null;
+        String trimmed = definition.strip();
+        // Match: type TypeName { ... } or input TypeName { ... } or enum TypeName { ... }
+        String[] parts = trimmed.split("\\s+");
+        if (parts.length >= 2) {
+            return parts[1].replaceAll("[{(].*", "");
+        }
+        return null;
     }
 }

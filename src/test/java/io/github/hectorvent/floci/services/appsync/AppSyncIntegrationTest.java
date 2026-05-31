@@ -845,6 +845,17 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/types")
         .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types")
+        .then()
             .statusCode(400);
     }
 
