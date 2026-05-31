@@ -12,6 +12,7 @@ import org.jboss.logging.Logger;
 
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.Base64;
 
 @ApplicationScoped
 public class AppSyncService {
@@ -100,8 +101,8 @@ public class AppSyncService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "GraphQL API not found: " + apiId, 404));
     }
 
-    public List<GraphqlApi> listGraphqlApis() {
-        return apiStore.scan(k -> true);
+    public Page<GraphqlApi> listGraphqlApis(Integer maxResults, String nextToken) {
+        return paginate(apiStore.scan(k -> true), nextToken, maxResults);
     }
 
     public GraphqlApi updateGraphqlApi(String apiId, Map<String, Object> request, String region) {
@@ -195,8 +196,8 @@ public class AppSyncService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Data source not found: " + dataSourceName, 404));
     }
 
-    public List<DataSource> listDataSources(String apiId) {
-        return dataSourceStore.scan(k -> k.startsWith(apiId + "::"));
+    public Page<DataSource> listDataSources(String apiId, Integer maxResults, String nextToken) {
+        return paginate(dataSourceStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
     public DataSource updateDataSource(String apiId, String dataSourceName, Map<String, Object> request) {
@@ -272,15 +273,16 @@ public class AppSyncService {
                         "Resolver not found: " + typeName + "." + fieldName, 404));
     }
 
-    public List<Resolver> listResolvers(String apiId) {
-        return resolverStore.scan(k -> k.startsWith(apiId + "::"));
+    public Page<Resolver> listResolvers(String apiId, Integer maxResults, String nextToken) {
+        return paginate(resolverStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
-    public List<Resolver> listResolversByFunction(String apiId, String functionId) {
+    public Page<Resolver> listResolversByFunction(String apiId, String functionId, Integer maxResults, String nextToken) {
         FunctionConfiguration fn = getFunction(apiId, functionId);
-        return resolverStore.scan(k -> k.startsWith(apiId + "::")).stream()
+        List<Resolver> all = resolverStore.scan(k -> k.startsWith(apiId + "::")).stream()
                 .filter(r -> fn.getName().equals(r.getDataSourceName()))
                 .toList();
+        return paginate(all, nextToken, maxResults);
     }
 
     public Resolver updateResolver(String apiId, String typeName, String fieldName, Map<String, Object> request) {
@@ -339,8 +341,8 @@ public class AppSyncService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Function not found: " + functionId, 404));
     }
 
-    public List<FunctionConfiguration> listFunctions(String apiId) {
-        return functionStore.scan(k -> k.startsWith(apiId + "::"));
+    public Page<FunctionConfiguration> listFunctions(String apiId, Integer maxResults, String nextToken) {
+        return paginate(functionStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
     public FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
@@ -389,8 +391,8 @@ public class AppSyncService {
                 .orElseThrow(() -> new AwsException("NotFoundException", "Type not found: " + typeName, 404));
     }
 
-    public List<AppSyncType> listTypes(String apiId) {
-        return typeStore.scan(k -> k.startsWith(apiId + "::"));
+    public Page<AppSyncType> listTypes(String apiId, Integer maxResults, String nextToken) {
+        return paginate(typeStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
     public AppSyncType updateType(String apiId, String typeName, Map<String, Object> request) {
@@ -441,8 +443,8 @@ public class AppSyncService {
         return key;
     }
 
-    public List<ApiKey> listApiKeys(String apiId) {
-        return apiKeyStore.scan(k -> k.startsWith(apiId + "::"));
+    public Page<ApiKey> listApiKeys(String apiId, Integer maxResults, String nextToken) {
+        return paginate(apiKeyStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
     public ApiKey getApiKey(String apiId, String keyId) {
@@ -564,6 +566,41 @@ public class AppSyncService {
         } catch (IllegalArgumentException e) {
             throw new AwsException("BadRequestException",
                     "Invalid value '" + str + "' for " + enumClass.getSimpleName(), 400);
+        }
+    }
+
+    // ──────────────────────────── Pagination ────────────────────────────
+
+    record Page<T>(List<T> items, String nextToken) {}
+
+    static <T> Page<T> paginate(List<T> items, String nextToken, Integer maxResults) {
+        int start = decodeToken(nextToken);
+        if (start < 0 || start > items.size()) {
+            throw new AwsException("InvalidNextTokenException", "Invalid NextToken.", 400);
+        }
+        int limit = (maxResults == null || maxResults <= 0)
+                ? items.size()
+                : Math.min(maxResults, items.size() - start);
+        int end = Math.min(items.size(), start + limit);
+        List<T> sliced = items.subList(start, end);
+        String next = (end < items.size()) ? encodeToken(end) : null;
+        return new Page<>(sliced, next);
+    }
+
+    static String encodeToken(int offset) {
+        return Base64.getUrlEncoder().withoutPadding()
+                .encodeToString(Integer.toString(offset).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    static int decodeToken(String token) {
+        if (token == null || token.isEmpty()) {
+            return 0;
+        }
+        try {
+            byte[] decoded = Base64.getUrlDecoder().decode(token);
+            return Integer.parseInt(new String(decoded, java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IllegalArgumentException e) {
+            return -1;
         }
     }
 }

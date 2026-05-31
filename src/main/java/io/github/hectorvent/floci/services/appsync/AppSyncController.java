@@ -82,12 +82,17 @@ public class AppSyncController {
 
     @GET
     @Path("/v1/apis")
-    public Response listGraphqlApis() {
-        List<GraphqlApi> apis = service.listGraphqlApis();
+    public Response listGraphqlApis(@QueryParam("maxResults") Integer maxResults,
+                                    @QueryParam("nextToken") String nextToken) {
+        var page = service.listGraphqlApis(maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("graphqlApis");
-        apis.forEach(items::addPOJO);
-        root.putNull("nextToken");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
         return Response.ok(root).build();
     }
 
@@ -172,12 +177,18 @@ public class AppSyncController {
 
     @GET
     @Path("/v1/apis/{apiId}/datasources")
-    public Response listDataSources(@PathParam("apiId") String apiId) {
-        List<DataSource> dataSources = service.listDataSources(apiId);
+    public Response listDataSources(@PathParam("apiId") String apiId,
+                                    @QueryParam("maxResults") Integer maxResults,
+                                    @QueryParam("nextToken") String nextToken) {
+        var page = service.listDataSources(apiId, maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("dataSources");
-        dataSources.forEach(items::addPOJO);
-        root.putNull("nextToken");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
         return Response.ok(root).build();
     }
 
@@ -199,14 +210,23 @@ public class AppSyncController {
 
     @GET
     @Path("/v1/apis/{apiId}/types/{typeName}/resolvers")
-    public Response listResolvers(@PathParam("apiId") String apiId, @PathParam("typeName") String typeName) {
-        List<Resolver> resolvers = service.listResolvers(apiId).stream()
+    public Response listResolvers(@PathParam("apiId") String apiId,
+                                  @PathParam("typeName") String typeName,
+                                  @QueryParam("maxResults") Integer maxResults,
+                                  @QueryParam("nextToken") String nextToken) {
+        var allPage = service.listResolvers(apiId, null, null);
+        List<Resolver> filtered = allPage.items().stream()
                 .filter(r -> typeName.equals(r.getTypeName()))
                 .toList();
+        var page = AppSyncService.paginate(filtered, nextToken, maxResults);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("resolvers");
-        resolvers.forEach(items::addPOJO);
-        root.putNull("nextToken");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
         return Response.ok(root).build();
     }
 
@@ -247,12 +267,18 @@ public class AppSyncController {
     @GET
     @Path("/v1/apis/{apiId}/functions/{functionId}/resolvers")
     public Response listResolversByFunction(@PathParam("apiId") String apiId,
-                                            @PathParam("functionId") String functionId) {
-        List<Resolver> resolvers = service.listResolversByFunction(apiId, functionId);
+                                            @PathParam("functionId") String functionId,
+                                            @QueryParam("maxResults") Integer maxResults,
+                                            @QueryParam("nextToken") String nextToken) {
+        var page = service.listResolversByFunction(apiId, functionId, maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("resolvers");
-        resolvers.forEach(items::addPOJO);
-        root.putNull("nextToken");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
         return Response.ok(root).build();
     }
 
@@ -303,12 +329,18 @@ public class AppSyncController {
 
     @GET
     @Path("/v1/apis/{apiId}/functions")
-    public Response listFunctions(@PathParam("apiId") String apiId) {
-        List<FunctionConfiguration> functions = service.listFunctions(apiId);
+    public Response listFunctions(@PathParam("apiId") String apiId,
+                                  @QueryParam("maxResults") Integer maxResults,
+                                  @QueryParam("nextToken") String nextToken) {
+        var page = service.listFunctions(apiId, maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("functions");
-        functions.forEach(items::addPOJO);
-        root.putNull("nextToken");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
         return Response.ok(root).build();
     }
 
@@ -357,12 +389,18 @@ public class AppSyncController {
 
     @GET
     @Path("/v1/apis/{apiId}/types")
-    public Response listTypes(@PathParam("apiId") String apiId) {
-        List<AppSyncType> types = service.listTypes(apiId);
+    public Response listTypes(@PathParam("apiId") String apiId,
+                              @QueryParam("maxResults") Integer maxResults,
+                              @QueryParam("nextToken") String nextToken) {
+        var page = service.listTypes(apiId, maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("types");
-        types.forEach(items::addPOJO);
-        root.putNull("nextToken");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
         return Response.ok(root).build();
     }
 
@@ -381,12 +419,18 @@ public class AppSyncController {
 
     @GET
     @Path("/v1/apis/{apiId}/apikeys")
-    public Response listApiKeys(@PathParam("apiId") String apiId) {
-        List<ApiKey> keys = service.listApiKeys(apiId);
+    public Response listApiKeys(@PathParam("apiId") String apiId,
+                                @QueryParam("maxResults") Integer maxResults,
+                                @QueryParam("nextToken") String nextToken) {
+        var page = service.listApiKeys(apiId, maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("apiKeys");
-        keys.forEach(items::addPOJO);
-        root.putNull("nextToken");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
         return Response.ok(root).build();
     }
 
