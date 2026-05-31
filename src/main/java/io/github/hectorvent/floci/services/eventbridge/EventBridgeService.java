@@ -645,7 +645,7 @@ public class EventBridgeService {
                 if (matchesPattern(entry, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
                     List<Target> targets = accountGet(targetStore, accountId, ruleKey).orElse(List.of());
-                    String eventJson = buildEventEnvelope(entry, effectiveBus, eventId);
+                    String eventJson = buildEventEnvelope(entry, effectiveBus, eventId, region);
                     for (Target target : targets) {
                         invoker.invokeTarget(target, eventJson, region);
                     }
@@ -900,7 +900,7 @@ public class EventBridgeService {
     // ──────────────────────────── Target Routing ────────────────────────────
 
 
-    private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId) {
+    private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId, String region) {
         try {
             String source = (String) entry.getOrDefault("Source", "");
             String detailType = (String) entry.getOrDefault("DetailType", "");
@@ -913,7 +913,7 @@ public class EventBridgeService {
             node.put("detail-type", detailType);
             node.put("account", regionResolver.getAccountId());
             node.put("time", Instant.now().toString());
-            node.put("region", regionResolver.getDefaultRegion());
+            node.put("region", region);
             node.putArray("resources").addAll(resources);
             node.set("detail", objectMapper.readTree(detail));
             node.put("event-bus-name", busName);

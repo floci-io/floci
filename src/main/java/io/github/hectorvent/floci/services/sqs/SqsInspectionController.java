@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.sqs;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.inject.Inject;
@@ -11,6 +13,8 @@ import jakarta.ws.rs.GET;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.Produces;
 import jakarta.ws.rs.QueryParam;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
 
@@ -27,22 +31,24 @@ public class SqsInspectionController {
 
     private final SqsService sqsService;
     private final ObjectMapper objectMapper;
+    private final RegionResolver regionResolver;
 
     @Inject
-    public SqsInspectionController(SqsService sqsService, ObjectMapper objectMapper) {
+    public SqsInspectionController(SqsService sqsService, ObjectMapper objectMapper, RegionResolver regionResolver) {
         this.sqsService = sqsService;
         this.objectMapper = objectMapper;
+        this.regionResolver = regionResolver;
     }
 
     @GET
-    public Response getMessages(@QueryParam("QueueUrl") String queueUrl) {
+    public Response getMessages(@Context HttpHeaders headers, @QueryParam("QueueUrl") String queueUrl) {
         if (queueUrl == null || queueUrl.isBlank()) {
             return Response.status(400)
                     .entity(objectMapper.createObjectNode().put("message", "QueueUrl query parameter is required"))
                     .build();
         }
 
-        List<Message> messages = sqsService.peekMessages(queueUrl);
+        List<Message> messages = sqsService.peekMessages(queueUrl, regionResolver.resolveRegion(headers));
 
         ArrayNode messagesArray = objectMapper.createArrayNode();
         for (Message msg : messages) {
@@ -96,14 +102,14 @@ public class SqsInspectionController {
     }
 
     @DELETE
-    public Response purgeQueue(@QueryParam("QueueUrl") String queueUrl) {
+    public Response purgeQueue(@Context HttpHeaders headers, @QueryParam("QueueUrl") String queueUrl) {
         if (queueUrl == null || queueUrl.isBlank()) {
             return Response.status(400)
                     .entity(objectMapper.createObjectNode().put("message", "QueueUrl query parameter is required"))
                     .build();
         }
 
-        sqsService.purgeQueue(queueUrl);
+        sqsService.purgeQueue(queueUrl, regionResolver.resolveRegion(headers));
         return Response.ok().build();
     }
 }

@@ -58,10 +58,6 @@ public class SsmService {
         this.regionResolver = regionResolver;
     }
 
-    public long putParameter(String name, String value, String type, String description, boolean overwrite) {
-        return putParameter(name, value, type, description, overwrite, regionResolver.getDefaultRegion());
-    }
-
     /**
      * Create or update a parameter.
      * Returns the version number.
@@ -91,19 +87,11 @@ public class SsmService {
         return version;
     }
 
-    public Parameter getParameter(String name) {
-        return getParameter(name, regionResolver.getDefaultRegion());
-    }
-
     public Parameter getParameter(String name, String region) {
         String storageKey = regionKey(region, name);
         return parameterStore.get(storageKey)
                 .orElseThrow(() -> new AwsException("ParameterNotFound",
                         "Parameter " + name + " not found.", 400));
-    }
-
-    public List<Parameter> getParameters(List<String> names) {
-        return getParameters(names, regionResolver.getDefaultRegion());
     }
 
     public List<Parameter> getParameters(List<String> names, String region) {
@@ -112,10 +100,6 @@ public class SsmService {
             parameterStore.get(regionKey(region, name)).ifPresent(result::add);
         }
         return result;
-    }
-
-    public List<Parameter> getParametersByPath(String path, boolean recursive) {
-        return getParametersByPath(path, recursive, regionResolver.getDefaultRegion());
     }
 
     public List<Parameter> getParametersByPath(String path, boolean recursive, String region) {
@@ -138,10 +122,6 @@ public class SsmService {
         });
     }
 
-    public void deleteParameter(String name) {
-        deleteParameter(name, regionResolver.getDefaultRegion());
-    }
-
     public void deleteParameter(String name, String region) {
         String storageKey = regionKey(region, name);
         if (parameterStore.get(storageKey).isEmpty()) {
@@ -151,10 +131,6 @@ public class SsmService {
         parameterStore.delete(storageKey);
         historyStore.delete(storageKey);
         LOG.infov("Deleted parameter: {0}", name);
-    }
-
-    public List<String> deleteParameters(List<String> names) {
-        return deleteParameters(names, regionResolver.getDefaultRegion());
     }
 
     public List<String> deleteParameters(List<String> names, String region) {
@@ -168,10 +144,6 @@ public class SsmService {
             }
         }
         return deleted;
-    }
-
-    public List<ParameterHistory> getParameterHistory(String name) {
-        return getParameterHistory(name, regionResolver.getDefaultRegion());
     }
 
     public List<ParameterHistory> getParameterHistory(String name, String region) {
