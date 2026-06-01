@@ -52,6 +52,7 @@ public class KmsService {
     private final StorageBackend<String, KmsAlias> aliasStore;
     private final StorageBackend<String, KmsGrant> grantStore;
     private final RegionResolver regionResolver;
+    private final SecureRandom secureRandom;
 
     @Inject
     public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
@@ -65,13 +66,33 @@ public class KmsService {
     }
 
     KmsService(StorageBackend<String, KmsKey> keyStore,
-                StorageBackend<String, KmsAlias> aliasStore,
+               StorageBackend<String, KmsAlias> aliasStore,
                StorageBackend<String, KmsGrant> grantStore,
-                RegionResolver regionResolver) {
+               RegionResolver regionResolver) {
+        this(keyStore, aliasStore, grantStore, regionResolver, new SecureRandom());
+    }
+
+    KmsService(StorageBackend<String, KmsKey> keyStore,
+               StorageBackend<String, KmsAlias> aliasStore,
+               StorageBackend<String, KmsGrant> grantStore,
+               RegionResolver regionResolver,
+               SecureRandom secureRandom) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.grantStore = grantStore;
         this.regionResolver = regionResolver;
+        this.secureRandom = secureRandom;
+    }
+
+    public byte[] generateRandom(int numberOfBytes) {
+        if (numberOfBytes < 1 || numberOfBytes > 1024) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + numberOfBytes + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1 and less than or equal to 1024",
+                    400);
+        }
+        byte[] bytes = new byte[numberOfBytes];
+        secureRandom.nextBytes(bytes);
+        return bytes;
     }
 
     private String buildDefaultKeyPolicy() {
