@@ -165,6 +165,7 @@ class SesServiceEventDestinationTest {
         ed.setSnsDestination(new SnsDestination()); // TopicArn left null
         AwsException ex = assertThrows(AwsException.class,
                 () -> SesService.validateEventDestination(ed));
+        assertEquals("InvalidParameterValue", ex.getErrorCode());
         assertEquals("SnsDestination requires a non-blank TopicArn.", ex.getMessage());
     }
 

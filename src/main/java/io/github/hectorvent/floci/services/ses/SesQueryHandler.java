@@ -563,10 +563,13 @@ public class SesQueryHandler {
                 .end("ConfigurationSet");
         if (attrs.contains("eventDestinations")) {
             xml.start("EventDestinations");
-            for (EventDestination ed : cs.getEventDestinations()) {
-                xml.start("member");
-                writeEventDestination(xml, ed);
-                xml.end("member");
+            List<EventDestination> destinations = cs.getEventDestinations();
+            if (destinations != null) {
+                for (EventDestination ed : destinations) {
+                    xml.start("member");
+                    writeEventDestination(xml, ed);
+                    xml.end("member");
+                }
             }
             xml.end("EventDestinations");
         }
