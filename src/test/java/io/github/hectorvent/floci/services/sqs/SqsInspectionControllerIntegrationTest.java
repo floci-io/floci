@@ -1,9 +1,14 @@
 package io.github.hectorvent.floci.services.sqs;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.specification.RequestSpecification;
+
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.NullSource;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -44,9 +49,11 @@ class SqsInspectionControllerIntegrationTest {
             .body("messages", hasSize(0));
     }
 
-    @Test
+    @ParameterizedTest
+    @NullSource
+    @ValueSource(strings = {"us-east-1"})
     @DisplayName("GET /_aws/sqs/messages returns all messages without consuming them")
-    void shouldReturnMessagesWithoutConsuming() {
+    void shouldReturnMessagesWithoutConsuming(String region) {
         given().contentType(CONTENT_TYPE)
             .formParam("Action", "SendMessage")
             .formParam("QueueUrl", queueUrl)
@@ -59,7 +66,12 @@ class SqsInspectionControllerIntegrationTest {
             .formParam("MessageBody", "second message")
         .when().post("/").then().statusCode(200);
 
-        given()
+        RequestSpecification requestSpecification = given();
+        String authorization = String.format("AWS4-HMAC-SHA256 Credential=AKID/20260101/%s/textract/aws4_request", region);
+        if (region != null) {
+          requestSpecification.header("Authorization", authorization);
+        }
+        requestSpecification
             .queryParam("QueueUrl", queueUrl)
         .when().get("/_aws/sqs/messages")
         .then()
@@ -72,7 +84,11 @@ class SqsInspectionControllerIntegrationTest {
             .body("messages[0].Attributes.ApproximateReceiveCount", equalTo("0"));
 
         // messages must still be there after peek
-        given()
+        requestSpecification = given();
+        if (region != null) {
+          requestSpecification.header("Authorization", authorization);
+        }
+        requestSpecification
             .queryParam("QueueUrl", queueUrl)
         .when().get("/_aws/sqs/messages")
         .then()
@@ -108,6 +124,28 @@ class SqsInspectionControllerIntegrationTest {
     void shouldReturn400WhenQueueUrlMissing() {
         given()
         .when().get("/_aws/sqs/messages")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @DisplayName("GET /_aws/sqs/messages returns 400 when retrieving messages from a queue in a different region")
+    void shouldReturn400WhenRetrievingMessagesFromQueueInDifferentRegion() {
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-1/textract/aws4_request")
+            .queryParam("QueueUrl", queueUrl)
+        .when().get("/_aws/sqs/messages")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @DisplayName("DELETE /_aws/sqs/messages returns 400 retrieving messages from a queue in a different region")
+    void shouldReturn400WhenPurgingMessagesFromQueueInDifferentRegion() {
+        given()
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/eu-west-1/textract/aws4_request")
+            .queryParam("QueueUrl", queueUrl)
+        .when().delete("/_aws/sqs/messages")
         .then()
             .statusCode(400);
     }

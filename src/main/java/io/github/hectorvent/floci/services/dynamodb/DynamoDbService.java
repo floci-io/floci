@@ -157,14 +157,6 @@ public class DynamoDbService {
     public TableDefinition createTable(String tableName,
                                         List<KeySchemaElement> keySchema,
                                         List<AttributeDefinition> attributeDefinitions,
-                                        Long readCapacity, Long writeCapacity) {
-        return createTable(tableName, keySchema, attributeDefinitions, readCapacity, writeCapacity,
-                           List.of(), List.of(), regionResolver.getDefaultRegion());
-    }
-
-    public TableDefinition createTable(String tableName,
-                                        List<KeySchemaElement> keySchema,
-                                        List<AttributeDefinition> attributeDefinitions,
                                         Long readCapacity, Long writeCapacity, String region) {
         return createTable(tableName, keySchema, attributeDefinitions, readCapacity, writeCapacity,
                            List.of(), List.of(), region);
@@ -322,10 +314,6 @@ public class DynamoDbService {
         return table;
     }
 
-    public TableDefinition describeTable(String tableName) {
-        return describeTable(tableName, regionResolver.getDefaultRegion());
-    }
-
     public TableDefinition describeTable(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
@@ -345,10 +333,6 @@ public class DynamoDbService {
         tableStore.put(regionKey(region, canonicalTableName), table);
     }
 
-    public void deleteTable(String tableName) {
-        deleteTable(tableName, regionResolver.getDefaultRegion());
-    }
-
     public void deleteTable(String tableName, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
@@ -365,10 +349,6 @@ public class DynamoDbService {
             streamService.deleteStream(canonicalTableName, region);
         }
         LOG.infov("Deleted table: {0}", canonicalTableName);
-    }
-
-    public List<String> listTables() {
-        return listTables(regionResolver.getDefaultRegion());
     }
 
     public List<String> listTables(String region) {
@@ -402,10 +382,6 @@ public class DynamoDbService {
     }
 
     public record ListTablesResult(List<String> tableNames, String lastEvaluatedTableName) {}
-
-    public void putItem(String tableName, JsonNode item) {
-        putItem(tableName, item, null, null, null, regionResolver.getDefaultRegion(), "NONE");
-    }
 
     public void putItem(String tableName, JsonNode item, String region) {
         putItem(tableName, item, null, null, null, region, "NONE");
@@ -449,10 +425,6 @@ public class DynamoDbService {
         });
     }
 
-    public JsonNode getItem(String tableName, JsonNode key) {
-        return getItem(tableName, key, regionResolver.getDefaultRegion());
-    }
-
     public JsonNode getItem(String tableName, JsonNode key, String region) {
         String canonicalTableName = canonicalTableName(region, tableName);
         String storageKey = regionKey(region, canonicalTableName);
@@ -472,10 +444,6 @@ public class DynamoDbService {
         }
         LOG.tracev("Got item from {0}: key={1} item={2}", canonicalTableName, itemKey, item);
         return item;
-    }
-
-    public JsonNode deleteItem(String tableName, JsonNode key) {
-        return deleteItem(tableName, key, null, null, null, regionResolver.getDefaultRegion(), "NONE");
     }
 
     public JsonNode deleteItem(String tableName, JsonNode key, String region) {
@@ -518,14 +486,6 @@ public class DynamoDbService {
 
             return removed;
         });
-    }
-
-    public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
-                                String updateExpression,
-                                JsonNode expressionAttrNames, JsonNode expressionAttrValues,
-                                String returnValues) {
-        return updateItem(tableName, key, attributeUpdates, updateExpression, expressionAttrNames,
-                          expressionAttrValues, returnValues, null, regionResolver.getDefaultRegion(), "NONE");
     }
 
     public UpdateResult updateItem(String tableName, JsonNode key, JsonNode attributeUpdates,
@@ -675,13 +635,6 @@ public class DynamoDbService {
 
             return new UpdateResult(item, existing);
         });
-    }
-
-    public QueryResult query(String tableName, JsonNode keyConditions,
-                              JsonNode expressionAttrValues, String keyConditionExpression,
-                              String filterExpression, Integer limit) {
-        return query(tableName, keyConditions, expressionAttrValues, keyConditionExpression,
-                     filterExpression, limit, null, null, null, null, regionResolver.getDefaultRegion());
     }
 
     public QueryResult query(String tableName, JsonNode keyConditions,
@@ -842,13 +795,6 @@ public class DynamoDbService {
         LOG.tracev("Query on {0}: returned={1} scanned={2}",
                 canonicalTableName, evaluatedItems.size(), scannedCount);
         return new QueryResult(evaluatedItems, scannedCount, lastEvaluatedKey);
-    }
-
-    public ScanResult scan(String tableName, String filterExpression,
-                            JsonNode expressionAttrNames, JsonNode expressionAttrValues,
-                            JsonNode scanFilter, Integer limit, JsonNode exclusiveStartKey) {
-        return scan(tableName, filterExpression, expressionAttrNames, expressionAttrValues,
-                    scanFilter, limit, exclusiveStartKey, regionResolver.getDefaultRegion());
     }
 
     public ScanResult scan(String tableName, String filterExpression,

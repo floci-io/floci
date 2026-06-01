@@ -1701,7 +1701,7 @@ public class S3Service {
             return;
         }
 
-        String region = regionResolver != null ? regionResolver.getDefaultRegion() : "us-east-1";
+        String region = bucket.getRegion();
         String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled());
 
         for (QueueNotification qn : config.getQueueConfigurations()) {

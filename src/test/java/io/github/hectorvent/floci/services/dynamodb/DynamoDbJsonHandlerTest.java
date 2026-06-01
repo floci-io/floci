@@ -13,7 +13,6 @@ import org.junit.jupiter.api.Test;
 
 import jakarta.ws.rs.core.Response;
 
-import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -31,11 +30,11 @@ class DynamoDbJsonHandlerTest {
         handler = new DynamoDbJsonHandler(service, null, null, mapper);
     }
 
-    private TableDefinition createUsersTable() {
+    private TableDefinition createUsersTable(String region) {
         return service.createTable("Users",
                 List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
-                5L, 5L);
+                5L, 5L, region);
     }
 
     private ObjectNode attributeValue(String type, String value) {
@@ -70,9 +69,9 @@ class DynamoDbJsonHandlerTest {
 
     @Test
     void updateItemReturnValuesUpdatedNew()  throws Exception {
-        createUsersTable();
+        createUsersTable("us-east-1");
 
-        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"));
+        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"), "us-east-1");
 
         ObjectNode key = item("userId", "u-fallback");
 
@@ -110,7 +109,7 @@ class DynamoDbJsonHandlerTest {
     
     @Test
     void updateItemReturnValuesUpdatedNewOnNewItem() throws Exception {
-        createUsersTable();
+        createUsersTable("us-east-1");
 
         // Item does not exist - UpdateItem creates it
         ObjectNode key = item("userId", "u-new");
@@ -147,9 +146,9 @@ class DynamoDbJsonHandlerTest {
 
     @Test
     void updateItemReturnValuesUpdatedOld()  throws Exception {
-        createUsersTable();
+        createUsersTable("us-east-1");
 
-        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"));
+        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"), "us-east-1");
 
         ObjectNode key = item("userId", "u-fallback");
 
@@ -187,9 +186,9 @@ class DynamoDbJsonHandlerTest {
     
     @Test
     void updateItemReturnValuesAllOld()  throws Exception {
-        createUsersTable();
+        createUsersTable("us-east-1");
 
-        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"));
+        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"), "us-east-1");
 
         ObjectNode key = item("userId", "u-fallback");
 
@@ -229,9 +228,9 @@ class DynamoDbJsonHandlerTest {
     
     @Test
     void updateItemReturnValuesAllNew()  throws Exception {
-        createUsersTable();
+        createUsersTable("us-east-1");
 
-        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"));
+        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"), "us-east-1");
 
         ObjectNode key = item("userId", "u-fallback");
 
@@ -271,9 +270,9 @@ class DynamoDbJsonHandlerTest {
     
     @Test
     void updateItemReturnValuesNone()  throws Exception {
-        createUsersTable();
+        createUsersTable("us-east-1");
 
-        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"));
+        service.putItem("Users", item("userId", "u-fallback", "delAttr", "old", "changeAttr", "val1", "sameAttr", "static"), "us-east-1");
 
         ObjectNode key = item("userId", "u-fallback");
 
