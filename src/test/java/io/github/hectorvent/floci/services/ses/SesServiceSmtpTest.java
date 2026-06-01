@@ -105,4 +105,67 @@ class SesServiceSmtpTest {
                 null, null, null,
                 "Subject", null, "<p>html only</p>");
     }
+
+    @Test
+    void sendEmail_allRecipientsSuppressed_skipsRelayButStillStores() {
+        service.putSuppressedDestination("us-east-1", "to@example.com", "BOUNCE");
+        service.putSuppressedDestination("us-east-1", "cc@example.com", "COMPLAINT");
+
+        String messageId = service.sendEmail("from@example.com",
+                List.of("to@example.com"),
+                List.of("cc@example.com"),
+                null, null,
+                "Subject", "text body", null, null, List.of(), List.of(), "us-east-1");
+
+        assertNotNull(messageId);
+        assertFalse(emailStore.scan(k -> true).isEmpty(),
+                "stored SentEmail should still record the original recipient list");
+        verify(smtpRelay, never()).relay(any(), any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void sendEmail_partialSuppression_relayCalledWithFilteredRecipients() {
+        // Only suppress one of the To recipients; the other should still reach the relay.
+        service.putSuppressedDestination("us-east-1", "suppressed@example.com", "BOUNCE");
+
+        service.sendEmail("from@example.com",
+                List.of("to@example.com", "suppressed@example.com"),
+                List.of("cc-keep@example.com"),
+                null, null,
+                "Subject", "text body", null, null, List.of(), List.of(), "us-east-1");
+
+        verify(smtpRelay).relay(
+                "from@example.com",
+                List.of("to@example.com"),
+                List.of("cc-keep@example.com"),
+                null,
+                null,
+                "Subject", "text body", null);
+    }
+
+    @Test
+    void sendRawEmail_allRecipientsSuppressed_skipsRelayRawButStillStores() {
+        service.putSuppressedDestination("us-east-1", "to@example.com", "BOUNCE");
+
+        String messageId = service.sendRawEmail("from@example.com",
+                List.of("to@example.com"), "raw MIME", null, List.of(), "us-east-1");
+
+        assertNotNull(messageId);
+        assertFalse(emailStore.scan(k -> true).isEmpty());
+        verify(smtpRelay, never()).relayRaw(any(), any(), any());
+    }
+
+    @Test
+    void sendRawEmail_partialSuppression_relayRawCalledWithFilteredRecipients() {
+        service.putSuppressedDestination("us-east-1", "suppressed@example.com", "COMPLAINT");
+
+        service.sendRawEmail("from@example.com",
+                List.of("to@example.com", "suppressed@example.com"),
+                "raw MIME", null, List.of(), "us-east-1");
+
+        verify(smtpRelay).relayRaw(
+                "from@example.com",
+                List.of("to@example.com"),
+                "raw MIME");
+    }
 }
