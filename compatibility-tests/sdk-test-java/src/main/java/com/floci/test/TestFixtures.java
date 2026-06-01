@@ -24,6 +24,7 @@ import software.amazon.awssdk.services.lambda.LambdaClient;
 import software.amazon.awssdk.services.opensearch.OpenSearchClient;
 import software.amazon.awssdk.services.neptune.NeptuneClient;
 import software.amazon.awssdk.services.rds.RdsClient;
+import software.amazon.awssdk.services.resourceexplorer2.ResourceExplorer2Client;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.endpoints.Endpoint;
 import software.amazon.awssdk.services.s3control.S3ControlClient;
@@ -853,6 +854,23 @@ public final class TestFixtures {
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
                 .build();
+    }
+
+    public static ResourceExplorer2Client resourceExplorer2Client() {
+        return resourceExplorer2Client(REGION);
+    }
+
+    /**
+     * Resource Explorer 2 client bound to an explicit region. The emulator auto-provisions an
+     * index only in the default region, so CreateIndex/DeleteIndex tests use a different region
+     * to exercise a real create against a region that starts with no index.
+     */
+    public static ResourceExplorer2Client resourceExplorer2Client(Region region) {
+        var builder = ResourceExplorer2Client.builder().region(region);
+        if (!isRealAws()) {
+            builder.endpointOverride(ENDPOINT).credentialsProvider(CREDENTIALS);
+        }
+        return builder.build();
     }
 
     public static AppSyncClient appSyncClient() {

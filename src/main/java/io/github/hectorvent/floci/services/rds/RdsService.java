@@ -9,6 +9,9 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -25,6 +28,7 @@ import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingService;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.core.common.Resettable;
@@ -50,7 +54,7 @@ import java.util.regex.Pattern;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService implements Resettable {
+public class RdsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -67,6 +71,7 @@ public class RdsService implements Resettable {
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
     private final DockerHostResolver dockerHostResolver;
+    private final ResourceGroupsTaggingService taggingService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
@@ -79,7 +84,8 @@ public class RdsService implements Resettable {
                       EmulatorConfig config,
                       StorageFactory storageFactory,
                       SecretsManagerService secretsManagerService,
-                      DockerHostResolver dockerHostResolver) {
+                      DockerHostResolver dockerHostResolver,
+                      ResourceGroupsTaggingService taggingService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -87,6 +93,7 @@ public class RdsService implements Resettable {
         this.config = config;
         this.secretsManagerService = secretsManagerService;
         this.dockerHostResolver = dockerHostResolver;
+        this.taggingService = taggingService;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -111,7 +118,7 @@ public class RdsService implements Resettable {
                StorageBackend<String, DbSubnetGroup> subnetGroups) {
         this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
-                null, null);
+                null, null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -125,7 +132,8 @@ public class RdsService implements Resettable {
                StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
                StorageBackend<String, DbSubnetGroup> subnetGroups,
                SecretsManagerService secretsManagerService,
-               DockerHostResolver dockerHostResolver) {
+               DockerHostResolver dockerHostResolver,
+               ResourceGroupsTaggingService taggingService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.ec2Service = ec2Service;
@@ -138,6 +146,7 @@ public class RdsService implements Resettable {
         this.parameterGroups = parameterGroups;
         this.clusterParameterGroups = clusterParameterGroups;
         this.subnetGroups = subnetGroups;
+        this.taggingService = taggingService;
     }
 
     public void restorePersistedRuntime() {
@@ -1352,5 +1361,45 @@ public class RdsService implements Resettable {
                     cluster.isMultiAz(),
                     cluster.getSubnetAvailabilityZones());
         }
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (DbInstance instance : listDbInstances(null)) {
+            String arn = instance.getDbInstanceArn();
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:db", "rds",
+                    parsed.region(), parsed.accountId(),
+                    instance.getCreatedAt() != null ? instance.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        for (DbCluster cluster : listDbClusters(null)) {
+            String arn = cluster.getDbClusterArn();
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(arn, "rds:cluster", "rds",
+                    parsed.region(), parsed.accountId(),
+                    cluster.getCreatedAt() != null ? cluster.getCreatedAt() : Instant.now(),
+                    tagsFor(parsed.region(), arn)));
+        }
+        return resources;
+    }
+
+    /**
+     * Resolves tags for a resource, tolerating a null taggingService. The CDI constructor always
+     * supplies one; the storage-backed test constructors pass null, and unit tests that exercise
+     * getResources() would otherwise NPE.
+     */
+    private Map<String, String> tagsFor(String region, String arn) {
+        return taggingService != null ? taggingService.getTagsForResource(region, arn) : Map.of();
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(
+                new SupportedResourceType("rds:db", "rds", true),
+                new SupportedResourceType("rds:cluster", "rds", true));
     }
 }

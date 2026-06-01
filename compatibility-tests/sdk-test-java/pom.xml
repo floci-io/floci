@@ -337,6 +337,20 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>backup</artifactId>
         </dependency>
+        <!-- Resource Explorer 2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>resourceexplorer2</artifactId>
+        </dependency>
+        <!-- SSO credential support (needed for FLOCI_TARGET=aws with SSO profiles) -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>sso</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>ssooidc</artifactId>
+        </dependency>
         <!-- AppSync client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

@@ -42,9 +42,12 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 
 @ApplicationScoped
-public class S3Service implements Resettable {
+public class S3Service implements Resettable, ResourceProvider {
     private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
@@ -2693,5 +2696,26 @@ public class S3Service implements Resettable {
         LOG.debugv("Copied object: {0}/{1} -> {2}/{3}", sourceBucket, sourceKey, destBucket, destKey);
         fireNotifications(destBucket, destKey, "ObjectCreated:Copy", copy);
         return copy;
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (Bucket bucket : listBuckets()) {
+            resources.add(new ExplorerResource(
+                    "arn:aws:s3:::" + bucket.getName(),
+                    "s3:bucket",
+                    "s3",
+                    bucket.getRegion() != null ? bucket.getRegion() : regionResolver.getDefaultRegion(),
+                    regionResolver.getAccountId(),
+                    bucket.getCreationDate() != null ? bucket.getCreationDate() : Instant.now(),
+                    bucket.getTags() != null ? bucket.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("s3:bucket", "s3", true));
     }
 }

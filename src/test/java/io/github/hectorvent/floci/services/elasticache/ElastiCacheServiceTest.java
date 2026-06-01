@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elasticache;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerHandle;
@@ -40,6 +41,7 @@ class ElastiCacheServiceTest {
         proxyManager = mock(ElastiCacheProxyManager.class);
         StorageFactory storageFactory = mock(StorageFactory.class);
         EmulatorConfig config = mock(EmulatorConfig.class);
+        RegionResolver regionResolver = mock(RegionResolver.class);
 
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
         EmulatorConfig.ElastiCacheServiceConfig ecConfig = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
@@ -54,13 +56,15 @@ class ElastiCacheServiceTest {
         when(containerManager.start(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp", "localhost", 6379));
         doNothing().when(proxyManager).startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
+        when(regionResolver.buildArn(anyString(), anyString(), anyString()))
+                .thenAnswer(inv -> "arn:aws:" + inv.getArgument(0) + ":us-east-1:123456789012:" + inv.getArgument(2));
 
-        service = new ElastiCacheService(containerManager, proxyManager, storageFactory, config);
+        service = new ElastiCacheService(containerManager, proxyManager, storageFactory, config, regionResolver);
     }
 
     @Test
     void singleArgAuthMatchesDefaultUserOnly() {
-        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null);
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1");
 
         service.createUser("default-user-id", "default", AuthMode.PASSWORD,
                 List.of("default-pass"), "on ~* +@all");
@@ -80,7 +84,7 @@ class ElastiCacheServiceTest {
 
     @Test
     void twoArgAuthMatchesNamedUser() {
-        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null);
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1");
 
         service.createUser("other-user-id", "other", AuthMode.PASSWORD,
                 List.of("other-pass"), "on ~* +@all");
@@ -96,7 +100,7 @@ class ElastiCacheServiceTest {
 
     @Test
     void singleArgAuthFallsBackToGroupAuthToken() {
-        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, "group-token");
+        service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, "group-token", "us-east-1");
 
         // Single-arg AUTH with group auth token should succeed
         assertTrue(service.validatePassword("grp", null, "group-token"));
@@ -117,7 +121,7 @@ class ElastiCacheServiceTest {
 
         // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
-                () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
+                () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1"));
 
         // Rollback stopped the proxy and the already-started container.
         verify(proxyManager).stopProxy("grp");
@@ -128,7 +132,7 @@ class ElastiCacheServiceTest {
         doNothing().when(proxyManager)
                 .startProxy(anyString(), any(), anyInt(), anyString(), anyInt(), any());
         ReplicationGroup recovered =
-                service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null);
+                service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null, "us-east-1");
         assertEquals(16379, recovered.getProxyPort(),
                 "Port from the failed create must be released so the next group reuses it");
     }
@@ -141,7 +145,7 @@ class ElastiCacheServiceTest {
 
         // The original failure must propagate to the caller (we clean up, then rethrow).
         assertThrows(RuntimeException.class,
-                () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null));
+                () -> service.createReplicationGroup("grp", "test", AuthMode.PASSWORD, null, "us-east-1"));
 
         // No container started and no proxy started, so rollback must not call either stop.
         verify(proxyManager, never()).stopProxy(anyString());
@@ -151,7 +155,7 @@ class ElastiCacheServiceTest {
         when(containerManager.start(anyString(), anyString()))
                 .thenReturn(new ElastiCacheContainerHandle("cid", "grp2", "localhost", 6379));
         ReplicationGroup recovered =
-                service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null);
+                service.createReplicationGroup("grp2", "test", AuthMode.PASSWORD, null, "us-east-1");
         assertEquals(16379, recovered.getProxyPort(),
                 "Port from the failed create must be released so the next group reuses it");
     }

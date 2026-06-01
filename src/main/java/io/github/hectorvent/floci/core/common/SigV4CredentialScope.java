@@ -9,14 +9,14 @@ import java.util.regex.Pattern;
  * Extracts the SigV4 signing service name from an Authorization header's
  * credential scope ({@code Credential=<key>/<date>/<region>/<service>/aws4_request}).
  */
-final class SigV4CredentialScope {
+public final class SigV4CredentialScope {
 
     private static final Pattern SERVICE_PATTERN = Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
 
     private SigV4CredentialScope() {
     }
 
-    static Optional<String> serviceName(String authorization) {
+    public static Optional<String> serviceName(String authorization) {
         if (authorization == null) {
             return Optional.empty();
         }
