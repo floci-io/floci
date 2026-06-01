@@ -116,6 +116,8 @@ class AppSyncTest {
 
     // ── API Keys ────────────────────────────────────────────────────────
 
+    private static String keyId;
+
     @Test
     @Order(20)
     void createApiKey() {
@@ -127,7 +129,8 @@ class AppSyncTest {
                 .build());
 
         assertThat(resp.apiKey()).isNotNull();
-        assertThat(resp.apiKey().id()).isNotBlank();
+        keyId = resp.apiKey().id();
+        assertThat(keyId).isNotBlank();
         assertThat(resp.apiKey().description()).isEqualTo("sdk-test-key");
     }
 
@@ -139,6 +142,35 @@ class AppSyncTest {
                 .build());
 
         assertThat(resp.apiKeys()).isNotEmpty();
+    }
+
+    @Test
+    @Order(22)
+    void updateApiKey() {
+        UpdateApiKeyResponse resp = client.updateApiKey(UpdateApiKeyRequest.builder()
+                .apiId(apiId)
+                .id(keyId)
+                .description("updated-sdk-key")
+                .build());
+
+        assertThat(resp.apiKey()).isNotNull();
+        assertThat(resp.apiKey().description()).isEqualTo("updated-sdk-key");
+    }
+
+    @Test
+    @Order(23)
+    void deleteApiKey() {
+        CreateApiKeyResponse created = client.createApiKey(CreateApiKeyRequest.builder()
+                .apiId(apiId)
+                .description("temp-key")
+                .build());
+
+        DeleteApiKeyResponse resp = client.deleteApiKey(DeleteApiKeyRequest.builder()
+                .apiId(apiId)
+                .id(created.apiKey().id())
+                .build());
+
+        assertThat(resp).isNotNull();
     }
 
     // ── Data Sources ────────────────────────────────────────────────────
@@ -252,6 +284,21 @@ class AppSyncTest {
 
     @Test
     @Order(43)
+    void updateResolver() {
+        UpdateResolverResponse resp = client.updateResolver(UpdateResolverRequest.builder()
+                .apiId(apiId)
+                .typeName("Query")
+                .fieldName("hello")
+                .dataSourceName("none-ds")
+                .responseMappingTemplate("$util.toJson({\"updated\": true})")
+                .build());
+
+        assertThat(resp.resolver()).isNotNull();
+        assertThat(resp.resolver().responseMappingTemplate()).contains("updated");
+    }
+
+    @Test
+    @Order(44)
     void deleteResolver() {
         client.createResolver(CreateResolverRequest.builder()
                 .apiId(apiId)
@@ -377,7 +424,55 @@ class AppSyncTest {
     // ── Types ──────────────────────────────────────────────────────────
 
     @Test
-    @Order(65)
+    @Order(70)
+    void createType() {
+        CreateTypeResponse resp = client.createType(CreateTypeRequest.builder()
+                .apiId(apiId)
+                .definition("type Item { id: ID!, name: String }")
+                .build());
+
+        assertThat(resp.type()).isNotNull();
+        assertThat(resp.type().name()).isEqualTo("Item");
+        assertThat(resp.type().definition()).contains("Item");
+    }
+
+    @Test
+    @Order(71)
+    void getType() {
+        GetTypeResponse resp = client.getType(GetTypeRequest.builder()
+                .apiId(apiId)
+                .typeName("Item")
+                .build());
+
+        assertThat(resp.type()).isNotNull();
+        assertThat(resp.type().name()).isEqualTo("Item");
+    }
+
+    @Test
+    @Order(72)
+    void listTypes() {
+        ListTypesResponse resp = client.listTypes(ListTypesRequest.builder()
+                .apiId(apiId)
+                .build());
+
+        assertThat(resp.types()).isNotEmpty();
+    }
+
+    @Test
+    @Order(73)
+    void updateType() {
+        UpdateTypeResponse resp = client.updateType(UpdateTypeRequest.builder()
+                .apiId(apiId)
+                .typeName("Item")
+                .definition("type Item { id: ID!, name: String, description: String }")
+                .build());
+
+        assertThat(resp.type()).isNotNull();
+        assertThat(resp.type().definition()).contains("description");
+    }
+
+    @Test
+    @Order(74)
     void deleteType() {
         client.createType(CreateTypeRequest.builder()
                 .apiId(apiId)
@@ -390,5 +485,47 @@ class AppSyncTest {
                 .build());
 
         assertThat(resp).isNotNull();
+    }
+
+    // ── Error Handling ─────────────────────────────────────────────────
+
+    @Test
+    @Order(80)
+    void getNonExistentApiThrowsException() {
+        assertThatThrownBy(() -> client.getGraphqlApi(GetGraphqlApiRequest.builder()
+                        .apiId("nonexistent12345678901234")
+                        .build()))
+                .isInstanceOf(AppSyncException.class);
+    }
+
+    @Test
+    @Order(81)
+    void getNonExistentDataSourceThrowsException() {
+        assertThatThrownBy(() -> client.getDataSource(GetDataSourceRequest.builder()
+                        .apiId(apiId)
+                        .name("nonexistent-ds")
+                        .build()))
+                .isInstanceOf(AppSyncException.class);
+    }
+
+    @Test
+    @Order(82)
+    void getNonExistentTypeThrowsException() {
+        assertThatThrownBy(() -> client.getType(GetTypeRequest.builder()
+                        .apiId(apiId)
+                        .typeName("NonExistentType")
+                        .build()))
+                .isInstanceOf(AppSyncException.class);
+    }
+
+    @Test
+    @Order(83)
+    void createApiKeyMissingDescriptionSucceeds() {
+        CreateApiKeyResponse resp = client.createApiKey(CreateApiKeyRequest.builder()
+                .apiId(apiId)
+                .build());
+
+        assertThat(resp.apiKey()).isNotNull();
+        assertThat(resp.apiKey().id()).isNotBlank();
     }
 }
