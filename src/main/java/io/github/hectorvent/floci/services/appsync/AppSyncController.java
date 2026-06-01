@@ -209,16 +209,29 @@ public class AppSyncController {
     }
 
     @GET
-    @Path("/v1/apis/{apiId}/types/{typeName}/resolvers")
+    @Path("/v1/apis/{apiId}/resolvers")
     public Response listResolvers(@PathParam("apiId") String apiId,
-                                  @PathParam("typeName") String typeName,
                                   @QueryParam("maxResults") Integer maxResults,
                                   @QueryParam("nextToken") String nextToken) {
-        var allPage = service.listResolvers(apiId, null, null);
-        List<Resolver> filtered = allPage.items().stream()
-                .filter(r -> typeName.equals(r.getTypeName()))
-                .toList();
-        var page = AppSyncService.paginate(filtered, nextToken, maxResults);
+        var page = service.listResolvers(apiId, maxResults, nextToken);
+        ObjectNode root = objectMapper.createObjectNode();
+        ArrayNode items = root.putArray("resolvers");
+        page.items().forEach(items::addPOJO);
+        if (page.nextToken() != null) {
+            root.put("nextToken", page.nextToken());
+        } else {
+            root.putNull("nextToken");
+        }
+        return Response.ok(root).build();
+    }
+
+    @GET
+    @Path("/v1/apis/{apiId}/types/{typeName}/resolvers")
+    public Response listResolversByType(@PathParam("apiId") String apiId,
+                                        @PathParam("typeName") String typeName,
+                                        @QueryParam("maxResults") Integer maxResults,
+                                        @QueryParam("nextToken") String nextToken) {
+        var page = service.listResolversByType(apiId, typeName, maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
         ArrayNode items = root.putArray("resolvers");
         page.items().forEach(items::addPOJO);

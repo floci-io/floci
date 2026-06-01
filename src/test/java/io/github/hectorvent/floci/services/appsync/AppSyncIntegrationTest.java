@@ -458,6 +458,20 @@ class AppSyncIntegrationTest {
     }
 
     @Test
+    @Order(62)
+    void listAllResolvers() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/resolvers")
+        .then()
+            .statusCode(200)
+            .body("resolvers", hasSize(greaterThanOrEqualTo(1)))
+            .body("resolvers[0].typeName", notNullValue())
+            .body("resolvers[0].fieldName", notNullValue());
+    }
+
+    @Test
     @Order(63)
     void updateResolver() {
         given()
@@ -552,11 +566,35 @@ class AppSyncIntegrationTest {
     void listResolversByFunction() {
         given()
             .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "fieldName": "fnResolverField",
+                  "dataSourceName": "none-ds",
+                  "functionId": "%s"
+                }
+                """.formatted(functionId))
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(200)
+            .body("resolver.functionId", equalTo(functionId));
+
+        given()
+            .header("Authorization", AUTH)
         .when()
             .get("/v1/apis/" + apiId + "/functions/" + functionId + "/resolvers")
         .then()
             .statusCode(200)
-            .body("resolvers", notNullValue());
+            .body("resolvers", hasSize(greaterThanOrEqualTo(1)))
+            .body("resolvers[0].functionId", equalTo(functionId));
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/types/Query/resolvers/fnResolverField")
+        .then()
+            .statusCode(204);
     }
 
     @Test
