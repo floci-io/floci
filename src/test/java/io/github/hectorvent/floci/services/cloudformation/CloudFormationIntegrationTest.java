@@ -19,6 +19,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -5779,6 +5780,60 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("CREATE_FAILED"));
+    }
+
+    @Test
+    void createStack_apiGatewayRestApi_withEndpointConfiguration() {
+        String template = """
+            {
+              "Resources": {
+                "MyPrivateApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-private-api",
+                    "EndpointConfiguration": {
+                      "Types": ["PRIVATE"],
+                      "VpcEndpointIds": ["vpce-12345678"]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        String stackName = "apigw-ep-stack";
+
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body(containsString("<StackId>"));
+
+        String resourcesXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "MyPrivateApi");
+
+        given()
+                .when()
+                .get("/restapis/" + apiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("cfn-private-api"))
+                .body("endpointConfiguration.types", contains("PRIVATE"))
+                .body("endpointConfiguration.vpcEndpointIds", contains("vpce-12345678"));
     }
 
 }
