@@ -332,7 +332,10 @@ public class AwsQueryController {
             "ListTemplates", "SendTemplatedEmail", "SendBulkTemplatedEmail",
             "TestRenderTemplate",
             "CreateConfigurationSet", "DescribeConfigurationSet",
-            "ListConfigurationSets", "DeleteConfigurationSet"
+            "ListConfigurationSets", "DeleteConfigurationSet",
+            "CreateConfigurationSetEventDestination",
+            "UpdateConfigurationSetEventDestination",
+            "DeleteConfigurationSetEventDestination"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(
