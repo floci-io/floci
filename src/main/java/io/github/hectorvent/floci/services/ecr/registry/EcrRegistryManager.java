@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
@@ -50,6 +51,7 @@ public class EcrRegistryManager {
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerLogStreamer logStreamer;
     private final ContainerDetector containerDetector;
+    private final CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private final PortAllocator portAllocator;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -66,6 +68,7 @@ public class EcrRegistryManager {
                               ContainerLifecycleManager lifecycleManager,
                               ContainerLogStreamer logStreamer,
                               ContainerDetector containerDetector,
+                              CurrentContainerNetworkResolver currentContainerNetworkResolver,
                               PortAllocator portAllocator,
                               EmulatorConfig config,
                               RegionResolver regionResolver) {
@@ -73,6 +76,7 @@ public class EcrRegistryManager {
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.containerDetector = containerDetector;
+        this.currentContainerNetworkResolver = currentContainerNetworkResolver;
         this.portAllocator = portAllocator;
         this.config = config;
         this.regionResolver = regionResolver;
@@ -107,6 +111,10 @@ public class EcrRegistryManager {
 
     /** Returns a {@link RegistryHttpClient} bound to the current registry endpoint. */
     public RegistryHttpClient httpClient() {
+        if (containerDetector.isRunningInContainer()) {
+            return new RegistryHttpClient("http://" + config.services().ecr().registryContainerName()
+                    + ":" + CONTAINER_INTERNAL_PORT);
+        }
         return new RegistryHttpClient("http://localhost:" + effectivePort());
     }
 
@@ -156,7 +164,7 @@ public class EcrRegistryManager {
                     .withName(name)
                     .withEnv(env)
                     .withPortBinding(CONTAINER_INTERNAL_PORT, chosenPort)
-                    .withDockerNetwork(config.services().ecr().dockerNetwork())
+                    .withDockerNetwork(resolveRegistryDockerNetwork())
                     .withLogRotation();
 
             // Handle persistence mounting based on storage configuration
@@ -212,6 +220,17 @@ public class EcrRegistryManager {
 
         this.logStream = logStreamer.attach(
                 containerId, logGroup, logStreamName, region, "ecr:registry");
+    }
+
+    private java.util.Optional<String> resolveRegistryDockerNetwork() {
+        java.util.Optional<String> configured = config.services().ecr().dockerNetwork();
+        if (configured.isPresent() && !configured.get().isBlank()) {
+            return configured;
+        }
+        if (containerDetector.isRunningInContainer()) {
+            return currentContainerNetworkResolver.resolveNetworkName();
+        }
+        return java.util.Optional.empty();
     }
 
     private void runReconcileOnce() {

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import org.junit.jupiter.api.BeforeEach;
@@ -14,6 +15,7 @@ import org.mockito.Mockito;
 
 import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -30,9 +32,12 @@ class EcrRegistryManagerTest {
 
     private static final int BASE_PORT = 6100;
     private static final int MAX_PORT = 6101; // pool of exactly two ports
+    private static final String REGISTRY_NAME = "floci-test-ecr-registry";
 
     private PortAllocator portAllocator;
     private ContainerLifecycleManager lifecycleManager;
+    private ContainerDetector containerDetector;
+    private CurrentContainerNetworkResolver currentContainerNetworkResolver;
     private EcrRegistryManager manager;
 
     @BeforeEach
@@ -49,7 +54,8 @@ class EcrRegistryManagerTest {
         when(lifecycleManager.findByName(anyString())).thenReturn(Optional.empty());
 
         ContainerLogStreamer logStreamer = Mockito.mock(ContainerLogStreamer.class);
-        ContainerDetector containerDetector = Mockito.mock(ContainerDetector.class);
+        containerDetector = Mockito.mock(ContainerDetector.class);
+        currentContainerNetworkResolver = Mockito.mock(CurrentContainerNetworkResolver.class);
         RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
 
         EmulatorConfig config = Mockito.mock(EmulatorConfig.class);
@@ -60,14 +66,14 @@ class EcrRegistryManagerTest {
         when(config.storage()).thenReturn(storage);
         // Empty host-persistent-path selects named-volume mode (no host bind-mount logic).
         when(storage.hostPersistentPath()).thenReturn("");
-        when(ecr.registryContainerName()).thenReturn("floci-test-ecr-registry");
+        when(ecr.registryContainerName()).thenReturn(REGISTRY_NAME);
         when(ecr.registryImage()).thenReturn("registry:2");
         when(ecr.registryBasePort()).thenReturn(BASE_PORT);
         when(ecr.registryMaxPort()).thenReturn(MAX_PORT);
         when(ecr.dockerNetwork()).thenReturn(Optional.empty());
 
         manager = new EcrRegistryManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, portAllocator, config, regionResolver);
+                containerDetector, currentContainerNetworkResolver, portAllocator, config, regionResolver);
     }
 
     @Test
@@ -86,5 +92,12 @@ class EcrRegistryManagerTest {
             assertFalse(ex.getMessage().contains("No free port available"),
                     "port pool leaked on attempt " + attempt + ": " + ex.getMessage());
         }
+    }
+
+    @Test
+    void httpClient_usesRegistryContainerDnsWhenRunningInsideDocker() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+
+        assertEquals("http://" + REGISTRY_NAME + ":5000", manager.httpClient().baseUrl());
     }
 }
