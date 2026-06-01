@@ -31,6 +31,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HexFormat;
@@ -201,9 +202,12 @@ public class SesService {
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
         emailStore.put("email::" + region + "::" + messageId, email);
 
-        List<String> relayedTo = filterUnsuppressed(toAddresses, region);
-        List<String> relayedCc = filterUnsuppressed(ccAddresses, region);
-        List<String> relayedBcc = filterUnsuppressed(bccAddresses, region);
+        List<String> envelope = allRecipients(toAddresses, ccAddresses, bccAddresses);
+        Map<String, String> suppressedReasons = collectSuppressedReasons(envelope, region);
+
+        List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
+        List<String> relayedCc = filterUnsuppressed(ccAddresses, suppressedReasons);
+        List<String> relayedBcc = filterUnsuppressed(bccAddresses, suppressedReasons);
         if (sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
             smtpRelay.relay(source, relayedTo, relayedCc, relayedBcc,
                     replyToAddresses, subject, bodyText, bodyHtml);
@@ -215,9 +219,8 @@ public class SesService {
         LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
                 source, toAddresses, subject, messageId);
         publishSendEvents(configurationSetName, messageId, source, subject,
-                toAddresses, ccAddresses, bccAddresses,
-                allRecipients(toAddresses, ccAddresses, bccAddresses),
-                emailTags, additionalHeaders, region);
+                toAddresses, ccAddresses, bccAddresses, envelope,
+                suppressedReasons, emailTags, additionalHeaders, region);
         return messageId;
     }
 
@@ -244,7 +247,9 @@ public class SesService {
         SentEmail email = new SentEmail(messageId, region, source, effectiveDestinations, rawMessage);
         emailStore.put("email::" + region + "::" + messageId, email);
 
-        List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, region);
+        Map<String, String> suppressedReasons = collectSuppressedReasons(effectiveDestinations, region);
+
+        List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!relayedDestinations.isEmpty()) {
             smtpRelay.relayRaw(source, relayedDestinations, rawMessage);
         } else {
@@ -259,7 +264,7 @@ public class SesService {
                 headers != null ? headers.cc() : List.of(),
                 headers != null ? headers.bcc() : List.of(),
                 effectiveDestinations,
-                emailTags, List.of(), region);
+                suppressedReasons, emailTags, List.of(), region);
         return messageId;
     }
 
@@ -299,6 +304,7 @@ public class SesService {
                                    String subject, List<String> toAddresses,
                                    List<String> ccAddresses, List<String> bccAddresses,
                                    List<String> envelopeDestinations,
+                                   Map<String, String> suppressedReasons,
                                    List<MessageTag> emailTags,
                                    List<MessageHeader> additionalHeaders, String region) {
         if (eventPublisher == null) {
@@ -327,12 +333,11 @@ public class SesService {
 
         List<String> suppressionBounceRecipients = new ArrayList<>();
         List<String> suppressionComplaintRecipients = new ArrayList<>();
-        for (String r : envelope) {
-            String reason = resolveSuppressionReason(r, region);
-            if ("BOUNCE".equals(reason)) {
-                suppressionBounceRecipients.add(r);
-            } else if ("COMPLAINT".equals(reason)) {
-                suppressionComplaintRecipients.add(r);
+        for (Map.Entry<String, String> e : suppressedReasons.entrySet()) {
+            if ("BOUNCE".equals(e.getValue())) {
+                suppressionBounceRecipients.add(e.getKey());
+            } else if ("COMPLAINT".equals(e.getValue())) {
+                suppressionComplaintRecipients.add(e.getKey());
             }
         }
 
@@ -1104,18 +1109,54 @@ public class SesService {
     }
 
     /**
+     * Resolve the effective suppression reason for each address in a single pass over the
+     * store and the account-level settings. The returned map only contains entries for
+     * addresses that ARE suppressed (i.e., on the list AND whose reason matches the
+     * account's {@code suppressedReasons}). Callers reuse this map for both the SMTP
+     * relay filter and the event-publishing partitioning so the store is read once per
+     * send regardless of the number of consumers.
+     */
+    Map<String, String> collectSuppressedReasons(Collection<String> addresses, String region) {
+        if (addresses == null || addresses.isEmpty()) {
+            return Map.of();
+        }
+        List<String> accountReasons = getAccountSuppressionAttributes(region).getSuppressedReasons();
+        if (accountReasons == null || accountReasons.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> reasonFilter = Set.copyOf(accountReasons);
+        Map<String, String> result = new LinkedHashMap<>();
+        for (String address : addresses) {
+            if (address == null || address.isBlank() || result.containsKey(address)) {
+                continue;
+            }
+            String normalized = normalizeSuppressionEmail(address);
+            SuppressedDestination entry = suppressionStore.get(suppressionKey(region, normalized))
+                    .orElse(null);
+            if (entry != null && entry.getReason() != null
+                    && reasonFilter.contains(entry.getReason())) {
+                result.put(address, entry.getReason());
+            }
+        }
+        return result;
+    }
+
+    /**
      * Filter out recipients whose effective suppression reason is non-null. Returns a new
      * list containing only the addresses that should reach the SMTP relay, mirroring AWS
      * SES's "accept the message, but doesn't send it" behaviour for suppressed addresses.
      * Returns the original reference when {@code addresses} is {@code null} or empty.
      */
-    List<String> filterUnsuppressed(List<String> addresses, String region) {
+    static List<String> filterUnsuppressed(List<String> addresses, Map<String, String> suppressedReasons) {
         if (addresses == null || addresses.isEmpty()) {
+            return addresses;
+        }
+        if (suppressedReasons.isEmpty()) {
             return addresses;
         }
         List<String> kept = new ArrayList<>(addresses.size());
         for (String a : addresses) {
-            if (resolveSuppressionReason(a, region) == null) {
+            if (!suppressedReasons.containsKey(a)) {
                 kept.add(a);
             }
         }
@@ -1130,7 +1171,12 @@ public class SesService {
      *
      * <p>The returned value is one of {@code "BOUNCE"} / {@code "COMPLAINT"}, allowing
      * callers (publishSendEvents) to map the recipient to a synthetic Bounce / Complaint
-     * event without consulting the store again.
+     * event without consulting the store again. Both the per-address suppression entries
+     * and the account-level {@code suppressedReasons} go through
+     * {@link #validateSuppressionReason}, which enforces exact case-sensitive equality
+     * with the two canonical values, so {@code entry.getReason()} is guaranteed to be
+     * canonical and downstream {@code .equals("BOUNCE")} / {@code .equals("COMPLAINT")}
+     * checks are safe.
      */
     String resolveSuppressionReason(String emailAddress, String region) {
         if (emailAddress == null || emailAddress.isBlank()) {

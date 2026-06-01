@@ -171,44 +171,16 @@ final class SesEventPayload {
             case "BOUNCE" -> {
                 body.put("bounceType", "Permanent");
                 body.put("bounceSubType", "General");
-                ArrayNode bounced = body.putArray("bouncedRecipients");
-                // Union of simulator-bounce addresses and account-level suppressed addresses
-                // whose reason is BOUNCE.
-                LinkedHashSet<String> emitted = new LinkedHashSet<>();
-                for (String d : destination) {
-                    if (SimulatorAddresses.isBounce(d) && emitted.add(d.trim())) {
-                        ObjectNode br = bounced.addObject();
-                        br.put("emailAddress", d.trim());
-                    }
-                }
-                if (suppressionBounceRecipients != null) {
-                    for (String d : suppressionBounceRecipients) {
-                        if (d != null && emitted.add(d.trim())) {
-                            ObjectNode br = bounced.addObject();
-                            br.put("emailAddress", d.trim());
-                        }
-                    }
-                }
+                emitDedupedRecipientObjects(body.putArray("bouncedRecipients"),
+                        destination, SimulatorAddresses::isBounce,
+                        suppressionBounceRecipients);
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
                 body.put("feedbackId", "feedback-" + messageId);
             }
             case "COMPLAINT" -> {
-                ArrayNode complained = body.putArray("complainedRecipients");
-                LinkedHashSet<String> emitted = new LinkedHashSet<>();
-                for (String d : destination) {
-                    if (SimulatorAddresses.isComplaint(d) && emitted.add(d.trim())) {
-                        ObjectNode cr = complained.addObject();
-                        cr.put("emailAddress", d.trim());
-                    }
-                }
-                if (suppressionComplaintRecipients != null) {
-                    for (String d : suppressionComplaintRecipients) {
-                        if (d != null && emitted.add(d.trim())) {
-                            ObjectNode cr = complained.addObject();
-                            cr.put("emailAddress", d.trim());
-                        }
-                    }
-                }
+                emitDedupedRecipientObjects(body.putArray("complainedRecipients"),
+                        destination, SimulatorAddresses::isComplaint,
+                        suppressionComplaintRecipients);
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
                 body.put("feedbackId", "feedback-" + messageId);
             }
@@ -218,6 +190,33 @@ final class SesEventPayload {
             }
         }
         return body;
+    }
+
+    /**
+     * Emit `{emailAddress: ...}` objects into {@code arr} for every recipient that either
+     * matches {@code simulatorPredicate} in {@code envelope} or is listed in
+     * {@code suppressionRecipients}. Addresses are trimmed and deduplicated by trimmed
+     * form so the same address never appears twice when both inputs claim it.
+     */
+    private static void emitDedupedRecipientObjects(ArrayNode arr,
+                                                    List<String> envelope,
+                                                    java.util.function.Predicate<String> simulatorPredicate,
+                                                    List<String> suppressionRecipients) {
+        LinkedHashSet<String> emitted = new LinkedHashSet<>();
+        if (envelope != null) {
+            for (String d : envelope) {
+                if (d != null && simulatorPredicate.test(d) && emitted.add(d.trim())) {
+                    arr.addObject().put("emailAddress", d.trim());
+                }
+            }
+        }
+        if (suppressionRecipients != null) {
+            for (String d : suppressionRecipients) {
+                if (d != null && emitted.add(d.trim())) {
+                    arr.addObject().put("emailAddress", d.trim());
+                }
+            }
+        }
     }
 
     private static String eventTypeLabel(String eventType) {
