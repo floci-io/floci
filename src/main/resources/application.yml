@@ -299,3 +299,5 @@ floci:
       emit-mode: synchronous
     cloudfront:
       enabled: true
+    appsync:
+      enabled: true

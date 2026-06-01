@@ -197,3 +197,5 @@ floci:
       emit-mode: off
     cloudfront:
       enabled: true
+    appsync:
+      enabled: true
