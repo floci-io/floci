@@ -12,6 +12,7 @@ public class Resolver {
     private String typeName;
     private String fieldName;
     private String dataSourceName;
+    private String functionId;
     private String requestMappingTemplate;
     private String responseMappingTemplate;
     private ResolverKind kind;
@@ -29,6 +30,9 @@ public class Resolver {
 
     public String getDataSourceName() { return dataSourceName; }
     public void setDataSourceName(String dataSourceName) { this.dataSourceName = dataSourceName; }
+
+    public String getFunctionId() { return functionId; }
+    public void setFunctionId(String functionId) { this.functionId = functionId; }
 
     public String getRequestMappingTemplate() { return requestMappingTemplate; }
     public void setRequestMappingTemplate(String template) { this.requestMappingTemplate = template; }

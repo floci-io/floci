@@ -250,6 +250,7 @@ public class AppSyncService {
         resolver.setTypeName((String) request.get("typeName"));
         resolver.setFieldName((String) request.get("fieldName"));
         resolver.setDataSourceName((String) request.get("dataSourceName"));
+        resolver.setFunctionId((String) request.get("functionId"));
         resolver.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
         resolver.setResponseMappingTemplate((String) request.get("responseMappingTemplate"));
         resolver.setKind(parseEnum(ResolverKind.class, request.getOrDefault("kind", "UNIT")));
@@ -278,10 +279,17 @@ public class AppSyncService {
         return paginate(resolverStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
+    public Page<Resolver> listResolversByType(String apiId, String typeName, Integer maxResults, String nextToken) {
+        List<Resolver> filtered = resolverStore.scan(k -> k.startsWith(apiId + "::")).stream()
+                .filter(r -> typeName.equals(r.getTypeName()))
+                .toList();
+        return paginate(filtered, nextToken, maxResults);
+    }
+
     public Page<Resolver> listResolversByFunction(String apiId, String functionId, Integer maxResults, String nextToken) {
-        FunctionConfiguration fn = getFunction(apiId, functionId);
+        getFunction(apiId, functionId);
         List<Resolver> all = resolverStore.scan(k -> k.startsWith(apiId + "::")).stream()
-                .filter(r -> fn.getName().equals(r.getDataSourceName()))
+                .filter(r -> functionId.equals(r.getFunctionId()))
                 .toList();
         return paginate(all, nextToken, maxResults);
     }
@@ -289,6 +297,7 @@ public class AppSyncService {
     public Resolver updateResolver(String apiId, String typeName, String fieldName, Map<String, Object> request) {
         Resolver existing = getResolver(apiId, typeName, fieldName);
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
+        if (request.containsKey("functionId")) existing.setFunctionId((String) request.get("functionId"));
         if (request.containsKey("requestMappingTemplate")) existing.setRequestMappingTemplate((String) request.get("requestMappingTemplate"));
         if (request.containsKey("responseMappingTemplate")) existing.setResponseMappingTemplate((String) request.get("responseMappingTemplate"));
         if (request.containsKey("kind")) existing.setKind(parseEnum(ResolverKind.class, request.get("kind")));
