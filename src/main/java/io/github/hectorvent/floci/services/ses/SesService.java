@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
+import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
@@ -732,11 +733,42 @@ public class SesService {
                     "Please provide only one destination with each request. Either a Firehose Destination "
                             + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.", 400);
         }
-        if (dest.getCloudWatchDestination() != null
-                && (dest.getCloudWatchDestination().getDimensionConfigurations() == null
-                || dest.getCloudWatchDestination().getDimensionConfigurations().isEmpty())) {
+        if (dest.getSnsDestination() != null
+                && (dest.getSnsDestination().getTopicArn() == null
+                || dest.getSnsDestination().getTopicArn().isBlank())) {
             throw new AwsException("InvalidParameterValue",
-                    "CloudWatch metrics dimension configuration list cannot be empty.", 400);
+                    "SnsDestination requires a non-blank TopicArn.", 400);
+        }
+        if (dest.getKinesisFirehoseDestination() != null
+                && (dest.getKinesisFirehoseDestination().getIamRoleArn() == null
+                || dest.getKinesisFirehoseDestination().getIamRoleArn().isBlank()
+                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn() == null
+                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn().isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "KinesisFirehoseDestination requires both IamRoleArn and DeliveryStreamArn.",
+                    400);
+        }
+        if (dest.getCloudWatchDestination() != null) {
+            List<CloudWatchDimensionConfiguration> dims =
+                    dest.getCloudWatchDestination().getDimensionConfigurations();
+            if (dims == null || dims.isEmpty()) {
+                throw new AwsException("InvalidParameterValue",
+                        "CloudWatch metrics dimension configuration list cannot be empty.", 400);
+            }
+            for (int i = 0; i < dims.size(); i++) {
+                CloudWatchDimensionConfiguration dim = dims.get(i);
+                if (dim == null
+                        || dim.getDimensionName() == null || dim.getDimensionName().isBlank()
+                        || dim.getDimensionValueSource() == null
+                        || dim.getDimensionValueSource().isBlank()
+                        || dim.getDefaultDimensionValue() == null
+                        || dim.getDefaultDimensionValue().isBlank()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "CloudWatchDestination dimension configurations require "
+                                    + "DimensionName, DimensionValueSource, and DefaultDimensionValue "
+                                    + "(missing on member " + (i + 1) + ").", 400);
+                }
+            }
         }
         if (dest.getPinpointDestination() != null
                 && (dest.getPinpointDestination().getApplicationArn() == null
