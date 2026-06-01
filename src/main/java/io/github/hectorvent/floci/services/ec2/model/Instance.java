@@ -39,8 +39,8 @@ public class Instance {
     private boolean sourceDestCheck = true;
     private boolean ebsOptimized = false;
     private boolean enaSupport = true;
-    private boolean disableApiStop = true;
-    private boolean disableApiTermination = true;
+    private boolean disableApiStop = false;
+    private boolean disableApiTermination = false;
     private String iamInstanceProfileArn;
     private String region;
     private List<Tag> tags = new ArrayList<>();

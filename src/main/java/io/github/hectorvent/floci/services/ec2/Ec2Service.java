@@ -300,6 +300,7 @@ public class Ec2Service {
                 attachment.setAttachTime(Instant.now());
                 volume.getAttachments().add(attachment);
                 if (j == 0) {
+                    volume.setState("in-use");
                     inst.setRootDeviceVolumeId(volume.getVolumeId());
                     inst.setRootDeviceName(blockDevice.getDeviceName());
                 }
@@ -402,7 +403,6 @@ public class Ec2Service {
             entry.put("currentState", "shutting-down");
             entry.put("currentCode", "32");
             result.add(entry);
-            instances.remove(key(region, id));
         }
         return result;
     }
