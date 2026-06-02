@@ -594,20 +594,24 @@ public class S3Controller {
                 return handleRangeRequest(obj, rangeHeader, overrides);
             }
 
-            var resp = Response.ok(obj.getData())
-                    .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                    .header("Content-Length", obj.getSize())
-                    .header("ETag", obj.getETag())
-                    .header("Last-Modified", RFC_822.format(obj.getLastModified()))
-                    .header("Accept-Ranges", "bytes");
-            if (obj.getVersionId() != null) {
-                resp.header("x-amz-version-id", obj.getVersionId());
-            }
-            appendObjectHeaders(resp, obj, overrides);
-            return resp.build();
+            return fullObjectResponse(obj, overrides);
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
+    }
+
+    private Response fullObjectResponse(S3Object obj, ResponseHeaderOverrides overrides) {
+        var resp = Response.ok(obj.getData())
+                .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
+                .header("Content-Length", obj.getSize())
+                .header("ETag", obj.getETag())
+                .header("Last-Modified", RFC_822.format(obj.getLastModified()))
+                .header("Accept-Ranges", "bytes");
+        if (obj.getVersionId() != null) {
+            resp.header("x-amz-version-id", obj.getVersionId());
+        }
+        appendObjectHeaders(resp, obj, overrides);
+        return resp.build();
     }
 
     private Response handleRangeRequest(S3Object obj, String rangeHeader, ResponseHeaderOverrides overrides) {
@@ -642,6 +646,9 @@ public class S3Controller {
         }
 
         if (start < 0 || start >= totalSize || start > end) {
+            if (totalSize == 0 && rangeSpec.startsWith("-")) {
+                return fullObjectResponse(obj, overrides);
+            }
             return invalidRangeResponse(totalSize);
         }
 

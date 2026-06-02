@@ -591,6 +591,35 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(41)
+    void getObjectWithSuffixRangeForEmptyObject() {
+        given()
+            .header("x-amz-meta-kind", "empty")
+            .body(new byte[0])
+        .when()
+            .put("/test-bucket/empty.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Range", "bytes=-13")
+        .when()
+            .get("/test-bucket/empty.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Length", equalTo("0"))
+            .header("Accept-Ranges", equalTo("bytes"))
+            .header("x-amz-meta-kind", equalTo("empty"))
+            .body(equalTo(""));
+
+        given()
+        .when()
+            .delete("/test-bucket/empty.txt")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
     @Order(50)
     void getObjectIfNoneMatchReturns304() {
         String eTag = given()
