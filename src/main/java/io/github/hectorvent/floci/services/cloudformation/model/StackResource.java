@@ -1,9 +1,14 @@
 package io.github.hectorvent.floci.services.cloudformation.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.Map;
 
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class StackResource {
     private String logicalId;
     private String physicalId;
