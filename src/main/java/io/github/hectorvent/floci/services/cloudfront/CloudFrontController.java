@@ -141,8 +141,7 @@ public class CloudFrontController {
             boolean truncated = dists.size() == maxItems && dists.size() < total;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListDistributionsResult", NS)
-                    .start("DistributionList")
+                    .start("DistributionList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated);
@@ -155,8 +154,7 @@ public class CloudFrontController {
                 xml.raw(xmlDistributionSummary(d));
             }
             xml.end("Items")
-                    .end("DistributionList")
-                    .end("ListDistributionsResult");
+                    .end("DistributionList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -338,8 +336,7 @@ public class CloudFrontController {
             boolean truncated = policies.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListCachePoliciesResult", NS)
-                    .start("CachePolicyList")
+                    .start("CachePolicyList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -351,7 +348,7 @@ public class CloudFrontController {
                         .raw(xmlCachePolicyResponse(p))
                         .end("CachePolicySummary");
             }
-            xml.end("Items").end("CachePolicyList").end("ListCachePoliciesResult");
+            xml.end("Items").end("CachePolicyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -451,8 +448,7 @@ public class CloudFrontController {
             boolean truncated = policies.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListOriginRequestPoliciesResult", NS)
-                    .start("OriginRequestPolicyList")
+                    .start("OriginRequestPolicyList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -464,7 +460,7 @@ public class CloudFrontController {
                         .raw(xmlOriginRequestPolicyResponse(p))
                         .end("OriginRequestPolicySummary");
             }
-            xml.end("Items").end("OriginRequestPolicyList").end("ListOriginRequestPoliciesResult");
+            xml.end("Items").end("OriginRequestPolicyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -565,8 +561,7 @@ public class CloudFrontController {
             boolean truncated = policies.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListResponseHeadersPoliciesResult", NS)
-                    .start("ResponseHeadersPolicyList")
+                    .start("ResponseHeadersPolicyList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -578,7 +573,7 @@ public class CloudFrontController {
                         .raw(xmlResponseHeadersPolicyResponse(p))
                         .end("ResponseHeadersPolicySummary");
             }
-            xml.end("Items").end("ResponseHeadersPolicyList").end("ListResponseHeadersPoliciesResult");
+            xml.end("Items").end("ResponseHeadersPolicyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -680,8 +675,7 @@ public class CloudFrontController {
             boolean truncated = oacs.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListOriginAccessControlsResult", NS)
-                    .start("OriginAccessControlList")
+                    .start("OriginAccessControlList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -690,7 +684,7 @@ public class CloudFrontController {
             for (OriginAccessControl o : oacs) {
                 xml.raw(xmlOriginAccessControlSummary(o));
             }
-            xml.end("Items").end("OriginAccessControlList").end("ListOriginAccessControlsResult");
+            xml.end("Items").end("OriginAccessControlList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -790,8 +784,7 @@ public class CloudFrontController {
             boolean truncated = oais.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListCloudFrontOriginAccessIdentitiesResult", NS)
-                    .start("CloudFrontOriginAccessIdentityList")
+                    .start("CloudFrontOriginAccessIdentityList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -804,8 +797,7 @@ public class CloudFrontController {
                         .elem("Comment", o.getComment() != null ? o.getComment() : "")
                         .end("CloudFrontOriginAccessIdentitySummary");
             }
-            xml.end("Items").end("CloudFrontOriginAccessIdentityList")
-                    .end("ListCloudFrontOriginAccessIdentitiesResult");
+            xml.end("Items").end("CloudFrontOriginAccessIdentityList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -901,8 +893,7 @@ public class CloudFrontController {
         try {
             List<CloudFrontFunction> fns = service.listFunctions(stage);
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListFunctionsResult", NS)
-                    .start("FunctionList")
+                    .start("FunctionList", NS)
                     .elem("MaxItems", maxItems)
                     .elem("Quantity", fns.size())
                     .start("Items");
@@ -924,7 +915,7 @@ public class CloudFrontController {
                         .end("FunctionMetadata")
                         .end("FunctionSummary");
             }
-            xml.end("Items").end("FunctionList").end("ListFunctionsResult");
+            xml.end("Items").end("FunctionList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -939,8 +930,7 @@ public class CloudFrontController {
         try {
             Map<String, String> tags = service.listTagsForResource(resource);
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListTagsForResourceResult", NS)
-                    .start("Tags")
+                    .start("Tags", NS)
                     .start("Items");
             for (Map.Entry<String, String> entry : tags.entrySet()) {
                 xml.start("Tag")
@@ -948,7 +938,7 @@ public class CloudFrontController {
                         .elem("Value", entry.getValue())
                         .end("Tag");
             }
-            xml.end("Items").end("Tags").end("ListTagsForResourceResult");
+            xml.end("Items").end("Tags");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1052,8 +1042,7 @@ public class CloudFrontController {
             boolean truncated = policies.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListContinuousDeploymentPoliciesResult", NS)
-                    .start("ContinuousDeploymentPolicyList")
+                    .start("ContinuousDeploymentPolicyList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -1065,8 +1054,7 @@ public class CloudFrontController {
                         .raw(xmlContinuousDeploymentPolicyResponse(p))
                         .end("ContinuousDeploymentPolicySummary");
             }
-            xml.end("Items").end("ContinuousDeploymentPolicyList")
-                    .end("ListContinuousDeploymentPoliciesResult");
+            xml.end("Items").end("ContinuousDeploymentPolicyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1186,8 +1174,7 @@ public class CloudFrontController {
             boolean truncated = keys.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListPublicKeysResult", NS)
-                    .start("PublicKeyList")
+                    .start("PublicKeyList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -1196,7 +1183,7 @@ public class CloudFrontController {
             for (PublicKey k : keys) {
                 xml.raw(xmlPublicKeySummary(k));
             }
-            xml.end("Items").end("PublicKeyList").end("ListPublicKeysResult");
+            xml.end("Items").end("PublicKeyList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1296,8 +1283,7 @@ public class CloudFrontController {
             boolean truncated = groups.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListKeyGroupsResult", NS)
-                    .start("KeyGroupList")
+                    .start("KeyGroupList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -1306,7 +1292,7 @@ public class CloudFrontController {
             for (KeyGroup g : groups) {
                 xml.start("KeyGroupSummary").raw(xmlKeyGroupResponse(g)).end("KeyGroupSummary");
             }
-            xml.end("Items").end("KeyGroupList").end("ListKeyGroupsResult");
+            xml.end("Items").end("KeyGroupList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1392,8 +1378,7 @@ public class CloudFrontController {
             boolean truncated = configs.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListRealtimeLogConfigsResult", NS)
-                    .start("RealtimeLogConfigs")
+                    .start("RealtimeLogConfigs", NS)
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
                     .elem("Quantity", configs.size())
@@ -1401,7 +1386,7 @@ public class CloudFrontController {
             for (RealtimeLogConfig c : configs) {
                 xml.raw(xmlRealtimeLogConfigBody(c));
             }
-            xml.end("Items").end("RealtimeLogConfigs").end("ListRealtimeLogConfigsResult");
+            xml.end("Items").end("RealtimeLogConfigs");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1562,8 +1547,7 @@ public class CloudFrontController {
             boolean truncated = configs.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListFieldLevelEncryptionConfigsResult", NS)
-                    .start("FieldLevelEncryptionList")
+                    .start("FieldLevelEncryptionList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -1572,7 +1556,7 @@ public class CloudFrontController {
             for (FieldLevelEncryptionConfig c : configs) {
                 xml.raw(xmlFieldLevelEncryptionConfigResponse(c));
             }
-            xml.end("Items").end("FieldLevelEncryptionList").end("ListFieldLevelEncryptionConfigsResult");
+            xml.end("Items").end("FieldLevelEncryptionList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
@@ -1656,8 +1640,7 @@ public class CloudFrontController {
             boolean truncated = profiles.size() == maxItems;
 
             XmlBuilder xml = new XmlBuilder()
-                    .start("ListFieldLevelEncryptionProfilesResult", NS)
-                    .start("FieldLevelEncryptionProfileList")
+                    .start("FieldLevelEncryptionProfileList", NS)
                     .elem("Marker", marker != null ? marker : "")
                     .elem("MaxItems", maxItems)
                     .elem("IsTruncated", truncated)
@@ -1666,8 +1649,7 @@ public class CloudFrontController {
             for (FieldLevelEncryptionProfile p : profiles) {
                 xml.raw(xmlFieldLevelEncryptionProfileResponse(p));
             }
-            xml.end("Items").end("FieldLevelEncryptionProfileList")
-                    .end("ListFieldLevelEncryptionProfilesResult");
+            xml.end("Items").end("FieldLevelEncryptionProfileList");
             return Response.ok(xml.build(), XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);

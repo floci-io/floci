@@ -1710,6 +1710,81 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_cloudFrontDistribution_resolvesDomainNameAndStoresDistribution() {
+        // Regression: AWS::CloudFront::Distribution used to hit the default stub, so
+        // Fn::GetAtt [Dist, DomainName] resolved to the raw token "Distribution.DomainName"
+        // and the distribution was never created in the CloudFront service.
+        String template = """
+            {
+              "Resources": {
+                "Distribution": {
+                  "Type": "AWS::CloudFront::Distribution",
+                  "Properties": {
+                    "DistributionConfig": {
+                      "Enabled": true,
+                      "Comment": "repro",
+                      "Origins": [
+                        {
+                          "Id": "origin",
+                          "DomainName": "example.com",
+                          "CustomOriginConfig": {"OriginProtocolPolicy": "https-only"}
+                        }
+                      ],
+                      "DefaultCacheBehavior": {
+                        "TargetOriginId": "origin",
+                        "ViewerProtocolPolicy": "redirect-to-https",
+                        "ForwardedValues": {"QueryString": false}
+                      }
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "DistributionDomainName": {
+                  "Value": {"Fn::GetAtt": ["Distribution", "DomainName"]}
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cloudfront-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // The DomainName output must be a generated <id>.cloudfront.net, NOT the raw token.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cloudfront-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<OutputKey>DistributionDomainName</OutputKey>"))
+            .body(containsString(".cloudfront.net"))
+            .body(not(containsString("Distribution.DomainName")));
+
+        // The distribution must actually exist in the CloudFront service, and the list response
+        // must be rooted at the payload element <DistributionList> (not wrapped in
+        // <ListDistributionsResult>), otherwise the AWS CLI/SDKs parse it as empty.
+        given()
+        .when()
+            .get("/2020-05-31/distribution")
+        .then()
+            .statusCode(200)
+            .body(containsString(".cloudfront.net"))
+            .body(containsString("<DistributionList"))
+            .body(not(containsString("ListDistributionsResult")));
+    }
+
+    @Test
     void createStack_snsAutoName_refReturnsArn() {
         // SNS Ref returns TopicArn. AWS example: arn:aws:sns:us-east-1:123456789012:mystack-mytopic-NZJ5JSMVGFIE
         // See: https://docs.aws.amazon.com/AWSCloudFormation/latest/TemplateReference/aws-resource-sns-topic.html

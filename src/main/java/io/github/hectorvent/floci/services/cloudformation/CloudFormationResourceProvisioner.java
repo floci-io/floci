@@ -31,6 +31,9 @@ import io.github.hectorvent.floci.services.apigatewayv2.model.*;
 import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cloudfront.CloudFrontService;
+import io.github.hectorvent.floci.services.cloudfront.model.Distribution;
+import io.github.hectorvent.floci.services.cloudfront.model.DistributionConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -77,6 +80,7 @@ public class CloudFormationResourceProvisioner {
     private final EcrService ecrService;
     private final PipesService pipesService;
     private final CognitoService cognitoService;
+    private final CloudFrontService cloudFrontService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -89,7 +93,8 @@ public class CloudFormationResourceProvisioner {
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
                                              PipesService pipesService,
-                                             CognitoService cognitoService) {
+                                             CognitoService cognitoService,
+                                             CloudFrontService cloudFrontService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -105,6 +110,7 @@ public class CloudFormationResourceProvisioner {
         this.ecrService = ecrService;
         this.pipesService = pipesService;
         this.cognitoService = cognitoService;
+        this.cloudFrontService = cloudFrontService;
     }
 
     /**
@@ -178,6 +184,8 @@ public class CloudFormationResourceProvisioner {
                         provisionCognitoUserPool(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Cognito::UserPoolClient" ->
                         provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
+                case "AWS::CloudFront::Distribution" ->
+                        provisionCloudFrontDistribution(resource, properties, engine);
                 default -> {
                     LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
                     resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
@@ -220,11 +228,94 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
                 case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
                 case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
+                case "AWS::CloudFront::Distribution" -> deleteCloudFrontDistribution(physicalId);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
             LOG.debugv("Error deleting {0} ({1}): {2}", resourceType, physicalId, e.getMessage());
         }
+    }
+
+    // ── CloudFront ──────────────────────────────────────────────────────────────
+
+    /**
+     * Provisions an AWS::CloudFront::Distribution. CloudFront in Floci is management-plane only:
+     * the service generates a distribution id and DomainName ({@code <id>.cloudfront.net}) and stores
+     * the config. Setting the DomainName attribute is what lets Fn::GetAtt [Dist, DomainName] resolve,
+     * and creating the distribution in CloudFrontService is what makes list/get-distribution return it.
+     */
+    private void provisionCloudFrontDistribution(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine) {
+        DistributionConfig config = buildDistributionConfig(props, engine);
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+
+        Distribution dist = new Distribution();
+        dist.setConfig(config);
+
+        Distribution result;
+        if (r.getPhysicalId() == null) {
+            result = cloudFrontService.createDistribution(dist, tags);
+        } else {
+            Distribution existing = cloudFrontService.getDistribution(r.getPhysicalId());
+            result = cloudFrontService.updateDistribution(r.getPhysicalId(), existing.getEtag(), dist);
+        }
+
+        r.setPhysicalId(result.getId());
+        r.getAttributes().put("Id", result.getId());
+        r.getAttributes().put("DomainName", result.getDomainName());
+        r.getAttributes().put("Arn", result.getArn());
+    }
+
+    /**
+     * Maps the top-level scalar fields of a CloudFormation DistributionConfig onto Floci's model.
+     * Nested origins/cache behaviors are intentionally left sparse — CloudFront does not serve
+     * content in Floci, so these only affect what get/list-distribution echoes back.
+     */
+    private DistributionConfig buildDistributionConfig(JsonNode props, CloudFormationTemplateEngine engine) {
+        DistributionConfig cfg = new DistributionConfig();
+        if (props == null || !props.has("DistributionConfig") || props.get("DistributionConfig").isNull()) {
+            return cfg;
+        }
+        JsonNode dc = engine.resolveNode(props.get("DistributionConfig"));
+        if (dc == null || dc.isNull()) {
+            return cfg;
+        }
+        if (dc.has("Enabled")) {
+            cfg.setEnabled(dc.get("Enabled").asBoolean(false));
+        }
+        if (dc.hasNonNull("Comment")) {
+            cfg.setComment(dc.get("Comment").asText());
+        }
+        if (dc.hasNonNull("DefaultRootObject")) {
+            cfg.setDefaultRootObject(dc.get("DefaultRootObject").asText());
+        }
+        if (dc.hasNonNull("HttpVersion")) {
+            cfg.setHttpVersion(dc.get("HttpVersion").asText());
+        }
+        if (dc.hasNonNull("PriceClass")) {
+            cfg.setPriceClass(dc.get("PriceClass").asText());
+        }
+        if (dc.has("IPV6Enabled")) {
+            cfg.setIPV6Enabled(dc.get("IPV6Enabled").asBoolean(true));
+        }
+        if (dc.hasNonNull("WebACLId")) {
+            cfg.setWebAclId(dc.get("WebACLId").asText());
+        }
+        return cfg;
+    }
+
+    /**
+     * Deletes a distribution. CloudFrontService refuses to delete an enabled distribution
+     * (mirroring AWS), so disable it first, then delete using the refreshed ETag.
+     */
+    private void deleteCloudFrontDistribution(String id) {
+        Distribution dist = cloudFrontService.getDistribution(id);
+        String etag = dist.getEtag();
+        if (dist.getConfig() != null && dist.getConfig().isEnabled()) {
+            dist.getConfig().setEnabled(false);
+            etag = cloudFrontService.updateDistribution(id, etag, dist).getEtag();
+        }
+        cloudFrontService.deleteDistribution(id, etag);
     }
 
     // ── S3 ────────────────────────────────────────────────────────────────────
