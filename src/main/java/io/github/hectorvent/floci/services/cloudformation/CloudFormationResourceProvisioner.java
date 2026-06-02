@@ -1587,7 +1587,12 @@ public class CloudFormationResourceProvisioner {
             req.put("corsConfiguration", cors);
         }
 
-        Api api = apiGatewayV2Service.createApi(region, req);
+        Api api;
+        if (r.getPhysicalId() == null) {
+            api = apiGatewayV2Service.createApi(region, req);
+        } else {
+            api = apiGatewayV2Service.updateApi(region, r.getPhysicalId(), req);
+        }
         r.setPhysicalId(api.getApiId());
         r.getAttributes().put("ApiEndpoint", api.getApiEndpoint());
     }
@@ -1643,7 +1648,12 @@ public class CloudFormationResourceProvisioner {
         req.put("authorizationType", resolveOrDefault(props, "AuthorizationType", engine, "NONE"));
         req.put("target", resolveOptional(props, "Target", engine));
 
-        Route route = apiGatewayV2Service.createRoute(region, apiId, req);
+        Route route;
+        if (r.getPhysicalId() == null) {
+            route = apiGatewayV2Service.createRoute(region, apiId, req);
+        } else {
+            route = apiGatewayV2Service.updateRoute(region, apiId, r.getPhysicalId(), req);
+        }
         r.setPhysicalId(route.getRouteId());
     }
 
@@ -1655,7 +1665,12 @@ public class CloudFormationResourceProvisioner {
         req.put("integrationUri", resolveOptional(props, "IntegrationUri", engine));
         req.put("payloadFormatVersion", resolveOrDefault(props, "PayloadFormatVersion", engine, "2.0"));
 
-        Integration integration = apiGatewayV2Service.createIntegration(region, apiId, req);
+        Integration integration;
+        if (r.getPhysicalId() == null) {
+            integration = apiGatewayV2Service.createIntegration(region, apiId, req);
+        } else {
+            integration = apiGatewayV2Service.updateIntegration(region, apiId, r.getPhysicalId(), req);
+        }
         r.setPhysicalId(integration.getIntegrationId());
     }
 
@@ -1667,13 +1682,23 @@ public class CloudFormationResourceProvisioner {
         Map<String, Object> req = new HashMap<>();
         req.put("stageName", stageName);
         req.put("autoDeploy", resolveOrDefault(props, "AutoDeploy", engine, "false"));
+        putResolvedMapIfPresent(req, props, "StageVariables", "stageVariables", engine);
 
-        Stage stage = apiGatewayV2Service.createStage(region, apiId, req);
-        r.setPhysicalId(stageName);
+        if (r.getPhysicalId() == null) {
+            apiGatewayV2Service.createStage(region, apiId, req);
+            r.setPhysicalId(stageName);
+        } else {
+            apiGatewayV2Service.updateStage(region, apiId, r.getPhysicalId(), req);
+        }
     }
 
     private void provisionApiGatewayV2Deployment(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
                                                  String region) {
+        // Deployments are immutable point-in-time snapshots; on redeploy keep the existing one
+        // rather than minting a duplicate (idempotent re-deploy).
+        if (r.getPhysicalId() != null) {
+            return;
+        }
         String apiId = resolveOptional(props, "ApiId", engine);
         Map<String, Object> req = new HashMap<>();
         req.put("description", resolveOptional(props, "Description", engine));

@@ -5448,4 +5448,190 @@ class CloudFormationIntegrationTest {
         assertThat(tgXml, not(containsString("cfn-del-tg")));
     }
 
+
+    // ── Issue #924: ApiGatewayV2 CloudFormation update path ──────────────────
+
+    private static final String APIGWV2_CONTENT_TYPE = "application/x-amz-json-1.1";
+
+    private static String apigwOutputValue(String describeXml, String key) {
+        return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
+                .split("<OutputValue>")[1].split("</OutputValue>")[0];
+    }
+
+    private String apigwv2DescribeStacks(String stackName) {
+        return given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("_COMPLETE"))
+            .body(not(containsString("FAILED")))
+            .extract().asString();
+    }
+
+    @Test
+    void updateStack_apiGatewayV2_updatesInPlaceWithoutDuplicating() {
+        // Template parameterised over: api name, integration uri, route key, stage autoDeploy.
+        String template = """
+            {
+              "Resources": {
+                "HttpApi": {
+                  "Type": "AWS::ApiGatewayV2::Api",
+                  "Properties": { "Name": "%s", "ProtocolType": "HTTP" }
+                },
+                "Integration": {
+                  "Type": "AWS::ApiGatewayV2::Integration",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "IntegrationType": "HTTP_PROXY",
+                    "IntegrationUri": "%s",
+                    "PayloadFormatVersion": "1.0"
+                  }
+                },
+                "Route": {
+                  "Type": "AWS::ApiGatewayV2::Route",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "RouteKey": "%s",
+                    "Target": { "Fn::Join": ["/", ["integrations", { "Ref": "Integration" }]] }
+                  }
+                },
+                "Stage": {
+                  "Type": "AWS::ApiGatewayV2::Stage",
+                  "Properties": {
+                    "ApiId": { "Ref": "HttpApi" },
+                    "StageName": "dev",
+                    "AutoDeploy": %s
+                  }
+                }
+              },
+              "Outputs": {
+                "ApiId": { "Value": { "Ref": "HttpApi" } },
+                "IntegrationId": { "Value": { "Ref": "Integration" } },
+                "RouteId": { "Value": { "Ref": "Route" } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-apigwv2-update-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody",
+                    template.formatted("cfn-apigwv2-api", "https://example.com/v1", "GET /items", "false"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = apigwv2DescribeStacks(stackName);
+        String apiId = apigwOutputValue(createXml, "ApiId");
+        String integrationId = apigwOutputValue(createXml, "IntegrationId");
+        String routeId = apigwOutputValue(createXml, "RouteId");
+
+        // Baseline: exactly one route / integration / stage on the API
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].RouteKey", equalTo("GET /items"));
+        getIntegrations(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].IntegrationUri", equalTo("https://example.com/v1"));
+        getStages(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].AutoDeploy", equalTo(false));
+
+        // Update: change api name, integration uri, route key, and stage autoDeploy
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody",
+                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String updateXml = apigwv2DescribeStacks(stackName);
+        // Physical IDs are stable across the update (in-place patch, not replacement)
+        assertThat(apigwOutputValue(updateXml, "ApiId"), equalTo(apiId));
+        assertThat(apigwOutputValue(updateXml, "IntegrationId"), equalTo(integrationId));
+        assertThat(apigwOutputValue(updateXml, "RouteId"), equalTo(routeId));
+
+        // Still exactly one of each — updated in place, not duplicated (criteria #6, #3)
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].RouteId", equalTo(routeId))
+                .body("Items[0].RouteKey", equalTo("GET /things"));
+        getIntegrations(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].IntegrationId", equalTo(integrationId))
+                .body("Items[0].IntegrationUri", equalTo("https://example.com/v2"));
+        getStages(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].AutoDeploy", equalTo(true));
+
+        // The API name was updated, and there is still exactly one matching API
+        given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetApis")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Items.findAll { it.ApiId == '" + apiId + "' }.Name", hasItem("cfn-apigwv2-api-v2"));
+
+        // Idempotent re-deploy with no changes is a no-op (criterion #3): counts/ids unchanged
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody",
+                    template.formatted("cfn-apigwv2-api-v2", "https://example.com/v2", "GET /things", "true"))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        apigwv2DescribeStacks(stackName);
+        getRoutes(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].RouteId", equalTo(routeId));
+        getIntegrations(apiId).body("Items.size()", equalTo(1))
+                .body("Items[0].IntegrationId", equalTo(integrationId));
+        getStages(apiId).body("Items.size()", equalTo(1));
+    }
+
+    private io.restassured.response.ValidatableResponse getRoutes(String apiId) {
+        return given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetRoutes")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{\"ApiId\": \"" + apiId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private io.restassured.response.ValidatableResponse getIntegrations(String apiId) {
+        return given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetIntegrations")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{\"ApiId\": \"" + apiId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    private io.restassured.response.ValidatableResponse getStages(String apiId) {
+        return given()
+            .header("X-Amz-Target", "AmazonApiGatewayV2.GetStages")
+            .contentType(APIGWV2_CONTENT_TYPE)
+            .body("{\"ApiId\": \"" + apiId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
 }
