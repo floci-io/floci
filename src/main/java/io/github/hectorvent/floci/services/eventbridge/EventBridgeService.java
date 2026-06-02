@@ -618,7 +618,22 @@ public class EventBridgeService {
         int failed = 0;
         List<Map<String, String>> resultEntries = new ArrayList<>();
 
-        for (Map<String, Object> entry : entries) {
+        for (Map<String, Object> originalEntry : entries) {
+            // Defensive copy: callers may pass Map.of(...) (immutable) and we don't want to
+            // mutate caller state regardless. Normalize Region / Account from the PutEvents
+            // call context up front so matchesPattern, buildEventEnvelope, and the archive
+            // capture all see the same values — without this, a pattern's region/account
+            // filter would fall back to the resolver default in matchesPattern while the
+            // delivered envelope would correctly carry the call's region/account, giving an
+            // inconsistent observable.
+            Map<String, Object> entry = new HashMap<>(originalEntry);
+            if (isBlank(entry.get("Region"))) {
+                entry.put("Region", region);
+            }
+            if (isBlank(entry.get("Account"))) {
+                entry.put("Account", accountId != null ? accountId : regionResolver.getAccountId());
+            }
+
             String eventBusNameRaw = (String) entry.get("EventBusName");
             String effectiveBus = resolvedBusName(eventBusNameRaw);
             String busStoreKey = busKey(region, effectiveBus);
@@ -645,7 +660,7 @@ public class EventBridgeService {
                 if (matchesPattern(entry, rule.getEventPattern())) {
                     String ruleKey = ruleKey(region, effectiveBus, rule.getName());
                     List<Target> targets = accountGet(targetStore, accountId, ruleKey).orElse(List.of());
-                    String eventJson = buildEventEnvelope(entry, effectiveBus, eventId);
+                    String eventJson = buildEventEnvelope(entry, effectiveBus, eventId, region, accountId);
                     for (Target target : targets) {
                         invoker.invokeTarget(target, eventJson, region);
                     }
@@ -900,20 +915,37 @@ public class EventBridgeService {
     // ──────────────────────────── Target Routing ────────────────────────────
 
 
-    private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId) {
+    private String buildEventEnvelope(Map<String, Object> entry, String busName, String eventId,
+                                      String callRegion, String callAccountId) {
         try {
             String source = (String) entry.getOrDefault("Source", "");
             String detailType = (String) entry.getOrDefault("DetailType", "");
             String detail = (String) entry.getOrDefault("Detail", "{}");
             ArrayNode resources = (ArrayNode) entry.getOrDefault("Resources", objectMapper.createArrayNode());
+            // Envelope region/account precedence: entry-supplied "Region"/"Account" (set by
+            // archive replay paths and cross-region producers) wins; otherwise stamp the
+            // region/account the PutEvents call was made against. Only when neither is
+            // available do we fall back to the RegionResolver defaults. This keeps the
+            // envelope consistent with matchesPattern() which also reads entry.Region with
+            // the same fallback chain.
+            String envelopeRegion = (String) entry.get("Region");
+            if (isBlank(envelopeRegion)) {
+                envelopeRegion = isBlank(callRegion)
+                        ? regionResolver.getDefaultRegion() : callRegion;
+            }
+            String envelopeAccount = (String) entry.get("Account");
+            if (isBlank(envelopeAccount)) {
+                envelopeAccount = isBlank(callAccountId)
+                        ? regionResolver.getAccountId() : callAccountId;
+            }
             ObjectNode node = objectMapper.createObjectNode();
             node.put("version", "0");
             node.put("id", eventId);
             node.put("source", source);
             node.put("detail-type", detailType);
-            node.put("account", regionResolver.getAccountId());
+            node.put("account", envelopeAccount);
             node.put("time", Instant.now().toString());
-            node.put("region", regionResolver.getDefaultRegion());
+            node.put("region", envelopeRegion);
             node.putArray("resources").addAll(resources);
             node.set("detail", objectMapper.readTree(detail));
             node.put("event-bus-name", busName);
@@ -939,6 +971,10 @@ public class EventBridgeService {
         busStore.get(busKey(region, busName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "EventBus not found: " + busName, 404));
+    }
+
+    private static boolean isBlank(Object value) {
+        return !(value instanceof String s) || s.isBlank();
     }
 
     private static String resolvedBusName(String busName) {
