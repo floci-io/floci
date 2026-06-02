@@ -178,6 +178,36 @@ class GlueServiceTest {
         }
     }
 
+    @Test
+    void updateTableReplacesExistingDefinitionAndPreservesCreateTime() {
+        Table table = new Table();
+        table.setName("plain");
+        StorageDescriptor sd = new StorageDescriptor();
+        sd.setColumns(java.util.List.of(new Column("a", "string")));
+        table.setStorageDescriptor(sd);
+        glueService.createTable("db1", table);
+
+        Table created = glueService.getTable("db1", "plain");
+        Table replacement = new Table();
+        replacement.setName("plain");
+        StorageDescriptor replacementSd = new StorageDescriptor();
+        replacementSd.setColumns(java.util.List.of(new Column("b", "bigint")));
+        replacement.setStorageDescriptor(replacementSd);
+
+        glueService.updateTable("db1", replacement);
+
+        Table fetched = glueService.getTable("db1", "plain");
+        assertEquals(created.getCreateTime(), fetched.getCreateTime());
+        assertNotNull(fetched.getUpdateTime());
+        assertEquals(1, fetched.getStorageDescriptor().getColumns().size());
+        assertEquals("b", fetched.getStorageDescriptor().getColumns().get(0).getName());
+    }
+
+    @Test
+    void getTableVersionsReturnsEmptyListForAthenaCompatibility() {
+        assertTrue(glueService.getTableVersions().isEmpty());
+    }
+
     private Table tableReferencing(String registryName, String schemaName, Long versionNumber, String versionId) {
         Table table = new Table();
         table.setName("withref");

@@ -19,6 +19,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -83,6 +84,9 @@ public class GlueService {
         }
         validateSchemaReference(table);
         table.setDatabaseName(databaseName);
+        if (table.getCreateTime() == null) {
+            table.setCreateTime(Instant.now());
+        }
         tableStore.put(key, table);
         LOG.infov("Created Glue Table: {0}.{1}", databaseName, table.getName());
     }
@@ -101,6 +105,24 @@ public class GlueService {
             resolved.add(withResolvedSchemaReference(table));
         }
         return resolved;
+    }
+
+    public void updateTable(String databaseName, Table table) {
+        getDatabase(databaseName);
+        String key = databaseName + ":" + table.getName();
+        Table existing = tableStore.get(key)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                        "Table not found: " + databaseName + "." + table.getName(), 400));
+        validateSchemaReference(table);
+        table.setDatabaseName(databaseName);
+        table.setCreateTime(existing.getCreateTime());
+        table.setUpdateTime(Instant.now());
+        tableStore.put(key, table);
+        LOG.infov("Updated Glue Table: {0}.{1}", databaseName, table.getName());
+    }
+
+    public List<Map<String, Object>> getTableVersions() {
+        return List.of();
     }
 
     public void deleteTable(String databaseName, String tableName) {
