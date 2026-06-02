@@ -105,6 +105,10 @@ public class EcsService {
     // ── Clusters ─────────────────────────────────────────────────────────────
 
     public EcsCluster createCluster(String clusterName, String region) {
+        return createCluster(clusterName, null, region);
+    }
+
+    public EcsCluster createCluster(String clusterName, Map<String, String> tags, String region) {
         String name = (clusterName == null || clusterName.isBlank()) ? DEFAULT_CLUSTER : clusterName;
         String key = clusterKey(region, name);
         if (clusters.containsKey(key)) {
@@ -114,6 +118,9 @@ public class EcsService {
         cluster.setClusterName(name);
         cluster.setClusterArn(regionResolver.buildArn("ecs", region, "cluster/" + name));
         cluster.setStatus("ACTIVE");
+        if (tags != null && !tags.isEmpty()) {
+            cluster.setTags(new LinkedHashMap<>(tags));
+        }
         clusters.put(key, cluster);
         LOG.infov("Created ECS cluster: {0} in {1}", name, region);
         return cluster;
@@ -184,6 +191,14 @@ public class EcsService {
                                                   NetworkMode networkMode, String cpu, String memory,
                                                   String taskRoleArn, String executionRoleArn,
                                                   String region) {
+        return registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
+                taskRoleArn, executionRoleArn, null, region);
+    }
+
+    public TaskDefinition registerTaskDefinition(String family, List<ContainerDefinition> containerDefs,
+                                                  NetworkMode networkMode, String cpu, String memory,
+                                                  String taskRoleArn, String executionRoleArn,
+                                                  Map<String, String> tags, String region) {
         int revision = latestRevisions.merge(family, 1, Integer::sum);
 
         TaskDefinition td = new TaskDefinition();
@@ -198,6 +213,9 @@ public class EcsService {
         td.setContainerDefinitions(containerDefs != null ? containerDefs : List.of());
         td.setTaskDefinitionArn(regionResolver.buildArn("ecs", region,
                 "task-definition/" + family + ":" + revision));
+        if (tags != null && !tags.isEmpty()) {
+            td.setTags(new LinkedHashMap<>(tags));
+        }
 
         taskDefinitions.put(family + ":" + revision, td);
         LOG.infov("Registered task definition: {0}:{1}", family, revision);
@@ -448,6 +466,15 @@ public class EcsService {
                                           int desiredCount, LaunchType launchType,
                                           List<EcsLoadBalancer> loadBalancers,
                                           NetworkConfiguration networkConfiguration, String region) {
+        return createService(clusterRef, serviceName, taskDefinition, desiredCount, launchType,
+                loadBalancers, networkConfiguration, null, region);
+    }
+
+    public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
+                                          int desiredCount, LaunchType launchType,
+                                          List<EcsLoadBalancer> loadBalancers,
+                                          NetworkConfiguration networkConfiguration,
+                                          Map<String, String> tags, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         resolveTaskDefinitionOrThrow(taskDefinition, region);
 
@@ -469,6 +496,9 @@ public class EcsService {
         svc.setNetworkConfiguration(networkConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
+        if (tags != null && !tags.isEmpty()) {
+            svc.setTags(new LinkedHashMap<>(tags));
+        }
 
         services.put(key, svc);
         cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);

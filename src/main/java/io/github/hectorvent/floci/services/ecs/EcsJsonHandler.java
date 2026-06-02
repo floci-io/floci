@@ -131,7 +131,8 @@ public class EcsJsonHandler {
 
     private Response handleCreateCluster(JsonNode req, String region) {
         String name = req.path("clusterName").asText(null);
-        EcsCluster cluster = service.createCluster(name, region);
+        Map<String, String> tags = parseTagMap(req.path("tags"));
+        EcsCluster cluster = service.createCluster(name, tags, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", clusterNode(cluster));
         return Response.ok(resp).build();
@@ -203,9 +204,10 @@ public class EcsJsonHandler {
         String memory = req.has("memory") ? req.path("memory").asText() : null;
         String taskRoleArn = req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null;
         String executionRoleArn = req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null;
+        Map<String, String> tags = parseTagMap(req.path("tags"));
 
         TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, region);
+                taskRoleArn, executionRoleArn, tags, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", taskDefinitionNode(td));
@@ -379,9 +381,10 @@ public class EcsJsonHandler {
         LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
         List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
+        Map<String, String> tags = parseTagMap(req.path("tags"));
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, loadBalancers, networkConfiguration, region);
+                desiredCount, launchType, loadBalancers, networkConfiguration, tags, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
