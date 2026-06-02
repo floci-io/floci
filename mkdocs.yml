@@ -116,6 +116,7 @@ nav:
     - AWS Backup: services/backup.md
     - CloudFront: services/cloudfront.md
     - Route53: services/route53.md
+    - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
   - Testcontainers:
     - Overview: testcontainers/index.md
