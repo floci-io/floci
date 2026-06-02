@@ -930,13 +930,11 @@ public class EventBridgeService {
             // the same fallback chain.
             String envelopeRegion = (String) entry.get("Region");
             if (isBlank(envelopeRegion)) {
-                envelopeRegion = isBlank(callRegion)
-                        ? regionResolver.getDefaultRegion() : callRegion;
+                envelopeRegion = isBlank(callRegion) ? regionResolver.getDefaultRegion() : callRegion;
             }
             String envelopeAccount = (String) entry.get("Account");
             if (isBlank(envelopeAccount)) {
-                envelopeAccount = isBlank(callAccountId)
-                        ? regionResolver.getAccountId() : callAccountId;
+                envelopeAccount = isBlank(callAccountId) ? regionResolver.getAccountId() : callAccountId;
             }
             ObjectNode node = objectMapper.createObjectNode();
             node.put("version", "0");
