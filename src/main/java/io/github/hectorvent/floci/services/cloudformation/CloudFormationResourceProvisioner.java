@@ -14,6 +14,18 @@ import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
+import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
+import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
+import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
+import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
+import io.github.hectorvent.floci.services.ecs.model.PortMapping;
+import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -77,6 +89,7 @@ public class CloudFormationResourceProvisioner {
     private final EcrService ecrService;
     private final PipesService pipesService;
     private final CognitoService cognitoService;
+    private final EcsService ecsService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -89,7 +102,8 @@ public class CloudFormationResourceProvisioner {
                                              ApiGatewayV2Service apiGatewayV2Service,
                                              EcrService ecrService,
                                              PipesService pipesService,
-                                             CognitoService cognitoService) {
+                                             CognitoService cognitoService,
+                                             EcsService ecsService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -105,6 +119,7 @@ public class CloudFormationResourceProvisioner {
         this.ecrService = ecrService;
         this.pipesService = pipesService;
         this.cognitoService = cognitoService;
+        this.ecsService = ecsService;
     }
 
     /**
@@ -178,6 +193,9 @@ public class CloudFormationResourceProvisioner {
                         provisionCognitoUserPool(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Cognito::UserPoolClient" ->
                         provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
+                case "AWS::ECS::Cluster" -> provisionEcsCluster(resource, properties, engine, region, stackName);
+                case "AWS::ECS::TaskDefinition" -> provisionEcsTaskDefinition(resource, properties, engine, region, stackName);
+                case "AWS::ECS::Service" -> provisionEcsService(resource, properties, engine, region, stackName);
                 default -> {
                     LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
                     resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
@@ -220,6 +238,9 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
                 case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
                 case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
+                case "AWS::ECS::Cluster" -> ecsService.deleteCluster(physicalId, region);
+                case "AWS::ECS::TaskDefinition" -> ecsService.deregisterTaskDefinition(physicalId, region);
+                case "AWS::ECS::Service" -> deleteEcsServiceSafe(physicalId, region);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -1701,6 +1722,238 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("ClientName", client.getClientName());
         if (client.getClientSecret() != null) {
             r.getAttributes().put("ClientSecret", client.getClientSecret());
+        }
+    }
+
+    // ── ECS ──────────────────────────────────────────────────────────────────
+
+    private void provisionEcsCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                     String region, String stackName) {
+        String clusterName = resolveOptional(props, "ClusterName", engine);
+        if (clusterName == null || clusterName.isBlank()) {
+            clusterName = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        // createCluster is idempotent, so re-running it on a stack update reuses the existing cluster.
+        EcsCluster cluster = ecsService.createCluster(clusterName, region);
+        r.setPhysicalId(cluster.getClusterName());
+        r.getAttributes().put("Arn", cluster.getClusterArn());
+    }
+
+    private void provisionEcsTaskDefinition(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                            String region, String stackName) {
+        String family = resolveOptional(props, "Family", engine);
+        if (family == null || family.isBlank()) {
+            family = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        List<ContainerDefinition> containerDefs =
+                parseContainerDefinitions(props != null ? props.get("ContainerDefinitions") : null, engine);
+        NetworkMode networkMode = parseNetworkMode(resolveOptional(props, "NetworkMode", engine));
+        String cpu = resolveOptional(props, "Cpu", engine);
+        String memory = resolveOptional(props, "Memory", engine);
+        String taskRoleArn = resolveOptional(props, "TaskRoleArn", engine);
+        String executionRoleArn = resolveOptional(props, "ExecutionRoleArn", engine);
+
+        // Task definitions are immutable; each CFN update registers a fresh revision.
+        TaskDefinition td = ecsService.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
+                taskRoleArn, executionRoleArn, region);
+
+        r.setPhysicalId(td.getTaskDefinitionArn());
+        r.getAttributes().put("TaskDefinitionArn", td.getTaskDefinitionArn());
+    }
+
+    private void provisionEcsService(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                     String region, String stackName) {
+        String clusterRef = resolveOptional(props, "Cluster", engine);
+        String taskDefinition = resolveOptional(props, "TaskDefinition", engine);
+        int desiredCount = intOrDefault(resolveOptional(props, "DesiredCount", engine), 1);
+        LaunchType launchType = parseLaunchType(resolveOptional(props, "LaunchType", engine));
+        List<EcsLoadBalancer> loadBalancers =
+                parseEcsLoadBalancers(props != null ? props.get("LoadBalancers") : null, engine);
+        NetworkConfiguration networkConfiguration =
+                parseEcsNetworkConfiguration(props != null ? props.get("NetworkConfiguration") : null, engine);
+
+        String serviceName = resolveOptional(props, "ServiceName", engine);
+        if (serviceName == null || serviceName.isBlank()) {
+            serviceName = r.getAttributes().get("Name");
+        }
+        if (serviceName == null || serviceName.isBlank()) {
+            serviceName = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+
+        EcsServiceModel svc;
+        if (r.getPhysicalId() == null) {
+            svc = ecsService.createService(clusterRef, serviceName, taskDefinition,
+                    desiredCount, launchType, loadBalancers, networkConfiguration, region);
+        } else {
+            svc = ecsService.updateService(clusterRef, serviceName, taskDefinition,
+                    desiredCount, networkConfiguration, region);
+        }
+
+        r.setPhysicalId(svc.getServiceArn());
+        r.getAttributes().put("Name", svc.getServiceName());
+        r.getAttributes().put("ServiceArn", svc.getServiceArn());
+    }
+
+    private void deleteEcsServiceSafe(String serviceArn, String region) {
+        // Floci service ARNs embed the cluster: arn:aws:ecs:<region>:<acct>:service/<cluster>/<service>.
+        // Parse both so the right cluster's tasks get stopped during teardown.
+        String clusterRef = null;
+        String serviceName = serviceArn;
+        try {
+            String[] segments = AwsArnUtils.parse(serviceArn).resource().split("/");
+            if (segments.length == 3) {
+                clusterRef = segments[1];
+                serviceName = segments[2];
+            } else if (segments.length == 2) {
+                // Legacy ARN format without an embedded cluster: service/<service>.
+                serviceName = segments[1];
+            }
+        } catch (IllegalArgumentException e) {
+            // Not an ARN; treat the value as a bare service name.
+        }
+        ecsService.deleteService(clusterRef, serviceName, true, region);
+    }
+
+    private List<ContainerDefinition> parseContainerDefinitions(JsonNode node, CloudFormationTemplateEngine engine) {
+        List<ContainerDefinition> result = new ArrayList<>();
+        if (node == null || node.isNull()) {
+            return result;
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return result;
+        }
+        for (JsonNode item : resolved) {
+            ContainerDefinition def = new ContainerDefinition();
+            def.setName(item.path("Name").asText(null));
+            def.setImage(item.path("Image").asText(null));
+            def.setEssential(item.path("Essential").asBoolean(true));
+            if (item.hasNonNull("Cpu")) {
+                def.setCpu(item.path("Cpu").asInt());
+            }
+            if (item.hasNonNull("Memory")) {
+                def.setMemory(item.path("Memory").asInt());
+            }
+            if (item.hasNonNull("MemoryReservation")) {
+                def.setMemoryReservation(item.path("MemoryReservation").asInt());
+            }
+            def.setPortMappings(parseCfnPortMappings(item.path("PortMappings")));
+            def.setEnvironment(parseCfnEnvironment(item.path("Environment")));
+            if (item.path("Command").isArray()) {
+                List<String> cmd = new ArrayList<>();
+                item.path("Command").forEach(c -> cmd.add(c.asText()));
+                def.setCommand(cmd);
+            }
+            if (item.path("EntryPoint").isArray()) {
+                List<String> ep = new ArrayList<>();
+                item.path("EntryPoint").forEach(e -> ep.add(e.asText()));
+                def.setEntryPoint(ep);
+            }
+            result.add(def);
+        }
+        return result;
+    }
+
+    private List<PortMapping> parseCfnPortMappings(JsonNode node) {
+        List<PortMapping> result = new ArrayList<>();
+        if (node == null || !node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            int containerPort = item.path("ContainerPort").asInt(0);
+            int hostPort = item.path("HostPort").asInt(0);
+            String protocol = item.path("Protocol").asText("tcp");
+            result.add(new PortMapping(containerPort, hostPort, protocol));
+        }
+        return result;
+    }
+
+    private List<KeyValuePair> parseCfnEnvironment(JsonNode node) {
+        List<KeyValuePair> result = new ArrayList<>();
+        if (node == null || !node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new KeyValuePair(item.path("Name").asText(), item.path("Value").asText()));
+        }
+        return result;
+    }
+
+    private List<EcsLoadBalancer> parseEcsLoadBalancers(JsonNode node, CloudFormationTemplateEngine engine) {
+        List<EcsLoadBalancer> result = new ArrayList<>();
+        if (node == null || node.isNull()) {
+            return result;
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isArray()) {
+            return result;
+        }
+        for (JsonNode item : resolved) {
+            EcsLoadBalancer lb = new EcsLoadBalancer();
+            if (item.hasNonNull("TargetGroupArn")) {
+                lb.setTargetGroupArn(item.path("TargetGroupArn").asText());
+            }
+            if (item.hasNonNull("LoadBalancerName")) {
+                lb.setLoadBalancerName(item.path("LoadBalancerName").asText());
+            }
+            if (item.hasNonNull("ContainerName")) {
+                lb.setContainerName(item.path("ContainerName").asText());
+            }
+            if (item.hasNonNull("ContainerPort")) {
+                lb.setContainerPort(item.path("ContainerPort").asInt());
+            }
+            result.add(lb);
+        }
+        return result;
+    }
+
+    private NetworkConfiguration parseEcsNetworkConfiguration(JsonNode node, CloudFormationTemplateEngine engine) {
+        if (node == null || node.isNull()) {
+            return null;
+        }
+        JsonNode resolved = engine.resolveNode(node);
+        if (resolved == null || !resolved.isObject() || !resolved.hasNonNull("AwsvpcConfiguration")) {
+            return null;
+        }
+        JsonNode awsvpc = resolved.path("AwsvpcConfiguration");
+        AwsVpcConfiguration awsvpcConfig = new AwsVpcConfiguration();
+        awsvpcConfig.setSubnets(jsonArrayToStringList(awsvpc.path("Subnets")));
+        awsvpcConfig.setSecurityGroups(jsonArrayToStringList(awsvpc.path("SecurityGroups")));
+        if (awsvpc.hasNonNull("AssignPublicIp")) {
+            awsvpcConfig.setAssignPublicIp(awsvpc.path("AssignPublicIp").asText());
+        }
+        NetworkConfiguration networkConfiguration = new NetworkConfiguration();
+        networkConfiguration.setAwsvpcConfiguration(awsvpcConfig);
+        return networkConfiguration;
+    }
+
+    private static List<String> jsonArrayToStringList(JsonNode node) {
+        List<String> result = new ArrayList<>();
+        if (node != null && node.isArray()) {
+            node.forEach(v -> result.add(v.asText()));
+        }
+        return result;
+    }
+
+    private static NetworkMode parseNetworkMode(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return NetworkMode.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
+    }
+
+    private static LaunchType parseLaunchType(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return LaunchType.valueOf(value);
+        } catch (IllegalArgumentException e) {
+            return null;
         }
     }
 

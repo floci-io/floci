@@ -4772,4 +4772,326 @@ class CloudFormationIntegrationTest {
         assertThat(apisJson, containsString("\"AllowCredentials\":true"));
     }
 
+    // ── Issue #924: ECS provisioning via CloudFormation ──────────────────────
+
+    private static final String ECS_TARGET_PREFIX = "AmazonEC2ContainerServiceV20141113.";
+    private static final String ECS_CONTENT_TYPE = "application/x-amz-json-1.1";
+
+    private static String outputValue(String describeXml, String key) {
+        return describeXml.split("<OutputKey>" + key + "</OutputKey>")[1]
+                .split("<OutputValue>")[1].split("</OutputValue>")[0];
+    }
+
+    @Test
+    void createStack_withEcsClusterTaskDefAndService() {
+        String template = """
+            {
+              "Resources": {
+                "EcsCluster": {
+                  "Type": "AWS::ECS::Cluster",
+                  "Properties": { "ClusterName": "cfn-ecs-cluster" }
+                },
+                "TaskDef": {
+                  "Type": "AWS::ECS::TaskDefinition",
+                  "Properties": {
+                    "Family": "cfn-ecs-taskdef",
+                    "Cpu": "256",
+                    "Memory": "512",
+                    "NetworkMode": "awsvpc",
+                    "TaskRoleArn": "arn:aws:iam::000000000000:role/cfn-ecs-task-role",
+                    "ExecutionRoleArn": "arn:aws:iam::000000000000:role/cfn-ecs-exec-role",
+                    "ContainerDefinitions": [
+                      {
+                        "Name": "web",
+                        "Image": "nginx:latest",
+                        "Essential": true,
+                        "Cpu": 128,
+                        "Memory": 256,
+                        "PortMappings": [ { "ContainerPort": 80, "Protocol": "tcp" } ],
+                        "Environment": [ { "Name": "STAGE", "Value": "test" } ]
+                      }
+                    ]
+                  }
+                },
+                "EcsService": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "ServiceName": "cfn-ecs-service",
+                    "Cluster": { "Ref": "EcsCluster" },
+                    "TaskDefinition": { "Ref": "TaskDef" },
+                    "DesiredCount": 2,
+                    "LaunchType": "FARGATE",
+                    "NetworkConfiguration": {
+                      "AwsvpcConfiguration": {
+                        "Subnets": ["subnet-aaa", "subnet-bbb"],
+                        "SecurityGroups": ["sg-123"],
+                        "AssignPublicIp": "ENABLED"
+                      }
+                    }
+                  }
+                }
+              },
+              "Outputs": {
+                "ClusterRef": { "Value": { "Ref": "EcsCluster" } },
+                "ClusterArn": { "Value": { "Fn::GetAtt": ["EcsCluster", "Arn"] } },
+                "TaskDefRef": { "Value": { "Ref": "TaskDef" } },
+                "ServiceRef": { "Value": { "Ref": "EcsService" } },
+                "ServiceName": { "Value": { "Fn::GetAtt": ["EcsService", "Name"] } },
+                "ServiceArn": { "Value": { "Fn::GetAtt": ["EcsService", "ServiceArn"] } }
+              }
+            }
+            """;
+
+        String stackName = "cfn-ecs-stack";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        // Ref/GetAtt parity with AWS CloudFormation:
+        //  - Cluster Ref = name, GetAtt Arn = ARN
+        //  - TaskDefinition Ref = full ARN including revision
+        //  - Service Ref = ARN; GetAtt Name = service name, GetAtt ServiceArn = ARN
+        assertThat(outputValue(describeXml, "ClusterRef"), equalTo("cfn-ecs-cluster"));
+        assertThat(outputValue(describeXml, "ClusterArn"),
+                equalTo("arn:aws:ecs:us-east-1:000000000000:cluster/cfn-ecs-cluster"));
+        assertThat(outputValue(describeXml, "TaskDefRef"),
+                equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-taskdef:1"));
+        String serviceArn = "arn:aws:ecs:us-east-1:000000000000:service/cfn-ecs-cluster/cfn-ecs-service";
+        assertThat(outputValue(describeXml, "ServiceRef"), equalTo(serviceArn));
+        assertThat(outputValue(describeXml, "ServiceArn"), equalTo(serviceArn));
+        assertThat(outputValue(describeXml, "ServiceName"), equalTo("cfn-ecs-service"));
+
+        // Task definition carries role ARNs (Part 5a) and container definitions
+        given()
+            .header("X-Amz-Target", ECS_TARGET_PREFIX + "DescribeTaskDefinition")
+            .contentType(ECS_CONTENT_TYPE)
+            .body("{\"taskDefinition\": \"cfn-ecs-taskdef\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.family", equalTo("cfn-ecs-taskdef"))
+            .body("taskDefinition.networkMode", equalTo("awsvpc"))
+            .body("taskDefinition.taskRoleArn", equalTo("arn:aws:iam::000000000000:role/cfn-ecs-task-role"))
+            .body("taskDefinition.executionRoleArn", equalTo("arn:aws:iam::000000000000:role/cfn-ecs-exec-role"))
+            .body("taskDefinition.containerDefinitions[0].name", equalTo("web"))
+            .body("taskDefinition.containerDefinitions[0].image", equalTo("nginx:latest"))
+            .body("taskDefinition.containerDefinitions[0].portMappings[0].containerPort", equalTo(80))
+            .body("taskDefinition.containerDefinitions[0].environment[0].name", equalTo("STAGE"));
+
+        // Service carries desiredCount and network configuration (Part 5b)
+        given()
+            .header("X-Amz-Target", ECS_TARGET_PREFIX + "DescribeServices")
+            .contentType(ECS_CONTENT_TYPE)
+            .body("{\"cluster\": \"cfn-ecs-cluster\", \"services\": [\"cfn-ecs-service\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("services[0].serviceName", equalTo("cfn-ecs-service"))
+            .body("services[0].desiredCount", equalTo(2))
+            .body("services[0].launchType", equalTo("FARGATE"))
+            .body("services[0].networkConfiguration.awsvpcConfiguration.subnets", hasItem("subnet-aaa"))
+            .body("services[0].networkConfiguration.awsvpcConfiguration.securityGroups", hasItem("sg-123"))
+            .body("services[0].networkConfiguration.awsvpcConfiguration.assignPublicIp", equalTo("ENABLED"));
+    }
+
+    @Test
+    void updateStack_ecsService_registersNewTaskDefRevisionAndUpdatesDesiredCount() {
+        String stackName = "cfn-ecs-update-stack";
+        String template = """
+            {
+              "Resources": {
+                "EcsCluster": {
+                  "Type": "AWS::ECS::Cluster",
+                  "Properties": { "ClusterName": "cfn-ecs-update-cluster" }
+                },
+                "TaskDef": {
+                  "Type": "AWS::ECS::TaskDefinition",
+                  "Properties": {
+                    "Family": "cfn-ecs-update-taskdef",
+                    "ContainerDefinitions": [
+                      { "Name": "app", "Image": "%s", "Essential": true }
+                    ]
+                  }
+                },
+                "EcsService": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "ServiceName": "cfn-ecs-update-service",
+                    "Cluster": { "Ref": "EcsCluster" },
+                    "TaskDefinition": { "Ref": "TaskDef" },
+                    "DesiredCount": %d,
+                    "LaunchType": "FARGATE"
+                  }
+                }
+              },
+              "Outputs": {
+                "TaskDefRef": { "Value": { "Ref": "TaskDef" } }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("app:v1", 1))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String createXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(outputValue(createXml, "TaskDefRef"),
+                equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:1"));
+
+        // Update: new container image registers a fresh revision; desiredCount changes 1 -> 3
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template.formatted("app:v2", 3))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String updateXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(outputValue(updateXml, "TaskDefRef"),
+                equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:2"));
+
+        given()
+            .header("X-Amz-Target", ECS_TARGET_PREFIX + "DescribeServices")
+            .contentType(ECS_CONTENT_TYPE)
+            .body("{\"cluster\": \"cfn-ecs-update-cluster\", \"services\": [\"cfn-ecs-update-service\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("services[0].desiredCount", equalTo(3))
+            .body("services[0].taskDefinition",
+                    equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:2"));
+    }
+
+    @Test
+    void deleteStack_ecs_leavesNoOrphans() {
+        String stackName = "cfn-ecs-delete-stack";
+        String template = """
+            {
+              "Resources": {
+                "EcsCluster": {
+                  "Type": "AWS::ECS::Cluster",
+                  "Properties": { "ClusterName": "cfn-ecs-delete-cluster" }
+                },
+                "TaskDef": {
+                  "Type": "AWS::ECS::TaskDefinition",
+                  "Properties": {
+                    "Family": "cfn-ecs-delete-taskdef",
+                    "ContainerDefinitions": [
+                      { "Name": "app", "Image": "app:latest", "Essential": true }
+                    ]
+                  }
+                },
+                "EcsService": {
+                  "Type": "AWS::ECS::Service",
+                  "Properties": {
+                    "ServiceName": "cfn-ecs-delete-service",
+                    "Cluster": { "Ref": "EcsCluster" },
+                    "TaskDefinition": { "Ref": "TaskDef" },
+                    "DesiredCount": 0,
+                    "LaunchType": "FARGATE"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Sanity: cluster exists before delete
+        given()
+            .header("X-Amz-Target", ECS_TARGET_PREFIX + "DescribeClusters")
+            .contentType(ECS_CONTENT_TYPE)
+            .body("{\"clusters\": [\"cfn-ecs-delete-cluster\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("clusters[0].clusterName", equalTo("cfn-ecs-delete-cluster"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Cluster is gone (deleted in reverse order, after the service)
+        given()
+            .header("X-Amz-Target", ECS_TARGET_PREFIX + "DescribeClusters")
+            .contentType(ECS_CONTENT_TYPE)
+            .body("{\"clusters\": [\"cfn-ecs-delete-cluster\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("clusters", org.hamcrest.Matchers.empty());
+
+        // Task definition is deregistered (INACTIVE)
+        given()
+            .header("X-Amz-Target", ECS_TARGET_PREFIX + "DescribeTaskDefinition")
+            .contentType(ECS_CONTENT_TYPE)
+            .body("{\"taskDefinition\": \"cfn-ecs-delete-taskdef\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskDefinition.status", equalTo("INACTIVE"));
+    }
 }
