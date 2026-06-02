@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
-import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
@@ -61,8 +61,8 @@ public class ContainerLauncher {
     private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
     private final EcrRegistryManager ecrRegistryManager;
-    private final EmbeddedDnsServer embeddedDnsServer;
     private final LambdaLayerService layerService;
+    private final ContainerReachableEndpoint reachableEndpoint;
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -77,8 +77,8 @@ public class ContainerLauncher {
                              DockerHostResolver dockerHostResolver,
                              EmulatorConfig config,
                              EcrRegistryManager ecrRegistryManager,
-                             EmbeddedDnsServer embeddedDnsServer,
-                             LambdaLayerService layerService) {
+                             LambdaLayerService layerService,
+                             ContainerReachableEndpoint reachableEndpoint) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -87,8 +87,8 @@ public class ContainerLauncher {
         this.dockerHostResolver = dockerHostResolver;
         this.config = config;
         this.ecrRegistryManager = ecrRegistryManager;
-        this.embeddedDnsServer = embeddedDnsServer;
         this.layerService = layerService;
+        this.reachableEndpoint = reachableEndpoint;
     }
 
     /**
@@ -154,15 +154,10 @@ public class ContainerLauncher {
         String cwLogStream = LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/[$LATEST]" + shortId;
         String lambdaRegion = extractRegionFromArn(fn.getFunctionArn(), config.defaultRegion());
 
-        // Floci endpoint reachable from inside the container.
-        // When the embedded DNS server is active, Lambda containers already have it wired as their
-        // resolver and can reach Floci by the configured hostname (or the default DNS suffix).
-        // Fall back to the raw Docker host IP when the embedded DNS is not running (local dev mode).
-        int flociPort = java.net.URI.create(config.baseUrl()).getPort();
-        String flociHostname = embeddedDnsServer.getServerIp().isPresent()
-                ? config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX)
-                : hostAddress;
-        String flociEndpoint = "http://" + flociHostname + ":" + flociPort;
+        // Floci endpoint reachable from inside the container (shared with the CloudFormation
+        // custom-resource provisioner, which uses the same address for ResponseURL callbacks).
+        String flociEndpoint = reachableEndpoint.baseUrl();
+        String flociHostname = java.net.URI.create(flociEndpoint).getHost();
 
         // Build env vars
         List<String> env = new ArrayList<>();
