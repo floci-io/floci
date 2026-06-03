@@ -19,6 +19,9 @@ class PreSignedUrlIntegrationTest {
 
     private static final String BUCKET = "presign-test-bucket";
 
+    private static final String AUTH_HEADER =
+            "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/s3/aws4_request";
+
     @Inject
     PreSignedUrlGenerator presignGenerator;
 
@@ -138,8 +141,10 @@ class PreSignedUrlIntegrationTest {
     @Order(11)
     void getObjectAppliesResponseContentDispositionOverride() {
         // Stored disposition is "inline"; override should win.
+        // Must be a signed request per AWS spec (response-* params require Authorization or presigned URL).
         given()
             .urlEncodingEnabled(false)
+            .header("Authorization", AUTH_HEADER)
         .when()
             .get("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22file.txt%22")
         .then()
@@ -152,6 +157,7 @@ class PreSignedUrlIntegrationTest {
     void getObjectAppliesAllResponseOverrides() {
         given()
             .urlEncodingEnabled(false)
+            .header("Authorization", AUTH_HEADER)
         .when()
             .get("/" + BUCKET + "/disposition-file.txt"
                 + "?response-content-type=application%2Fpdf"
@@ -187,6 +193,7 @@ class PreSignedUrlIntegrationTest {
     void headObjectAppliesResponseContentDispositionOverride() {
         given()
             .urlEncodingEnabled(false)
+            .header("Authorization", AUTH_HEADER)
         .when()
             .head("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22head.txt%22")
         .then()
@@ -212,6 +219,7 @@ class PreSignedUrlIntegrationTest {
     void rangeRequestAppliesResponseContentDispositionOverride() {
         given()
             .urlEncodingEnabled(false)
+            .header("Authorization", AUTH_HEADER)
             .header("Range", "bytes=0-3")
         .when()
             .get("/" + BUCKET + "/disposition-file.txt?response-content-disposition=attachment%3B%20filename%3D%22range.txt%22")

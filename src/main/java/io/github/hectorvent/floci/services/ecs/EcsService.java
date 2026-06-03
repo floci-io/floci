@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
@@ -30,6 +31,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -92,7 +94,7 @@ public class EcsService {
 
     @PostConstruct
     void init() {
-        reconciler.scheduleAtFixedRate(this::reconcileServices, 5, 5, TimeUnit.SECONDS);
+        reconciler.scheduleAtFixedRate(this::reconcile, 5, 5, TimeUnit.SECONDS);
     }
 
     @PreDestroy
@@ -180,6 +182,7 @@ public class EcsService {
 
     public TaskDefinition registerTaskDefinition(String family, List<ContainerDefinition> containerDefs,
                                                   NetworkMode networkMode, String cpu, String memory,
+                                                  String taskRoleArn, String executionRoleArn,
                                                   String region) {
         int revision = latestRevisions.merge(family, 1, Integer::sum);
 
@@ -190,6 +193,8 @@ public class EcsService {
         td.setNetworkMode(networkMode != null ? networkMode : NetworkMode.bridge);
         td.setCpu(cpu);
         td.setMemory(memory);
+        td.setTaskRoleArn(taskRoleArn);
+        td.setExecutionRoleArn(executionRoleArn);
         td.setContainerDefinitions(containerDefs != null ? containerDefs : List.of());
         td.setTaskDefinitionArn(regionResolver.buildArn("ecs", region,
                 "task-definition/" + family + ":" + revision));
@@ -316,21 +321,32 @@ public class EcsService {
 
     public EcsTask stopTask(String clusterRef, String taskRef, String reason, String region) {
         EcsTask task = resolveTaskOrThrow(taskRef, region);
+        if (TaskStatus.STOPPED.name().equals(task.getLastStatus())) {
+            return task;
+        }
         task.setDesiredStatus(TaskStatus.STOPPED.name());
         task.setLastStatus(TaskStatus.STOPPING.name());
         task.setStoppedReason(reason != null ? reason : "Stopped by user");
 
         deregisterTaskFromLoadBalancers(task, region);
 
+        Map<String, Integer> exitCodes = Map.of();
         if (dockerMode) {
             EcsTaskHandle handle = taskHandles.remove(task.getTaskArn());
-            containerManager.stopTask(handle);
+            exitCodes = containerManager.stopTaskAndCollectExitCodes(handle);
         }
 
         task.setLastStatus(TaskStatus.STOPPED.name());
         task.setStoppedAt(Instant.now());
         if (task.getContainers() != null) {
-            task.getContainers().forEach(c -> c.setLastStatus("STOPPED"));
+            final Map<String, Integer> codes = exitCodes;
+            task.getContainers().forEach(c -> {
+                c.setLastStatus("STOPPED");
+                Integer code = codes.get(c.getName());
+                if (code != null) {
+                    c.setExitCode(code);
+                }
+            });
         }
 
         EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
@@ -430,7 +446,8 @@ public class EcsService {
 
     public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
                                           int desiredCount, LaunchType launchType,
-                                          List<EcsLoadBalancer> loadBalancers, String region) {
+                                          List<EcsLoadBalancer> loadBalancers,
+                                          NetworkConfiguration networkConfiguration, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         resolveTaskDefinitionOrThrow(taskDefinition, region);
 
@@ -449,6 +466,7 @@ public class EcsService {
         svc.setLaunchType(launchType != null ? launchType : LaunchType.FARGATE);
         svc.setDesiredCount(desiredCount);
         svc.setLoadBalancers(loadBalancers);
+        svc.setNetworkConfiguration(networkConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
 
@@ -460,7 +478,8 @@ public class EcsService {
     }
 
     public EcsServiceModel updateService(String clusterRef, String serviceName, String taskDefinition,
-                                          Integer desiredCount, String region) {
+                                          Integer desiredCount, NetworkConfiguration networkConfiguration,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         EcsServiceModel svc = services.get(key);
@@ -469,6 +488,9 @@ public class EcsService {
         }
         if (desiredCount != null) {
             svc.setDesiredCount(desiredCount);
+        }
+        if (networkConfiguration != null) {
+            svc.setNetworkConfiguration(networkConfiguration);
         }
         if (taskDefinition != null) {
             resolveTaskDefinitionOrThrow(taskDefinition, region);
@@ -999,6 +1021,75 @@ public class EcsService {
     }
 
     // ── Service Reconciliation ────────────────────────────────────────────────
+
+    void reconcile() {
+        reconcileTasks();
+        reconcileServices();
+    }
+
+    private void reconcileTasks() {
+        for (String taskArn : taskHandles.keySet()) {
+            try {
+                reconcileTask(taskArn);
+            } catch (Exception e) {
+                LOG.debugv("Error reconciling ECS task {0}: {1}", taskArn, e.getMessage());
+            }
+        }
+    }
+
+    private void reconcileTask(String taskArn) {
+        EcsTask task = tasks.get(taskArn);
+        if (task == null || !TaskStatus.RUNNING.name().equals(task.getLastStatus())) {
+            return;
+        }
+
+        EcsTaskHandle handle = taskHandles.get(taskArn);
+        if (handle == null) {
+            return;
+        }
+
+        // Inspect every container; abort if any are still running.
+        Map<String, Integer> exitCodes = new LinkedHashMap<>();
+        for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
+            Integer code = containerManager.getExitCodeIfStopped(entry.getValue());
+            if (code == null) {
+                return;
+            }
+            exitCodes.put(entry.getKey(), code);
+        }
+
+        // All containers have exited. Atomically claim the handle to avoid
+        // racing with an explicit stopTask() call.
+        EcsTaskHandle claimed = taskHandles.remove(taskArn);
+        if (claimed == null) {
+            return;
+        }
+
+        // Close log streams and remove the stopped Docker containers without re-inspecting.
+        containerManager.cleanupStoppedTask(claimed);
+
+        if (task.getContainers() != null) {
+            task.getContainers().forEach(c -> {
+                c.setLastStatus("STOPPED");
+                Integer code = exitCodes.get(c.getName());
+                if (code != null) {
+                    c.setExitCode(code);
+                }
+            });
+        }
+
+        task.setLastStatus(TaskStatus.STOPPED.name());
+        task.setDesiredStatus(TaskStatus.STOPPED.name());
+        task.setStoppedAt(Instant.now());
+        task.setStoppedReason("Essential container in task exited");
+
+        EcsCluster cluster = resolveClusterByArn(task.getClusterArn());
+        if (cluster != null && cluster.getRunningTasksCount() > 0) {
+            cluster.setRunningTasksCount(cluster.getRunningTasksCount() - 1);
+        }
+
+        LOG.infov("ECS task {0} reconciled to STOPPED (all containers exited)", taskArn);
+    }
 
     void reconcileServices() {
         for (Map.Entry<String, EcsServiceModel> entry : services.entrySet()) {

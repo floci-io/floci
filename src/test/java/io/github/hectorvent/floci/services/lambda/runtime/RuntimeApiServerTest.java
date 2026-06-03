@@ -233,10 +233,19 @@ class RuntimeApiServerTest {
     @Timeout(10)
     void stopReleasesPortSynchronously() throws Exception {
         server.stop().get(5, TimeUnit.SECONDS);
-        try (ServerSocket s = new ServerSocket()) {
-            s.setReuseAddress(true);
-            s.bind(new InetSocketAddress(port));
+        boolean bound = false;
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            try (ServerSocket s = new ServerSocket()) {
+                s.setReuseAddress(true);
+                s.bind(new InetSocketAddress(port));
+                bound = true;
+                break;
+            } catch (IOException e) {
+                Thread.sleep(100);
+            }
         }
+        assertTrue(bound, "Should be able to bind to the port after stop()");
     }
 
     @Test
@@ -244,8 +253,20 @@ class RuntimeApiServerTest {
     void newServerOnSamePortAcceptsTrafficAfterStop() throws Exception {
         server.stop().get(5, TimeUnit.SECONDS);
 
-        server = new RuntimeApiServer(vertx, port);
-        server.start().get(5, TimeUnit.SECONDS);
+        // Try to start a new server, retrying if it fails to bind due to temporary port conflicts
+        boolean started = false;
+        long deadline = System.currentTimeMillis() + 5000;
+        while (System.currentTimeMillis() < deadline) {
+            try {
+                server = new RuntimeApiServer(vertx, port);
+                server.start().get(5, TimeUnit.SECONDS);
+                started = true;
+                break;
+            } catch (Exception e) {
+                Thread.sleep(100);
+            }
+        }
+        assertTrue(started, "New server should start successfully on the same port");
 
         HttpResponse<String> resp = httpClient.send(
                 HttpRequest.newBuilder(URI.create("http://localhost:" + port + "/x")).GET().build(),

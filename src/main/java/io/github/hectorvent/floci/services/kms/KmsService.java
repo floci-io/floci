@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
+import io.github.hectorvent.floci.services.kms.model.KmsGrant;
 import io.github.hectorvent.floci.services.kms.model.KmsKey;
 import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -49,6 +50,7 @@ public class KmsService {
 
     private final StorageBackend<String, KmsKey> keyStore;
     private final StorageBackend<String, KmsAlias> aliasStore;
+    private final StorageBackend<String, KmsGrant> grantStore;
     private final RegionResolver regionResolver;
 
     @Inject
@@ -57,14 +59,18 @@ public class KmsService {
                         new TypeReference<Map<String, KmsKey>>() {}),
                 storageFactory.create("kms", "kms-aliases.json",
                         new TypeReference<Map<String, KmsAlias>>() {}),
+                storageFactory.create("kms", "kms-grants.json",
+                        new TypeReference<Map<String, KmsGrant>>() {}),
                 regionResolver);
     }
 
     KmsService(StorageBackend<String, KmsKey> keyStore,
-               StorageBackend<String, KmsAlias> aliasStore,
-               RegionResolver regionResolver) {
+                StorageBackend<String, KmsAlias> aliasStore,
+               StorageBackend<String, KmsGrant> grantStore,
+                RegionResolver regionResolver) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
+        this.grantStore = grantStore;
         this.regionResolver = regionResolver;
     }
 
@@ -234,6 +240,205 @@ public class KmsService {
         return keyStore.scan(k -> k.startsWith(prefix));
     }
 
+    public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations, String region) {
+        return createGrant(keyId, granteePrincipal, operations, null, region);
+    }
+
+    public KmsGrant createGrant(String keyId, String granteePrincipal, List<String> operations,
+                                String retiringPrincipal, String region) {
+        if (keyId == null || keyId.isBlank()) {
+            throw new AwsException("ValidationException", "KeyId is required", 400);
+        }
+        if (granteePrincipal == null || granteePrincipal.isBlank()) {
+            throw new AwsException("ValidationException", "GranteePrincipal is required", 400);
+        }
+        if (operations == null || operations.isEmpty()) {
+            throw new AwsException("ValidationException", "Operations is required", 400);
+        }
+
+        KmsKey key = resolveKey(keyId, region);
+        String grantId = UUID.randomUUID().toString();
+        byte[] tokenBytes = new byte[32];
+        ThreadLocalRandom.current().nextBytes(tokenBytes);
+
+        KmsGrant grant = new KmsGrant();
+        grant.setGrantId(grantId);
+        grant.setGrantToken(Base64.getUrlEncoder().withoutPadding().encodeToString(tokenBytes));
+        grant.setKeyId(key.getKeyId());
+        grant.setKeyArn(key.getArn());
+        grant.setGranteePrincipal(granteePrincipal);
+        grant.setRetiringPrincipal(retiringPrincipal);
+        grant.setOperations(new ArrayList<>(operations));
+
+        grantStore.put(region + "::" + grantId, grant);
+        LOG.infov("Created KMS grant: {0} for key {1} in {2}", grantId, key.getKeyId(), region);
+        return grant;
+    }
+
+    private static final int DEFAULT_GRANT_LIMIT = 50;
+    private static final int MAX_GRANT_LIMIT = 100;
+
+    public Map<String, Object> listGrants(String keyId, String region, String marker, Integer limit,
+                                           String grantIdFilter, String granteePrincipalFilter) {
+        // Validate filter mutual exclusivity
+        if (grantIdFilter != null && (grantIdFilter.length() > 128)) {
+            throw new AwsException("ValidationException", "GrantId exceeds maximum length of 128", 400);
+        }
+
+        KmsKey key = resolveKey(keyId, region);
+        String prefix = region + "::";
+
+        // Collect and sort grants deterministically by grantId
+        List<KmsGrant> sortedGrants = grantStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(grant -> key.getKeyId().equals(grant.getKeyId()))
+                .filter(grant -> grantIdFilter == null || grantIdFilter.isBlank()
+                        || grantIdFilter.equals(grant.getGrantId()))
+                .filter(grant -> granteePrincipalFilter == null || granteePrincipalFilter.isBlank()
+                        || granteePrincipalFilter.equals(grant.getGranteePrincipal()))
+                .sorted(Comparator.comparing(KmsGrant::getGrantId))
+                .toList();
+
+        return paginateGrants(sortedGrants, marker, limit);
+    }
+
+    public Map<String, Object> listRetirableGrants(String retiringPrincipal, String region,
+                                                    String marker, Integer limit) {
+        if (retiringPrincipal == null || retiringPrincipal.isBlank()) {
+            throw new AwsException("ValidationException", "RetiringPrincipal is required", 400);
+        }
+
+        String prefix = region + "::";
+
+        List<KmsGrant> sortedGrants = grantStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(grant -> retiringPrincipal.equals(grant.getRetiringPrincipal()))
+                .sorted(Comparator.comparing(KmsGrant::getGrantId))
+                .toList();
+
+        return paginateGrants(sortedGrants, marker, limit);
+    }
+
+    public void revokeGrant(String keyId, String grantId, String region) {
+        if (keyId == null || keyId.isBlank()) {
+            throw new AwsException("ValidationException", "KeyId is required", 400);
+        }
+        if (grantId == null || grantId.isBlank()) {
+            throw new AwsException("ValidationException", "GrantId is required", 400);
+        }
+
+        // Resolve the key to validate it exists
+        resolveKey(keyId, region);
+
+        String storageKey = region + "::" + grantId;
+        if (grantStore.get(storageKey).isEmpty()) {
+            throw new AwsException("NotFoundException", "Grant not found: " + grantId, 400);
+        }
+
+        grantStore.delete(storageKey);
+        LOG.infov("Revoked KMS grant: {0} for key {1} in {2}", grantId, keyId, region);
+    }
+
+    public void retireGrant(String grantToken, String keyId, String grantId, String region) {
+        boolean hasToken = grantToken != null && !grantToken.isBlank();
+        boolean hasKeyAndGrant = keyId != null && !keyId.isBlank() && grantId != null && !grantId.isBlank();
+
+        if (!hasToken && !hasKeyAndGrant) {
+            throw new AwsException("ValidationException",
+                    "Either GrantToken or both KeyId and GrantId must be provided", 400);
+        }
+
+        // Token-based retirement: scan all grants in the region for matching token
+        if (hasToken) {
+            String prefix = region + "::";
+            KmsGrant found = grantStore.scan(k -> k.startsWith(prefix)).stream()
+                    .filter(g -> grantToken.equals(g.getGrantToken()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("NotFoundException",
+                            "Grant not found for the given grant token", 400));
+
+            // Cross-verify GrantId if provided
+            if (grantId != null && !grantId.isBlank() && !grantId.equals(found.getGrantId())) {
+                throw new AwsException("NotFoundException", "Grant not found", 400);
+            }
+
+            // Cross-verify KeyId if provided
+            if (keyId != null && !keyId.isBlank()) {
+                KmsKey key = resolveKey(keyId, region);
+                if (!key.getKeyId().equals(found.getKeyId())) {
+                    throw new AwsException("NotFoundException",
+                            "Grant not found for the given key", 400);
+                }
+            }
+
+            grantStore.delete(region + "::" + found.getGrantId());
+            LOG.infov("Retired KMS grant: {0} by token in {1}", found.getGrantId(), region);
+            return;
+        }
+
+        // KeyId + GrantId retirement (administrative, distinct from RevokeGrant surface)
+        resolveKey(keyId, region);
+        String storageKey = region + "::" + grantId;
+        if (grantStore.get(storageKey).isEmpty()) {
+            throw new AwsException("NotFoundException", "Grant not found: " + grantId, 400);
+        }
+        grantStore.delete(storageKey);
+        LOG.infov("Retired KMS grant: {0} for key {1} in {2}", grantId, keyId, region);
+    }
+
+    private Map<String, Object> paginateGrants(List<KmsGrant> sortedGrants, String marker, Integer limit) {
+        int effectiveLimit = limit != null ? Math.clamp(limit, 1, MAX_GRANT_LIMIT) : DEFAULT_GRANT_LIMIT;
+
+        int startIndex = 0;
+        if (marker != null && !marker.isBlank()) {
+            String decodedMarker;
+            try {
+                decodedMarker = new String(Base64.getDecoder().decode(marker), StandardCharsets.UTF_8);
+            } catch (IllegalArgumentException e) {
+                throw new AwsException("InvalidMarkerException",
+                        "The request was rejected because the marker is not valid.", 400);
+            }
+            String lastGrantId = decodedMarker;
+            boolean found = false;
+            for (int i = 0; i < sortedGrants.size(); i++) {
+                if (sortedGrants.get(i).getGrantId().equals(lastGrantId)) {
+                    startIndex = i + 1;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                throw new AwsException("InvalidMarkerException",
+                        "The request was rejected because the marker that specifies where pagination should next begin is not valid.", 400);
+            }
+        }
+
+        int endIndex = Math.min(startIndex + effectiveLimit, sortedGrants.size());
+        List<KmsGrant> page = sortedGrants.subList(startIndex, endIndex);
+        boolean truncated = endIndex < sortedGrants.size();
+
+        Map<String, Object> result = new HashMap<>();
+        result.put("Grants", page.stream().map(this::grantToMap).toList());
+        result.put("Truncated", truncated);
+        if (truncated && !page.isEmpty()) {
+            String lastGrantId = page.getLast().getGrantId();
+            String nextMarker = Base64.getEncoder().encodeToString(lastGrantId.getBytes(StandardCharsets.UTF_8));
+            result.put("NextMarker", nextMarker);
+        }
+        return result;
+    }
+
+    private Map<String, Object> grantToMap(KmsGrant grant) {
+        Map<String, Object> result = new HashMap<>();
+        result.put("GrantId", grant.getGrantId());
+        result.put("KeyId", grant.getKeyArn());
+        result.put("GranteePrincipal", grant.getGranteePrincipal());
+        result.put("Operations", grant.getOperations());
+        result.put("CreationDate", grant.getCreationDate());
+        if (grant.getRetiringPrincipal() != null) {
+            result.put("RetiringPrincipal", grant.getRetiringPrincipal());
+        }
+        return result;
+    }
+
     public void scheduleKeyDeletion(String keyId, int pendingWindowInDays, String region) {
         KmsKey key = resolveKey(keyId, region);
         key.setKeyState("PendingDeletion");
@@ -290,6 +495,7 @@ public class KmsService {
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    private static final int ON_DEMAND_ROTATION_LIMIT = 25;
     public String rotateKeyOnDemand(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
         if (!key.isEnabled()) {
@@ -297,6 +503,12 @@ public class KmsService {
                     "KMS key " + key.getKeyId() + " is disabled.", 400);
         }
         validateRotationSupported(key);
+        if (key.getOnDemandRotationCount() >= ON_DEMAND_ROTATION_LIMIT) {
+            throw new AwsException("LimitExceededException",
+                    "On-demand rotation quota for KMS key " + key.getKeyId() + " is exceeded.", 400);
+        }
+        key.setOnDemandRotationCount(key.getOnDemandRotationCount() + 1);
+        keyStore.put(region + "::" + key.getKeyId(), key);
         return key.getKeyId();
     }
 

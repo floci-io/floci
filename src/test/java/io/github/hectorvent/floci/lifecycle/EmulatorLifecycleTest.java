@@ -13,7 +13,9 @@ import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoll
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
@@ -50,12 +52,14 @@ class EmulatorLifecycleTest {
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
     @Mock private RdsContainerManager rdsContainerManager;
     @Mock private RdsProxyManager rdsProxyManager;
+    @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
     @Mock private KinesisEventSourcePoller kinesisPoller;
     @Mock private DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
+    @Mock private EcrRegistryManager ecrRegistryManager;
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
 
@@ -72,9 +76,9 @@ class EmulatorLifecycleTest {
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
-                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
+                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, initLifecycleState);
+                pipesService, ec2MetadataServer, ecrRegistryManager, initLifecycleState);
     }
 
     private void stubStorageConfig() {
@@ -92,10 +96,11 @@ class EmulatorLifecycleTest {
 
         emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class));
 
-        var inOrder = Mockito.inOrder(initializationHooksRunner, storageFactory, initLifecycleState);
+        var inOrder = Mockito.inOrder(initializationHooksRunner, storageFactory, initLifecycleState, rdsService);
         inOrder.verify(initializationHooksRunner).run(InitializationHook.BOOT);
         inOrder.verify(initLifecycleState).markBootCompleted();
         inOrder.verify(storageFactory).loadAll();
+        inOrder.verify(rdsService).restorePersistedRuntime();
     }
 
     @Test

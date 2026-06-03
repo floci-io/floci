@@ -25,6 +25,7 @@ public class EcsServiceModel {
     private String deploymentController;
     private Map<String, String> tags = new HashMap<>();
     private List<EcsLoadBalancer> loadBalancers = new ArrayList<>();
+    private NetworkConfiguration networkConfiguration;
 
     public String getServiceArn() { return serviceArn; }
     public void setServiceArn(String serviceArn) { this.serviceArn = serviceArn; }
@@ -68,5 +69,10 @@ public class EcsServiceModel {
     public List<EcsLoadBalancer> getLoadBalancers() { return loadBalancers; }
     public void setLoadBalancers(List<EcsLoadBalancer> loadBalancers) {
         this.loadBalancers = loadBalancers != null ? loadBalancers : new ArrayList<>();
+    }
+
+    public NetworkConfiguration getNetworkConfiguration() { return networkConfiguration; }
+    public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) {
+        this.networkConfiguration = networkConfiguration;
     }
 }

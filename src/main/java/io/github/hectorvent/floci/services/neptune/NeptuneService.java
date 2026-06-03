@@ -64,7 +64,7 @@ public class NeptuneService {
         int proxyPort = allocateProxyPort();
         String image = config.services().neptune().defaultImage();
 
-        LOG.infov("Creating Neptune cluster {0} on proxy port {1}, image={2}", id, proxyPort, image);
+        LOG.infov("Creating Neptune cluster {0} on proxy port {1}, image={2}", id, String.valueOf(proxyPort), image);
 
         NeptuneContainerHandle handle = containerManager.start(id, image);
 
@@ -92,7 +92,7 @@ public class NeptuneService {
         proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
 
         clusters.put(id, cluster);
-        LOG.infov("Neptune cluster {0} created, Gremlin endpoint={1}:{2}", id, endpointHost, proxyPort);
+        LOG.infov("Neptune cluster {0} created, Gremlin endpoint={1}:{2}", id, endpointHost, String.valueOf(proxyPort));
         return cluster;
     }
 

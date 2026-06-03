@@ -36,7 +36,7 @@ public class PortAllocator {
         for (int port = basePort; port <= maxPort; port++) {
             if (!reserved.contains(port) && isPortFree(port)) {
                 reserved.add(port);
-                LOG.debugv("Allocated port {0} from range {1}-{2}", port, basePort, maxPort);
+                LOG.debugv("Allocated port {0} from range {1}-{2}", String.valueOf(port), String.valueOf(basePort), String.valueOf(maxPort));
                 return port;
             }
         }
@@ -49,7 +49,7 @@ public class PortAllocator {
      */
     public void release(int port) {
         if (reserved.remove(port)) {
-            LOG.debugv("Released port {0}", port);
+            LOG.debugv("Released port {0}", String.valueOf(port));
         }
     }
 
@@ -64,7 +64,7 @@ public class PortAllocator {
         try (ServerSocket socket = new ServerSocket(0)) {
             socket.setReuseAddress(true);
             int port = socket.getLocalPort();
-            LOG.debugv("Allocated ephemeral port {0}", port);
+            LOG.debugv("Allocated ephemeral port {0}", String.valueOf(port));
             return port;
         } catch (IOException e) {
             throw new RuntimeException("Could not find a free port", e);

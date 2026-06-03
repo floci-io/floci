@@ -19,6 +19,9 @@ public class Subnet {
     private int availableIpAddressCount;
     private boolean defaultForAz;
     private boolean mapPublicIpOnLaunch;
+    private boolean assignIpv6AddressOnCreation = false;
+    private boolean enableDns64 = false;
+    private boolean mapCustomerOwnedIpOnLaunch = false;
     private String ownerId;
     private String region;
     private String subnetArn;
@@ -52,6 +55,15 @@ public class Subnet {
 
     public boolean isMapPublicIpOnLaunch() { return mapPublicIpOnLaunch; }
     public void setMapPublicIpOnLaunch(boolean mapPublicIpOnLaunch) { this.mapPublicIpOnLaunch = mapPublicIpOnLaunch; }
+
+    public boolean isAssignIpv6AddressOnCreation() { return assignIpv6AddressOnCreation; }
+    public void setAssignIpv6AddressOnCreation(boolean assignIpv6AddressOnCreation) { this.assignIpv6AddressOnCreation = assignIpv6AddressOnCreation; }
+
+    public boolean isEnableDns64() { return enableDns64; }
+    public void setEnableDns64(boolean enableDns64) { this.enableDns64 = enableDns64; }
+
+    public boolean isMapCustomerOwnedIpOnLaunch() { return mapCustomerOwnedIpOnLaunch; }
+    public void setMapCustomerOwnedIpOnLaunch(boolean mapCustomerOwnedIpOnLaunch) { this.mapCustomerOwnedIpOnLaunch = mapCustomerOwnedIpOnLaunch; }
 
     public String getOwnerId() { return ownerId; }
     public void setOwnerId(String ownerId) { this.ownerId = ownerId; }

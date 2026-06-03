@@ -65,7 +65,7 @@ public class ElastiCacheService {
         String image = config.services().elasticache().defaultImage();
 
         LOG.infov("Creating replication group {0} with authMode={1} on proxy port {2}",
-                groupId, authMode, proxyPort);
+                groupId, authMode, String.valueOf(proxyPort));
 
         ElastiCacheContainerHandle handle = containerManager.start(groupId, image);
 
@@ -84,7 +84,7 @@ public class ElastiCacheService {
                 (username, password) -> validatePassword(groupId, username, password));
 
         groups.put(groupId, group);
-        LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, proxyPort);
+        LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
         return group;
     }
 

@@ -4,14 +4,23 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.services.ecr.model.ImageDetail;
+import io.github.hectorvent.floci.services.ecr.model.ImageIdentifier;
 import io.github.hectorvent.floci.services.ecr.model.AuthorizationData;
 import io.github.hectorvent.floci.services.ecr.model.ImageMetadata;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.ecr.registry.RegistryHttpClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+
+import java.io.IOException;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
 import java.util.Base64;
 import java.util.List;
 import java.util.Map;
@@ -167,6 +176,60 @@ class EcrServiceTest {
         Mockito.verify(registryManager).ensureStarted();
     }
 
+    @Test
+    void pathStyleSeededRegistryEntriesAreVisibleViaListAndDescribeImages() throws Exception {
+        String repositoryName = "backend-user";
+        String internalRepository = ACCOUNT + "/" + REGION + "/" + repositoryName;
+        String tag = "1";
+        String digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        String manifest = """
+                {
+                  "schemaVersion": 2,
+                  "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                  "config": {
+                    "mediaType": "application/vnd.docker.container.image.v1+json",
+                    "size": 123,
+                    "digest": "sha256:config"
+                  },
+                  "layers": [
+                    {
+                      "mediaType": "application/vnd.docker.image.rootfs.diff.tar.gzip",
+                      "size": 456,
+                      "digest": "sha256:layer"
+                    }
+                  ]
+                }
+                """;
+
+        try (FakeRegistryServer registry = new FakeRegistryServer(internalRepository, tag, digest, manifest)) {
+            when(registryManager.getRepositoryUri(ACCOUNT, REGION, repositoryName))
+                    .thenReturn("localhost:" + registry.port() + "/" + internalRepository);
+            when(registryManager.httpClient())
+                    .thenReturn(new RegistryHttpClient("http://localhost:" + registry.port()));
+
+            service.createRepository(repositoryName, null, null, null, null, null, null, REGION);
+
+            List<ImageIdentifier> imageIds = service.listImages(repositoryName, null, REGION);
+            assertEquals(1, imageIds.size());
+            assertEquals(tag, imageIds.get(0).getImageTag());
+            assertEquals(digest, imageIds.get(0).getImageDigest());
+
+            EcrService.DescribeImagesResult described = service.describeImages(repositoryName, null, null, REGION);
+            assertTrue(described.failures().isEmpty());
+            assertEquals(1, described.imageDetails().size());
+
+            ImageDetail detail = described.imageDetails().get(0);
+            assertEquals(ACCOUNT, detail.getRegistryId());
+            assertEquals(repositoryName, detail.getRepositoryName());
+            assertEquals(digest, detail.getImageDigest());
+            assertEquals(List.of(tag), detail.getImageTags());
+            assertEquals(579L, detail.getImageSizeInBytes());
+            assertEquals("application/vnd.docker.distribution.manifest.v2+json", detail.getImageManifestMediaType());
+            assertEquals("application/vnd.docker.container.image.v1+json", detail.getArtifactMediaType());
+            assertNotNull(detail.getImagePushedAt());
+        }
+    }
+
     // ------------------------------------------------------------
     // PutImageTagMutability
     // ------------------------------------------------------------
@@ -276,5 +339,75 @@ class EcrServiceTest {
         Repository existing = service.describeRepositories(List.of(REPO), null, REGION).get(0);
         // Tag is still present → existing entry was NOT overwritten by reconcile
         assertEquals("yes", existing.getTags().get("preserved"));
+    }
+
+    private static final class FakeRegistryServer implements AutoCloseable {
+        private final HttpServer server;
+        private final String repository;
+        private final String tag;
+        private final String digest;
+        private final String manifest;
+
+        private FakeRegistryServer(String repository, String tag, String digest, String manifest) throws IOException {
+            this.repository = repository;
+            this.tag = tag;
+            this.digest = digest;
+            this.manifest = manifest;
+            this.server = HttpServer.create(new InetSocketAddress(0), 0);
+            this.server.createContext("/v2/", this::handle);
+            this.server.start();
+        }
+
+        private int port() {
+            return server.getAddress().getPort();
+        }
+
+        private void handle(HttpExchange exchange) throws IOException {
+            String path = exchange.getRequestURI().getPath();
+            String method = exchange.getRequestMethod();
+            if ("/v2/".equals(path) && "GET".equals(method)) {
+                send(exchange, 200, "");
+                return;
+            }
+            if (("/v2/" + repository + "/tags/list").equals(path) && "GET".equals(method)) {
+                sendJson(exchange, 200, "{\"name\":\"" + repository + "\",\"tags\":[\"" + tag + "\"]}");
+                return;
+            }
+            if (("/v2/" + repository + "/manifests/" + tag).equals(path) && "HEAD".equals(method)) {
+                exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                exchange.sendResponseHeaders(200, -1);
+                exchange.close();
+                return;
+            }
+            if ((("/v2/" + repository + "/manifests/" + tag).equals(path)
+                    || ("/v2/" + repository + "/manifests/" + digest).equals(path))
+                    && "GET".equals(method)) {
+                exchange.getResponseHeaders().add("Docker-Content-Digest", digest);
+                exchange.getResponseHeaders().add("Content-Type",
+                        "application/vnd.docker.distribution.manifest.v2+json");
+                send(exchange, 200, manifest);
+                return;
+            }
+            exchange.sendResponseHeaders(404, -1);
+            exchange.close();
+        }
+
+        private static void sendJson(HttpExchange exchange, int status, String body) throws IOException {
+            exchange.getResponseHeaders().add("Content-Type", "application/json");
+            send(exchange, status, body);
+        }
+
+        private static void send(HttpExchange exchange, int status, String body) throws IOException {
+            byte[] bytes = body.getBytes();
+            exchange.sendResponseHeaders(status, bytes.length);
+            try (OutputStream out = exchange.getResponseBody()) {
+                out.write(bytes);
+            }
+        }
+
+        @Override
+        public void close() {
+            server.stop(0);
+        }
     }
 }

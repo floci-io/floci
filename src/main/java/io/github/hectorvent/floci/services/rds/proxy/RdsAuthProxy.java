@@ -51,7 +51,7 @@ public class RdsAuthProxy {
         running = true;
         Thread.ofVirtual().name("rds-proxy-accept-" + instanceId).start(this::acceptLoop);
         LOG.infov("RDS proxy started for instance {0} on port {1} → {2}:{3}",
-                instanceId, proxyPort, backendHost, backendPort);
+                instanceId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
     }
 
     public void stop() {

@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import com.github.dockerjava.api.DockerClient;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ExposedPort;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -145,11 +146,39 @@ public class EcsContainerManager {
      * Stops and removes all Docker containers for a task.
      */
     public void stopTask(EcsTaskHandle handle) {
+        stopTaskAndCollectExitCodes(handle);
+    }
+
+    /**
+     * Closes log streams and removes already-stopped containers without re-inspecting exit codes.
+     * Use this from the reconciler when exit codes have already been collected.
+     */
+    public void cleanupStoppedTask(EcsTaskHandle handle) {
         if (handle == null) {
             return;
         }
+        for (Closeable logStream : handle.getLogStreams()) {
+            try {
+                logStream.close();
+            } catch (Exception ignored) {
+            }
+        }
+        for (String dockerId : handle.getContainerIds().values()) {
+            lifecycleManager.stopAndRemove(dockerId, null);
+        }
+    }
 
-        // Close all log streams first
+    /**
+     * Stops all containers, captures their exit codes, then removes them.
+     * Stop happens before inspect so the exit code reflects the actual stop
+     * signal (e.g. 137 for SIGKILL), not a stale pre-stop value.
+     */
+    public Map<String, Integer> stopTaskAndCollectExitCodes(EcsTaskHandle handle) {
+        Map<String, Integer> exitCodes = new LinkedHashMap<>();
+        if (handle == null) {
+            return exitCodes;
+        }
+
         for (Closeable logStream : handle.getLogStreams()) {
             try {
                 logStream.close();
@@ -157,9 +186,49 @@ public class EcsContainerManager {
             }
         }
 
-        // Stop and remove all containers
+        // Phase 1: stop all containers (no-op for those already exited).
+        for (String dockerId : handle.getContainerIds().values()) {
+            try {
+                lifecycleManager.getDockerClient().stopContainerCmd(dockerId).withTimeout(5).exec();
+            } catch (NotFoundException ignored) {
+            } catch (Exception e) {
+                LOG.warnv("Error stopping ECS container {0}: {1}", dockerId, e.getMessage());
+            }
+        }
+
+        // Phase 2: inspect exit codes, then remove.
         for (Map.Entry<String, String> entry : handle.getContainerIds().entrySet()) {
-            lifecycleManager.stopAndRemove(entry.getValue(), null);
+            String name = entry.getKey();
+            String dockerId = entry.getValue();
+            exitCodes.put(name, getExitCodeIfStopped(dockerId));
+            try {
+                lifecycleManager.getDockerClient().removeContainerCmd(dockerId).withForce(true).exec();
+            } catch (NotFoundException ignored) {
+            } catch (Exception e) {
+                LOG.warnv("Error removing ECS container {0}: {1}", dockerId, e.getMessage());
+            }
+        }
+        return exitCodes;
+    }
+
+    /**
+     * Returns the exit code of a container that has already stopped, or {@code null}
+     * if the container is still running or its state cannot be determined.
+     * A missing container (externally removed) is treated as a clean exit (code 0).
+     */
+    public Integer getExitCodeIfStopped(String dockerId) {
+        try {
+            var inspect = lifecycleManager.getDockerClient().inspectContainerCmd(dockerId).exec();
+            if (Boolean.TRUE.equals(inspect.getState().getRunning())) {
+                return null;
+            }
+            Long code = inspect.getState().getExitCodeLong();
+            return code != null ? code.intValue() : null;
+        } catch (NotFoundException e) {
+            return 0;
+        } catch (Exception e) {
+            LOG.debugv("Could not inspect container {0}: {1}", dockerId, e.getMessage());
+            return null;
         }
     }
 

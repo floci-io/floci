@@ -130,6 +130,55 @@ public class CognitoService {
         return pool;
     }
 
+    public void addCustomAttributes(String userPoolId, List<Map<String, Object>> customAttributes) {
+        UserPool pool = describeUserPool(userPoolId);
+        List<Map<String, Object>> schema = pool.getSchemaAttributes();
+        if (schema == null) {
+            schema = new ArrayList<>();
+        }
+        for (Map<String, Object> attr : customAttributes) {
+            attr = new HashMap<>(attr);
+            String name = (String) attr.get("Name");
+            if (name == null || name.isEmpty()) {
+                throw new AwsException("InvalidParameterException", "Attribute name is required.", 400);
+            }
+
+            // Strip prefix to validate name length and pattern
+            String strippedName = name;
+            if (strippedName.startsWith("custom:")) {
+                strippedName = strippedName.substring("custom:".length());
+            } else if (strippedName.startsWith("dev:")) {
+                strippedName = strippedName.substring("dev:".length());
+            }
+
+            if (strippedName.isEmpty() || strippedName.length() > 20) {
+                throw new AwsException("InvalidParameterException", "Attribute name length must be between 1 and 20 characters.", 400);
+            }
+
+            if (!strippedName.matches("[\\p{L}\\p{M}\\p{S}\\p{N}\\p{P}]+")) {
+                throw new AwsException("InvalidParameterException", "Attribute name contains invalid characters.", 400);
+            }
+
+            boolean developerOnly = Boolean.TRUE.equals(attr.get("DeveloperOnlyAttribute"));
+            String prefix = developerOnly ? "dev:" : "custom:";
+            if (!name.startsWith("custom:") && !name.startsWith("dev:")) {
+                attr.put("Name", prefix + name);
+            }
+
+            String finalName = (String) attr.get("Name");
+            boolean exists = schema.stream().anyMatch(existing -> finalName.equals(existing.get("Name")));
+            if (exists) {
+                throw new AwsException("InvalidParameterException", "Attribute already exists in schema: " + finalName, 400);
+            }
+
+            schema.add(attr);
+        }
+        pool.setSchemaAttributes(schema);
+        pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        poolStore.put(userPoolId, pool);
+        LOG.infov("Added custom attributes to User Pool: {0}", userPoolId);
+    }
+
     @SuppressWarnings("unchecked")
     private void populateUserPool(UserPool pool, Map<String, Object> request) {
         if (request.containsKey("Policies")) pool.setPolicies((Map<String, Object>) request.get("Policies"));
@@ -578,6 +627,16 @@ public class CognitoService {
         userStore.put(userKey(userPoolId, user.getUsername()), user);
     }
 
+    public void adminDeleteUserAttributes(String userPoolId, String username, List<String> attributeNames) {
+        CognitoUser user = adminGetUser(userPoolId, username);
+        for (String attrName : attributeNames) {
+            user.getAttributes().remove(attrName);
+        }
+        user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        userStore.put(userKey(userPoolId, user.getUsername()), user);
+        LOG.infov("Deleted attributes {0} for user {1} in pool {2}", attributeNames, username, userPoolId);
+    }
+
     public void adminEnableUser(String userPoolId, String username) {
         CognitoUser user = adminGetUser(userPoolId, username);
         user.setEnabled(true);
@@ -931,6 +990,15 @@ public class CognitoService {
         adminUpdateUserAttributes(poolId, username, attributes);
     }
 
+    public void deleteUserAttributes(String accessToken, List<String> attributeNames) {
+        String username = extractUsernameFromToken(accessToken);
+        String poolId = extractPoolIdFromToken(accessToken);
+        if (username == null || poolId == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+        }
+        adminDeleteUserAttributes(poolId, username, attributeNames);
+    }
+
     public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
@@ -982,6 +1050,10 @@ public class CognitoService {
 
     public String getTokenEndpoint() {
         return baseUrl + "/cognito-idp/oauth2/token";
+    }
+
+    public String getUserInfoEndpoint() {
+        return baseUrl + "/cognito-idp/oauth2/userInfo";
     }
 
     // ──────────────────────────── Private helpers ────────────────────────────

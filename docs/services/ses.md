@@ -183,6 +183,10 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `GET` | `/v2/email/configuration-sets` | `ListConfigurationSets` |
 | `GET` | `/v2/email/configuration-sets/{name}` | `GetConfigurationSet` |
 | `DELETE` | `/v2/email/configuration-sets/{name}` | `DeleteConfigurationSet` |
+| `POST` | `/v2/email/configuration-sets/{name}/event-destinations` | `CreateConfigurationSetEventDestination` |
+| `GET` | `/v2/email/configuration-sets/{name}/event-destinations` | `GetConfigurationSetEventDestinations` |
+| `PUT` | `/v2/email/configuration-sets/{name}/event-destinations/{eventDestinationName}` | `UpdateConfigurationSetEventDestination` |
+| `DELETE` | `/v2/email/configuration-sets/{name}/event-destinations/{eventDestinationName}` | `DeleteConfigurationSetEventDestination` |
 | `PUT` | `/v2/email/suppression/addresses` | `PutSuppressedDestination` |
 | `GET` | `/v2/email/suppression/addresses/{EmailAddress}` | `GetSuppressedDestination` |
 | `DELETE` | `/v2/email/suppression/addresses/{EmailAddress}` | `DeleteSuppressedDestination` |
@@ -190,6 +194,21 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `POST` | `/v2/email/tags` | `TagResource` |
 | `DELETE` | `/v2/email/tags?ResourceArn=...&TagKeys=...` | `UntagResource` |
 | `GET` | `/v2/email/tags?ResourceArn=...` | `ListTagsForResource` |
+
+Configuration set event destinations are stored as configuration. The target is not validated for existence; missing targets cause Floci to log a warning and skip that destination. Each event destination must specify exactly one destination type and at least one matching event type. A CloudWatch destination requires a non-empty dimension configuration list, and a Pinpoint destination requires an application ARN.
+
+Floci publishes SES events to `SnsDestination` only in this version (`KinesisFirehoseDestination` / `EventBridgeDestination` / `CloudWatchDestination` / `PinpointDestination` log a warning and skip). The published payload matches the AWS SES SNS notification format with an outer `eventType` plus `mail` and event-type-specific blocks. Events fire whenever a configuration set has at least one event destination matching the event type — disable per-destination via `EventDestination.Enabled=false`, or remove the destination entirely.
+
+Floci recognises the AWS [mailbox simulator addresses](https://docs.aws.amazon.com/ses/latest/dg/send-an-email-from-console.html#send-email-simulator) for deterministic event-type emission:
+
+| Recipient address | Events emitted (in addition to `Send`) |
+|---|---|
+| `success@simulator.amazonses.com` | `Delivery` |
+| `bounce@simulator.amazonses.com` | `Bounce` |
+| `complaint@simulator.amazonses.com` | `Complaint` |
+| `suppressionlist@simulator.amazonses.com` | `Reject` |
+
+A successful send without a simulator-address recipient emits only the `Send` event.
 
 Suppression list entries are stored per region. `Reason` is `BOUNCE` or `COMPLAINT`. `SendEmail` is not yet integrated with the suppression list, so suppressed addresses are still delivered locally.
 

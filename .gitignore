@@ -28,4 +28,4 @@ package-lock.json
 test-results.xml
 
 *.log
-
+test-results

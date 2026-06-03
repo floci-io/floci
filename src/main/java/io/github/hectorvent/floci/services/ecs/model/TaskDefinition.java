@@ -16,6 +16,8 @@ public class TaskDefinition {
     private NetworkMode networkMode;
     private String cpu;
     private String memory;
+    private String taskRoleArn;
+    private String executionRoleArn;
     private List<ContainerDefinition> containerDefinitions;
     private Map<String, String> tags = new HashMap<>();
 
@@ -39,6 +41,12 @@ public class TaskDefinition {
 
     public String getMemory() { return memory; }
     public void setMemory(String memory) { this.memory = memory; }
+
+    public String getTaskRoleArn() { return taskRoleArn; }
+    public void setTaskRoleArn(String taskRoleArn) { this.taskRoleArn = taskRoleArn; }
+
+    public String getExecutionRoleArn() { return executionRoleArn; }
+    public void setExecutionRoleArn(String executionRoleArn) { this.executionRoleArn = executionRoleArn; }
 
     public List<ContainerDefinition> getContainerDefinitions() { return containerDefinitions; }
     public void setContainerDefinitions(List<ContainerDefinition> containerDefinitions) {

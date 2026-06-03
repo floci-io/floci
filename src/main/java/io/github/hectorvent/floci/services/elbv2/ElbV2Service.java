@@ -384,6 +384,7 @@ public class ElbV2Service {
             ruleArns.forEach(regionRules::remove);
         }
         tags.remove(listenerArn);
+        unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
     }
 
     public Listener modifyListener(String region, String listenerArn, String protocol, Integer port,
@@ -506,6 +507,10 @@ public class ElbV2Service {
         regionRules.remove(ruleArn);
         listenerToRules.getOrDefault(listenerArn, List.of()).remove(ruleArn);
         tags.remove(ruleArn);
+        Listener listener = listeners.getOrDefault(region, Map.of()).get(listenerArn);
+        if (listener != null) {
+            unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
+        }
         dataPlane.recompileRules(listenerArn, getListenerRules(region, listenerArn));
     }
 
@@ -811,6 +816,44 @@ public class ElbV2Service {
                 if (t.getTargetGroupArn() != null) {
                     tgToLbs.computeIfAbsent(t.getTargetGroupArn(), k -> ConcurrentHashMap.newKeySet()).add(lbArn);
                 }
+            }
+        }
+    }
+
+    /**
+     * Drops {@code lbArn} from every target group that is no longer referenced by any of the
+     * load balancer's remaining listeners or rules. Called after a listener or rule is removed
+     * so a target group can be deleted once nothing routes to it (avoids a stale "in use" guard
+     * during teardown).
+     */
+    private void unlinkUnreferencedTargetGroups(String region, String lbArn) {
+        Set<String> referenced = new HashSet<>();
+        Map<String, Listener> regionListeners = listeners.getOrDefault(region, Map.of());
+        for (Listener listener : regionListeners.values()) {
+            if (lbArn.equals(listener.getLoadBalancerArn())) {
+                listener.getDefaultActions().forEach(a -> collectActionTargetGroups(a, referenced));
+            }
+        }
+        for (Rule rule : rules.getOrDefault(region, Map.of()).values()) {
+            Listener listener = regionListeners.get(rule.getListenerArn());
+            if (listener != null && lbArn.equals(listener.getLoadBalancerArn())) {
+                rule.getActions().forEach(a -> collectActionTargetGroups(a, referenced));
+            }
+        }
+        tgToLbs.forEach((tgArn, lbSet) -> {
+            if (!referenced.contains(tgArn)) {
+                lbSet.remove(lbArn);
+            }
+        });
+    }
+
+    private static void collectActionTargetGroups(Action action, Set<String> out) {
+        if (action.getTargetGroupArn() != null) {
+            out.add(action.getTargetGroupArn());
+        }
+        for (Action.TargetGroupTuple t : action.getTargetGroups()) {
+            if (t.getTargetGroupArn() != null) {
+                out.add(t.getTargetGroupArn());
             }
         }
     }

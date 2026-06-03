@@ -585,6 +585,10 @@ public class S3Controller {
             ResponseHeaderOverrides overrides = new ResponseHeaderOverrides(
                     responseContentType, responseContentLanguage, responseExpires,
                     responseCacheControl, responseContentDisposition, responseContentEncoding);
+            if (overrides.hasAny() && !isSigned(httpHeaders, uriInfo)) {
+                return xmlErrorResponse(new AwsException("InvalidRequest",
+                        "Request specific response headers cannot be used for anonymous GET requests.", 400));
+            }
 
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
                 return handleRangeRequest(obj, rangeHeader, overrides);
@@ -689,7 +693,8 @@ public class S3Controller {
                                @HeaderParam("If-None-Match") String ifNoneMatch,
                                @HeaderParam("If-Modified-Since") String ifModifiedSince,
                                @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
-                               @Context UriInfo uriInfo) {
+                               @Context UriInfo uriInfo,
+                               @Context HttpHeaders httpHeaders) {
         try {
             key = extractObjectKey(uriInfo, bucket);
             S3Object obj = s3Service.headObject(bucket, key, versionId);
@@ -700,6 +705,10 @@ public class S3Controller {
             ResponseHeaderOverrides overrides = new ResponseHeaderOverrides(
                     responseContentType, responseContentLanguage, responseExpires,
                     responseCacheControl, responseContentDisposition, responseContentEncoding);
+            if (overrides.hasAny() && !isSigned(httpHeaders, uriInfo)) {
+                return xmlErrorResponse(new AwsException("InvalidRequest",
+                        "Request specific response headers cannot be used for anonymous GET requests.", 400));
+            }
             var resp = Response.ok()
                     .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                     .header("Content-Length", obj.getSize())
@@ -1515,6 +1524,11 @@ public class S3Controller {
             String contentEncoding) {
         static final ResponseHeaderOverrides NONE = new ResponseHeaderOverrides(null, null, null, null, null, null);
 
+        boolean hasAny() {
+            return contentType != null || contentLanguage != null || expires != null
+                    || cacheControl != null || contentDisposition != null || contentEncoding != null;
+        }
+
         ResponseHeaderOverrides {
             // Real S3 ignores empty `response-*` values; @QueryParam binds "?foo=" as "" rather than null.
             contentType = emptyToNull(contentType);
@@ -1906,6 +1920,11 @@ public class S3Controller {
             return preconditionFailedResponse();
         }
         return null;
+    }
+
+    private static boolean isSigned(HttpHeaders httpHeaders, UriInfo uriInfo) {
+        return httpHeaders.getHeaderString("Authorization") != null
+                || uriInfo.getQueryParameters().containsKey("X-Amz-Algorithm");
     }
 
     private boolean hasPreconditions(String ifMatch, String ifNoneMatch,

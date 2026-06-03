@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
+import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -13,6 +14,7 @@ import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoll
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
 import io.github.hectorvent.floci.services.pipes.PipesService;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.Quarkus;
@@ -48,12 +50,14 @@ public class EmulatorLifecycle {
     private final ElastiCacheProxyManager elastiCacheProxyManager;
     private final RdsContainerManager rdsContainerManager;
     private final RdsProxyManager rdsProxyManager;
+    private final RdsService rdsService;
     private final InitializationHooksRunner initializationHooksRunner;
     private final SqsEventSourcePoller sqsPoller;
     private final KinesisEventSourcePoller kinesisPoller;
     private final DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller;
     private final PipesService pipesService;
     private final Ec2MetadataServer ec2MetadataServer;
+    private final EcrRegistryManager ecrRegistryManager;
     private final InitLifecycleState initLifecycleState;
 
     @Inject
@@ -64,12 +68,14 @@ public class EmulatorLifecycle {
                              ElastiCacheProxyManager elastiCacheProxyManager,
                              RdsContainerManager rdsContainerManager,
                              RdsProxyManager rdsProxyManager,
+                             RdsService rdsService,
                              InitializationHooksRunner initializationHooksRunner,
                              SqsEventSourcePoller sqsPoller,
                              KinesisEventSourcePoller kinesisPoller,
                              DynamoDbStreamsEventSourcePoller dynamodbStreamsPoller,
                              PipesService pipesService,
                              Ec2MetadataServer ec2MetadataServer,
+                             EcrRegistryManager ecrRegistryManager,
                              InitLifecycleState initLifecycleState) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
@@ -79,12 +85,14 @@ public class EmulatorLifecycle {
         this.elastiCacheProxyManager = elastiCacheProxyManager;
         this.rdsContainerManager = rdsContainerManager;
         this.rdsProxyManager = rdsProxyManager;
+        this.rdsService = rdsService;
         this.initializationHooksRunner = initializationHooksRunner;
         this.sqsPoller = sqsPoller;
         this.kinesisPoller = kinesisPoller;
         this.dynamodbStreamsPoller = dynamodbStreamsPoller;
         this.pipesService = pipesService;
         this.ec2MetadataServer = ec2MetadataServer;
+        this.ecrRegistryManager = ecrRegistryManager;
         this.initLifecycleState = initLifecycleState;
     }
 
@@ -113,6 +121,7 @@ public class EmulatorLifecycle {
         kinesisPoller.startPersistedPollers();
         dynamodbStreamsPoller.startPersistedPollers();
         pipesService.startPersistedPollers();
+        rdsService.restorePersistedRuntime();
 
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.start().exceptionally(ex -> {
@@ -186,6 +195,7 @@ public class EmulatorLifecycle {
         elastiCacheContainerManager.stopAll();
         elastiCacheMemcachedContainerManager.stopAll();
         rdsContainerManager.stopAll();
+        ecrRegistryManager.shutdown();
         storageFactory.shutdownAll();
 
         LOG.info("=== AWS Local Emulator Stopped ===");

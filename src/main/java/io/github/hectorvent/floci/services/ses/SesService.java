@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -7,9 +8,13 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
+import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
+import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.MessageHeader;
+import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tag;
@@ -33,6 +38,7 @@ import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -60,9 +66,12 @@ public class SesService {
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
+    private final SesEventPublisher eventPublisher;
+    private final String defaultAccountId;
 
     @Inject
-    public SesService(StorageFactory storageFactory, SmtpRelay smtpRelay, ObjectMapper objectMapper) {
+    public SesService(StorageFactory storageFactory, SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesEventPublisher eventPublisher, EmulatorConfig config) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
@@ -79,6 +88,8 @@ public class SesService {
                 new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
+        this.eventPublisher = eventPublisher;
+        this.defaultAccountId = config.defaultAccountId();
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -99,6 +110,8 @@ public class SesService {
         this.accountSuppressionStore = accountSuppressionStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
+        this.eventPublisher = null;
+        this.defaultAccountId = "000000000000";
     }
 
     public Identity verifyEmailIdentity(String emailAddress, String region) {
@@ -170,7 +183,9 @@ public class SesService {
 
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> replyToAddresses,
-                            String subject, String bodyText, String bodyHtml, String region) {
+                            String subject, String bodyText, String bodyHtml,
+                            String configurationSetName, List<MessageTag> emailTags,
+                            List<MessageHeader> additionalHeaders, String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -180,6 +195,7 @@ public class SesService {
         if (!hasRecipient) {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
+        validateConfigurationSet(configurationSetName, region);
 
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
@@ -191,23 +207,136 @@ public class SesService {
 
         LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
                 source, toAddresses, subject, messageId);
+        publishSendEvents(configurationSetName, messageId, source, subject,
+                toAddresses, ccAddresses, bccAddresses,
+                allRecipients(toAddresses, ccAddresses, bccAddresses),
+                emailTags, additionalHeaders, region);
         return messageId;
     }
 
-    public String sendRawEmail(String source, List<String> destinations, String rawMessage, String region) {
+    public String sendRawEmail(String source, List<String> destinations, String rawMessage,
+                               String configurationSetName, List<MessageTag> emailTags,
+                               String region) {
         if (rawMessage == null || rawMessage.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
+        validateConfigurationSet(configurationSetName, region);
+        boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
+        boolean willPublishEvents = configurationSetName != null && !configurationSetName.isBlank();
+        SmtpRelay.RawMessageHeaders headers = (hasExplicitDestinations && !willPublishEvents)
+                ? null
+                : SmtpRelay.parseRawHeaders(rawMessage);
+        List<String> effectiveDestinations = hasExplicitDestinations
+                ? destinations
+                : allRecipients(headers.to(), headers.cc(), headers.bcc());
+        if (effectiveDestinations.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "At least one destination address is required.", 400);
+        }
         String messageId = UUID.randomUUID().toString();
-        SentEmail email = new SentEmail(messageId, region, source,
-                destinations != null ? destinations : Collections.emptyList(),
-                rawMessage);
+        SentEmail email = new SentEmail(messageId, region, source, effectiveDestinations, rawMessage);
         emailStore.put("email::" + region + "::" + messageId, email);
 
-        smtpRelay.relayRaw(source, destinations, rawMessage);
+        smtpRelay.relayRaw(source, effectiveDestinations, rawMessage);
 
         LOG.infov("SES raw email sent: from={0}, messageId={1}", source, messageId);
+        publishSendEvents(configurationSetName, messageId, source,
+                headers != null ? headers.subject() : "",
+                headers != null ? headers.to() : List.of(),
+                headers != null ? headers.cc() : List.of(),
+                headers != null ? headers.bcc() : List.of(),
+                effectiveDestinations,
+                emailTags, List.of(), region);
         return messageId;
+    }
+
+    private static List<String> allRecipients(List<String> to, List<String> cc, List<String> bcc) {
+        List<String> all = new ArrayList<>();
+        if (to != null) {
+            all.addAll(to);
+        }
+        if (cc != null) {
+            all.addAll(cc);
+        }
+        if (bcc != null) {
+            all.addAll(bcc);
+        }
+        return all;
+    }
+
+    /**
+     * Validate that a non-blank {@code ConfigurationSetName} refers to a configuration set
+     * that exists in the given region. Always raises {@code ConfigurationSetDoesNotExist}
+     * with {@code httpStatus = 400}; the V2 REST controller's {@code remapV1Exception}
+     * then translates that into a {@code NotFoundException 404}, while V1 Query keeps the
+     * original code/status. Mirrors AWS SES behaviour: invalid set name fails fast instead
+     * of silently storing/relaying the message and skipping event publishing later.
+     */
+    private void validateConfigurationSet(String configurationSetName, String region) {
+        if (configurationSetName == null || configurationSetName.isBlank()) {
+            return;
+        }
+        if (configSetStore.get(configSetKey(region, configurationSetName)).isEmpty()) {
+            throw new AwsException("ConfigurationSetDoesNotExist",
+                    "Configuration set <" + configurationSetName + "> does not exist.", 400);
+        }
+    }
+
+    private void publishSendEvents(String configurationSetName, String messageId, String source,
+                                   String subject, List<String> toAddresses,
+                                   List<String> ccAddresses, List<String> bccAddresses,
+                                   List<String> envelopeDestinations,
+                                   List<MessageTag> emailTags,
+                                   List<MessageHeader> additionalHeaders, String region) {
+        if (eventPublisher == null) {
+            return;
+        }
+        if (configurationSetName == null || configurationSetName.isBlank() || messageId == null) {
+            return;
+        }
+        ConfigurationSet cs = configSetStore.get(configSetKey(region, configurationSetName)).orElse(null);
+        if (cs == null) {
+            LOG.warnv("SES send references unknown ConfigurationSet <{0}>; events not published.",
+                    configurationSetName);
+            return;
+        }
+        if (cs.getEventDestinations().isEmpty()) {
+            return;
+        }
+
+        List<String> envelope = envelopeDestinations != null
+                ? envelopeDestinations : Collections.emptyList();
+        Instant timestamp = Instant.now();
+        String sendingAccountId = defaultAccountId;
+        String sourceArn = (source == null || source.isBlank())
+                ? null
+                : AwsArnUtils.Arn.of("ses", region, sendingAccountId, "identity/" + source).toString();
+
+        for (String eventType : determineSendEventTypes(envelope)) {
+            eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
+                    subject, toAddresses, ccAddresses, bccAddresses, envelope,
+                    emailTags, additionalHeaders, timestamp, region);
+        }
+    }
+
+    private static List<String> determineSendEventTypes(List<String> destinations) {
+        List<String> events = new ArrayList<>();
+        events.add("SEND");
+        for (String d : destinations) {
+            if (SimulatorAddresses.isSuccess(d) && !events.contains("DELIVERY")) {
+                events.add("DELIVERY");
+            }
+            if (SimulatorAddresses.isBounce(d) && !events.contains("BOUNCE")) {
+                events.add("BOUNCE");
+            }
+            if (SimulatorAddresses.isComplaint(d) && !events.contains("COMPLAINT")) {
+                events.add("COMPLAINT");
+            }
+            if (SimulatorAddresses.isSuppressionList(d) && !events.contains("REJECT")) {
+                events.add("REJECT");
+            }
+        }
+        return events;
     }
 
     public long getSentEmailCount(String region) {
@@ -453,7 +582,7 @@ public class SesService {
     public ConfigurationSet getConfigurationSet(String name, String region) {
         return configSetStore.get(configSetKey(region, name))
                 .orElseThrow(() -> new AwsException("ConfigurationSetDoesNotExist",
-                        "Configuration set " + name + " does not exist.", 400));
+                        "Configuration set <" + name + "> does not exist.", 400));
     }
 
     public List<ConfigurationSet> listConfigurationSets(String region) {
@@ -470,7 +599,7 @@ public class SesService {
         String key = configSetKey(region, name);
         if (configSetStore.get(key).isEmpty()) {
             throw new AwsException("ConfigurationSetDoesNotExist",
-                    "Configuration set " + name + " does not exist.", 400);
+                    "Configuration set <" + name + "> does not exist.", 400);
         }
         configSetStore.delete(key);
         LOG.infov("Deleted SES configuration set: {0} in region {1}", name, region);
@@ -493,6 +622,181 @@ public class SesService {
                     "ConfigurationSetName must be 1-64 characters and may only contain "
                             + "alphanumeric characters, underscores, and hyphens.", 400);
         }
+    }
+
+    private static final Pattern EVENT_DESTINATION_NAME_CHARS = Pattern.compile("^[A-Za-z0-9_-]+$");
+
+    private static final int MAX_EVENT_DESTINATION_NAME_LENGTH = 64;
+
+    private static final List<String> VALID_EVENT_TYPES = List.of(
+            "SEND", "REJECT", "BOUNCE", "COMPLAINT", "DELIVERY", "OPEN", "CLICK",
+            "RENDERING_FAILURE", "DELIVERY_DELAY", "SUBSCRIPTION");
+
+    public void createConfigurationSetEventDestination(String configSetName, String eventDestinationName,
+                                                       EventDestination dest, String region) {
+        validateEventDestinationName(eventDestinationName);
+        validateEventDestination(dest);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (indexOfEventDestination(cs.getEventDestinations(), eventDestinationName) >= 0) {
+            throw new AwsException("AlreadyExists",
+                    "An event destination with name <" + eventDestinationName
+                            + "> already exists for configuration set <" + configSetName + ">.", 400);
+        }
+        dest.setName(eventDestinationName);
+        cs.getEventDestinations().add(dest);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Created SES event destination {0} on configuration set {1} in region {2}",
+                eventDestinationName, configSetName, region);
+    }
+
+    public List<EventDestination> getConfigurationSetEventDestinations(String configSetName, String region) {
+        return List.copyOf(getConfigurationSet(configSetName, region).getEventDestinations());
+    }
+
+    public void updateConfigurationSetEventDestination(String configSetName, String eventDestinationName,
+                                                       EventDestination dest, String region) {
+        validateEventDestinationName(eventDestinationName);
+        validateEventDestination(dest);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        int index = indexOfEventDestination(cs.getEventDestinations(), eventDestinationName);
+        if (index < 0) {
+            throw new AwsException("NotFoundException",
+                    "An event destination with name <" + eventDestinationName
+                            + "> does not exist for configuration set <" + configSetName + ">.", 404);
+        }
+        dest.setName(eventDestinationName);
+        cs.getEventDestinations().set(index, dest);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated SES event destination {0} on configuration set {1} in region {2}",
+                eventDestinationName, configSetName, region);
+    }
+
+    public void deleteConfigurationSetEventDestination(String configSetName, String eventDestinationName,
+                                                       String region) {
+        validateEventDestinationName(eventDestinationName);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        boolean removed = cs.getEventDestinations().removeIf(ed -> eventDestinationName.equals(ed.getName()));
+        if (!removed) {
+            throw new AwsException("NotFoundException",
+                    "An event destination with name <" + eventDestinationName
+                            + "> does not exist for configuration set <" + configSetName + ">.", 404);
+        }
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Deleted SES event destination {0} on configuration set {1} in region {2}",
+                eventDestinationName, configSetName, region);
+    }
+
+    private static int indexOfEventDestination(List<EventDestination> destinations, String name) {
+        for (int i = 0; i < destinations.size(); i++) {
+            if (name != null && name.equals(destinations.get(i).getName())) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    static void validateEventDestinationName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "EventDestinationName is required.", 400);
+        }
+        if (!EVENT_DESTINATION_NAME_CHARS.matcher(name).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid event destination name <" + name + ">: only alphanumeric ASCII characters, "
+                            + "'_', and '-' are allowed.", 400);
+        }
+        if (name.length() > MAX_EVENT_DESTINATION_NAME_LENGTH) {
+            throw new AwsException("InvalidParameterValue",
+                    "Event destination name cannot exceed 64 characters.", 400);
+        }
+    }
+
+    static void validateEventDestination(EventDestination dest) {
+        if (dest == null) {
+            throw new AwsException("InvalidParameterValue", "EventDestination is required.", 400);
+        }
+        List<String> types = dest.getMatchingEventTypes();
+        if (types == null || types.isEmpty()) {
+            throw new AwsException("InvalidParameterValue", "At least one event type must be specified.", 400);
+        }
+        for (String t : types) {
+            if (t == null || !VALID_EVENT_TYPES.contains(t)) {
+                throw new AwsException("InvalidParameterValue",
+                        "Invalid event type: " + t + ". Valid values are " + VALID_EVENT_TYPES + ".", 400);
+            }
+        }
+        int destinationCount = countDestinations(dest);
+        if (destinationCount == 0) {
+            throw new AwsException("InvalidParameterValue", "Event destination is not provided.", 400);
+        }
+        if (destinationCount > 1) {
+            throw new AwsException("InvalidParameterValue",
+                    "Please provide only one destination with each request. Either a Firehose Destination "
+                            + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.", 400);
+        }
+        if (dest.getSnsDestination() != null
+                && (dest.getSnsDestination().getTopicArn() == null
+                || dest.getSnsDestination().getTopicArn().isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "SnsDestination requires a non-blank TopicArn.", 400);
+        }
+        if (dest.getKinesisFirehoseDestination() != null
+                && (dest.getKinesisFirehoseDestination().getIamRoleArn() == null
+                || dest.getKinesisFirehoseDestination().getIamRoleArn().isBlank()
+                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn() == null
+                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn().isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "KinesisFirehoseDestination requires both IamRoleArn and DeliveryStreamArn.",
+                    400);
+        }
+        if (dest.getCloudWatchDestination() != null) {
+            List<CloudWatchDimensionConfiguration> dims =
+                    dest.getCloudWatchDestination().getDimensionConfigurations();
+            if (dims == null || dims.isEmpty()) {
+                throw new AwsException("InvalidParameterValue",
+                        "CloudWatch metrics dimension configuration list cannot be empty.", 400);
+            }
+            for (int i = 0; i < dims.size(); i++) {
+                CloudWatchDimensionConfiguration dim = dims.get(i);
+                if (dim == null
+                        || dim.getDimensionName() == null || dim.getDimensionName().isBlank()
+                        || dim.getDimensionValueSource() == null
+                        || dim.getDimensionValueSource().isBlank()
+                        || dim.getDefaultDimensionValue() == null
+                        || dim.getDefaultDimensionValue().isBlank()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "CloudWatchDestination dimension configurations require "
+                                    + "DimensionName, DimensionValueSource, and DefaultDimensionValue "
+                                    + "(missing on member " + (i + 1) + ").", 400);
+                }
+            }
+        }
+        if (dest.getPinpointDestination() != null
+                && (dest.getPinpointDestination().getApplicationArn() == null
+                || dest.getPinpointDestination().getApplicationArn().isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "Invalid Pinpoint application ARN provided: "
+                            + dest.getPinpointDestination().getApplicationArn() + ".", 400);
+        }
+    }
+
+    private static int countDestinations(EventDestination dest) {
+        int count = 0;
+        if (dest.getSnsDestination() != null) {
+            count++;
+        }
+        if (dest.getCloudWatchDestination() != null) {
+            count++;
+        }
+        if (dest.getKinesisFirehoseDestination() != null) {
+            count++;
+        }
+        if (dest.getEventBridgeDestination() != null) {
+            count++;
+        }
+        if (dest.getPinpointDestination() != null) {
+            count++;
+        }
+        return count;
     }
 
     public List<Tag> listResourceTags(String arn, String region) {
@@ -836,11 +1140,14 @@ public class SesService {
 
     public String sendTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                      List<String> bccAddresses, List<String> replyToAddresses,
-                                     String templateName, JsonNode templateData, String region) {
+                                     String templateName, JsonNode templateData,
+                                     String configurationSetName, List<MessageTag> emailTags,
+                                     List<MessageHeader> additionalHeaders, String region) {
         EmailTemplate template = getTemplate(templateName, region);
         return sendInlineTemplatedEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, template.getSubject(), template.getTextPart(),
-                template.getHtmlPart(), templateData, region);
+                template.getHtmlPart(), templateData,
+                configurationSetName, emailTags, additionalHeaders, region);
     }
 
     public String renderTestTemplate(String templateName, String templateDataRaw, String region) {
@@ -959,7 +1266,10 @@ public class SesService {
     public String sendInlineTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                             List<String> bccAddresses, List<String> replyToAddresses,
                                             String subject, String textPart, String htmlPart,
-                                            JsonNode templateData, String region) {
+                                            JsonNode templateData,
+                                            String configurationSetName, List<MessageTag> emailTags,
+                                            List<MessageHeader> additionalHeaders,
+                                            String region) {
         boolean hasSubject = subject != null && !subject.isBlank();
         boolean hasText = textPart != null && !textPart.isBlank();
         boolean hasHtml = htmlPart != null && !htmlPart.isBlank();
@@ -971,7 +1281,7 @@ public class SesService {
                 applyTemplateData(subject, templateData),
                 applyTemplateData(textPart, templateData),
                 applyTemplateData(htmlPart, templateData),
-                region);
+                configurationSetName, emailTags, additionalHeaders, region);
     }
 
     public List<BulkEmailEntryResult> sendBulkTemplatedEmail(String source,
@@ -979,6 +1289,9 @@ public class SesService {
                                                               String subject, String textPart, String htmlPart,
                                                               JsonNode defaultTemplateData,
                                                               List<BulkEmailEntry> entries,
+                                                              String configurationSetName,
+                                                              List<MessageTag> defaultEmailTags,
+                                                              List<MessageHeader> defaultHeaders,
                                                               String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
@@ -994,6 +1307,7 @@ public class SesService {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination entry is required.", 400);
         }
+        validateConfigurationSet(configurationSetName, region);
         if (entries.size() > MAX_BULK_DESTINATIONS) {
             throw new AwsException("MessageRejected",
                     "Number of destinations (" + entries.size() + ") exceeds the maximum of "
@@ -1014,13 +1328,15 @@ public class SesService {
         for (BulkEmailEntry entry : entries) {
             try {
                 JsonNode merged = mergeTemplateData(defaultTemplateData, entry.replacementTemplateData());
+                List<MessageTag> mergedTags = mergeEmailTags(defaultEmailTags, entry.replacementEmailTags());
+                List<MessageHeader> mergedHeaders = mergeHeaders(defaultHeaders, entry.replacementHeaders());
                 String messageId = sendEmail(source,
                         entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses(),
                         replyToAddresses,
                         applyTemplateData(subject, merged),
                         applyTemplateData(textPart, merged),
                         applyTemplateData(htmlPart, merged),
-                        region);
+                        configurationSetName, mergedTags, mergedHeaders, region);
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
                 results.add(BulkEmailEntryResult.failure(
@@ -1043,6 +1359,57 @@ public class SesService {
             return BulkEmailEntryResult.Status.INVALID_PARAMETER;
         }
         return BulkEmailEntryResult.Status.FAILED;
+    }
+
+    static List<MessageHeader> mergeHeaders(List<MessageHeader> defaults, List<MessageHeader> replacement) {
+        boolean hasDefault = defaults != null && !defaults.isEmpty();
+        boolean hasReplacement = replacement != null && !replacement.isEmpty();
+        if (!hasDefault && !hasReplacement) {
+            return List.of();
+        }
+        // RFC 5322 header field names are case-insensitive, so the merge key is the
+        // lowercased name. The header itself is stored verbatim, so the replacement's
+        // original casing wins when it overrides a default.
+        LinkedHashMap<String, MessageHeader> byLowerName = new LinkedHashMap<>();
+        if (hasDefault) {
+            for (MessageHeader h : defaults) {
+                if (h != null && h.name() != null && !h.name().isBlank()) {
+                    byLowerName.put(h.name().toLowerCase(Locale.ROOT), h);
+                }
+            }
+        }
+        if (hasReplacement) {
+            for (MessageHeader h : replacement) {
+                if (h != null && h.name() != null && !h.name().isBlank()) {
+                    byLowerName.put(h.name().toLowerCase(Locale.ROOT), h);
+                }
+            }
+        }
+        return new ArrayList<>(byLowerName.values());
+    }
+
+    static List<MessageTag> mergeEmailTags(List<MessageTag> defaults, List<MessageTag> replacement) {
+        boolean hasDefault = defaults != null && !defaults.isEmpty();
+        boolean hasReplacement = replacement != null && !replacement.isEmpty();
+        if (!hasDefault && !hasReplacement) {
+            return List.of();
+        }
+        LinkedHashMap<String, MessageTag> byName = new LinkedHashMap<>();
+        if (hasDefault) {
+            for (MessageTag t : defaults) {
+                if (t != null && t.name() != null && !t.name().isBlank()) {
+                    byName.put(t.name(), t);
+                }
+            }
+        }
+        if (hasReplacement) {
+            for (MessageTag t : replacement) {
+                if (t != null && t.name() != null && !t.name().isBlank()) {
+                    byName.put(t.name(), t);
+                }
+            }
+        }
+        return new ArrayList<>(byName.values());
     }
 
     static JsonNode mergeTemplateData(JsonNode defaults, JsonNode replacement) {

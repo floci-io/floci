@@ -5,13 +5,18 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.s3.S3Service;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -46,18 +51,62 @@ public class CloudFormationService {
     private final ObjectMapper objectMapper;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final SamTransformProcessor samTransformProcessor;
     private final Clock clock;
+
+    // Persisted state so stacks survive a restart (criteria #10, #11). The in-memory maps above are
+    // the live working copy; these backends are write-through + loaded on startup. CloudFormation is
+    // account-blind (keyed by stack+region), so everything is stored under one fixed account
+    // namespace for thread-consistent access from both request and background executor threads.
+    private final AccountAwareStorageBackend<Stack> stackBackend;
+    private final AccountAwareStorageBackend<String> exportBackend;
+    private final String storageAccount;
 
     @Inject
     public CloudFormationService(CloudFormationResourceProvisioner provisioner, S3Service s3Service,
                                  ObjectMapper objectMapper, EmulatorConfig config,
-                                 RegionResolver regionResolver, Clock clock) {
+                                 RegionResolver regionResolver, Clock clock,
+                                 StorageFactory storageFactory) {
         this.provisioner = provisioner;
         this.s3Service = s3Service;
         this.objectMapper = objectMapper;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.samTransformProcessor = new SamTransformProcessor(objectMapper);
         this.clock = clock;
+        this.storageAccount = config.defaultAccountId();
+        this.stackBackend = asAccountAware(storageFactory.create(
+                "cloudformation", "cloudformation-stacks.json", new TypeReference<Map<String, Stack>>() {}));
+        this.exportBackend = asAccountAware(storageFactory.create(
+                "cloudformation", "cloudformation-exports.json", new TypeReference<Map<String, String>>() {}));
+    }
+
+    @SuppressWarnings("unchecked")
+    private static <V> AccountAwareStorageBackend<V> asAccountAware(StorageBackend<String, V> backend) {
+        return (AccountAwareStorageBackend<V>) backend;
+    }
+
+    @PostConstruct
+    void loadPersistedState() {
+        for (Stack stack : stackBackend.scanForAccount(storageAccount, k -> true)) {
+            stacks.put(key(stack.getStackName(), stack.getRegion()), stack);
+        }
+        for (String exportKey : exportBackend.keysForAccount(storageAccount)) {
+            exportBackend.getForAccount(storageAccount, exportKey)
+                    .ifPresent(value -> exports.put(exportKey, value));
+        }
+        if (!stacks.isEmpty() || !exports.isEmpty()) {
+            LOG.infov("Loaded {0} CloudFormation stack(s) and {1} export(s) from storage",
+                    stacks.size(), exports.size());
+        }
+    }
+
+    private void persistStack(Stack stack) {
+        stackBackend.putForAccount(storageAccount, key(stack.getStackName(), stack.getRegion()), stack);
+    }
+
+    private void unpersistStack(String stackName, String region) {
+        stackBackend.deleteForAccount(storageAccount, key(stackName, region));
     }
 
     // ── DescribeStacks ────────────────────────────────────────────────────────
@@ -104,6 +153,7 @@ public class CloudFormationService {
         cs.setExecutionStatus("AVAILABLE");
 
         stack.getChangeSets().put(changeSetName, cs);
+        persistStack(stack);
         return cs;
     }
 
@@ -136,6 +186,7 @@ public class CloudFormationService {
         stack.setLastUpdatedTime(now());
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", isCreate ? "CREATE_IN_PROGRESS" : "UPDATE_IN_PROGRESS", null);
+        persistStack(stack);
 
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
@@ -155,6 +206,7 @@ public class CloudFormationService {
                     "ChangeSet [" + changeSetName + "] does not exist", 400);
         }
         stack.getChangeSets().remove(name);
+        persistStack(stack);
     }
 
     // ── DeleteStack ───────────────────────────────────────────────────────────
@@ -229,7 +281,9 @@ public class CloudFormationService {
 
     private void removeStackExports(Stack stack, String region) {
         for (String exportName : stack.getExports().keySet()) {
-            exports.remove(exportKey(region, exportName));
+            String exportKey = exportKey(region, exportName);
+            exports.remove(exportKey);
+            exportBackend.deleteForAccount(storageAccount, exportKey);
         }
     }
 
@@ -269,6 +323,15 @@ public class CloudFormationService {
                                  boolean isCreate, String region, String accountId) {
         try {
             JsonNode template = parseTemplate(templateBody);
+
+            // Apply SAM transform if the template declares AWS::Serverless-2016-10-31
+            if (samTransformProcessor.hasSamTransform(template)) {
+                LOG.infov("Applying SAM transform for stack {0}", stack.getStackName());
+                template = samTransformProcessor.expandSamTemplate(template);
+                // Store the expanded template so GetTemplate returns the transformed version
+                templateBody = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(template);
+            }
+
             stack.setTemplateBody(templateBody);
 
             // Merge default parameter values from the template with caller-supplied params
@@ -372,7 +435,9 @@ public class CloudFormationService {
             stack.getOutputExportNames().clear();
             stack.getOutputExportNames().putAll(newOutputExportNames);
             newExports.forEach((exportName, value) -> {
-                exports.put(exportKey(region, exportName), value);
+                String exportKey = exportKey(region, exportName);
+                exports.put(exportKey, value);
+                exportBackend.putForAccount(storageAccount, exportKey, value);
                 LOG.infov("Registered export {0} = {1} from stack {2}",
                         exportName, value, stack.getStackName());
             });
@@ -382,6 +447,7 @@ public class CloudFormationService {
             stack.setLastUpdatedTime(now());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", completeStatus, null);
+            persistStack(stack);
             LOG.infov("Stack {0} execution complete: {1}", stack.getStackName(), completeStatus);
 
         } catch (Exception e) {
@@ -391,6 +457,7 @@ public class CloudFormationService {
             stack.setStatusReason(e.getMessage());
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", failStatus, e.getMessage());
+            persistStack(stack);
         }
     }
 
@@ -415,6 +482,7 @@ public class CloudFormationService {
                     "AWS::CloudFormation::Stack", "DELETE_COMPLETE", null);
             removeStackExports(stack, region);
             stacks.remove(key(stack.getStackName(), region));
+            unpersistStack(stack.getStackName(), region);
             deletedStacks.put(stack.getStackId(), new DeletedStackEntry(
                     stack,
                     now().plusSeconds(config.services().cloudformation().deletedStackRetentionSeconds())));

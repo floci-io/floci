@@ -40,6 +40,9 @@ floci:
     validate-signatures: false
     presign-secret: test-secret
 
+  security:
+    disable-cors-headers: false
+
   init-hooks:
     shell-executable: /bin/sh
     timeout-seconds: 5
@@ -193,4 +196,6 @@ floci:
       enabled: true
       emit-mode: off
     cloudfront:
+      enabled: true
+    appsync:
       enabled: true

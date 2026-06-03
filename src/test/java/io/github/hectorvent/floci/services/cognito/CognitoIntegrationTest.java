@@ -1262,6 +1262,258 @@ class CognitoIntegrationTest {
                 resent.path("User").path("UserStatus").asText());
     }
 
+    @Test
+    @Order(92)
+    void addCustomAttributesAndSchemaIsUpdated() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "SchemaTestPool"
+                }
+                """);
+        String customPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    {
+                      "Name": "location",
+                      "AttributeDataType": "String",
+                      "Mutable": true
+                    },
+                    {
+                      "Name": "custom:hobby",
+                      "AttributeDataType": "String",
+                      "Mutable": true
+                    }
+                  ]
+                }
+                """.formatted(customPoolId))
+                .then()
+                .statusCode(200);
+
+        JsonNode describeResponse = cognitoJson("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(customPoolId));
+
+        JsonNode schema = describeResponse.path("UserPool").path("SchemaAttributes");
+        assertTrue(schema.isArray());
+
+        boolean hasLocation = false;
+        boolean hasHobby = false;
+        for (JsonNode attr : schema) {
+            String name = attr.path("Name").asText();
+            if ("custom:location".equals(name)) {
+                hasLocation = true;
+            } else if ("custom:hobby".equals(name)) {
+                hasHobby = true;
+            }
+        }
+        assertTrue(hasLocation, "custom:location should be in the user pool schema");
+        assertTrue(hasHobby, "custom:hobby should be in the user pool schema");
+    }
+
+    @Test
+    @Order(93)
+    void addCustomAttributesValidationAndDeveloperPrefix() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "SchemaValidationPool"
+                }
+                """);
+        String poolId = poolResponse.path("UserPool").path("Id").asText();
+
+        // 1. Happy path developer attribute
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    {
+                      "Name": "devattr",
+                      "AttributeDataType": "String",
+                      "DeveloperOnlyAttribute": true
+                    }
+                  ]
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(200);
+
+        JsonNode describeResponse = cognitoJson("DescribeUserPool", """
+                {
+                  "UserPoolId": "%s"
+                }
+                """.formatted(poolId));
+
+        JsonNode schema = describeResponse.path("UserPool").path("SchemaAttributes");
+        boolean hasDevAttr = false;
+        for (JsonNode attr : schema) {
+            if ("dev:devattr".equals(attr.path("Name").asText())) {
+                hasDevAttr = true;
+                break;
+            }
+        }
+        assertTrue(hasDevAttr, "dev:devattr should be in the user pool schema with dev: prefix");
+
+        // 2. Reject duplicate attribute
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    {
+                      "Name": "devattr",
+                      "AttributeDataType": "String",
+                      "DeveloperOnlyAttribute": true
+                    }
+                  ]
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400);
+
+        // 3. Reject name longer than 20 characters (after stripping prefix)
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": [
+                    {
+                      "Name": "custom:thisNameIsWayTooLongForCognitoAttributeLimits",
+                      "AttributeDataType": "String"
+                    }
+                  ]
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400);
+
+        // 4. Reject empty attributes list
+        cognitoAction("AddCustomAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "CustomAttributes": []
+                }
+                """.formatted(poolId))
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    @Order(94)
+    void deleteUserAttributesAndVerifyDeleted() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "DeleteAttrPool"
+                }
+                """);
+        String delPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "del-client"
+                }
+                """.formatted(delPoolId));
+        String delClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String delUser = "user-" + UUID.randomUUID();
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "user@example.com" },
+                    { "Name": "custom:age", "Value": "30" },
+                    { "Name": "custom:gender", "Value": "female" }
+                  ]
+                }
+                """.formatted(delPoolId, delUser))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminSetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "Password": "Password123!",
+                  "Permanent": true
+                }
+                """.formatted(delPoolId, delUser))
+                .then()
+                .statusCode(200);
+
+        // Delete custom:age via AdminDeleteUserAttributes
+        cognitoAction("AdminDeleteUserAttributes", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributeNames": [ "custom:age" ]
+                }
+                """.formatted(delPoolId, delUser))
+                .then()
+                .statusCode(200);
+
+        JsonNode userResp = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(delPoolId, delUser));
+
+        boolean hasAge = false;
+        boolean hasGender = false;
+        for (JsonNode attr : userResp.path("UserAttributes")) {
+            String name = attr.path("Name").asText();
+            if ("custom:age".equals(name)) {
+                hasAge = true;
+            } else if ("custom:gender".equals(name)) {
+                hasGender = true;
+            }
+        }
+        assertFalse(hasAge, "custom:age should be deleted");
+        assertTrue(hasGender, "custom:gender should still be present");
+
+        // Authenticate to get access token
+        JsonNode auth = cognitoJson("InitiateAuth", """
+                {
+                  "ClientId": "%s",
+                  "AuthFlow": "USER_PASSWORD_AUTH",
+                  "AuthParameters": {
+                    "USERNAME": "%s",
+                    "PASSWORD": "Password123!"
+                  }
+                }
+                """.formatted(delClientId, delUser));
+        String accessToken = auth.path("AuthenticationResult").path("AccessToken").asText();
+        assertNotNull(accessToken);
+
+        // Delete custom:gender via DeleteUserAttributes
+        cognitoAction("DeleteUserAttributes", """
+                {
+                  "AccessToken": "%s",
+                  "UserAttributeNames": [ "custom:gender" ]
+                }
+                """.formatted(accessToken))
+                .then()
+                .statusCode(200);
+
+        // Get user using AccessToken
+        JsonNode getResponse = cognitoJson("GetUser", """
+                {
+                  "AccessToken": "%s"
+                }
+                """.formatted(accessToken));
+
+        boolean hasGenderAfterDelete = false;
+        for (JsonNode attr : getResponse.path("UserAttributes")) {
+            if ("custom:gender".equals(attr.path("Name").asText())) {
+                hasGenderAfterDelete = true;
+            }
+        }
+        assertFalse(hasGenderAfterDelete, "custom:gender should be deleted");
+    }
+
     private static Response cognitoAction(String action, String body) {
         return given()
                 .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)

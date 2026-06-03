@@ -52,6 +52,53 @@ class FirehoseIntegrationTest {
 
     @Test
     @Order(3)
+    void tagAndUntagDeliveryStream() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.TagDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + STREAM_NAME + "\", \"Tags\": [ { \"Key\": \"env\", \"Value\": \"prod\" }, { \"Key\": \"owner\", \"Value\": \"team-a\" } ] }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.ListTagsForDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + STREAM_NAME + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(2))
+            .body("Tags.find { it.Key == 'env' }.Value", equalTo("prod"))
+            .body("Tags.find { it.Key == 'owner' }.Value", equalTo("team-a"))
+            .body("HasMoreTags", equalTo(false));
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.UntagDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + STREAM_NAME + "\", \"TagKeys\": [ \"env\" ] }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.ListTagsForDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + STREAM_NAME + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Tags", hasSize(1))
+            .body("Tags[0].Key", equalTo("owner"))
+            .body("Tags[0].Value", equalTo("team-a"));
+    }
+
+    @Test
+    @Order(4)
     void deleteDeliveryStream() {
         given()
             .contentType("application/x-amz-json-1.1")
@@ -64,7 +111,7 @@ class FirehoseIntegrationTest {
     }
 
     @Test
-    @Order(4)
+    @Order(5)
     void describeDeletedDeliveryStreamReturnsNotFound() {
         given()
             .contentType("application/x-amz-json-1.1")

@@ -157,6 +157,8 @@ public class AwsQueryController {
             "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
             "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
+            "DescribeAddressesAttribute",
+            "DescribeIamInstanceProfileAssociations",
             "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
             "DescribeInstanceTypes",
             "DescribeNetworkInterfaces"
@@ -330,7 +332,10 @@ public class AwsQueryController {
             "ListTemplates", "SendTemplatedEmail", "SendBulkTemplatedEmail",
             "TestRenderTemplate",
             "CreateConfigurationSet", "DescribeConfigurationSet",
-            "ListConfigurationSets", "DeleteConfigurationSet"
+            "ListConfigurationSets", "DeleteConfigurationSet",
+            "CreateConfigurationSetEventDestination",
+            "UpdateConfigurationSetEventDestination",
+            "DeleteConfigurationSetEventDestination"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(

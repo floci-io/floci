@@ -18,7 +18,6 @@ import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
-import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -89,8 +88,7 @@ public class RdsService {
         this.clusterParameterGroups = clusterParameterGroups;
     }
 
-    @PostConstruct
-    void restorePersistedRuntime() {
+    public void restorePersistedRuntime() {
         restoreClusters();
         restoreInstances();
     }
@@ -172,7 +170,7 @@ public class RdsService {
         }
 
         instances.put(id, instance);
-        LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, proxyPort);
+        LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
         return instance;
     }
 
@@ -315,7 +313,7 @@ public class RdsService {
                 (user, pw) -> validateDbClusterPassword(id, user, pw));
 
         clusters.put(id, cluster);
-        LOG.infov("DB cluster {0} created, engine={1}, endpoint=localhost:{2}", id, engine, proxyPort);
+        LOG.infov("DB cluster {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
         return cluster;
     }
 

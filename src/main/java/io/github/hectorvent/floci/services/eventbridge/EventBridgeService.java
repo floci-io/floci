@@ -388,36 +388,23 @@ public class EventBridgeService {
     // ──────────────────────────── Tags ────────────────────────────
 
     public Map<String, String> listTagsForResource(String resourceArn, String region) {
-        // Check if it's an event bus ARN (contains "event-bus/")
-        if (resourceArn.contains("event-bus/")) {
-            String busName = resourceArn.substring(resourceArn.lastIndexOf("event-bus/") + "event-bus/".length());
+        String resource = AwsArnUtils.parse(resourceArn).resource();
+        if (resource.startsWith("event-bus/")) {
+            String busName = resource.substring("event-bus/".length());
             String key = busKey(region, busName);
             return busStore.get(key)
                     .map(EventBus::getTags)
                     .orElse(Map.of());
         }
-        // Check if it's a rule ARN (contains "rule/")
-        if (resourceArn.contains("rule/")) {
-            String afterRule = resourceArn.substring(resourceArn.lastIndexOf("rule/") + "rule/".length());
-            String busName;
-            String ruleName;
-            if (afterRule.contains("/")) {
-                // Custom bus: rule/{busName}/{ruleName}
-                int slashIdx = afterRule.indexOf('/');
-                busName = afterRule.substring(0, slashIdx);
-                ruleName = afterRule.substring(slashIdx + 1);
-            } else {
-                // Default bus: rule/{ruleName}
-                busName = "default";
-                ruleName = afterRule;
-            }
-            String key = ruleKey(region, busName, ruleName);
+        if (resource.startsWith("rule/")) {
+            RuleRef ref = parseRuleResource(resource);
+            String key = ruleKey(region, ref.busName(), ref.ruleName());
             return ruleStore.get(key)
                     .map(Rule::getTags)
                     .orElse(Map.of());
         }
-        if (resourceArn.contains("archive/")) {
-            String archiveName = resourceArn.substring(resourceArn.lastIndexOf("archive/") + "archive/".length());
+        if (resource.startsWith("archive/")) {
+            String archiveName = resource.substring("archive/".length());
             String key = archiveKey(region, archiveName);
             return archiveStore.get(key)
                     .map(Archive::getTags)
@@ -426,9 +413,24 @@ public class EventBridgeService {
         return Map.of();
     }
 
+    /** Resolves the bus and rule name from a {@code rule/...} ARN resource segment. */
+    private record RuleRef(String busName, String ruleName) {}
+
+    private static RuleRef parseRuleResource(String resource) {
+        String afterRule = resource.substring("rule/".length());
+        int slashIdx = afterRule.indexOf('/');
+        if (slashIdx >= 0) {
+            // Custom bus: rule/{busName}/{ruleName}
+            return new RuleRef(afterRule.substring(0, slashIdx), afterRule.substring(slashIdx + 1));
+        }
+        // Default bus: rule/{ruleName}
+        return new RuleRef("default", afterRule);
+    }
+
     public void tagResource(String resourceArn, Map<String, String> tags, String region) {
-        if (resourceArn.contains("archive/")) {
-            String archiveName = resourceArn.substring(resourceArn.lastIndexOf("archive/") + "archive/".length());
+        String resource = AwsArnUtils.parse(resourceArn).resource();
+        if (resource.startsWith("archive/")) {
+            String archiveName = resource.substring("archive/".length());
             String key = archiveKey(region, archiveName);
             Archive archive = archiveStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -437,8 +439,8 @@ public class EventBridgeService {
             archiveStore.put(key, archive);
             return;
         }
-        if (resourceArn.contains("event-bus/")) {
-            String busName = resourceArn.substring(resourceArn.lastIndexOf("event-bus/") + "event-bus/".length());
+        if (resource.startsWith("event-bus/")) {
+            String busName = resource.substring("event-bus/".length());
             String key = busKey(region, busName);
             EventBus bus = busStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -447,19 +449,9 @@ public class EventBridgeService {
             busStore.put(key, bus);
             return;
         }
-        if (resourceArn.contains("rule/")) {
-            String afterRule = resourceArn.substring(resourceArn.lastIndexOf("rule/") + "rule/".length());
-            String busName;
-            String ruleName;
-            if (afterRule.contains("/")) {
-                int slashIdx = afterRule.indexOf('/');
-                busName = afterRule.substring(0, slashIdx);
-                ruleName = afterRule.substring(slashIdx + 1);
-            } else {
-                busName = "default";
-                ruleName = afterRule;
-            }
-            String key = ruleKey(region, busName, ruleName);
+        if (resource.startsWith("rule/")) {
+            RuleRef ref = parseRuleResource(resource);
+            String key = ruleKey(region, ref.busName(), ref.ruleName());
             Rule rule = ruleStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "Resource not found: " + resourceArn, 404));
@@ -471,8 +463,9 @@ public class EventBridgeService {
     }
 
     public void untagResource(String resourceArn, List<String> tagKeys, String region) {
-        if (resourceArn.contains("archive/")) {
-            String archiveName = resourceArn.substring(resourceArn.lastIndexOf("archive/") + "archive/".length());
+        String resource = AwsArnUtils.parse(resourceArn).resource();
+        if (resource.startsWith("archive/")) {
+            String archiveName = resource.substring("archive/".length());
             String key = archiveKey(region, archiveName);
             Archive archive = archiveStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -481,8 +474,8 @@ public class EventBridgeService {
             archiveStore.put(key, archive);
             return;
         }
-        if (resourceArn.contains("event-bus/")) {
-            String busName = resourceArn.substring(resourceArn.lastIndexOf("event-bus/") + "event-bus/".length());
+        if (resource.startsWith("event-bus/")) {
+            String busName = resource.substring("event-bus/".length());
             String key = busKey(region, busName);
             EventBus bus = busStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
@@ -491,19 +484,9 @@ public class EventBridgeService {
             busStore.put(key, bus);
             return;
         }
-        if (resourceArn.contains("rule/")) {
-            String afterRule = resourceArn.substring(resourceArn.lastIndexOf("rule/") + "rule/".length());
-            String busName;
-            String ruleName;
-            if (afterRule.contains("/")) {
-                int slashIdx = afterRule.indexOf('/');
-                busName = afterRule.substring(0, slashIdx);
-                ruleName = afterRule.substring(slashIdx + 1);
-            } else {
-                busName = "default";
-                ruleName = afterRule;
-            }
-            String key = ruleKey(region, busName, ruleName);
+        if (resource.startsWith("rule/")) {
+            RuleRef ref = parseRuleResource(resource);
+            String key = ruleKey(region, ref.busName(), ref.ruleName());
             Rule rule = ruleStore.get(key)
                     .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                             "Resource not found: " + resourceArn, 404));
@@ -741,6 +724,19 @@ public class EventBridgeService {
         }
         try {
             JsonNode pattern = objectMapper.readTree(eventPattern);
+            JsonNode orClauses = pattern.get("$or");
+            if (orClauses != null && orClauses.isArray()) {
+                boolean anyMatches = false;
+                for (JsonNode subPattern : orClauses) {
+                    if (matchesPattern(event, objectMapper.writeValueAsString(subPattern))) {
+                        anyMatches = true;
+                        break;
+                    }
+                }
+                if (!anyMatches) {
+                    return false;
+                }
+            }
             JsonNode sourceField = pattern.get("source");
             if (sourceField != null && sourceField.isArray()) {
                 String eventSource = (String) event.get("Source");
@@ -806,9 +802,25 @@ public class EventBridgeService {
     }
 
     private boolean matchesDetailNode(JsonNode actual, JsonNode pattern) {
+        JsonNode orClauses = pattern.get("$or");
+        if (orClauses != null && orClauses.isArray()) {
+            boolean anyMatches = false;
+            for (JsonNode subPattern : orClauses) {
+                if (matchesDetailNode(actual, subPattern)) {
+                    anyMatches = true;
+                    break;
+                }
+            }
+            if (!anyMatches) {
+                return false;
+            }
+        }
         var fields = pattern.fields();
         while (fields.hasNext()) {
             var field = fields.next();
+            if ("$or".equals(field.getKey())) {
+                continue;
+            }
             JsonNode expected = field.getValue();
             JsonNode actualField = actual.get(field.getKey());
             if (expected.isArray()) {

@@ -62,6 +62,8 @@ public interface EmulatorConfig {
 
     AuthConfig auth();
 
+    SecurityConfig security();
+
     ServicesConfig services();
 
     DockerConfig docker();
@@ -89,6 +91,15 @@ public interface EmulatorConfig {
          * </pre>
          */
         Optional<List<String>> extraSuffixes();
+    }
+
+    interface SecurityConfig {
+        Optional<List<String>> extraCorsAllowedOrigins();
+        Optional<List<String>> extraCorsAllowedHeaders();
+        Optional<List<String>> extraCorsExposeHeaders();
+
+        @WithDefault("false")
+        boolean disableCorsHeaders();
     }
 
     interface StorageConfig {
@@ -134,6 +145,7 @@ public interface EmulatorConfig {
         NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
         CloudFrontStorageConfig cloudfront();
+        AppSyncStorageConfig appsync();
     }
 
     interface SsmStorageConfig {
@@ -247,6 +259,13 @@ public interface EmulatorConfig {
         Optional<String> mode();
     }
 
+    interface AppSyncStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -319,6 +338,7 @@ public interface EmulatorConfig {
         BcmDataExportsServiceConfig bcmDataExports();
         ConfigServiceConfig configservice();
         CloudFrontServiceConfig cloudfront();
+        AppSyncServiceConfig appsync();
     }
 
     interface TransferServiceConfig {
@@ -757,6 +777,11 @@ public interface EmulatorConfig {
 
         @WithDefault("cloudfront.net")
         String domainSuffix();
+    }
+
+    interface AppSyncServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface BcmDataExportsServiceConfig {

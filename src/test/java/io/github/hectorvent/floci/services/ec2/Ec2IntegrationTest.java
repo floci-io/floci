@@ -288,6 +288,22 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(21)
+    void createSubnetHasAssignIpv6AddressOnCreation() {
+        given()
+            .formParam("Action", "DescribeSubnets")
+            .formParam("SubnetId.1", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSubnetsResponse.subnetSet.item.assignIpv6AddressOnCreation", equalTo("false"))
+            .body("DescribeSubnetsResponse.subnetSet.item.enableDns64", equalTo("false"))
+            .body("DescribeSubnetsResponse.subnetSet.item.mapCustomerOwnedIpOnLaunch", equalTo("false"));
+    }
+
+    @Test
     @Order(22)
     void modifySubnetAttribute() {
         given()

@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ecs;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ecs.model.Attribute;
+import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -14,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
@@ -199,8 +201,11 @@ public class EcsJsonHandler {
         NetworkMode networkMode = parseEnum(req, "networkMode", NetworkMode.class);
         String cpu = req.has("cpu") ? req.path("cpu").asText() : null;
         String memory = req.has("memory") ? req.path("memory").asText() : null;
+        String taskRoleArn = req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null;
+        String executionRoleArn = req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null;
 
-        TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory, region);
+        TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
+                taskRoleArn, executionRoleArn, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", taskDefinitionNode(td));
@@ -373,9 +378,10 @@ public class EcsJsonHandler {
         int desiredCount = req.path("desiredCount").asInt(1);
         LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
         List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
+        NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, loadBalancers, region);
+                desiredCount, launchType, loadBalancers, networkConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -425,13 +431,31 @@ public class EcsJsonHandler {
         return result;
     }
 
+    private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
+        if (node == null || !node.isObject() || !node.hasNonNull("awsvpcConfiguration")) {
+            return null;
+        }
+        JsonNode awsvpc = node.path("awsvpcConfiguration");
+        AwsVpcConfiguration awsvpcConfig = new AwsVpcConfiguration();
+        awsvpcConfig.setSubnets(jsonArrayToList(awsvpc.path("subnets")));
+        awsvpcConfig.setSecurityGroups(jsonArrayToList(awsvpc.path("securityGroups")));
+        if (awsvpc.hasNonNull("assignPublicIp")) {
+            awsvpcConfig.setAssignPublicIp(awsvpc.path("assignPublicIp").asText());
+        }
+        NetworkConfiguration networkConfiguration = new NetworkConfiguration();
+        networkConfiguration.setAwsvpcConfiguration(awsvpcConfig);
+        return networkConfiguration;
+    }
+
     private Response handleUpdateService(JsonNode req, String region) {
         String cluster = req.has("cluster") ? req.path("cluster").asText() : null;
         String serviceName = req.path("service").asText();
         String taskDefinition = req.has("taskDefinition") ? req.path("taskDefinition").asText() : null;
         Integer desiredCount = req.has("desiredCount") ? req.path("desiredCount").asInt() : null;
+        NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
 
-        EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount, region);
+        EcsServiceModel svc = service.updateService(cluster, serviceName, taskDefinition, desiredCount,
+                networkConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -885,6 +909,8 @@ public class EcsJsonHandler {
         }
         if (td.getCpu() != null) { n.put("cpu", td.getCpu()); }
         if (td.getMemory() != null) { n.put("memory", td.getMemory()); }
+        if (td.getTaskRoleArn() != null) { n.put("taskRoleArn", td.getTaskRoleArn()); }
+        if (td.getExecutionRoleArn() != null) { n.put("executionRoleArn", td.getExecutionRoleArn()); }
 
         ArrayNode containers = objectMapper.createArrayNode();
         if (td.getContainerDefinitions() != null) {
@@ -1012,6 +1038,23 @@ public class EcsJsonHandler {
                 lbs.add(ln);
             }
             n.set("loadBalancers", lbs);
+        }
+        if (s.getNetworkConfiguration() != null
+                && s.getNetworkConfiguration().getAwsvpcConfiguration() != null) {
+            AwsVpcConfiguration awsvpc = s.getNetworkConfiguration().getAwsvpcConfiguration();
+            ObjectNode awsvpcNode = objectMapper.createObjectNode();
+            ArrayNode subnets = objectMapper.createArrayNode();
+            awsvpc.getSubnets().forEach(subnets::add);
+            awsvpcNode.set("subnets", subnets);
+            ArrayNode securityGroups = objectMapper.createArrayNode();
+            awsvpc.getSecurityGroups().forEach(securityGroups::add);
+            awsvpcNode.set("securityGroups", securityGroups);
+            if (awsvpc.getAssignPublicIp() != null) {
+                awsvpcNode.put("assignPublicIp", awsvpc.getAssignPublicIp());
+            }
+            ObjectNode networkConfig = objectMapper.createObjectNode();
+            networkConfig.set("awsvpcConfiguration", awsvpcNode);
+            n.set("networkConfiguration", networkConfig);
         }
         return n;
     }

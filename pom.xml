@@ -6,7 +6,7 @@
 
     <groupId>io.github.hectorvent</groupId>
     <artifactId>floci</artifactId>
-    <version>1.5.19</version>
+    <version>1.5.21</version>
     <packaging>jar</packaging>
 
     <name>Floci</name>
@@ -258,6 +258,27 @@
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
                     </systemPropertyVariables>
                 </configuration>
+            </plugin>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-enforcer-plugin</artifactId>
+                <version>3.6.2</version>
+                <executions>
+                    <execution>
+                        <id>enforce-java</id>
+                        <goals>
+                            <goal>enforce</goal>
+                        </goals>
+                        <configuration>
+                            <rules>
+                                <requireJavaVersion>
+                                    <version>[25,26)</version>
+                                    <message>Floci requires JDK 25. Set JAVA_HOME to JDK 25.</message>
+                                </requireJavaVersion>
+                            </rules>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
         </plugins>
     </build>

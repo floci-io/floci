@@ -4,6 +4,8 @@ import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ec2.model.*;
 
+import java.util.List;
+
 import static org.assertj.core.api.Assertions.*;
 
 /**
@@ -187,7 +189,7 @@ class Ec2InstanceResponseShapeTest {
 
     @Test
     @Order(10)
-    @DisplayName("blockDeviceMappings contains root device entry")
+    @DisplayName("blockDeviceMappings contains root device entry with all required EBS fields")
     void blockDeviceMappings() {
         assertThat(instance.blockDeviceMappings())
                 .as("blockDeviceMappings must not be empty — Terraform reads root_block_device attributes")
@@ -199,9 +201,39 @@ class Ec2InstanceResponseShapeTest {
         assertThat(rootDevice.ebs())
                 .as("blockDeviceMapping ebs must not be null")
                 .isNotNull();
+        assertThat(rootDevice.ebs().volumeId())
+                .as("blockDeviceMapping ebs.volumeId must not be null — Terraform calls DescribeVolumes(volumeId); " +
+                    "empty/null causes InvalidVolume.NotFound for volume '' (issue #871)")
+                .isNotNull()
+                .startsWith("vol-");
+        assertThat(rootDevice.ebs().status())
+                .as("blockDeviceMapping ebs.status must not be null")
+                .isNotNull()
+                .isEqualTo(AttachmentStatus.ATTACHED);
         assertThat(rootDevice.ebs().deleteOnTermination())
                 .as("blockDeviceMapping ebs.deleteOnTermination must not be null")
                 .isNotNull();
+        assertThat(rootDevice.ebs().attachTime())
+                .as("blockDeviceMapping ebs.attachTime must not be null — present in all real AWS responses")
+                .isNotNull();
+    }
+
+    @Test
+    @Order(16)
+    @DisplayName("root volume referenced in blockDeviceMappings is queryable via DescribeVolumes")
+    void rootVolumeDescribable() {
+        String volumeId = instance.blockDeviceMappings().get(0).ebs().volumeId();
+        assertThat(volumeId).as("volumeId from blockDeviceMapping must not be null").isNotNull();
+
+        DescribeVolumesResponse resp = ec2.describeVolumes(
+                DescribeVolumesRequest.builder().volumeIds(volumeId).build());
+
+        assertThat(resp.volumes()).as("DescribeVolumes must return the root volume").isNotEmpty();
+        Volume vol = resp.volumes().get(0);
+        assertThat(vol.volumeId()).isEqualTo(volumeId);
+        assertThat(vol.stateAsString())
+                .as("root volume state must be in-use while instance is running")
+                .isEqualTo("in-use");
     }
 
     // ── Primary network interface (ENI) ──────────────────────────────────────
