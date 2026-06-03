@@ -1,9 +1,20 @@
 <p align="center">
-  <img height="450" alt="FLOCI logo" src="https://github.com/user-attachments/assets/4fbfc9b0-f4c7-4bf0-98c7-bab2ae3f64d5" />
-  <p align="center">
-    <strong>Light, fluffy, and always free</strong><br />
-    No account. No auth token. No feature gates. Just <code>docker compose up</code>.
-  </p>
+  <img src="floci-black.svg#gh-light-mode-only" alt="Floci" width="500" />
+  <img src="floci-white.svg#gh-dark-mode-only" alt="Floci" width="500" />
+</p>
+
+<p align="center">
+  <strong>Light, fluffy, and always free</strong><br />
+  No account. No auth token. No feature gates. Just <code>docker compose up</code>.
+</p>
+
+<p align="center">
+  <a href="https://github.com/floci-io/floci/releases/latest"><img src="https://img.shields.io/github/v/release/floci-io/floci?label=latest%20release&color=blue" alt="Latest Release"></a>
+  <a href="https://github.com/floci-io/floci/actions/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/floci-io/floci/release.yml?label=build" alt="Build Status"></a>
+  <a href="https://hub.docker.com/r/floci/floci"><img src="https://img.shields.io/docker/pulls/floci/floci?label=docker%20pulls" alt="Docker Pulls"></a>
+  <a href="https://hub.docker.com/r/floci/floci"><img src="https://img.shields.io/docker/image-size/floci/floci/latest?label=image%20size" alt="Docker Image Size"></a>
+  <a href="https://opensource.org/licenses/MIT"><img src="https://img.shields.io/badge/license-MIT-green" alt="License: MIT"></a>
+  <a href="https://github.com/floci-io/floci/stargazers"><img src="https://img.shields.io/github/stars/floci-io/floci?style=flat" alt="GitHub Stars"></a>
 </p>
 
 <p align="center">
