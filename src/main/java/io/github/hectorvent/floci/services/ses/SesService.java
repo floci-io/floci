@@ -42,6 +42,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -1170,7 +1171,20 @@ public class SesService {
         validateSuppressionReason(reason, "reason", false);
         String key = suppressionKey(region, normalized);
         SuppressedDestination existing = suppressionStore.get(key).orElse(null);
+        // Migrate a legacy entry persisted by a pre-canonicalization Floci (which
+        // stored the address trim-only) onto the canonical key, so a re-PUT doesn't
+        // leave a stuck duplicate alongside the new entry.
+        if (existing == null) {
+            String legacy = suppressionKey(region, emailAddress.trim());
+            if (!legacy.equals(key)) {
+                existing = suppressionStore.get(legacy).orElse(null);
+                if (existing != null) {
+                    suppressionStore.delete(legacy);
+                }
+            }
+        }
         SuppressedDestination entry = existing != null ? existing : new SuppressedDestination(normalized, reason);
+        entry.setEmailAddress(normalized);
         entry.setReason(reason);
         entry.setLastUpdateTime(Instant.now());
         suppressionStore.put(key, entry);
@@ -1179,7 +1193,8 @@ public class SesService {
 
     public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
         String normalized = normalizeSuppressionEmail(emailAddress);
-        return suppressionStore.get(suppressionKey(region, normalized))
+        return existingSuppressionKey(region, emailAddress, normalized)
+                .flatMap(suppressionStore::get)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Email address " + normalized + " does not exist on your suppression list.",
                         404));
@@ -1187,14 +1202,30 @@ public class SesService {
 
     public void deleteSuppressedDestination(String region, String emailAddress) {
         String normalized = normalizeSuppressionEmail(emailAddress);
-        String key = suppressionKey(region, normalized);
-        if (suppressionStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException",
-                    "Email address " + normalized + " does not exist on your suppression list.",
-                    404);
-        }
+        String key = existingSuppressionKey(region, emailAddress, normalized)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Email address " + normalized + " does not exist on your suppression list.",
+                        404));
         suppressionStore.delete(key);
         LOG.infov("Removed suppression entry for {0} in region {1}", normalized, region);
+    }
+
+    /**
+     * Resolve the storage key an entry currently lives under: the canonical
+     * (domain-lower-cased) key, or — for entries persisted by a pre-canonicalization
+     * Floci that stored the address trim-only — the legacy raw-trimmed key. Lets
+     * GET/DELETE reach and remove legacy entries without a keyspace scan.
+     */
+    private Optional<String> existingSuppressionKey(String region, String rawEmail, String normalized) {
+        String canonical = suppressionKey(region, normalized);
+        if (suppressionStore.get(canonical).isPresent()) {
+            return Optional.of(canonical);
+        }
+        String legacy = suppressionKey(region, rawEmail.trim());
+        if (!legacy.equals(canonical) && suppressionStore.get(legacy).isPresent()) {
+            return Optional.of(legacy);
+        }
+        return Optional.empty();
     }
 
     public List<SuppressedDestination> listSuppressedDestinations(String region, List<String> reasonFilters) {
@@ -1251,7 +1282,8 @@ public class SesService {
                 continue;
             }
             String normalized = normalizeSuppressionEmail(address);
-            SuppressedDestination entry = suppressionStore.get(suppressionKey(region, normalized))
+            SuppressedDestination entry = existingSuppressionKey(region, address, normalized)
+                    .flatMap(suppressionStore::get)
                     .orElse(null);
             if (entry != null && entry.getReason() != null
                     && reasonFilter.contains(entry.getReason())) {
@@ -1306,9 +1338,11 @@ public class SesService {
             return null;
         }
         // Share the same normalization used when entries are stored
-        // (`normalizeSuppressionEmail`) so lookups can't drift apart from inserts.
+        // (`normalizeSuppressionEmail`) so lookups can't drift apart from inserts,
+        // with the same legacy-key fallback as GET/DELETE.
         String normalized = normalizeSuppressionEmail(emailAddress);
-        SuppressedDestination entry = suppressionStore.get(suppressionKey(region, normalized))
+        SuppressedDestination entry = existingSuppressionKey(region, emailAddress, normalized)
+                .flatMap(suppressionStore::get)
                 .orElse(null);
         if (entry == null || entry.getReason() == null) {
             return null;
@@ -1324,8 +1358,19 @@ public class SesService {
         if (emailAddress == null || emailAddress.isBlank()) {
             throw new AwsException("BadRequestException", "EmailAddress is required.", 400);
         }
-        // AWS trims leading/trailing whitespace from EmailAddress before storing.
-        return emailAddress.trim();
+        // AWS trims the EmailAddress and canonicalizes only the domain to lower
+        // case; the local-part keeps its case. Verified against real AWS SES V2
+        // (2026-06-15): `Foo@Example.COM` and `Foo@example.com` collapse to one
+        // suppression entry (`Foo@example.com`), but `Foo@x` and `foo@x` are two
+        // distinct entries. Lower-casing the whole address would wrongly merge
+        // local-part variants and alter the stored value on read-back.
+        // Locale.ROOT avoids the JVM-locale Turkish-i pitfall.
+        String trimmed = emailAddress.trim();
+        int at = trimmed.lastIndexOf('@');
+        if (at < 0) {
+            return trimmed;
+        }
+        return trimmed.substring(0, at) + "@" + trimmed.substring(at + 1).toLowerCase(Locale.ROOT);
     }
 
     /**
