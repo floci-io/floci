@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.s3;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.CsvParser;
 import org.jboss.logging.Logger;
 
@@ -141,7 +142,9 @@ class S3SelectEvaluator {
                 return inner;
             }
             String col = consumeOperand();
-            if (pos >= tokens.size()) return new CompNode(col, "=", "");
+            if (pos >= tokens.size()) {
+                throw unsupportedWhereExpression("Missing predicate operator after: " + col);
+            }
             Token next = tokens.get(pos);
             if (next.type() == TokenType.KEYWORD) {
                 return switch (next.value()) {
@@ -173,19 +176,25 @@ class S3SelectEvaluator {
                         advance();
                         yield new LikeNode(col, consumeOperand());
                     }
-                    default -> new CompNode(col, "=", "");
+                    default -> throw unsupportedWhereExpression("Unsupported predicate keyword: " + next.value());
                 };
             }
             if (next.type() == TokenType.OP) {
                 String op = next.value(); advance();
                 return new CompNode(col, op, consumeOperand());
             }
-            return new CompNode(col, "=", "");
+            throw unsupportedWhereExpression("Unsupported predicate near: " + next.value());
         }
 
         private String consumeOperand() {
-            if (pos >= tokens.size()) return "";
-            return tokens.get(pos++).value();
+            if (pos >= tokens.size()) {
+                throw unsupportedWhereExpression("Missing predicate operand");
+            }
+            Token token = tokens.get(pos++);
+            if (token.type() == TokenType.LPAREN || token.type() == TokenType.RPAREN || token.type() == TokenType.COMMA) {
+                throw unsupportedWhereExpression("Unsupported predicate operand: " + token.value());
+            }
+            return token.value();
         }
 
         private boolean peekKeyword(String kw) {
@@ -195,6 +204,14 @@ class S3SelectEvaluator {
         }
 
         private void advance() { if (pos < tokens.size()) pos++; }
+    }
+
+    private static AwsException unsupportedWhereExpression(String expression) {
+        return new AwsException(
+                "ExternalEvalException",
+                "Unsupported S3 Select WHERE expression: " + expression,
+                400
+        );
     }
 
     private static WhereNode parseWhere(String where) {
@@ -253,9 +270,11 @@ class S3SelectEvaluator {
         try {
             WhereNode tree = parseWhere(processed);
             return rows.stream().filter(row -> evalCsv(tree, row, headers)).toList();
+        } catch (AwsException e) {
+            throw e;
         } catch (Exception e) {
-            LOG.warnv("WHERE parse error, returning all rows: {0}", e.getMessage());
-            return rows;
+            LOG.warnv("WHERE parse error: {0}", e.getMessage());
+            throw unsupportedWhereExpression(processed);
         }
     }
 
@@ -357,8 +376,11 @@ class S3SelectEvaluator {
             }
             try {
                 tree = parseWhere(processed);
+            } catch (AwsException e) {
+                throw e;
             } catch (Exception e) {
                 LOG.warnv("JSON WHERE parse error: {0}", e.getMessage());
+                throw unsupportedWhereExpression(processed);
             }
         }
 
