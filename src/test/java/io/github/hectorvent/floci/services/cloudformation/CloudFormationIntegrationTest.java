@@ -5634,4 +5634,106 @@ class CloudFormationIntegrationTest {
             .statusCode(200);
     }
 
+    private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
+
+    @Test
+    void createStack_stepFunctionsStateMachineResolvesDefinitionSubstitutionsAndIsDeletable() {
+        String template = """
+            {
+              "Resources": {
+                "MyRole": {
+                  "Type": "AWS::IAM::Role",
+                  "Properties": {
+                    "RoleName": "cfn-sfn-role",
+                    "AssumeRolePolicyDocument": {
+                      "Version": "2012-10-17",
+                      "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": { "Service": "states.amazonaws.com" },
+                        "Action": "sts:AssumeRole"
+                      }]
+                    }
+                  }
+                },
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "cfn-sfn-pipeline",
+                    "RoleArn": { "Fn::GetAtt": ["MyRole", "Arn"] },
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"${Marker}\\",\\"End\\":true}}}",
+                    "DefinitionSubstitutions": {
+                      "Marker": "substituted-value"
+                    },
+                    "Tags": [
+                      { "Key": "env", "Value": "test" }
+                    ]
+                  }
+                }
+              },
+              "Outputs": {
+                "StateMachineArn": { "Value": { "Ref": "MyStateMachine" } },
+                "StateMachineName": { "Value": { "Fn::GetAtt": ["MyStateMachine", "Name"] } }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "sfn-cfn-stack")
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_NAMED_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String expectedArn = "arn:aws:states:us-east-1:000000000000:stateMachine:cfn-sfn-pipeline";
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("name", equalTo("cfn-sfn-pipeline"))
+            .body("roleArn", containsString("cfn-sfn-role"))
+            .body("definition", containsString("substituted-value"))
+            .body("definition", not(containsString("${Marker}")));
+
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "sfn-cfn-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(describeXml, containsString("<OutputKey>StateMachineArn</OutputKey>"));
+        assertThat(describeXml, containsString("<OutputValue>" + expectedArn + "</OutputValue>"));
+        assertThat(describeXml, containsString("<OutputKey>StateMachineName</OutputKey>"));
+        assertThat(describeXml, containsString("<OutputValue>cfn-sfn-pipeline</OutputValue>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "sfn-cfn-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .body("__type", containsString("StateMachineDoesNotExist"));
+    }
+
 }

@@ -44,6 +44,8 @@ import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.github.hectorvent.floci.services.ssm.SsmService;
+import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsService;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import io.github.hectorvent.floci.services.apigateway.ApiGatewayService;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2Service;
 import io.github.hectorvent.floci.services.apigatewayv2.model.*;
@@ -98,6 +100,7 @@ public class CloudFormationResourceProvisioner {
     private final CognitoService cognitoService;
     private final EcsService ecsService;
     private final ElbV2Service elbV2Service;
+    private final StepFunctionsService stepFunctionsService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -112,7 +115,8 @@ public class CloudFormationResourceProvisioner {
                                              PipesService pipesService,
                                              CognitoService cognitoService,
                                              EcsService ecsService,
-                                             ElbV2Service elbV2Service) {
+                                             ElbV2Service elbV2Service,
+                                             StepFunctionsService stepFunctionsService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -130,6 +134,7 @@ public class CloudFormationResourceProvisioner {
         this.cognitoService = cognitoService;
         this.ecsService = ecsService;
         this.elbV2Service = elbV2Service;
+        this.stepFunctionsService = stepFunctionsService;
     }
 
     /**
@@ -197,6 +202,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ApiGatewayV2::Stage" -> provisionApiGatewayV2Stage(resource, properties, engine, region);
                 case "AWS::ApiGatewayV2::Deployment" -> provisionApiGatewayV2Deployment(resource, properties, engine, region);
                 case "AWS::Pipes::Pipe" -> provisionPipe(resource, properties, engine, region, stackName);
+                case "AWS::StepFunctions::StateMachine" ->
+                        provisionStepFunctionsStateMachine(resource, properties, engine, region, stackName);
                 case "AWS::Lambda::EventSourceMapping" ->
                         provisionLambdaEventSourceMapping(resource, properties, engine, region);
                 case "AWS::Cognito::UserPool" ->
@@ -253,6 +260,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ECR::Repository" ->
                         ecrService.deleteRepository(physicalId, null, true, region);
                 case "AWS::Pipes::Pipe" -> pipesService.deletePipe(physicalId, region);
+                case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
                 case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
                 case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
                 case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
@@ -1356,6 +1364,56 @@ public class CloudFormationResourceProvisioner {
 
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", pipe.getArn());
+    }
+
+    private void provisionStepFunctionsStateMachine(StackResource r, JsonNode props,
+                                                    CloudFormationTemplateEngine engine,
+                                                    String region, String stackName) {
+        String name = resolveOptional(props, "StateMachineName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 80, false);
+        }
+
+        String roleArn = resolveOptional(props, "RoleArn", engine);
+        String type = resolveOptional(props, "StateMachineType", engine);
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+
+        String definition = resolveStateMachineDefinition(props, engine);
+
+        StateMachine sm = stepFunctionsService.createStateMachine(name, definition, roleArn, type, region, tags);
+
+        r.setPhysicalId(sm.getStateMachineArn());
+        r.getAttributes().put("Arn", sm.getStateMachineArn());
+        r.getAttributes().put("Name", sm.getName());
+    }
+
+    private String resolveStateMachineDefinition(JsonNode props, CloudFormationTemplateEngine engine) {
+        if (props == null) {
+            return null;
+        }
+
+        String definition = resolveOptional(props, "DefinitionString", engine);
+        if (definition == null && props.has("Definition") && !props.get("Definition").isNull()) {
+            definition = engine.resolveNode(props.get("Definition")).toString();
+        }
+        if (definition == null) {
+            return null;
+        }
+
+        JsonNode subsNode = props.get("DefinitionSubstitutions");
+        if (subsNode == null || subsNode.isNull()) {
+            return definition;
+        }
+
+        JsonNode resolvedSubs = engine.resolveNode(subsNode);
+        Iterator<Map.Entry<String, JsonNode>> entries = resolvedSubs.fields();
+        while (entries.hasNext()) {
+            Map.Entry<String, JsonNode> entry = entries.next();
+            String placeholder = "${" + entry.getKey() + "}";
+            String value = entry.getValue().isTextual() ? entry.getValue().asText() : entry.getValue().toString();
+            definition = definition.replace(placeholder, value);
+        }
+        return definition;
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
