@@ -19,6 +19,7 @@ public class TaskDefinition {
     private String taskRoleArn;
     private String executionRoleArn;
     private List<ContainerDefinition> containerDefinitions;
+    private List<Volume> volumes;
     private Map<String, String> tags = new HashMap<>();
 
     public String getTaskDefinitionArn() { return taskDefinitionArn; }
@@ -52,6 +53,9 @@ public class TaskDefinition {
     public void setContainerDefinitions(List<ContainerDefinition> containerDefinitions) {
         this.containerDefinitions = containerDefinitions;
     }
+
+    public List<Volume> getVolumes() { return volumes; }
+    public void setVolumes(List<Volume> volumes) { this.volumes = volumes; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

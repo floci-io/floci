@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
@@ -24,6 +25,7 @@ import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
+import io.github.hectorvent.floci.services.ecs.model.Volume;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -209,6 +211,9 @@ public class EcsJsonHandler {
 
         TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
                 taskRoleArn, executionRoleArn, tags, region);
+        // Task-level volumes are not part of registerTaskDefinition's signature; set them on the
+        // returned (and stored) task definition so they round-trip and reach RunTask launches.
+        td.setVolumes(parseVolumes(req.path("volumes")));
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", taskDefinitionNode(td));
@@ -925,6 +930,20 @@ public class EcsJsonHandler {
             }
         }
         n.set("containerDefinitions", containers);
+        if (td.getVolumes() != null && !td.getVolumes().isEmpty()) {
+            ArrayNode vols = objectMapper.createArrayNode();
+            for (Volume v : td.getVolumes()) {
+                ObjectNode vNode = objectMapper.createObjectNode();
+                vNode.put("name", v.name());
+                if (v.hostSourcePath() != null) {
+                    ObjectNode host = objectMapper.createObjectNode();
+                    host.put("sourcePath", v.hostSourcePath());
+                    vNode.set("host", host);
+                }
+                vols.add(vNode);
+            }
+            n.set("volumes", vols);
+        }
         if (td.getTags() != null && !td.getTags().isEmpty()) {
             n.set("tags", tagsNode(td.getTags()));
         }
@@ -960,6 +979,18 @@ public class EcsJsonHandler {
                 envArr.add(kvNode);
             }
             n.set("environment", envArr);
+        }
+
+        if (def.getMountPoints() != null && !def.getMountPoints().isEmpty()) {
+            ArrayNode mps = objectMapper.createArrayNode();
+            for (MountPoint mp : def.getMountPoints()) {
+                ObjectNode mpNode = objectMapper.createObjectNode();
+                mpNode.put("sourceVolume", mp.sourceVolume());
+                mpNode.put("containerPath", mp.containerPath());
+                mpNode.put("readOnly", mp.readOnly());
+                mps.add(mpNode);
+            }
+            n.set("mountPoints", mps);
         }
 
         return n;
@@ -1200,6 +1231,7 @@ public class EcsJsonHandler {
 
             def.setPortMappings(parsePortMappings(item.path("portMappings")));
             def.setEnvironment(parseKeyValuePairs(item.path("environment")));
+            def.setMountPoints(parseMountPoints(item.path("mountPoints")));
 
             if (item.has("command") && item.path("command").isArray()) {
                 List<String> cmd = new ArrayList<>();
@@ -1238,6 +1270,32 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             result.add(new KeyValuePair(item.path("name").asText(), item.path("value").asText()));
+        }
+        return result;
+    }
+
+    private List<Volume> parseVolumes(JsonNode node) {
+        List<Volume> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            String hostSourcePath = item.path("host").path("sourcePath").asText(null);
+            result.add(new Volume(item.path("name").asText(), hostSourcePath));
+        }
+        return result;
+    }
+
+    private List<MountPoint> parseMountPoints(JsonNode node) {
+        List<MountPoint> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new MountPoint(
+                    item.path("sourceVolume").asText(),
+                    item.path("containerPath").asText(),
+                    item.path("readOnly").asBoolean(false)));
         }
         return result;
     }

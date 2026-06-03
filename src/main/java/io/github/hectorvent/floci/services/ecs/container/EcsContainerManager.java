@@ -12,9 +12,11 @@ import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.Volume;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ExposedPort;
@@ -72,6 +74,16 @@ public class EcsContainerManager {
         List<Closeable> logStreams = new ArrayList<>();
         List<Container> runtimeContainers = new ArrayList<>();
 
+        // Task-level volumes: map volume name -> host source path, consumed by per-container mountPoints.
+        Map<String, String> volumeSourcePaths = new LinkedHashMap<>();
+        if (taskDef.getVolumes() != null) {
+            for (Volume v : taskDef.getVolumes()) {
+                if (v.name() != null && v.hostSourcePath() != null) {
+                    volumeSourcePaths.put(v.name(), v.hostSourcePath());
+                }
+            }
+        }
+
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
             String containerName = "floci-ecs-" + taskId + "-" + def.getName();
 
@@ -123,6 +135,25 @@ public class EcsContainerManager {
             }
             if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
                 specBuilder.withEntrypoint(def.getEntryPoint());
+            }
+
+            // Bind-mount task-level volumes referenced by this container's mountPoints.
+            // The host source path resolves on the Docker daemon (sibling-container launch),
+            // so it must be an absolute host path. Unresolved volume references are skipped.
+            if (def.getMountPoints() != null) {
+                for (MountPoint mp : def.getMountPoints()) {
+                    String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
+                    if (sourcePath == null || mp.containerPath() == null) {
+                        LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
+                                mp.sourceVolume(), def.getName());
+                        continue;
+                    }
+                    if (mp.readOnly()) {
+                        specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
+                    } else {
+                        specBuilder.withBind(sourcePath, mp.containerPath());
+                    }
+                }
             }
 
             ContainerSpec spec = specBuilder.build();
