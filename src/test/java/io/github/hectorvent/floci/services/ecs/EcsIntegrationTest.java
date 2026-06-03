@@ -419,6 +419,48 @@ class EcsIntegrationTest {
             .body("service.desiredCount", equalTo(2));
     }
 
+    @Test
+    @Order(34)
+    void createServiceIdempotentWithSameParameters() {
+        ecs("CreateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "%s",
+                    "taskDefinition": "%s",
+                    "desiredCount": 2,
+                    "launchType": "FARGATE"
+                }
+                """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("service.serviceName", equalTo(SERVICE_NAME))
+                .body("service.status", equalTo("ACTIVE"));
+    }
+
+    @Test
+    @Order(35)
+    void createServiceWithDifferentParametersFailsIdempotency() {
+        ecs("CreateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "%s",
+                    "taskDefinition": "%s",
+                    "desiredCount": 99,
+                    "launchType": "FARGATE"
+                }
+                """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("Creation of service was not idempotent."));
+    }
+
     // ── Tags ─────────────────────────────────────────────────────────────────
 
     @Test
@@ -506,6 +548,27 @@ class EcsIntegrationTest {
 
     @Test
     @Order(51)
+    void updateInactiveServiceHandlesDrainGracefully() {
+        String fullServiceArn = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":service/" + CLUSTER_NAME + "/" + SERVICE_NAME;
+
+        ecs("UpdateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "service": "%s",
+                    "desiredCount": 0
+                }
+                """.formatted(CLUSTER_NAME, fullServiceArn))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("service.serviceName", equalTo(SERVICE_NAME))
+                .body("service.status", equalTo("INACTIVE"));
+    }
+
+    @Test
+    @Order(52)
     void deregisterTaskDefinition() {
         ecs("DeregisterTaskDefinition")
             .body("""
@@ -519,7 +582,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(52)
+    @Order(53)
     void deleteCluster() {
         ecs("DeleteCluster")
             .body("""
@@ -534,7 +597,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(53)
+    @Order(54)
     void deleteClusterNotFound() {
         ecs("DeleteCluster")
             .body("""
