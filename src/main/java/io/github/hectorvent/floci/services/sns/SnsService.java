@@ -59,6 +59,8 @@ public class SnsService {
     /** Mobile-push platforms Floci mocks. iOS and Android only — anything else is rejected. */
     private static final Set<String> SUPPORTED_PUSH_PLATFORMS = Set.of(
             "APNS", "APNS_SANDBOX", "GCM", "FCM");
+    private static final java.util.regex.Pattern PLATFORM_APP_NAME_PATTERN =
+            java.util.regex.Pattern.compile("[a-zA-Z0-9_.\\-]{1,256}");
 
     private final StorageBackend<String, Topic> topicStore;
     private final StorageBackend<String, Subscription> subscriptionStore;
@@ -425,6 +427,13 @@ public class SnsService {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameter", "Name is required.", 400);
         }
+        if (!PLATFORM_APP_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Name Reason: must be made up of only uppercase and"
+                            + " lowercase ASCII letters, numbers, underscores, hyphens, and"
+                            + " periods, and must be between 1 and 256 characters long.",
+                    400);
+        }
         if (platform == null || !SUPPORTED_PUSH_PLATFORMS.contains(platform)) {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Platform Reason: Floci mocks only APNS, APNS_SANDBOX, GCM, and FCM.",
@@ -494,7 +503,7 @@ public class SnsService {
                 .orElseThrow(() -> new AwsException("NotFound",
                         "PlatformApplication does not exist.", 404));
         if ("false".equalsIgnoreCase(app.getAttributes().get("Enabled"))) {
-            throw new AwsException("PlatformApplicationDisabledException",
+            throw new AwsException("PlatformApplicationDisabled",
                     "Platform application is disabled.", 400);
         }
 
@@ -548,7 +557,11 @@ public class SnsService {
         String key = endpointKey(region, endpointArn);
         PlatformEndpoint endpoint = platformEndpointStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Endpoint does not exist.", 404));
-        if (attributes != null) endpoint.getAttributes().putAll(attributes);
+        if (attributes != null) {
+            endpoint.getAttributes().putAll(attributes);
+            String newToken = attributes.get("Token");
+            if (newToken != null) endpoint.setToken(newToken);
+        }
         platformEndpointStore.put(key, endpoint);
     }
 
@@ -585,14 +598,14 @@ public class SnsService {
         PlatformEndpoint endpoint = platformEndpointStore.get(endpointKey(region, endpointArn))
                 .orElseThrow(() -> new AwsException("NotFound", "Endpoint does not exist.", 404));
         if (!"true".equalsIgnoreCase(endpoint.getAttributes().getOrDefault("Enabled", "true"))) {
-            throw new AwsException("EndpointDisabledException",
+            throw new AwsException("EndpointDisabled",
                     "Endpoint " + endpointArn + " disabled", 400);
         }
         PlatformApplication app = platformAppStore.get(platformAppKey(region, endpoint.getPlatformApplicationArn()))
                 .orElseThrow(() -> new AwsException("NotFound",
                         "PlatformApplication does not exist.", 404));
         if ("false".equalsIgnoreCase(app.getAttributes().get("Enabled"))) {
-            throw new AwsException("PlatformApplicationDisabledException",
+            throw new AwsException("PlatformApplicationDisabled",
                     "Platform application is disabled.", 400);
         }
         String payload = resolvePushPayload(app.getPlatform(), message, messageStructure);
@@ -621,16 +634,23 @@ public class SnsService {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Message Reason: Message is not valid JSON.", 400);
         }
-        if (!root.isObject() || !root.has("default")) {
+        if (!root.isObject()) {
             throw new AwsException("InvalidParameter",
-                    "Invalid parameter: Message Reason: Messages must be a JSON object with a 'default' key.",
+                    "Invalid parameter: Message Reason: Messages must be a JSON object.",
                     400);
         }
         JsonNode platformValue = root.get(platform);
         if (platformValue != null && !platformValue.isNull()) {
             return platformValue.isTextual() ? platformValue.asText() : platformValue.toString();
         }
-        return root.get("default").asText();
+        JsonNode defaultValue = root.get("default");
+        if (defaultValue != null && !defaultValue.isNull()) {
+            return defaultValue.isTextual() ? defaultValue.asText() : defaultValue.toString();
+        }
+        throw new AwsException("InvalidParameter",
+                "Invalid parameter: Message Reason: Messages must have a '" + platform
+                        + "' or 'default' key.",
+                400);
     }
 
     private void recordPushNotification(PushNotification notification) {
