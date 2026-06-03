@@ -167,6 +167,29 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(8)
+    void describeImagesWithCatalogFilters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "099720109477")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-*")
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "x86_64")
+            .formParam("Filter.3.Name", "state")
+            .formParam("Filter.3.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-0abcdef1234567892"))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("x86_64"));
+    }
+
+    @Test
+    @Order(9)
     void describeInstanceTypes() {
         given()
             .formParam("Action", "DescribeInstanceTypes")

@@ -67,6 +67,7 @@ public class Ec2Service {
     private final EmulatorConfig config;
     private final Ec2ContainerManager containerManager;
     private final AmiImageResolver amiImageResolver;
+    private final Ec2ImageCatalog imageCatalog;
 
     // region::id → resource
     private final Map<String, Vpc> vpcs = new ConcurrentHashMap<>();
@@ -87,11 +88,12 @@ public class Ec2Service {
 
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
-                      AmiImageResolver amiImageResolver) {
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog) {
         this.accountId = config.defaultAccountId();
         this.config = config;
         this.containerManager = containerManager;
         this.amiImageResolver = amiImageResolver;
+        this.imageCatalog = imageCatalog;
     }
 
     // ─── Default resource seeding ──────────────────────────────────────────────
@@ -923,44 +925,71 @@ public class Ec2Service {
     // ─── AMIs ──────────────────────────────────────────────────────────────────
 
     public List<Image> describeImages(String region, List<String> imageIds, List<String> owners) {
-        List<Image> staticImages = new ArrayList<>();
+        return describeImages(region, imageIds, owners, Map.of());
+    }
 
-        Image al2 = new Image();
-        al2.setImageId("ami-0abcdef1234567890");
-        al2.setName("amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2");
-        al2.setDescription("Amazon Linux 2 AMI");
-        al2.setArchitecture("x86_64");
-        al2.setCreationDate("2023-04-04T00:00:00.000Z");
-        staticImages.add(al2);
-
-        Image al2023 = new Image();
-        al2023.setImageId("ami-0abcdef1234567891");
-        al2023.setName("al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64");
-        al2023.setDescription("Amazon Linux 2023 AMI");
-        al2023.setArchitecture("x86_64");
-        al2023.setCreationDate("2023-03-15T00:00:00.000Z");
-        staticImages.add(al2023);
-
-        Image ubuntu = new Image();
-        ubuntu.setImageId("ami-0abcdef1234567892");
-        ubuntu.setName("ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20230324");
-        ubuntu.setDescription("Canonical, Ubuntu, 20.04 LTS");
-        ubuntu.setArchitecture("x86_64");
-        ubuntu.setCreationDate("2023-03-24T00:00:00.000Z");
-        staticImages.add(ubuntu);
-
-        Image windows = new Image();
-        windows.setImageId("ami-0abcdef1234567893");
-        windows.setName("Windows_Server-2022-English-Full-Base-2023.04.12");
-        windows.setDescription("Microsoft Windows Server 2022 Full Locale English AMI");
-        windows.setArchitecture("x86_64");
-        windows.setPlatform("windows");
-        windows.setCreationDate("2023-04-12T00:00:00.000Z");
-        staticImages.add(windows);
-
-        return staticImages.stream()
-                .filter(img -> imageIds.isEmpty() || imageIds.contains(img.getImageId()))
+    public List<Image> describeImages(String region, List<String> imageIds, List<String> owners, Map<String, List<String>> filters) {
+        return imageCatalog.images().stream()
+                .filter(Ec2ImageCatalog.CatalogImage::advertised)
+                .filter(img -> img.matchesIdOrAlias(imageIds))
+                .filter(img -> img.matchesOwner(owners))
+                .filter(img -> matchesImageFilters(img, filters))
+                .map(Ec2ImageCatalog.CatalogImage::toImage)
                 .collect(Collectors.toList());
+    }
+
+    private boolean matchesImageFilters(Ec2ImageCatalog.CatalogImage image, Map<String, List<String>> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return true;
+        }
+        for (Map.Entry<String, List<String>> filter : filters.entrySet()) {
+            if (!matchesImageFilter(image, filter.getKey(), filter.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean matchesImageFilter(Ec2ImageCatalog.CatalogImage catalogImage, String name, List<String> values) {
+        Image image = catalogImage.toImage();
+        return switch (name) {
+            case "architecture" -> matchesFilterValue(values, image.getArchitecture());
+            case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
+            case "image-id" -> catalogImage.idsAndAliases().stream().anyMatch(id -> matchesFilterValue(values, id));
+            case "image-type" -> matchesFilterValue(values, "machine");
+            case "is-public" -> matchesFilterValue(values, String.valueOf(image.isPublic()));
+            case "name" -> matchesFilterValue(values, image.getName());
+            case "owner-alias" -> matchesFilterValue(values, image.getImageOwnerAlias());
+            case "owner-id" -> matchesFilterValue(values, image.getOwnerId());
+            case "root-device-name" -> matchesFilterValue(values, image.getRootDeviceName());
+            case "root-device-type" -> matchesFilterValue(values, image.getRootDeviceType());
+            case "state" -> matchesFilterValue(values, image.getState());
+            case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
+            default -> true;
+        };
+    }
+
+    private boolean matchesFilterValue(List<String> patterns, String value) {
+        if (patterns == null || patterns.isEmpty()) {
+            return true;
+        }
+        if (value == null) {
+            return false;
+        }
+        return patterns.stream().anyMatch(pattern -> wildcardMatches(pattern, value));
+    }
+
+    private boolean wildcardMatches(String pattern, String value) {
+        if (pattern == null) {
+            return false;
+        }
+        if (!pattern.contains("*")) {
+            return pattern.equals(value);
+        }
+        String regex = pattern.chars()
+                .mapToObj(ch -> ch == '*' ? ".*" : java.util.regex.Pattern.quote(String.valueOf((char) ch)))
+                .collect(Collectors.joining());
+        return value.matches(regex);
     }
 
     // ─── Tags ──────────────────────────────────────────────────────────────────

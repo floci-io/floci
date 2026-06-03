@@ -883,7 +883,8 @@ public class Ec2QueryHandler {
     private Response handleDescribeImages(MultivaluedMap<String, String> p, String region) {
         List<String> imageIds = getList(p, "ImageId");
         List<String> owners = getList(p, "Owner");
-        List<Image> images = service.describeImages(region, imageIds, owners);
+        Map<String, List<String>> filters = getFilters(p);
+        List<Image> images = service.describeImages(region, imageIds, owners, filters);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeImagesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
