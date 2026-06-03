@@ -190,6 +190,29 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(9)
+    void describeImagesWithUbuntu2404Arm64Filters() {
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Owner.1", "099720109477")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-*")
+            .formParam("Filter.2.Name", "architecture")
+            .formParam("Filter.2.Value.1", "arm64")
+            .formParam("Filter.3.Name", "state")
+            .formParam("Filter.3.Value.1", "available")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-ubuntu2404-arm64"))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+    }
+
+    @Test
+    @Order(9)
     void describeInstanceTypes() {
         given()
             .formParam("Action", "DescribeInstanceTypes")

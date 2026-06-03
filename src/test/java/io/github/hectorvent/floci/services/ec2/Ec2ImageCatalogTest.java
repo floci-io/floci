@@ -33,6 +33,8 @@ class Ec2ImageCatalogTest {
                 "ami-0abcdef1234567891",
                 "ami-0abcdef1234567892",
                 "ami-ubuntu2204",
+                "ami-ubuntu2404-arm64",
+                "ami-ubuntu2404-amd64",
                 "ami-debian12",
                 "ami-alpine",
                 "ami-0abcdef1234567893"), imageIds);
@@ -40,7 +42,7 @@ class Ec2ImageCatalogTest {
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-amazonlinux2023").isPresent());
         assertTrue(imageCatalog.findByIdOrAlias("ami-ubuntu2004").isPresent());
-        assertFalse(imageCatalog.findByIdOrAlias("ami-ubuntu2404").isPresent());
+        assertTrue(imageCatalog.findByIdOrAlias("ami-ubuntu2404").isPresent());
     }
 
     @Test
@@ -48,7 +50,7 @@ class Ec2ImageCatalogTest {
         imageCatalog.images()
                 .forEach(image -> assertEquals(image.dockerImage, amiImageResolver.resolve(image.imageId)));
 
-        List.of("ami-amazonlinux2", "ami-amazonlinux2023", "ami-ubuntu2004")
+        List.of("ami-amazonlinux2", "ami-amazonlinux2023", "ami-ubuntu2004", "ami-ubuntu2404")
                 .forEach(alias -> assertEquals(
                         imageCatalog.findByIdOrAlias(alias).orElseThrow().dockerImage,
                         amiImageResolver.resolve(alias)));
