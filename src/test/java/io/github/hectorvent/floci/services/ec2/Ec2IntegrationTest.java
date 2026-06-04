@@ -253,6 +253,28 @@ class Ec2IntegrationTest {
                     startsWith("us-east-1"));
     }
 
+    @Test
+    @Order(9)
+    void describeArmInstanceTypeOfferingByRegion() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "t4g.medium")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].instanceType",
+                    equalTo("t4g.medium"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].locationType",
+                    equalTo("region"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].location",
+                    equalTo("us-east-1"));
+    }
+
     // =========================================================================
     // VPCs
     // =========================================================================

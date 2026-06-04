@@ -1602,6 +1602,7 @@ public class Ec2Service {
         allTypes.add(buildInstanceType("m5.large", 2, 8192));
         allTypes.add(buildInstanceType("t4g.micro", 2, 1024, List.of("arm64")));
         allTypes.add(buildInstanceType("t4g.small", 2, 2048, List.of("arm64")));
+        allTypes.add(buildInstanceType("t4g.medium", 2, 4096, List.of("arm64")));
 
         if (instanceTypeNames.isEmpty()) {
             return allTypes;
