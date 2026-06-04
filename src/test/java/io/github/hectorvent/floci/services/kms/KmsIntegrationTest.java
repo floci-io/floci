@@ -298,6 +298,40 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void disableKeyUpdatesDescribeKeyState() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"disable-key\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.DisableKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.Enabled", equalTo(false))
+                .body("KeyMetadata.KeyState", equalTo("Disabled"));
+    }
+
+    @Test
     void listGrantsReturnsEmptyGrantListThroughJsonHandler() {
         String keyId = given()
                 .header("X-Amz-Target", "TrentService.CreateKey")

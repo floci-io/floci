@@ -68,6 +68,7 @@ public class KmsJsonHandler {
             case "GetKeyRotationStatus" -> handleGetKeyRotationStatus(request, region);
             case "EnableKeyRotation" -> handleEnableKeyRotation(request, region);
             case "DisableKeyRotation" -> handleDisableKeyRotation(request, region);
+            case "DisableKey" -> handleDisableKey(request, region);
             case "RotateKeyOnDemand" -> handleRotateKeyOnDemand(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
@@ -490,6 +491,11 @@ public class KmsJsonHandler {
 
     private Response handleDisableKeyRotation(JsonNode request, String region) {
         service.disableKeyRotation(request.path("KeyId").asText(), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleDisableKey(JsonNode request, String region) {
+        service.disableKey(request.path("KeyId").asText(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

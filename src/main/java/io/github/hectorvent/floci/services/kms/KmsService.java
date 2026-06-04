@@ -516,6 +516,14 @@ public class KmsService {
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    public void disableKey(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        key.setEnabled(false);
+        key.setKeyState("Disabled");
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Disabled KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
     private static final int ON_DEMAND_ROTATION_LIMIT = 25;
     public String rotateKeyOnDemand(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
