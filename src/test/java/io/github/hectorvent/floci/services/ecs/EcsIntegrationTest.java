@@ -31,6 +31,9 @@ class EcsIntegrationTest {
     private static final String CLUSTER_NAME = "test-cluster";
     private static final String CLUSTER_ARN =
             "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":cluster/" + CLUSTER_NAME;
+    private static final String TAGGED_CLUSTER_NAME = "tagged-create-cluster";
+    private static final String TAGGED_CLUSTER_ARN =
+            "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":cluster/" + TAGGED_CLUSTER_NAME;
     private static final String TASK_DEF_FAMILY = "test-task";
     private static final String SERVICE_NAME = "test-service";
 
@@ -114,6 +117,38 @@ class EcsIntegrationTest {
             .body("clusterArns", hasItem(containsString(CLUSTER_NAME)));
     }
 
+    @Test
+    @Order(5)
+    void createClusterWithTagsAvailableThroughListTagsForResource() {
+        ecs("CreateCluster")
+            .body("""
+                {
+                    "clusterName": "%s",
+                    "tags": [
+                        {"key": "Environment", "value": "dev"},
+                        {"key": "Project", "value": "project1"}
+                    ]
+                }
+                """.formatted(TAGGED_CLUSTER_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("cluster.clusterName", equalTo(TAGGED_CLUSTER_NAME));
+
+        ecs("ListTagsForResource")
+            .body("""
+                {"resourceArn": "%s"}
+                """.formatted(TAGGED_CLUSTER_ARN))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("tags", hasSize(2))
+            .body("tags.find { it.key == 'Environment' }.value", equalTo("dev"))
+            .body("tags.find { it.key == 'Project' }.value", equalTo("project1"));
+    }
+
     // ── Task Definitions ──────────────────────────────────────────────────────
 
     @Test
@@ -136,7 +171,11 @@ class EcsIntegrationTest {
                     "requiresCompatibilities": ["FARGATE"],
                     "cpu": "256",
                     "memory": "512",
-                    "networkMode": "awsvpc"
+                    "networkMode": "awsvpc",
+                    "tags": [
+                        {"key": "Environment", "value": "dev"},
+                        {"key": "Project", "value": "project1"}
+                    ]
                 }
                 """.formatted(TASK_DEF_FAMILY))
         .when()
@@ -151,6 +190,18 @@ class EcsIntegrationTest {
             .body("taskDefinition.containerDefinitions[0].name", equalTo("app"))
         .extract()
             .path("taskDefinition.taskDefinitionArn");
+
+        ecs("ListTagsForResource")
+            .body("""
+                {"resourceArn": "%s"}
+                """.formatted(taskDefArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("tags", hasSize(2))
+            .body("tags.find { it.key == 'Environment' }.value", equalTo("dev"))
+            .body("tags.find { it.key == 'Project' }.value", equalTo("project1"));
     }
 
     @Test
@@ -284,7 +335,11 @@ class EcsIntegrationTest {
                     "serviceName": "%s",
                     "taskDefinition": "%s",
                     "desiredCount": 1,
-                    "launchType": "FARGATE"
+                    "launchType": "FARGATE",
+                    "tags": [
+                        {"key": "Environment", "value": "dev"},
+                        {"key": "Project", "value": "project1"}
+                    ]
                 }
                 """.formatted(CLUSTER_NAME, SERVICE_NAME, TASK_DEF_FAMILY))
         .when()
@@ -298,6 +353,18 @@ class EcsIntegrationTest {
             .body("service.status", equalTo("ACTIVE"))
         .extract()
             .path("service.serviceArn");
+
+        ecs("ListTagsForResource")
+            .body("""
+                {"resourceArn": "%s"}
+                """.formatted(serviceArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("tags", hasSize(2))
+            .body("tags.find { it.key == 'Environment' }.value", equalTo("dev"))
+            .body("tags.find { it.key == 'Project' }.value", equalTo("project1"));
     }
 
     @Test

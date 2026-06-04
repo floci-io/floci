@@ -93,6 +93,15 @@ floci:
     # extra-suffixes:
     #   - localhost.localstack.cloud
 
+    # Public resolvers appended after Floci's embedded DNS on spawned containers' HostConfig.Dns,
+    # and used as the fallback upstream for Floci's own DNS forwarder. Lets Lambda/CodeBuild
+    # resolve public hostnames even if the embedded forwarder cannot answer.
+    # Disable in offline/locked-down networks where these resolvers are blocked.
+    container-fallback-enabled: true              # FLOCI_DNS_CONTAINER_FALLBACK_ENABLED
+    container-fallback-servers:                   # FLOCI_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
+      - 8.8.8.8
+      - 8.8.4.4
+
   auth:
     validate-signatures: false
     presign-secret: local-emulator-secret
@@ -264,6 +273,8 @@ floci:
       api-server-max-port: 6599
       data-path: ./data/eks
       keep-running-on-shutdown: false
+      endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
+      iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
     elbv2:
       enabled: true
       mock: false

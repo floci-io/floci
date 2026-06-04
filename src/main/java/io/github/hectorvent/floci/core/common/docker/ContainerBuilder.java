@@ -319,9 +319,22 @@ public class ContainerBuilder {
          * Injects Floci's embedded DNS server into the container so virtual-hosted
          * S3 hostnames (my-bucket.localhost.floci.io) resolve to Floci's Docker
          * network IP. No-op when the embedded DNS server is not running.
+         *
+         * <p>When {@code floci.dns.container-fallback-enabled} is set, the configured public
+         * fallback resolvers are appended after Floci's IP so the container's own resolver can
+         * fall through for public hostnames if Floci's embedded forwarder cannot answer.
          */
         public Builder withEmbeddedDns() {
-            embeddedDnsServer.getServerIp().ifPresent(dnsServers::add);
+            embeddedDnsServer.getServerIp().ifPresent(flociIp -> {
+                dnsServers.add(flociIp);
+                if (config.dns().containerFallbackEnabled()) {
+                    for (String fallback : config.dns().containerFallbackServers()) {
+                        if (fallback != null && !fallback.isBlank() && !dnsServers.contains(fallback.trim())) {
+                            dnsServers.add(fallback.trim());
+                        }
+                    }
+                }
+            });
             return this;
         }
 

@@ -25,6 +25,8 @@ public class S3Object {
     private String contentDisposition;
     private String cacheControl;
     private String serverSideEncryption;
+    private String sseCustomerAlgorithm;
+    private String sseCustomerKeyMd5;
     private long size;
     private Instant lastModified;
     private String eTag;
@@ -92,6 +94,12 @@ public class S3Object {
 
     public String getServerSideEncryption() { return serverSideEncryption; }
     public void setServerSideEncryption(String serverSideEncryption) { this.serverSideEncryption = serverSideEncryption; }
+
+    public String getSseCustomerAlgorithm() { return sseCustomerAlgorithm; }
+    public void setSseCustomerAlgorithm(String sseCustomerAlgorithm) { this.sseCustomerAlgorithm = sseCustomerAlgorithm; }
+
+    public String getSseCustomerKeyMd5() { return sseCustomerKeyMd5; }
+    public void setSseCustomerKeyMd5(String sseCustomerKeyMd5) { this.sseCustomerKeyMd5 = sseCustomerKeyMd5; }
 
     public long getSize() { return size; }
     public void setSize(long size) { this.size = size; }

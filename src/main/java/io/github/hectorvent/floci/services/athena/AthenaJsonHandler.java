@@ -59,6 +59,36 @@ public class AthenaJsonHandler {
                         athenaService.listQueryExecutions().stream()
                                 .map(QueryExecution::getQueryExecutionId).toList())).build();
             }
+            case "StopQueryExecution" -> {
+                athenaService.stopQueryExecution(request.get("QueryExecutionId").asText());
+                yield Response.ok(Map.of()).build();
+            }
+            case "GetWorkGroup" -> {
+                String name = request.has("WorkGroup") ? request.get("WorkGroup").asText() : "primary";
+                yield Response.ok(Map.of("WorkGroup", athenaService.getWorkGroup(name))).build();
+            }
+            case "ListWorkGroups" -> Response.ok(Map.of("WorkGroups", athenaService.listWorkGroups())).build();
+            case "CreateWorkGroup" -> Response.ok(Map.of()).build();
+            case "ListDataCatalogs" -> Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs())).build();
+            case "GetDataCatalog" -> {
+                String name = request.has("Name") ? request.get("Name").asText() : AthenaService.DEFAULT_CATALOG;
+                yield Response.ok(Map.of("DataCatalog", athenaService.getDataCatalog(name))).build();
+            }
+            case "ListDatabases" -> {
+                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                yield Response.ok(Map.of("DatabaseList", athenaService.listDatabases(catalog))).build();
+            }
+            case "ListTableMetadata" -> {
+                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
+                yield Response.ok(Map.of("TableMetadataList", athenaService.listTableMetadata(catalog, database))).build();
+            }
+            case "GetTableMetadata" -> {
+                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
+                String tableName = request.get("TableName").asText();
+                yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
+            }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
     }

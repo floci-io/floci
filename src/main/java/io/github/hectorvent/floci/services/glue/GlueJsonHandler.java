@@ -70,6 +70,15 @@ public class GlueJsonHandler {
                 String dbName = request.get("DatabaseName").asText();
                 yield Response.ok(Map.of("TableList", glueService.getTables(dbName))).build();
             }
+            case "UpdateTable" -> {
+                String dbName = request.get("DatabaseName").asText();
+                Table table = mapper.treeToValue(request.get("TableInput"), Table.class);
+                glueService.updateTable(dbName, table);
+                yield Response.ok().build();
+            }
+            case "GetTableVersions" -> {
+                yield Response.ok(Map.of("TableVersions", glueService.getTableVersions())).build();
+            }
             case "DeleteTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("Name").asText();

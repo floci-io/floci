@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
@@ -105,6 +106,10 @@ public class EcsService {
     // ── Clusters ─────────────────────────────────────────────────────────────
 
     public EcsCluster createCluster(String clusterName, String region) {
+        return createCluster(clusterName, null, region);
+    }
+
+    public EcsCluster createCluster(String clusterName, Map<String, String> tags, String region) {
         String name = (clusterName == null || clusterName.isBlank()) ? DEFAULT_CLUSTER : clusterName;
         String key = clusterKey(region, name);
         if (clusters.containsKey(key)) {
@@ -114,6 +119,9 @@ public class EcsService {
         cluster.setClusterName(name);
         cluster.setClusterArn(regionResolver.buildArn("ecs", region, "cluster/" + name));
         cluster.setStatus("ACTIVE");
+        if (tags != null && !tags.isEmpty()) {
+            cluster.setTags(new LinkedHashMap<>(tags));
+        }
         clusters.put(key, cluster);
         LOG.infov("Created ECS cluster: {0} in {1}", name, region);
         return cluster;
@@ -184,6 +192,14 @@ public class EcsService {
                                                   NetworkMode networkMode, String cpu, String memory,
                                                   String taskRoleArn, String executionRoleArn,
                                                   String region) {
+        return registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
+                taskRoleArn, executionRoleArn, null, region);
+    }
+
+    public TaskDefinition registerTaskDefinition(String family, List<ContainerDefinition> containerDefs,
+                                                  NetworkMode networkMode, String cpu, String memory,
+                                                  String taskRoleArn, String executionRoleArn,
+                                                  Map<String, String> tags, String region) {
         int revision = latestRevisions.merge(family, 1, Integer::sum);
 
         TaskDefinition td = new TaskDefinition();
@@ -198,6 +214,9 @@ public class EcsService {
         td.setContainerDefinitions(containerDefs != null ? containerDefs : List.of());
         td.setTaskDefinitionArn(regionResolver.buildArn("ecs", region,
                 "task-definition/" + family + ":" + revision));
+        if (tags != null && !tags.isEmpty()) {
+            td.setTags(new LinkedHashMap<>(tags));
+        }
 
         taskDefinitions.put(family + ":" + revision, td);
         LOG.infov("Registered task definition: {0}:{1}", family, revision);
@@ -247,10 +266,12 @@ public class EcsService {
     // ── Tasks ─────────────────────────────────────────────────────────────────
 
     public List<EcsTask> runTask(String clusterRef, String taskDefinitionRef, int count,
-                                  LaunchType launchType, String group, String startedBy, String region) {
+                                  LaunchType launchType, String group, String startedBy,
+                                  List<ContainerOverride> containerOverrides, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         TaskDefinition taskDef = resolveTaskDefinitionOrThrow(taskDefinitionRef, region);
-        return launchTasks(cluster, taskDef, count, launchType, group, startedBy, null, region);
+        return launchTasks(cluster, taskDef, count, launchType, group, startedBy, null,
+                containerOverrides, region);
     }
 
     public List<EcsTask> startTask(String clusterRef, List<String> containerInstanceRefs,
@@ -261,7 +282,7 @@ public class EcsService {
         for (String instanceRef : containerInstanceRefs) {
             ContainerInstance instance = resolveContainerInstanceOrThrow(cluster.getClusterArn(), instanceRef);
             List<EcsTask> launched = launchTasks(cluster, taskDef, 1, LaunchType.EC2,
-                    group, startedBy, instance.getContainerInstanceArn(), region);
+                    group, startedBy, instance.getContainerInstanceArn(), null, region);
             result.addAll(launched);
         }
         return result;
@@ -269,7 +290,8 @@ public class EcsService {
 
     private List<EcsTask> launchTasks(EcsCluster cluster, TaskDefinition taskDef, int count,
                                        LaunchType launchType, String group, String startedBy,
-                                       String containerInstanceArn, String region) {
+                                       String containerInstanceArn,
+                                       List<ContainerOverride> containerOverrides, String region) {
         List<EcsTask> launched = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             String taskId = UUID.randomUUID().toString().replace("-", "");
@@ -295,7 +317,7 @@ public class EcsService {
 
             if (dockerMode) {
                 try {
-                    EcsTaskHandle handle = containerManager.startTask(task, taskDef, region);
+                    EcsTaskHandle handle = containerManager.startTask(task, taskDef, containerOverrides, region);
                     taskHandles.put(taskArn, handle);
                     cluster.setRunningTasksCount(cluster.getRunningTasksCount() + 1);
                     LOG.infov("Started ECS task (docker): {0}", taskArn);
@@ -448,6 +470,15 @@ public class EcsService {
                                           int desiredCount, LaunchType launchType,
                                           List<EcsLoadBalancer> loadBalancers,
                                           NetworkConfiguration networkConfiguration, String region) {
+        return createService(clusterRef, serviceName, taskDefinition, desiredCount, launchType,
+                loadBalancers, networkConfiguration, null, region);
+    }
+
+    public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
+                                          int desiredCount, LaunchType launchType,
+                                          List<EcsLoadBalancer> loadBalancers,
+                                          NetworkConfiguration networkConfiguration,
+                                          Map<String, String> tags, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         resolveTaskDefinitionOrThrow(taskDefinition, region);
 
@@ -469,6 +500,9 @@ public class EcsService {
         svc.setNetworkConfiguration(networkConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
+        if (tags != null && !tags.isEmpty()) {
+            svc.setTags(new LinkedHashMap<>(tags));
+        }
 
         services.put(key, svc);
         cluster.setActiveServicesCount(cluster.getActiveServicesCount() + 1);
@@ -1123,7 +1157,7 @@ public class EcsService {
             for (int i = 0; i < toStart; i++) {
                 try {
                     List<EcsTask> launched = runTask(clusterName, svc.getTaskDefinition(), 1,
-                            svc.getLaunchType(), svc.getServiceName(), "ecs-svc", region);
+                            svc.getLaunchType(), svc.getServiceName(), "ecs-svc", null, region);
                     LOG.infov("Service reconciler started task {0} for service {1}",
                             launched.getFirst().getTaskArn(), svc.getServiceName());
                 } catch (Exception e) {

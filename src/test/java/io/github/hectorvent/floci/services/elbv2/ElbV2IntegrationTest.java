@@ -246,6 +246,35 @@ class ElbV2IntegrationTest {
                         equalTo("deregistration_delay.timeout_seconds"));
     }
 
+    @Test
+    @Order(14)
+    void describeTargetGroupsByMissingNameThrows() {
+        given()
+                .formParam("Action", "DescribeTargetGroups")
+                .formParam("Names.member.1", "target-group-that-does-not-exist")
+                .header("Authorization", AUTH)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("TargetGroupNotFound"));
+    }
+
+    @Test
+    @Order(15)
+    void describeTargetGroupsByMissingArnThrows() {
+        given()
+                .formParam("Action", "DescribeTargetGroups")
+                .formParam("TargetGroupArns.member.1",
+                        "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/missing/0123456789abcdef")
+                .header("Authorization", AUTH)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("TargetGroupNotFound"));
+    }
+
     // ── Targets ───────────────────────────────────────────────────────────────
 
     @Test

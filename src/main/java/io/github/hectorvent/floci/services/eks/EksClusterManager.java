@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
@@ -22,6 +23,8 @@ import java.net.URI;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
@@ -35,10 +38,16 @@ public class EksClusterManager {
     private static final Logger LOG = Logger.getLogger(EksClusterManager.class);
     private static final int K3S_API_SERVER_PORT = 6443;
 
+    private static final String WEBHOOK_CONFIG_DIR = "/etc";
+    private static final String WEBHOOK_CONFIG_FILE = "token-webhook.yaml";
+    private static final String WEBHOOK_CONFIG_PATH = WEBHOOK_CONFIG_DIR + "/" + WEBHOOK_CONFIG_FILE;
+    private static final String ENDPOINT_MODE_NETWORK = "network";
+
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
+    private final DockerHostResolver dockerHostResolver;
     private final EmulatorConfig config;
 
     @Inject
@@ -46,11 +55,13 @@ public class EksClusterManager {
                              ContainerLifecycleManager lifecycleManager,
                              ContainerDetector containerDetector,
                              PortAllocator portAllocator,
+                             DockerHostResolver dockerHostResolver,
                              EmulatorConfig config) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.containerDetector = containerDetector;
         this.portAllocator = portAllocator;
+        this.dockerHostResolver = dockerHostResolver;
         this.config = config;
     }
 
@@ -71,6 +82,8 @@ public class EksClusterManager {
                 config.services().eks().apiServerBasePort(),
                 config.services().eks().apiServerMaxPort());
 
+        cluster.setHostPort(hostPort);
+
         // Remove any stale container
         lifecycleManager.removeIfExists(containerName);
 
@@ -84,41 +97,67 @@ public class EksClusterManager {
         // k3s before it can start. Named volumes live in the Docker VM's Linux
         // filesystem, so chmod works correctly and data persists across container restarts.
         String volumeName = "floci-eks-" + cluster.getName();
-        ContainerSpec spec = containerBuilder.newContainer(image)
+
+        List<String> serverArgs = new ArrayList<>(List.of("server",
+                "--disable=traefik",
+                "--tls-san=localhost"));
+
+        ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
-                .withCmd(List.of("server",
-                        "--disable=traefik",
-                        "--tls-san=localhost"))
                 .withEnv("K3S_KUBECONFIG_MODE", "644")
                 .withPortBinding(K3S_API_SERVER_PORT, hostPort)
                 .withNamedVolume(volumeName, "/var/lib/rancher/k3s")
                 .withDockerNetwork(config.services().eks().dockerNetwork())
                 .withPrivileged(true)
-                .withLogRotation()
-                .build();
+                .withLogRotation();
 
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
-        cluster.setContainerId(info.containerId());
-
-        // Public endpoint uses the container name (DNS-resolvable on user-defined networks).
-        // Internal endpoint uses the resolved IP from ContainerLifecycleManager so the
-        // readiness poller works on the default bridge network where container-name DNS
-        // is not available.
-        if (containerDetector.isRunningInContainer()) {
-            cluster.setEndpoint("https://" + containerName + ":" + K3S_API_SERVER_PORT);
-            ContainerLifecycleManager.EndpointInfo ep = info.getEndpoint(K3S_API_SERVER_PORT);
-            if (ep != null) {
-                cluster.setInternalEndpoint("https://" + ep.host() + ":" + ep.port());
-            } else {
-                cluster.setInternalEndpoint(cluster.getEndpoint());
+        // Wire a token-authentication webhook so `aws eks get-token` bearer tokens are validated by
+        // Floci and mapped to cluster-admin. The k3s API server POSTs a TokenReview to Floci's
+        // _floci/eks/token-webhook endpoint. The kubeconfig is copied into the container via the
+        // Docker API after create and before start (below) — not bind-mounted — so it works the same
+        // natively and in Docker-in-Docker, with no host-path / host-persistent-path requirement.
+        String webhookLocalFile = null;
+        if (config.services().eks().iamAuthWebhook()) {
+            webhookLocalFile = writeWebhookKubeconfig(cluster.getName());
+            if (webhookLocalFile != null) {
+                specBuilder.withHostDockerInternalOnLinux();
+                serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-config-file="
+                        + WEBHOOK_CONFIG_PATH);
+                serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-version=v1");
+                serverArgs.add("--kube-apiserver-arg=authentication-token-webhook-cache-ttl=30s");
             }
+        }
+
+        ContainerSpec spec = specBuilder.withCmd(serverArgs).build();
+
+        // create -> inject webhook kubeconfig -> start, so the file exists before the API server boots.
+        String containerId = lifecycleManager.create(spec);
+        cluster.setContainerId(containerId);
+        if (webhookLocalFile != null) {
+            copyWebhookIntoContainer(containerId, webhookLocalFile, cluster.getName());
+        }
+        ContainerInfo info = lifecycleManager.startCreated(containerId, spec);
+
+        // Public endpoint: see floci.services.eks.endpoint-mode. `host` (default) is the host-reachable
+        // published port (k3s cert carries `--tls-san=localhost`, so it verifies against the CA that
+        // describe-cluster returns); `network` is the container DNS name (pre-#1118 behaviour).
+        cluster.setEndpoint(resolvePublicEndpoint(
+                containerDetector.isRunningInContainer(), config.services().eks().endpointMode(),
+                containerName, hostPort));
+
+        // Internal endpoint uses the resolved container IP so the readiness poller works from inside
+        // the Docker network (where localhost:<hostPort> would not reach the k3s container).
+        if (containerDetector.isRunningInContainer()) {
+            ContainerLifecycleManager.EndpointInfo ep = info.getEndpoint(K3S_API_SERVER_PORT);
+            cluster.setInternalEndpoint(ep != null
+                    ? "https://" + ep.host() + ":" + ep.port()
+                    : "https://localhost:" + hostPort);
         } else {
-            cluster.setEndpoint("https://localhost:" + hostPort);
-            cluster.setInternalEndpoint(cluster.getEndpoint());
+            cluster.setInternalEndpoint("https://localhost:" + hostPort);
         }
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
-                info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
+                containerId, cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
     }
 
     /**
@@ -193,6 +232,86 @@ public class EksClusterManager {
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
         lifecycleManager.removeVolume("floci-eks-" + cluster.getName());
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
+    }
+
+    /**
+     * Resolves the public {@code describe-cluster} endpoint. Returns the container DNS name only when
+     * Floci runs in a container and {@code endpoint-mode=network}; otherwise the host-reachable
+     * published port (the default, and the only usable value in native mode).
+     */
+    static String resolvePublicEndpoint(boolean inContainer, String endpointMode,
+                                        String containerName, int hostPort) {
+        if (inContainer && ENDPOINT_MODE_NETWORK.equalsIgnoreCase(endpointMode)) {
+            return "https://" + containerName + ":" + K3S_API_SERVER_PORT;
+        }
+        return "https://localhost:" + hostPort;
+    }
+
+    /**
+     * Writes the token-webhook kubeconfig for the given cluster to Floci's local filesystem and
+     * returns its path (basename {@value #WEBHOOK_CONFIG_FILE}), or {@code null} if it could not be
+     * written (in which case the caller skips the webhook so cluster creation still succeeds). The
+     * file is later streamed into the container via the Docker API, so no host path is involved.
+     */
+    private String writeWebhookKubeconfig(String clusterName) {
+        Path localFile = Paths.get(config.services().eks().dataPath(), "webhook", clusterName, WEBHOOK_CONFIG_FILE)
+                .toAbsolutePath().normalize();
+        try {
+            Files.createDirectories(localFile.getParent());
+            Files.writeString(localFile, buildWebhookKubeconfig(webhookUrl()));
+        } catch (IOException e) {
+            LOG.warnv("EKS token-webhook disabled for cluster {0}: could not write kubeconfig: {1}",
+                    clusterName, e.getMessage());
+            return null;
+        }
+        return localFile.toString();
+    }
+
+    /**
+     * Streams the webhook kubeconfig from Floci's filesystem into the (created, not-yet-started)
+     * k3s container at {@value #WEBHOOK_CONFIG_PATH}, using the Docker API. Reading the file
+     * client-side avoids any host bind-mount, so this works in native and Docker-in-Docker modes
+     * alike. A failure here disables the webhook for the cluster but does not abort its startup.
+     */
+    private void copyWebhookIntoContainer(String containerId, String localFile, String clusterName) {
+        try {
+            lifecycleManager.getDockerClient()
+                    .copyArchiveToContainerCmd(containerId)
+                    .withHostResource(localFile)
+                    .withRemotePath(WEBHOOK_CONFIG_DIR)
+                    .exec();
+        } catch (Exception e) {
+            LOG.warnv("EKS token-webhook may not authenticate for cluster {0}: could not copy kubeconfig "
+                    + "into the k3s container: {1}", clusterName, e.getMessage());
+        }
+    }
+
+    /** The Floci token-webhook URL as reachable from inside the k3s container. */
+    String webhookUrl() {
+        return "http://" + dockerHostResolver.resolve() + ":" + config.port() + "/_floci/eks/token-webhook";
+    }
+
+    /**
+     * Builds a minimal kubeconfig that points the k3s API server's token-authentication webhook
+     * at Floci. The webhook server uses anonymous access (no client credentials needed).
+     */
+    static String buildWebhookKubeconfig(String serverUrl) {
+        return """
+                apiVersion: v1
+                kind: Config
+                clusters:
+                - name: floci-token-webhook
+                  cluster:
+                    server: %s
+                users:
+                - name: floci-token-webhook
+                contexts:
+                - name: floci-token-webhook
+                  context:
+                    cluster: floci-token-webhook
+                    user: floci-token-webhook
+                current-context: floci-token-webhook
+                """.formatted(serverUrl);
     }
 
     private String execInContainer(String containerId, String[] cmd) throws Exception {

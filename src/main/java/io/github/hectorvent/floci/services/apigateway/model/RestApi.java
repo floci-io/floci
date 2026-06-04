@@ -13,6 +13,8 @@ public class RestApi {
     private String description;
     private long createdDate;
     private Map<String, String> tags = new HashMap<>();
+    private EndpointConfiguration endpointConfiguration;
+
 
     public String getId() {
         return id;
@@ -52,5 +54,13 @@ public class RestApi {
 
     public void setTags(Map<String, String> tags) {
         this.tags = tags != null ? tags : new HashMap<>();
+    }
+
+    public EndpointConfiguration getEndpointConfiguration() {
+        return endpointConfiguration;
+    }
+
+    public void setEndpointConfiguration(EndpointConfiguration endpointConfiguration) {
+        this.endpointConfiguration = endpointConfiguration;
     }
 }

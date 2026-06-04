@@ -24,6 +24,9 @@ public class ConfigurationSet {
     @JsonProperty("EventDestinations")
     private List<EventDestination> eventDestinations = new ArrayList<>();
 
+    @JsonProperty("SuppressionOptions")
+    private SuppressionOptions suppressionOptions;
+
     public ConfigurationSet() {}
 
     public ConfigurationSet(String name) {
@@ -43,5 +46,10 @@ public class ConfigurationSet {
     public List<EventDestination> getEventDestinations() { return eventDestinations; }
     public void setEventDestinations(List<EventDestination> eventDestinations) {
         this.eventDestinations = eventDestinations != null ? eventDestinations : new ArrayList<>();
+    }
+
+    public SuppressionOptions getSuppressionOptions() { return suppressionOptions; }
+    public void setSuppressionOptions(SuppressionOptions suppressionOptions) {
+        this.suppressionOptions = suppressionOptions;
     }
 }

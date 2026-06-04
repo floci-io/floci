@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
@@ -131,7 +132,8 @@ public class EcsJsonHandler {
 
     private Response handleCreateCluster(JsonNode req, String region) {
         String name = req.path("clusterName").asText(null);
-        EcsCluster cluster = service.createCluster(name, region);
+        Map<String, String> tags = parseTagMap(req.path("tags"));
+        EcsCluster cluster = service.createCluster(name, tags, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", clusterNode(cluster));
         return Response.ok(resp).build();
@@ -203,9 +205,10 @@ public class EcsJsonHandler {
         String memory = req.has("memory") ? req.path("memory").asText() : null;
         String taskRoleArn = req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null;
         String executionRoleArn = req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null;
+        Map<String, String> tags = parseTagMap(req.path("tags"));
 
         TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, region);
+                taskRoleArn, executionRoleArn, tags, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", taskDefinitionNode(td));
@@ -269,9 +272,11 @@ public class EcsJsonHandler {
         LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
         String group = req.has("group") ? req.path("group").asText() : null;
         String startedBy = req.has("startedBy") ? req.path("startedBy").asText() : null;
+        List<ContainerOverride> containerOverrides =
+                parseContainerOverrides(req.path("overrides").path("containerOverrides"));
 
         List<EcsTask> launched = service.runTask(cluster, taskDefinition, count,
-                launchType, group, startedBy, region);
+                launchType, group, startedBy, containerOverrides, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
@@ -379,9 +384,10 @@ public class EcsJsonHandler {
         LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
         List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
+        Map<String, String> tags = parseTagMap(req.path("tags"));
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, loadBalancers, networkConfiguration, region);
+                desiredCount, launchType, loadBalancers, networkConfiguration, tags, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -1232,6 +1238,25 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             result.add(new KeyValuePair(item.path("name").asText(), item.path("value").asText()));
+        }
+        return result;
+    }
+
+    private List<ContainerOverride> parseContainerOverrides(JsonNode node) {
+        List<ContainerOverride> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            ContainerOverride co = new ContainerOverride();
+            co.setName(item.path("name").asText());
+            if (item.has("command") && item.path("command").isArray()) {
+                List<String> cmd = new ArrayList<>();
+                item.path("command").forEach(c -> cmd.add(c.asText()));
+                co.setCommand(cmd);
+            }
+            co.setEnvironment(parseKeyValuePairs(item.path("environment")));
+            result.add(co);
         }
         return result;
     }

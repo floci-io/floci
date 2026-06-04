@@ -445,6 +445,111 @@ class SesEventPublishingV2IntegrationTest {
         assertTrue(hasUnsubscribe, "expected List-Unsubscribe header in event mail.headers");
     }
 
+    @Test
+    @Order(12)
+    void sendToSuppressedAddress_withBounceReason_publishesSyntheticBounceEvent() throws Exception {
+        String suppressed = "bounce-suppressed-" + System.nanoTime() + "@example.com";
+        // Pre-register the address in the account-level suppression list with reason BOUNCE.
+        given()
+                .contentType("application/json")
+                .header("Authorization", SES_AUTH)
+                .body("{\"EmailAddress\":\"" + suppressed + "\",\"Reason\":\"BOUNCE\"}")
+        .when()
+                .put("/v2/email/suppression/addresses")
+        .then()
+                .statusCode(200);
+
+        try {
+            drainQueue();
+            given()
+                    .contentType("application/json")
+                    .header("Authorization", SES_AUTH)
+                    .body("""
+                        {
+                          "FromEmailAddress": "%s",
+                          "Destination": {"ToAddresses": ["%s"]},
+                          "ConfigurationSetName": "%s",
+                          "Content": {
+                            "Simple": {
+                              "Subject": {"Data": "evt"},
+                              "Body": {"Text": {"Data": "hi"}}
+                            }
+                          }
+                        }
+                        """.formatted(SENDER, suppressed, CS))
+            .when()
+                    .post("/v2/email/outbound-emails")
+            .then()
+                    .statusCode(200);
+
+            List<JsonNode> events = receiveSesEvents(2);
+            assertEquals(2, events.size(), "expected Send and synthetic Bounce events");
+            assertTrue(events.stream().anyMatch(e -> "Send".equals(e.path("eventType").asText())));
+            JsonNode bounce = events.stream()
+                    .filter(e -> "Bounce".equals(e.path("eventType").asText()))
+                    .findFirst().orElseThrow();
+            assertEquals(suppressed,
+                    bounce.path("bounce").path("bouncedRecipients").get(0).path("emailAddress").asText());
+        } finally {
+            // Always run cleanup so the suppression list doesn't leak into subsequent tests.
+            given()
+                    .header("Authorization", SES_AUTH)
+            .when()
+                    .delete("/v2/email/suppression/addresses/" + suppressed);
+        }
+    }
+
+    @Test
+    @Order(13)
+    void sendToSuppressedAddress_withComplaintReason_publishesSyntheticComplaintEvent() throws Exception {
+        String suppressed = "complaint-suppressed-" + System.nanoTime() + "@example.com";
+        given()
+                .contentType("application/json")
+                .header("Authorization", SES_AUTH)
+                .body("{\"EmailAddress\":\"" + suppressed + "\",\"Reason\":\"COMPLAINT\"}")
+        .when()
+                .put("/v2/email/suppression/addresses")
+        .then()
+                .statusCode(200);
+
+        try {
+            drainQueue();
+            given()
+                    .contentType("application/json")
+                    .header("Authorization", SES_AUTH)
+                    .body("""
+                        {
+                          "FromEmailAddress": "%s",
+                          "Destination": {"ToAddresses": ["%s"]},
+                          "ConfigurationSetName": "%s",
+                          "Content": {
+                            "Simple": {
+                              "Subject": {"Data": "evt"},
+                              "Body": {"Text": {"Data": "hi"}}
+                            }
+                          }
+                        }
+                        """.formatted(SENDER, suppressed, CS))
+            .when()
+                    .post("/v2/email/outbound-emails")
+            .then()
+                    .statusCode(200);
+
+            List<JsonNode> events = receiveSesEvents(2);
+            assertEquals(2, events.size(), "expected Send and synthetic Complaint events");
+            JsonNode complaint = events.stream()
+                    .filter(e -> "Complaint".equals(e.path("eventType").asText()))
+                    .findFirst().orElseThrow();
+            assertEquals(suppressed,
+                    complaint.path("complaint").path("complainedRecipients").get(0).path("emailAddress").asText());
+        } finally {
+            given()
+                    .header("Authorization", SES_AUTH)
+            .when()
+                    .delete("/v2/email/suppression/addresses/" + suppressed);
+        }
+    }
+
     private void sendEmail(String to) {
         given()
                 .contentType("application/json")

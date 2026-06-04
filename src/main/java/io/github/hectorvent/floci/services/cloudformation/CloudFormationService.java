@@ -357,6 +357,7 @@ public class CloudFormationService {
                 }
             }
 
+            StackResource failedResource = null;
             if (resources.isObject()) {
                 List<String> sortedLogicalIds = topologicalSort(resources, conditions);
 
@@ -395,7 +396,20 @@ public class CloudFormationService {
 
                     addEvent(stack, logicalId, resource.getPhysicalId(), type,
                             resource.getStatus(), resource.getStatusReason());
+
+                    if ("CREATE_FAILED".equals(resource.getStatus())
+                            || "UPDATE_FAILED".equals(resource.getStatus())) {
+                        failedResource = resource;
+                        break;
+                    }
                 }
+            }
+
+            // A resource failed to provision: stop, and (on create) roll back what we built so a
+            // corrected re-deploy starts from a clean slate (acceptance criterion #9).
+            if (failedResource != null) {
+                rollbackFailedExecution(stack, region, isCreate, failedResource);
+                return;
             }
 
             CloudFormationTemplateEngine finalEngine = new CloudFormationTemplateEngine(
@@ -458,6 +472,61 @@ public class CloudFormationService {
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", failStatus, e.getMessage());
             persistStack(stack);
+        }
+    }
+
+    /**
+     * Handles a resource that failed to provision.
+     *
+     * <p>On a <b>create</b>, rolls back by deleting the resources that were successfully created in
+     * this execution, leaving a clean slate ({@code ROLLBACK_COMPLETE}) so a corrected re-deploy can
+     * start from scratch. On an <b>update</b>, marks {@code UPDATE_ROLLBACK_COMPLETE} and keeps the
+     * prior physical IDs so a corrected re-deploy proceeds (full prior-template restoration is out
+     * of scope — see plan Part 7).
+     */
+    private void rollbackFailedExecution(Stack stack, String region, boolean isCreate,
+                                         StackResource failedResource) {
+        String failStatus = isCreate ? "CREATE_FAILED" : "UPDATE_FAILED";
+        stack.setStatus(failStatus);
+        stack.setStatusReason(failedResource.getStatusReason());
+        addEvent(stack, stack.getStackName(), stack.getStackId(),
+                "AWS::CloudFormation::Stack", failStatus, failedResource.getStatusReason());
+        LOG.warnv("Stack {0} resource {1} failed: {2}", stack.getStackName(),
+                failedResource.getLogicalId(), failedResource.getStatusReason());
+
+        if (isCreate) {
+            stack.setStatus("ROLLBACK_IN_PROGRESS");
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "ROLLBACK_IN_PROGRESS", failedResource.getStatusReason());
+            rollbackCreatedResources(stack, region);
+            stack.setStatus("ROLLBACK_COMPLETE");
+            stack.setLastUpdatedTime(now());
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "ROLLBACK_COMPLETE", null);
+            LOG.infov("Stack {0} rolled back to a clean slate (ROLLBACK_COMPLETE)", stack.getStackName());
+        } else {
+            stack.setStatus("UPDATE_ROLLBACK_COMPLETE");
+            stack.setLastUpdatedTime(now());
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "UPDATE_ROLLBACK_COMPLETE", null);
+            LOG.infov("Stack {0} update rolled back (UPDATE_ROLLBACK_COMPLETE)", stack.getStackName());
+        }
+        persistStack(stack);
+    }
+
+    /** Deletes every resource successfully created in this execution, in reverse order. */
+    private void rollbackCreatedResources(Stack stack, String region) {
+        List<StackResource> resources = new ArrayList<>(stack.getResources().values());
+        Collections.reverse(resources);
+        for (StackResource resource : resources) {
+            if (resource.getPhysicalId() != null && "CREATE_COMPLETE".equals(resource.getStatus())) {
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+                provisioner.delete(resource.getResourceType(), resource.getPhysicalId(), region);
+                resource.setStatus("DELETE_COMPLETE");
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_COMPLETE", null);
+            }
         }
     }
 

@@ -91,6 +91,32 @@ public interface EmulatorConfig {
          * </pre>
          */
         Optional<List<String>> extraSuffixes();
+
+        /**
+         * When {@code true} (default), the configured {@link #containerFallbackServers()} are
+         * appended after Floci's embedded DNS to every spawned container's {@code HostConfig.Dns}.
+         * This gives Lambda/CodeBuild/etc. a real secondary resolver so public hostnames still
+         * resolve if Floci's embedded forwarder cannot answer — mirroring the
+         * {@code docker run --dns <FlociIP> --dns 8.8.8.8} workaround.
+         *
+         * <p>Disable (via {@code FLOCI_DNS_CONTAINER_FALLBACK_ENABLED=false}) in offline or
+         * locked-down networks where the public resolvers are unreachable/blocked.
+         */
+        @WithDefault("true")
+        boolean containerFallbackEnabled();
+
+        /**
+         * Ordered list of public DNS resolvers used both as the fallback upstream for Floci's
+         * embedded DNS forwarder and (when {@link #containerFallbackEnabled()}) as the secondary
+         * resolvers injected into spawned containers.
+         *
+         * <p>Via environment variable (comma-separated):
+         * <pre>
+         * FLOCI_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
+         * </pre>
+         */
+        @WithDefault("8.8.8.8,8.8.4.4")
+        List<String> containerFallbackServers();
     }
 
     interface SecurityConfig {
@@ -988,6 +1014,27 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean keepRunningOnShutdown();
+
+        /**
+         * Controls the endpoint that {@code describe-cluster} returns in real mode:
+         * <ul>
+         *   <li>{@code host} (default) — {@code https://localhost:<hostPort>}, reachable from the
+         *       host so {@code kubectl}/{@code aws eks} work out of the box.</li>
+         *   <li>{@code network} — the container DNS name {@code https://floci-eks-<name>:6443},
+         *       reachable from other containers on the Docker network (pre-#1118 behaviour). Falls
+         *       back to the host endpoint when Floci runs natively.</li>
+         * </ul>
+         */
+        @WithDefault("host")
+        String endpointMode();
+
+        /**
+         * When true, wires a token-authentication webhook into k3s so that the bearer token
+         * produced by {@code aws eks get-token} is validated by Floci and mapped to cluster-admin.
+         * This makes the native {@code aws eks update-kubeconfig} + {@code kubectl} flow work.
+         */
+        @WithDefault("true")
+        boolean iamAuthWebhook();
     }
 
     interface InitHooksConfig {
