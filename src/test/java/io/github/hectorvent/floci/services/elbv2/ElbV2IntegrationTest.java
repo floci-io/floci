@@ -18,6 +18,8 @@ class ElbV2IntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/elasticloadbalancing/aws4_request";
+    private static final String ELB_V2_XMLNS =
+            "https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/";
 
     private static String lbArn;
     private static String tgArn;
@@ -165,6 +167,36 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("LoadBalancerNotFound"));
+    }
+
+    @Test
+    @Order(9)
+    void setSubnetsReturnsEmptyResultEnvelope() {
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", lbArn)
+                .formParam("Subnets.member.1", "subnet-00000001")
+                .formParam("Subnets.member.2", "subnet-00000002")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<SetSubnetsResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<SetSubnetsResult></SetSubnetsResult>"))
+                .body("SetSubnetsResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", lbArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.ZoneName",
+                        hasItems("subnet-00000001", "subnet-00000002"));
     }
 
     // ── Target Groups ─────────────────────────────────────────────────────────
@@ -647,7 +679,11 @@ class ElbV2IntegrationTest {
             .when()
                 .post("/")
             .then()
-                .statusCode(200);
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<DeleteListenerResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<DeleteListenerResult></DeleteListenerResult>"))
+                .body("DeleteListenerResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
 
         given()
                 .formParam("Action", "DescribeListeners")
@@ -658,6 +694,20 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(200)
                 .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.size()", equalTo(0));
+
+        given()
+                .formParam("Action", "DeleteTargetGroup")
+                .formParam("TargetGroupArn", tgArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<DeleteTargetGroupResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<DeleteTargetGroupResult></DeleteTargetGroupResult>"))
+                .body("DeleteTargetGroupResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
+        tgArn = null;
     }
 
     @Test
@@ -670,7 +720,11 @@ class ElbV2IntegrationTest {
             .when()
                 .post("/")
             .then()
-                .statusCode(200);
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<DeleteLoadBalancerResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<DeleteLoadBalancerResult></DeleteLoadBalancerResult>"))
+                .body("DeleteLoadBalancerResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
 
         given()
                 .formParam("Action", "DescribeLoadBalancers")
