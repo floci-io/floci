@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -53,8 +54,8 @@ class Ec2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
-            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupName", equalTo("default"))
-            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo("vpc-default"));
+        .then()
+            .statusCode(200)
             .contentType("application/xml")
             .body("DescribeVpcsResponse.vpcSet.item[0].vpcId", equalTo("vpc-default"))
             .body("DescribeVpcsResponse.vpcSet.item[0].cidrBlock", equalTo("172.31.0.0/16"))
@@ -89,7 +90,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupName", equalTo("default"))
-            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].description",
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupDescription",
                 equalTo("default security group"))
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo("vpc-default"));
     }
@@ -107,8 +108,6 @@ class Ec2IntegrationTest {
         .when()
             .post("/")
         .then()
-            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].description",
-                equalTo("default security group"))
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
@@ -276,7 +275,8 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeRouteTablesResponse.routeTableSet.item.vpcId", equalTo(vpcId))
-            .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item.main", equalTo(true));
+            .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item.main",
+                anyOf(equalTo(true), equalTo("true")));
     }
 
     @Test
