@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.21] - 2026-05-31
+
+### Added
+
+- **ses:** SES V2 configuration set event destination operations ([#1079](https://github.com/floci-io/floci/pull/1079))
+- **firehose:** `TagDeliveryStream`, `UntagDeliveryStream`, and `ListTagsForDeliveryStream` ([#1061](https://github.com/floci-io/floci/pull/1061))
+- **cognito:** custom schema attributes and attribute deletion APIs ([#1060](https://github.com/floci-io/floci/pull/1060))
+- **cognito:** OAuth2 `/oauth2/userInfo` endpoint ([#1062](https://github.com/floci-io/floci/pull/1062))
+- **kms:** handle `RotateKeyOnDemand` rotation limit ([#1042](https://github.com/floci-io/floci/pull/1042))
+- **ec2:** required methods for VPC, subnet, and instance operations ([#959](https://github.com/floci-io/floci/pull/959))
+
+### Fixed
+
+- **ec2:** volume throughput, `DescribeAddressesAttribute`, and IAM instance profile parity ([#1103](https://github.com/floci-io/floci/pull/1103))
+- **ec2:** add missing subnet attributes and instance block device `attachTime` ([#1087](https://github.com/floci-io/floci/pull/1087))
+- **dynamodb:** merge nested map paths in `ProjectionExpression` ([#1099](https://github.com/floci-io/floci/pull/1099))
+- **s3:** reject `response-*` overrides on unsigned requests ([#1098](https://github.com/floci-io/floci/pull/1098))
+- **eventbridge:** tag rules on custom buses whose name contains "event-bus" ([#1102](https://github.com/floci-io/floci/pull/1102))
+- **apigateway:** implement V1 `DeleteDeployment` endpoint and return correct JSON 404 error ([#1059](https://github.com/floci-io/floci/pull/1059))
+- **cloudformation:** forward ApiGatewayV2 `Api` properties to the apigatewayv2 service ([#1086](https://github.com/floci-io/floci/pull/1086))
+- **rds:** restore persisted runtime on startup ([#1071](https://github.com/floci-io/floci/pull/1071))
+- **logging:** render port numbers without locale grouping separators ([#1104](https://github.com/floci-io/floci/pull/1104))
+
+### Build
+
+- move all builds to GraalVM 25 ([#1107](https://github.com/floci-io/floci/pull/1107))
+- enforce JDK 25 requirement with Maven Enforcer Plugin ([#1101](https://github.com/floci-io/floci/pull/1101))
+
 ## [1.5.20] - 2026-05-29
 
 ### Added

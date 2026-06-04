@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.ses;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
@@ -7,12 +8,16 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
+import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.MessageHeader;
+import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
+import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -28,12 +33,14 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HexFormat;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
@@ -61,9 +68,12 @@ public class SesService {
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
+    private final SesEventPublisher eventPublisher;
+    private final String defaultAccountId;
 
     @Inject
-    public SesService(StorageFactory storageFactory, SmtpRelay smtpRelay, ObjectMapper objectMapper) {
+    public SesService(StorageFactory storageFactory, SmtpRelay smtpRelay, ObjectMapper objectMapper,
+                       SesEventPublisher eventPublisher, EmulatorConfig config) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
@@ -80,6 +90,8 @@ public class SesService {
                 new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
+        this.eventPublisher = eventPublisher;
+        this.defaultAccountId = config.defaultAccountId();
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -100,6 +112,8 @@ public class SesService {
         this.accountSuppressionStore = accountSuppressionStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
+        this.eventPublisher = null;
+        this.defaultAccountId = "000000000000";
     }
 
     public Identity verifyEmailIdentity(String emailAddress, String region) {
@@ -171,7 +185,9 @@ public class SesService {
 
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> replyToAddresses,
-                            String subject, String bodyText, String bodyHtml, String region) {
+                            String subject, String bodyText, String bodyHtml,
+                            String configurationSetName, List<MessageTag> emailTags,
+                            List<MessageHeader> additionalHeaders, String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
         }
@@ -181,34 +197,187 @@ public class SesService {
         if (!hasRecipient) {
             throw new AwsException("InvalidParameterValue", "At least one destination address is required.", 400);
         }
+        validateConfigurationSet(configurationSetName, region);
 
         String messageId = UUID.randomUUID().toString();
         SentEmail email = new SentEmail(messageId, region, source, toAddresses, ccAddresses,
                 bccAddresses, replyToAddresses, subject, bodyText, bodyHtml);
         emailStore.put("email::" + region + "::" + messageId, email);
 
-        smtpRelay.relay(source, toAddresses, ccAddresses, bccAddresses,
-                replyToAddresses, subject, bodyText, bodyHtml);
+        List<String> envelope = allRecipients(toAddresses, ccAddresses, bccAddresses);
+        Map<String, String> suppressedReasons = collectSuppressedReasons(envelope, configurationSetName, region);
+
+        List<String> relayedTo = filterUnsuppressed(toAddresses, suppressedReasons);
+        List<String> relayedCc = filterUnsuppressed(ccAddresses, suppressedReasons);
+        List<String> relayedBcc = filterUnsuppressed(bccAddresses, suppressedReasons);
+        if (sizeOf(relayedTo) + sizeOf(relayedCc) + sizeOf(relayedBcc) > 0) {
+            smtpRelay.relay(source, relayedTo, relayedCc, relayedBcc,
+                    replyToAddresses, subject, bodyText, bodyHtml);
+        } else {
+            LOG.infov("SES email accepted but not relayed (all recipients suppressed): messageId={0}",
+                    messageId);
+        }
 
         LOG.infov("SES email sent: from={0}, to={1}, subject={2}, messageId={3}",
                 source, toAddresses, subject, messageId);
+        publishSendEvents(configurationSetName, messageId, source, subject,
+                toAddresses, ccAddresses, bccAddresses, envelope,
+                suppressedReasons, emailTags, additionalHeaders, region);
         return messageId;
     }
 
-    public String sendRawEmail(String source, List<String> destinations, String rawMessage, String region) {
+    public String sendRawEmail(String source, List<String> destinations, String rawMessage,
+                               String configurationSetName, List<MessageTag> emailTags,
+                               String region) {
         if (rawMessage == null || rawMessage.isBlank()) {
             throw new AwsException("InvalidParameterValue", "RawMessage.Data is required.", 400);
         }
+        validateConfigurationSet(configurationSetName, region);
+        boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
+        boolean willPublishEvents = configurationSetName != null && !configurationSetName.isBlank();
+        SmtpRelay.RawMessageHeaders headers = (hasExplicitDestinations && !willPublishEvents)
+                ? null
+                : SmtpRelay.parseRawHeaders(rawMessage);
+        List<String> effectiveDestinations = hasExplicitDestinations
+                ? destinations
+                : allRecipients(headers.to(), headers.cc(), headers.bcc());
+        if (effectiveDestinations.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "At least one destination address is required.", 400);
+        }
         String messageId = UUID.randomUUID().toString();
-        SentEmail email = new SentEmail(messageId, region, source,
-                destinations != null ? destinations : Collections.emptyList(),
-                rawMessage);
+        SentEmail email = new SentEmail(messageId, region, source, effectiveDestinations, rawMessage);
         emailStore.put("email::" + region + "::" + messageId, email);
 
-        smtpRelay.relayRaw(source, destinations, rawMessage);
+        Map<String, String> suppressedReasons = collectSuppressedReasons(effectiveDestinations, configurationSetName, region);
+
+        List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
+        if (!relayedDestinations.isEmpty()) {
+            smtpRelay.relayRaw(source, relayedDestinations, rawMessage);
+        } else {
+            LOG.infov("SES raw email accepted but not relayed (all recipients suppressed): messageId={0}",
+                    messageId);
+        }
 
         LOG.infov("SES raw email sent: from={0}, messageId={1}", source, messageId);
+        publishSendEvents(configurationSetName, messageId, source,
+                headers != null ? headers.subject() : "",
+                headers != null ? headers.to() : List.of(),
+                headers != null ? headers.cc() : List.of(),
+                headers != null ? headers.bcc() : List.of(),
+                effectiveDestinations,
+                suppressedReasons, emailTags, List.of(), region);
         return messageId;
+    }
+
+    private static List<String> allRecipients(List<String> to, List<String> cc, List<String> bcc) {
+        List<String> all = new ArrayList<>();
+        if (to != null) {
+            all.addAll(to);
+        }
+        if (cc != null) {
+            all.addAll(cc);
+        }
+        if (bcc != null) {
+            all.addAll(bcc);
+        }
+        return all;
+    }
+
+    /**
+     * Validate that a non-blank {@code ConfigurationSetName} refers to a configuration set
+     * that exists in the given region. Always raises {@code ConfigurationSetDoesNotExist}
+     * with {@code httpStatus = 400}; the V2 REST controller's {@code remapV1Exception}
+     * then translates that into a {@code NotFoundException 404}, while V1 Query keeps the
+     * original code/status. Mirrors AWS SES behaviour: invalid set name fails fast instead
+     * of silently storing/relaying the message and skipping event publishing later.
+     */
+    private void validateConfigurationSet(String configurationSetName, String region) {
+        if (configurationSetName == null || configurationSetName.isBlank()) {
+            return;
+        }
+        if (configSetStore.get(configSetKey(region, configurationSetName)).isEmpty()) {
+            throw new AwsException("ConfigurationSetDoesNotExist",
+                    "Configuration set <" + configurationSetName + "> does not exist.", 400);
+        }
+    }
+
+    private void publishSendEvents(String configurationSetName, String messageId, String source,
+                                   String subject, List<String> toAddresses,
+                                   List<String> ccAddresses, List<String> bccAddresses,
+                                   List<String> envelopeDestinations,
+                                   Map<String, String> suppressedReasons,
+                                   List<MessageTag> emailTags,
+                                   List<MessageHeader> additionalHeaders, String region) {
+        if (eventPublisher == null) {
+            return;
+        }
+        if (configurationSetName == null || configurationSetName.isBlank() || messageId == null) {
+            return;
+        }
+        ConfigurationSet cs = configSetStore.get(configSetKey(region, configurationSetName)).orElse(null);
+        if (cs == null) {
+            LOG.warnv("SES send references unknown ConfigurationSet <{0}>; events not published.",
+                    configurationSetName);
+            return;
+        }
+        if (cs.getEventDestinations().isEmpty()) {
+            return;
+        }
+
+        List<String> envelope = envelopeDestinations != null
+                ? envelopeDestinations : Collections.emptyList();
+        Instant timestamp = Instant.now();
+        String sendingAccountId = defaultAccountId;
+        String sourceArn = (source == null || source.isBlank())
+                ? null
+                : AwsArnUtils.Arn.of("ses", region, sendingAccountId, "identity/" + source).toString();
+
+        List<String> suppressionBounceRecipients = new ArrayList<>();
+        List<String> suppressionComplaintRecipients = new ArrayList<>();
+        for (Map.Entry<String, String> e : suppressedReasons.entrySet()) {
+            if ("BOUNCE".equals(e.getValue())) {
+                suppressionBounceRecipients.add(e.getKey());
+            } else if ("COMPLAINT".equals(e.getValue())) {
+                suppressionComplaintRecipients.add(e.getKey());
+            }
+        }
+
+        for (String eventType : determineSendEventTypes(envelope,
+                suppressionBounceRecipients, suppressionComplaintRecipients)) {
+            eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
+                    subject, toAddresses, ccAddresses, bccAddresses, envelope,
+                    suppressionBounceRecipients, suppressionComplaintRecipients,
+                    emailTags, additionalHeaders, timestamp, region);
+        }
+    }
+
+    private static List<String> determineSendEventTypes(List<String> destinations,
+                                                        List<String> suppressionBounceRecipients,
+                                                        List<String> suppressionComplaintRecipients) {
+        List<String> events = new ArrayList<>();
+        events.add("SEND");
+        for (String d : destinations) {
+            if (SimulatorAddresses.isSuccess(d) && !events.contains("DELIVERY")) {
+                events.add("DELIVERY");
+            }
+            if (SimulatorAddresses.isBounce(d) && !events.contains("BOUNCE")) {
+                events.add("BOUNCE");
+            }
+            if (SimulatorAddresses.isComplaint(d) && !events.contains("COMPLAINT")) {
+                events.add("COMPLAINT");
+            }
+            if (SimulatorAddresses.isSuppressionList(d) && !events.contains("REJECT")) {
+                events.add("REJECT");
+            }
+        }
+        if (!suppressionBounceRecipients.isEmpty() && !events.contains("BOUNCE")) {
+            events.add("BOUNCE");
+        }
+        if (!suppressionComplaintRecipients.isEmpty() && !events.contains("COMPLAINT")) {
+            events.add("COMPLAINT");
+        }
+        return events;
     }
 
     public long getSentEmailCount(String region) {
@@ -558,6 +727,53 @@ public class SesService {
                 eventDestinationName, configSetName, region);
     }
 
+    /**
+     * Stores per-configuration-set suppression overrides. Mirrors the AWS V2
+     * {@code PutConfigurationSetSuppressionOptions} contract: {@code reasons} may
+     * be {@code null} or empty (explicit "no filtering" for this set) or a subset
+     * of {@code [BOUNCE, COMPLAINT]}. Once set, the value is returned through
+     * {@link #getConfigurationSet}; downstream callers can resolve the effective
+     * reasons for a given send via {@link #getEffectiveSuppressedReasons}.
+     */
+    public void putConfigurationSetSuppressionOptions(String configSetName,
+                                                      List<String> reasons, String region) {
+        List<String> sanitized = new ArrayList<>();
+        if (reasons != null) {
+            for (String r : reasons) {
+                validateConfigSetSuppressionReason(r);
+                sanitized.add(r);
+            }
+        }
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        SuppressionOptions options = new SuppressionOptions();
+        options.setSuppressedReasons(sanitized);
+        cs.setSuppressionOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated SuppressionOptions on configuration set {0} in region {1}: {2}",
+                configSetName, region, sanitized);
+    }
+
+    /**
+     * Returns the effective suppression reasons for a send that is using
+     * {@code configurationSetName}. Per the AWS V2 contract, a configuration
+     * set's {@code SuppressionOptions} (when present) overrides the
+     * account-level reasons — including an empty list, which explicitly
+     * disables suppression filtering for that set. Falls back to the
+     * account-level reasons when the configuration set has no override, or
+     * when {@code configurationSetName} is null/blank (i.e. the caller didn't
+     * specify a configuration set).
+     */
+    public List<String> getEffectiveSuppressedReasons(String configurationSetName, String region) {
+        if (configurationSetName != null && !configurationSetName.isBlank()) {
+            ConfigurationSet cs = getConfigurationSet(configurationSetName, region);
+            SuppressionOptions options = cs.getSuppressionOptions();
+            if (options != null) {
+                return List.copyOf(options.getSuppressedReasons());
+            }
+        }
+        return List.copyOf(getAccountSuppressionAttributes(region).getSuppressedReasons());
+    }
+
     private static int indexOfEventDestination(List<EventDestination> destinations, String name) {
         for (int i = 0; i < destinations.size(); i++) {
             if (name != null && name.equals(destinations.get(i).getName())) {
@@ -605,11 +821,42 @@ public class SesService {
                     "Please provide only one destination with each request. Either a Firehose Destination "
                             + "or a Cloudwatch Destination or an SNS Destination or an EventBridge Destination.", 400);
         }
-        if (dest.getCloudWatchDestination() != null
-                && (dest.getCloudWatchDestination().getDimensionConfigurations() == null
-                || dest.getCloudWatchDestination().getDimensionConfigurations().isEmpty())) {
+        if (dest.getSnsDestination() != null
+                && (dest.getSnsDestination().getTopicArn() == null
+                || dest.getSnsDestination().getTopicArn().isBlank())) {
             throw new AwsException("InvalidParameterValue",
-                    "CloudWatch metrics dimension configuration list cannot be empty.", 400);
+                    "SnsDestination requires a non-blank TopicArn.", 400);
+        }
+        if (dest.getKinesisFirehoseDestination() != null
+                && (dest.getKinesisFirehoseDestination().getIamRoleArn() == null
+                || dest.getKinesisFirehoseDestination().getIamRoleArn().isBlank()
+                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn() == null
+                || dest.getKinesisFirehoseDestination().getDeliveryStreamArn().isBlank())) {
+            throw new AwsException("InvalidParameterValue",
+                    "KinesisFirehoseDestination requires both IamRoleArn and DeliveryStreamArn.",
+                    400);
+        }
+        if (dest.getCloudWatchDestination() != null) {
+            List<CloudWatchDimensionConfiguration> dims =
+                    dest.getCloudWatchDestination().getDimensionConfigurations();
+            if (dims == null || dims.isEmpty()) {
+                throw new AwsException("InvalidParameterValue",
+                        "CloudWatch metrics dimension configuration list cannot be empty.", 400);
+            }
+            for (int i = 0; i < dims.size(); i++) {
+                CloudWatchDimensionConfiguration dim = dims.get(i);
+                if (dim == null
+                        || dim.getDimensionName() == null || dim.getDimensionName().isBlank()
+                        || dim.getDimensionValueSource() == null
+                        || dim.getDimensionValueSource().isBlank()
+                        || dim.getDefaultDimensionValue() == null
+                        || dim.getDefaultDimensionValue().isBlank()) {
+                    throw new AwsException("InvalidParameterValue",
+                            "CloudWatchDestination dimension configurations require "
+                                    + "DimensionName, DimensionValueSource, and DefaultDimensionValue "
+                                    + "(missing on member " + (i + 1) + ").", 400);
+                }
+            }
         }
         if (dest.getPinpointDestination() != null
                 && (dest.getPinpointDestination().getApplicationArn() == null
@@ -941,6 +1188,101 @@ public class SesService {
         return "suppression::" + region + "::" + emailAddress;
     }
 
+    /**
+     * Resolve the effective suppression reason for each address in a single pass over the
+     * store and the effective settings. The returned map only contains entries for
+     * addresses that ARE suppressed (i.e., on the list AND whose reason matches the
+     * effective {@code suppressedReasons} — the configuration set's
+     * {@code SuppressionOptions} override if present, else the account-level reasons).
+     * Callers reuse this map for both the SMTP relay filter and the event-publishing
+     * partitioning so the store is read once per send regardless of the number of
+     * consumers.
+     */
+    Map<String, String> collectSuppressedReasons(Collection<String> addresses,
+                                                  String configurationSetName, String region) {
+        if (addresses == null || addresses.isEmpty()) {
+            return Map.of();
+        }
+        List<String> effectiveReasons = getEffectiveSuppressedReasons(configurationSetName, region);
+        if (effectiveReasons == null || effectiveReasons.isEmpty()) {
+            return Map.of();
+        }
+        Set<String> reasonFilter = Set.copyOf(effectiveReasons);
+        Map<String, String> result = new LinkedHashMap<>();
+        for (String address : addresses) {
+            if (address == null || address.isBlank() || result.containsKey(address)) {
+                continue;
+            }
+            String normalized = normalizeSuppressionEmail(address);
+            SuppressedDestination entry = suppressionStore.get(suppressionKey(region, normalized))
+                    .orElse(null);
+            if (entry != null && entry.getReason() != null
+                    && reasonFilter.contains(entry.getReason())) {
+                result.put(address, entry.getReason());
+            }
+        }
+        return result;
+    }
+
+    /**
+     * Filter out recipients whose effective suppression reason is non-null. Returns a new
+     * list containing only the addresses that should reach the SMTP relay, mirroring AWS
+     * SES's "accept the message, but doesn't send it" behaviour for suppressed addresses.
+     * Returns the original reference when {@code addresses} is {@code null} or empty.
+     */
+    static List<String> filterUnsuppressed(List<String> addresses, Map<String, String> suppressedReasons) {
+        if (addresses == null || addresses.isEmpty()) {
+            return addresses;
+        }
+        if (suppressedReasons.isEmpty()) {
+            return addresses;
+        }
+        List<String> kept = new ArrayList<>(addresses.size());
+        for (String a : addresses) {
+            if (!suppressedReasons.containsKey(a)) {
+                kept.add(a);
+            }
+        }
+        return kept;
+    }
+
+    /**
+     * Resolve the suppression reason that applies to a given recipient in the given region
+     * for sends using {@code configurationSetName}, or {@code null} if the recipient is not
+     * suppressed. The recipient is suppressed only when it appears in the address-level
+     * suppression list AND its stored reason intersects the effective {@code suppressedReasons}
+     * — the configuration set's {@code SuppressionOptions} override if present, else the
+     * account-level reasons. {@code configurationSetName} may be {@code null} or blank to
+     * scope the check to account-level reasons only.
+     *
+     * <p>The returned value is one of {@code "BOUNCE"} / {@code "COMPLAINT"}, allowing
+     * callers (publishSendEvents) to map the recipient to a synthetic Bounce / Complaint
+     * event without consulting the store again. Both the per-address suppression entries
+     * and the account-level / per-CS {@code suppressedReasons} go through
+     * {@link #validateSuppressionReason} / {@link #validateConfigSetSuppressionReason},
+     * which enforce exact case-sensitive equality with the two canonical values, so
+     * {@code entry.getReason()} is guaranteed to be canonical and downstream
+     * {@code .equals("BOUNCE")} / {@code .equals("COMPLAINT")} checks are safe.
+     */
+    String resolveSuppressionReason(String emailAddress, String configurationSetName, String region) {
+        if (emailAddress == null || emailAddress.isBlank()) {
+            return null;
+        }
+        // Share the same normalization used when entries are stored
+        // (`normalizeSuppressionEmail`) so lookups can't drift apart from inserts.
+        String normalized = normalizeSuppressionEmail(emailAddress);
+        SuppressedDestination entry = suppressionStore.get(suppressionKey(region, normalized))
+                .orElse(null);
+        if (entry == null || entry.getReason() == null) {
+            return null;
+        }
+        List<String> effective = getEffectiveSuppressedReasons(configurationSetName, region);
+        if (effective == null || effective.isEmpty()) {
+            return null;
+        }
+        return effective.contains(entry.getReason()) ? entry.getReason() : null;
+    }
+
     private static String normalizeSuppressionEmail(String emailAddress) {
         if (emailAddress == null || emailAddress.isBlank()) {
             throw new AwsException("BadRequestException", "EmailAddress is required.", 400);
@@ -949,6 +1291,17 @@ public class SesService {
         return emailAddress.trim();
     }
 
+    /**
+     * Validation message used by PutAccountSuppressionAttributes,
+     * PutSuppressedDestination, and ListSuppressedDestinations — all three
+     * return the AWS "1 validation error detected: Value at '<fieldName>'
+     * failed to satisfy constraint: ..." V1-style nested message verbatim.
+     * (Verified against real AWS V2 SES on 2026-06-03.) The {@code nested}
+     * flag controls whether the inner enum constraint is wrapped in
+     * {@code Member must satisfy constraint: [...]} — PutSuppressedDestination
+     * (single Reason field) returns the unwrapped form; the two list-bearing
+     * APIs return the wrapped form.
+     */
     private static void validateSuppressionReason(String reason, String fieldName, boolean nested) {
         if (reason == null || (!"BOUNCE".equals(reason) && !"COMPLAINT".equals(reason))) {
             String constraint = nested
@@ -957,6 +1310,20 @@ public class SesService {
             throw new AwsException("BadRequestException",
                     "1 validation error detected: Value at '" + fieldName + "' failed to satisfy constraint: "
                             + constraint, 400);
+        }
+    }
+
+    /**
+     * Validation message used by PutConfigurationSetSuppressionOptions. AWS
+     * V2 SES uses a different, simpler natural-language sentence on this
+     * endpoint than on the three older suppression APIs above:
+     *   "Reason <X> is invalid, must be one of [BOUNCE, COMPLAINT]."
+     * (Verified against real AWS V2 SES on 2026-06-03.)
+     */
+    private static void validateConfigSetSuppressionReason(String reason) {
+        if (reason == null || (!"BOUNCE".equals(reason) && !"COMPLAINT".equals(reason))) {
+            throw new AwsException("BadRequestException",
+                    "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].", 400);
         }
     }
 
@@ -981,11 +1348,14 @@ public class SesService {
 
     public String sendTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                      List<String> bccAddresses, List<String> replyToAddresses,
-                                     String templateName, JsonNode templateData, String region) {
+                                     String templateName, JsonNode templateData,
+                                     String configurationSetName, List<MessageTag> emailTags,
+                                     List<MessageHeader> additionalHeaders, String region) {
         EmailTemplate template = getTemplate(templateName, region);
         return sendInlineTemplatedEmail(source, toAddresses, ccAddresses, bccAddresses,
                 replyToAddresses, template.getSubject(), template.getTextPart(),
-                template.getHtmlPart(), templateData, region);
+                template.getHtmlPart(), templateData,
+                configurationSetName, emailTags, additionalHeaders, region);
     }
 
     public String renderTestTemplate(String templateName, String templateDataRaw, String region) {
@@ -1104,7 +1474,10 @@ public class SesService {
     public String sendInlineTemplatedEmail(String source, List<String> toAddresses, List<String> ccAddresses,
                                             List<String> bccAddresses, List<String> replyToAddresses,
                                             String subject, String textPart, String htmlPart,
-                                            JsonNode templateData, String region) {
+                                            JsonNode templateData,
+                                            String configurationSetName, List<MessageTag> emailTags,
+                                            List<MessageHeader> additionalHeaders,
+                                            String region) {
         boolean hasSubject = subject != null && !subject.isBlank();
         boolean hasText = textPart != null && !textPart.isBlank();
         boolean hasHtml = htmlPart != null && !htmlPart.isBlank();
@@ -1116,7 +1489,7 @@ public class SesService {
                 applyTemplateData(subject, templateData),
                 applyTemplateData(textPart, templateData),
                 applyTemplateData(htmlPart, templateData),
-                region);
+                configurationSetName, emailTags, additionalHeaders, region);
     }
 
     public List<BulkEmailEntryResult> sendBulkTemplatedEmail(String source,
@@ -1124,6 +1497,9 @@ public class SesService {
                                                               String subject, String textPart, String htmlPart,
                                                               JsonNode defaultTemplateData,
                                                               List<BulkEmailEntry> entries,
+                                                              String configurationSetName,
+                                                              List<MessageTag> defaultEmailTags,
+                                                              List<MessageHeader> defaultHeaders,
                                                               String region) {
         if (source == null || source.isBlank()) {
             throw new AwsException("InvalidParameterValue", "Source email is required.", 400);
@@ -1139,6 +1515,7 @@ public class SesService {
             throw new AwsException("InvalidParameterValue",
                     "At least one destination entry is required.", 400);
         }
+        validateConfigurationSet(configurationSetName, region);
         if (entries.size() > MAX_BULK_DESTINATIONS) {
             throw new AwsException("MessageRejected",
                     "Number of destinations (" + entries.size() + ") exceeds the maximum of "
@@ -1159,13 +1536,15 @@ public class SesService {
         for (BulkEmailEntry entry : entries) {
             try {
                 JsonNode merged = mergeTemplateData(defaultTemplateData, entry.replacementTemplateData());
+                List<MessageTag> mergedTags = mergeEmailTags(defaultEmailTags, entry.replacementEmailTags());
+                List<MessageHeader> mergedHeaders = mergeHeaders(defaultHeaders, entry.replacementHeaders());
                 String messageId = sendEmail(source,
                         entry.toAddresses(), entry.ccAddresses(), entry.bccAddresses(),
                         replyToAddresses,
                         applyTemplateData(subject, merged),
                         applyTemplateData(textPart, merged),
                         applyTemplateData(htmlPart, merged),
-                        region);
+                        configurationSetName, mergedTags, mergedHeaders, region);
                 results.add(BulkEmailEntryResult.success(messageId));
             } catch (AwsException e) {
                 results.add(BulkEmailEntryResult.failure(
@@ -1188,6 +1567,57 @@ public class SesService {
             return BulkEmailEntryResult.Status.INVALID_PARAMETER;
         }
         return BulkEmailEntryResult.Status.FAILED;
+    }
+
+    static List<MessageHeader> mergeHeaders(List<MessageHeader> defaults, List<MessageHeader> replacement) {
+        boolean hasDefault = defaults != null && !defaults.isEmpty();
+        boolean hasReplacement = replacement != null && !replacement.isEmpty();
+        if (!hasDefault && !hasReplacement) {
+            return List.of();
+        }
+        // RFC 5322 header field names are case-insensitive, so the merge key is the
+        // lowercased name. The header itself is stored verbatim, so the replacement's
+        // original casing wins when it overrides a default.
+        LinkedHashMap<String, MessageHeader> byLowerName = new LinkedHashMap<>();
+        if (hasDefault) {
+            for (MessageHeader h : defaults) {
+                if (h != null && h.name() != null && !h.name().isBlank()) {
+                    byLowerName.put(h.name().toLowerCase(Locale.ROOT), h);
+                }
+            }
+        }
+        if (hasReplacement) {
+            for (MessageHeader h : replacement) {
+                if (h != null && h.name() != null && !h.name().isBlank()) {
+                    byLowerName.put(h.name().toLowerCase(Locale.ROOT), h);
+                }
+            }
+        }
+        return new ArrayList<>(byLowerName.values());
+    }
+
+    static List<MessageTag> mergeEmailTags(List<MessageTag> defaults, List<MessageTag> replacement) {
+        boolean hasDefault = defaults != null && !defaults.isEmpty();
+        boolean hasReplacement = replacement != null && !replacement.isEmpty();
+        if (!hasDefault && !hasReplacement) {
+            return List.of();
+        }
+        LinkedHashMap<String, MessageTag> byName = new LinkedHashMap<>();
+        if (hasDefault) {
+            for (MessageTag t : defaults) {
+                if (t != null && t.name() != null && !t.name().isBlank()) {
+                    byName.put(t.name(), t);
+                }
+            }
+        }
+        if (hasReplacement) {
+            for (MessageTag t : replacement) {
+                if (t != null && t.name() != null && !t.name().isBlank()) {
+                    byName.put(t.name(), t);
+                }
+            }
+        }
+        return new ArrayList<>(byName.values());
     }
 
     static JsonNode mergeTemplateData(JsonNode defaults, JsonNode replacement) {

@@ -170,7 +170,7 @@ public class RdsService {
         }
 
         instances.put(id, instance);
-        LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, proxyPort);
+        LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
         return instance;
     }
 
@@ -313,7 +313,7 @@ public class RdsService {
                 (user, pw) -> validateDbClusterPassword(id, user, pw));
 
         clusters.put(id, cluster);
-        LOG.infov("DB cluster {0} created, engine={1}, endpoint=localhost:{2}", id, engine, proxyPort);
+        LOG.infov("DB cluster {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
         return cluster;
     }
 

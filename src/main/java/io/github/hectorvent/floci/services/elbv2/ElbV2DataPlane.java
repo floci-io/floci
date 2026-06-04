@@ -105,8 +105,8 @@ public class ElbV2DataPlane {
 
         server.requestHandler(req -> handleRequest(req, listenerArn, region));
         server.listen()
-                .onSuccess(s -> LOG.infov("ELBv2 listener started on port {0} for {1}", listener.getPort(), listenerArn))
-                .onFailure(err -> LOG.warnv("ELBv2 listener failed to start on port {0}: {1}", listener.getPort(), err.getMessage()));
+                .onSuccess(s -> LOG.infov("ELBv2 listener started on port {0} for {1}", String.valueOf(listener.getPort()), listenerArn))
+                .onFailure(err -> LOG.warnv("ELBv2 listener failed to start on port {0}: {1}", String.valueOf(listener.getPort()), err.getMessage()));
 
         servers.put(listenerArn, server);
     }

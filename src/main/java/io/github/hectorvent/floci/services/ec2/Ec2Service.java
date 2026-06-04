@@ -1483,17 +1483,24 @@ public class Ec2Service {
     // ─── Volumes ───────────────────────────────────────────────────────────────
 
     public Volume createVolume(String region, String availabilityZone, String volumeType,
-                               int size, boolean encrypted, int iops, String snapshotId,
-                               List<Tag> volumeTags) {
+                               int size, boolean encrypted, int iops, Integer throughput,
+                               String snapshotId, List<Tag> volumeTags) {
         ensureDefaultResources(region);
         String volumeId = "vol-" + randomHex(17);
+        String effectiveType = volumeType != null ? volumeType : "gp2";
         Volume vol = new Volume();
         vol.setVolumeId(volumeId);
         vol.setAvailabilityZone(availabilityZone != null ? availabilityZone : region + "a");
-        vol.setVolumeType(volumeType != null ? volumeType : "gp2");
+        vol.setVolumeType(effectiveType);
         vol.setSize(size > 0 ? size : 8);
         vol.setEncrypted(encrypted);
         vol.setIops(iops > 0 ? iops : (volumeType != null && volumeType.startsWith("io") ? iops : 0));
+        // Throughput is a gp3-only attribute; AWS reports 125 MiB/s by default for gp3.
+        if ("gp3".equals(effectiveType)) {
+            vol.setThroughput(throughput != null && throughput > 0 ? throughput : 125);
+        } else {
+            vol.setThroughput(throughput);
+        }
         vol.setSnapshotId(snapshotId);
         vol.setCreateTime(Instant.now());
         vol.setState("available");

@@ -21,6 +21,8 @@ import software.amazon.awssdk.services.ses.model.ListConfigurationSetsResponse;
 import software.amazon.awssdk.services.sesv2.SesV2Client;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetResponse;
+import software.amazon.awssdk.services.sesv2.model.PutConfigurationSetSuppressionOptionsRequest;
+import software.amazon.awssdk.services.sesv2.model.SuppressionListReason;
 import software.amazon.awssdk.services.sesv2.model.Tag;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -38,6 +40,7 @@ class SesConfigurationSetTest {
     private static SesV2Client sesV2;
     private static String v1Name;
     private static String v2Name;
+    private static String suppressionCsName;
 
     @BeforeAll
     static void setup() {
@@ -46,6 +49,7 @@ class SesConfigurationSetTest {
         String suffix = TestFixtures.uniqueName();
         v1Name = "sdk-v1-cs-" + suffix;
         v2Name = "sdk-v2-cs-" + suffix;
+        suppressionCsName = "sdk-v2-cs-supp-" + suffix;
     }
 
     @AfterAll
@@ -56,6 +60,7 @@ class SesConfigurationSetTest {
         }
         if (sesV2 != null) {
             safelyDeleteV2(v2Name);
+            safelyDeleteV2(suppressionCsName);
             sesV2.close();
         }
     }
@@ -206,6 +211,99 @@ class SesConfigurationSetTest {
                 .isInstanceOf(AwsServiceException.class)
                 .extracting(e -> ((AwsServiceException) e).statusCode())
                 .isEqualTo(400);
+    }
+
+    // ─────────────────── V2 SuppressionOptions (per-CS) ───────────────────
+
+    @Test
+    @Order(30)
+    void v2SuppressionOptions_setup_createsSuppressionConfigurationSet() {
+        sesV2.createConfigurationSet(software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .build());
+
+        // Before any PutSuppressionOptions, the response has no SuppressionOptions block.
+        GetConfigurationSetResponse before = sesV2.getConfigurationSet(GetConfigurationSetRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .build());
+        assertThat(before.suppressionOptions()).isNull();
+    }
+
+    @Test
+    @Order(31)
+    void v2PutSuppressionOptions_bounceOnly_visibleOnGet() {
+        sesV2.putConfigurationSetSuppressionOptions(PutConfigurationSetSuppressionOptionsRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .suppressedReasons(SuppressionListReason.BOUNCE)
+                .build());
+
+        GetConfigurationSetResponse after = sesV2.getConfigurationSet(GetConfigurationSetRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .build());
+        assertThat(after.suppressionOptions()).isNotNull();
+        assertThat(after.suppressionOptions().suppressedReasons())
+                .containsExactly(SuppressionListReason.BOUNCE);
+    }
+
+    @Test
+    @Order(32)
+    void v2PutSuppressionOptions_bothReasons() {
+        sesV2.putConfigurationSetSuppressionOptions(PutConfigurationSetSuppressionOptionsRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .suppressedReasons(SuppressionListReason.BOUNCE, SuppressionListReason.COMPLAINT)
+                .build());
+
+        GetConfigurationSetResponse after = sesV2.getConfigurationSet(GetConfigurationSetRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .build());
+        assertThat(after.suppressionOptions().suppressedReasons())
+                .containsExactlyInAnyOrder(SuppressionListReason.BOUNCE, SuppressionListReason.COMPLAINT);
+    }
+
+    @Test
+    @Order(33)
+    void v2PutSuppressionOptions_emptyList_explicitlyDisablesFiltering() {
+        // Per the AWS V2 contract, an empty SuppressedReasons list is the documented way
+        // to disable suppression filtering for a configuration set.
+        sesV2.putConfigurationSetSuppressionOptions(PutConfigurationSetSuppressionOptionsRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .suppressedReasons(java.util.Collections.emptyList())
+                .build());
+
+        GetConfigurationSetResponse after = sesV2.getConfigurationSet(GetConfigurationSetRequest.builder()
+                .configurationSetName(suppressionCsName)
+                .build());
+        assertThat(after.suppressionOptions()).isNotNull();
+        assertThat(after.suppressionOptions().suppressedReasons()).isEmpty();
+    }
+
+    @Test
+    @Order(34)
+    void v2PutSuppressionOptions_invalidReason_rejectedAt400() {
+        // The typed enum (SuppressionListReason) prevents passing an unknown value through
+        // the SDK, so use the WithStrings variant to round-trip the literal "INVALID" to
+        // the wire and exercise server-side validation.
+        assertThatThrownBy(() -> sesV2.putConfigurationSetSuppressionOptions(
+                PutConfigurationSetSuppressionOptionsRequest.builder()
+                        .configurationSetName(suppressionCsName)
+                        .suppressedReasonsWithStrings("BOUNCE", "INVALID")
+                        .build()))
+                .isInstanceOf(AwsServiceException.class)
+                .extracting(e -> ((AwsServiceException) e).statusCode())
+                .isEqualTo(400);
+    }
+
+    @Test
+    @Order(35)
+    void v2PutSuppressionOptions_unknownConfigurationSet_rejectedAt404() {
+        assertThatThrownBy(() -> sesV2.putConfigurationSetSuppressionOptions(
+                PutConfigurationSetSuppressionOptionsRequest.builder()
+                        .configurationSetName(suppressionCsName + "-does-not-exist")
+                        .suppressedReasons(SuppressionListReason.BOUNCE)
+                        .build()))
+                .isInstanceOf(AwsServiceException.class)
+                .extracting(e -> ((AwsServiceException) e).statusCode())
+                .isEqualTo(404);
     }
 
     // ─────────────────────────── Helpers ───────────────────────────

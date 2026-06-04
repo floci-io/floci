@@ -94,7 +94,7 @@ public class OpenSearchDomainManager {
         }
 
         LOG.infov("OpenSearch container {0} started for domain {1} on port {2}",
-                info.containerId(), domain.getDomainName(), hostPort);
+                info.containerId(), domain.getDomainName(), String.valueOf(hostPort));
     }
 
     public boolean isReady(Domain domain) {

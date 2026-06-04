@@ -129,7 +129,7 @@ public class RuntimeApiServer {
 
         // POST /runtime/init/error — runtime initialization failure
         router.post(INIT_ERROR_PATH).handler(ctx -> {
-            LOG.warnv("Lambda runtime reported init error on port {0}", port);
+            LOG.warnv("Lambda runtime reported init error on port {0}", String.valueOf(port));
             ctx.response().setStatusCode(202).end();
         });
 
@@ -145,14 +145,14 @@ public class RuntimeApiServer {
                 .setMaxFormAttributeSize(-1));
         httpServer.requestHandler(router).listen(port, "0.0.0.0", result -> {
             if (result.succeeded()) {
-                LOG.infov("RuntimeApiServer started on port {0}", port);
+                LOG.infov("RuntimeApiServer started on port {0}", String.valueOf(port));
                 started.complete(null);
             } else {
                 if (System.currentTimeMillis() < deadline) {
-                    LOG.debugv("RuntimeApiServer failed to bind on port {0}, retrying in 100ms...", port);
+                    LOG.debugv("RuntimeApiServer failed to bind on port {0}, retrying in 100ms...", String.valueOf(port));
                     httpServer.close(ar -> vertx.setTimer(100, id -> tryListen(started, router, deadline)));
                 } else {
-                    LOG.errorv(result.cause(), "RuntimeApiServer failed to bind on port {0}", port);
+                    LOG.errorv(result.cause(), "RuntimeApiServer failed to bind on port {0}", String.valueOf(port));
                     started.completeExceptionally(result.cause());
                 }
             }
@@ -169,10 +169,10 @@ public class RuntimeApiServer {
         if (httpServer != null) {
             httpServer.close(ar -> {
                 if (ar.succeeded()) {
-                    LOG.debugv("RuntimeApiServer on port {0} closed", port);
+                    LOG.debugv("RuntimeApiServer on port {0} closed", String.valueOf(port));
                     closed.complete(null);
                 } else {
-                    LOG.warnv(ar.cause(), "RuntimeApiServer on port {0} failed to close cleanly", port);
+                    LOG.warnv(ar.cause(), "RuntimeApiServer on port {0} failed to close cleanly", String.valueOf(port));
                     closed.completeExceptionally(ar.cause());
                 }
             });

@@ -118,7 +118,7 @@ public class EksClusterManager {
         }
 
         LOG.infov("k3s container {0} started for cluster {1} on port {2} (internal: {3})",
-                info.containerId(), cluster.getName(), hostPort, cluster.getInternalEndpoint());
+                info.containerId(), cluster.getName(), String.valueOf(hostPort), cluster.getInternalEndpoint());
     }
 
     /**

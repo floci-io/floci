@@ -1,7 +1,7 @@
 # Floci
 
 <p align="center">
-  <img src="assets/floci.png" alt="Floci" width="500" />
+  <img src="assets/floci.svg" alt="Floci" width="500" />
 </p>
 
 <p align="center"><em>Light, fluffy, and always free</em></p>

@@ -32,7 +32,7 @@ public class RuntimeApiServerFactory {
         try {
             RuntimeApiServer server = new RuntimeApiServer(vertx, port);
             server.start().get(10, TimeUnit.SECONDS);
-            LOG.debugv("Created RuntimeApiServer on port {0}", port);
+            LOG.debugv("Created RuntimeApiServer on port {0}", String.valueOf(port));
             return server;
         } catch (InterruptedException e) {
             portAllocator.release(port);

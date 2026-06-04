@@ -1,8 +1,13 @@
 package io.github.hectorvent.floci.services.cloudformation.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 import java.time.Instant;
 import java.util.UUID;
 
+@RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class StackEvent {
     private String eventId = UUID.randomUUID().toString();
     private String stackId;

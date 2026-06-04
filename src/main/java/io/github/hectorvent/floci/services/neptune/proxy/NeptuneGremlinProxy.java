@@ -39,7 +39,7 @@ public class NeptuneGremlinProxy {
         running = true;
         Thread.ofVirtual().name("neptune-proxy-accept-" + clusterId).start(this::acceptLoop);
         LOG.infov("Neptune Gremlin proxy started for cluster {0} on port {1} → {2}:{3}",
-                clusterId, proxyPort, backendHost, backendPort);
+                clusterId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
     }
 
     public void stop() {

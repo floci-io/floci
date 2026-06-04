@@ -58,7 +58,7 @@ public class ElastiCacheAuthProxy {
         running = true;
         Thread.ofVirtual().name("ec-proxy-accept-" + groupId).start(this::acceptLoop);
         LOG.infov("ElastiCache proxy started for group {0} on port {1} → {2}:{3}",
-                groupId, proxyPort, backendHost, backendPort);
+                groupId, String.valueOf(proxyPort), backendHost, String.valueOf(backendPort));
     }
 
     public void stop() {

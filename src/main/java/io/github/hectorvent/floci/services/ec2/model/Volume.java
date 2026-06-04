@@ -18,6 +18,7 @@ public class Volume {
     private String availabilityZone;
     private boolean encrypted;
     private int iops;
+    private Integer throughput;        // MiB/s; only meaningful for gp3 (null otherwise)
     private String snapshotId;
     private Instant createTime;
     private String region;
@@ -46,6 +47,9 @@ public class Volume {
 
     public int getIops() { return iops; }
     public void setIops(int iops) { this.iops = iops; }
+
+    public Integer getThroughput() { return throughput; }
+    public void setThroughput(Integer throughput) { this.throughput = throughput; }
 
     public String getSnapshotId() { return snapshotId; }
     public void setSnapshotId(String snapshotId) { this.snapshotId = snapshotId; }

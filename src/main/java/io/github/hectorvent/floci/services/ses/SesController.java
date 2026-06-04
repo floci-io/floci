@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
+import io.github.hectorvent.floci.services.ses.model.MessageHeader;
+import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -271,6 +273,9 @@ public class SesController {
             List<String> ccAddresses = jsonArrayToList(destination.path("CcAddresses"));
             List<String> bccAddresses = jsonArrayToList(destination.path("BccAddresses"));
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
+            String configurationSetName = request.path("ConfigurationSetName").asText(null);
+            List<MessageTag> emailTags = parseEmailTagsArray(request.path("EmailTags"), "EmailTags");
 
             JsonNode content = request.path("Content");
             String messageId;
@@ -281,19 +286,21 @@ public class SesController {
                     throw new AwsException("BadRequestException",
                             "Content.Raw.Data is required.", 400);
                 }
-                List<String> allDestinations = mergeLists(toAddresses, ccAddresses, bccAddresses);
                 if (allDestinations.isEmpty()) {
                     throw new AwsException("BadRequestException",
                             "At least one destination address is required.", 400);
                 }
-                messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData, region);
+                messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
+                        configurationSetName, emailTags, region);
             } else if (content.has("Simple")) {
                 JsonNode simple = content.path("Simple");
                 String subject = simple.path("Subject").path("Data").asText("");
                 String bodyText = simple.path("Body").path("Text").path("Data").asText(null);
                 String bodyHtml = simple.path("Body").path("Html").path("Data").asText(null);
+                List<MessageHeader> additionalHeaders = parseHeadersArray(simple.path("Headers"));
                 messageId = sesService.sendEmail(fromEmailAddress, toAddresses, ccAddresses,
-                        bccAddresses, replyToAddresses, subject, bodyText, bodyHtml, region);
+                        bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
+                        configurationSetName, emailTags, additionalHeaders, region);
             } else if (content.has("Template")) {
                 JsonNode template = content.path("Template");
                 String templateName = template.path("TemplateName").asText(null);
@@ -312,12 +319,14 @@ public class SesController {
                             "Content.Template requires TemplateName, TemplateArn, or TemplateContent.", 400);
                 }
                 JsonNode templateData = parseTemplateData(template, "TemplateData");
+                List<MessageHeader> additionalHeaders = parseHeadersArray(template.path("Headers"));
                 if (hasName || hasArn) {
                     String resolvedName = hasName
                             ? templateName
                             : SesService.templateNameFromArn(templateArn);
                     messageId = sesService.sendTemplatedEmail(fromEmailAddress, toAddresses, ccAddresses,
-                            bccAddresses, replyToAddresses, resolvedName, templateData, region);
+                            bccAddresses, replyToAddresses, resolvedName, templateData,
+                            configurationSetName, emailTags, additionalHeaders, region);
                 } else {
                     JsonNode inline = template.path("TemplateContent");
                     String subject = inline.path("Subject").asText(null);
@@ -325,7 +334,8 @@ public class SesController {
                     String html = inline.path("Html").asText(null);
                     messageId = sesService.sendInlineTemplatedEmail(fromEmailAddress, toAddresses,
                             ccAddresses, bccAddresses, replyToAddresses,
-                            subject, text, html, templateData, region);
+                            subject, text, html, templateData,
+                            configurationSetName, emailTags, additionalHeaders, region);
                 }
             } else {
                 throw new AwsException("BadRequestException",
@@ -363,6 +373,7 @@ public class SesController {
                         "FromEmailAddress is required.", 400);
             }
             List<String> replyToAddresses = jsonArrayToList(request.path("ReplyToAddresses"));
+            String configurationSetName = request.path("ConfigurationSetName").asText(null);
 
             JsonNode template = request.path("DefaultContent").path("Template");
             if (template.isMissingNode() || template.isNull()) {
@@ -404,6 +415,8 @@ public class SesController {
             }
 
             JsonNode defaultTemplateData = parseTemplateData(template, "TemplateData");
+            List<MessageTag> defaultEmailTags = parseEmailTagsArray(request.path("DefaultEmailTags"), "DefaultEmailTags");
+            List<MessageHeader> defaultHeaders = parseHeadersArray(template.path("Headers"));
 
             JsonNode bulkEntries = request.path("BulkEmailEntries");
             if (!bulkEntries.isArray() || bulkEntries.isEmpty()) {
@@ -424,12 +437,15 @@ public class SesController {
                 JsonNode replacementContent = requireObjectOrAbsent(node, "ReplacementEmailContent");
                 JsonNode replacementTemplate = requireObjectOrAbsent(replacementContent, "ReplacementTemplate");
                 JsonNode replacementData = parseTemplateData(replacementTemplate, "ReplacementTemplateData");
-                entries.add(new BulkEmailEntry(to, cc, bcc, replacementData));
+                List<MessageTag> replacementTags = parseEmailTagsArray(node.path("ReplacementTags"), "ReplacementTags");
+                List<MessageHeader> entryReplacementHeaders = parseHeadersArray(node.path("ReplacementHeaders"));
+                entries.add(new BulkEmailEntry(to, cc, bcc, replacementData, replacementTags, entryReplacementHeaders));
             }
 
             List<BulkEmailEntryResult> results = sesService.sendBulkTemplatedEmail(fromEmailAddress,
                     replyToAddresses, subject, text, html,
-                    defaultTemplateData, entries, region);
+                    defaultTemplateData, entries, configurationSetName,
+                    defaultEmailTags, defaultHeaders, region);
 
             ObjectNode response = objectMapper.createObjectNode();
             ArrayNode arr = response.putArray("BulkEmailEntryResults");
@@ -632,9 +648,52 @@ public class SesController {
                 tagNode.put("Value", t.value());
                 tags.add(tagNode);
             }
+            if (cs.getSuppressionOptions() != null) {
+                ObjectNode suppressionNode = result.putObject("SuppressionOptions");
+                ArrayNode reasons = suppressionNode.putArray("SuppressedReasons");
+                for (String r : cs.getSuppressionOptions().getSuppressedReasons()) {
+                    reasons.add(r);
+                }
+            }
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/suppression-options")
+    public Response putConfigurationSetSuppressionOptions(@Context HttpHeaders headers,
+                                                          @PathParam("configurationSetName") String name,
+                                                          String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            JsonNode reasonsNode = request.path("SuppressedReasons");
+            List<String> reasons = new ArrayList<>();
+            if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
+                if (!reasonsNode.isArray()) {
+                    throw new AwsException("BadRequestException",
+                            "SuppressedReasons must be an array.", 400);
+                }
+                for (JsonNode r : reasonsNode) {
+                    if (r.isNull() || !r.isTextual()) {
+                        throw new AwsException("BadRequestException",
+                                "SuppressedReasons entries must be strings.", 400);
+                    }
+                    reasons.add(r.asText());
+                }
+            }
+            sesService.putConfigurationSetSuppressionOptions(name, reasons, region);
+            LOG.infov("SES V2 PutConfigurationSetSuppressionOptions: {0} on {1}", reasons, name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -1175,6 +1234,69 @@ public class SesController {
             out.add(new Tag(
                     t.path("Key").asText(null),
                     t.path("Value").asText(null)));
+        }
+        return out;
+    }
+
+    /**
+     * Parse a V2 SES {@code Content.Simple.Headers} / {@code Content.Template.Headers} array
+     * (additional message headers, elements use {@code Name}/{@code Value}). Returns an empty
+     * list when the node is absent so callers can pass it through unconditionally.
+     */
+    private List<MessageHeader> parseHeadersArray(JsonNode headersNode) {
+        if (headersNode.isMissingNode() || headersNode.isNull()) {
+            return List.of();
+        }
+        if (!headersNode.isArray()) {
+            throw new AwsException("BadRequestException", "Headers must be an array.", 400);
+        }
+        List<MessageHeader> out = new ArrayList<>();
+        for (JsonNode h : headersNode) {
+            if (!h.isObject()) {
+                throw new AwsException("BadRequestException",
+                        "Headers entries must be JSON objects.", 400);
+            }
+            String name = h.path("Name").asText(null);
+            String value = h.path("Value").asText(null);
+            if (name == null || name.isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "The header name must be specified.", 400);
+            }
+            out.add(new MessageHeader(name, value));
+        }
+        return out;
+    }
+
+    /**
+     * Parse a V2 SES {@code EmailTags} / {@code DefaultEmailTags} / {@code ReplacementTags}
+     * array (per-message {@link MessageTag} list whose elements use {@code Name}/{@code Value},
+     * distinct from the resource-tag {@link Tag} {@code Key}/{@code Value} shape). Note that
+     * the per-entry name is {@code ReplacementTags} on the wire — only the top-level field
+     * carries the {@code EmailTags} suffix. Returns an empty list when the node is absent so
+     * callers can pass it through unconditionally.
+     * The {@code fieldName} parameter is reported in the error message when the node is
+     * present but not an array.
+     */
+    private List<MessageTag> parseEmailTagsArray(JsonNode tagsNode, String fieldName) {
+        if (tagsNode.isMissingNode() || tagsNode.isNull()) {
+            return List.of();
+        }
+        if (!tagsNode.isArray()) {
+            throw new AwsException("BadRequestException", fieldName + " must be an array.", 400);
+        }
+        List<MessageTag> out = new ArrayList<>();
+        for (JsonNode t : tagsNode) {
+            if (!t.isObject()) {
+                throw new AwsException("BadRequestException",
+                        fieldName + " entries must be JSON objects.", 400);
+            }
+            String name = t.path("Name").asText(null);
+            String value = t.path("Value").asText(null);
+            if (name == null || name.isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "The tag name must be specified.", 400);
+            }
+            out.add(new MessageTag(name, value));
         }
         return out;
     }

@@ -252,6 +252,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>backup</artifactId>
         </dependency>
+        <!-- AppSync client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>appsync</artifactId>
+        </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

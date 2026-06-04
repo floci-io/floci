@@ -10,5 +10,7 @@ public record BulkEmailEntry(
         List<String> toAddresses,
         List<String> ccAddresses,
         List<String> bccAddresses,
-        JsonNode replacementTemplateData
+        JsonNode replacementTemplateData,
+        List<MessageTag> replacementEmailTags,
+        List<MessageHeader> replacementHeaders
 ) {}

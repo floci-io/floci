@@ -15,7 +15,6 @@ import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
-import java.util.Base64;
 
 @ApplicationScoped
 public class Ec2QueryHandler {
@@ -38,6 +37,8 @@ public class Ec2QueryHandler {
                 // Instances
                 case "RunInstances" -> handleRunInstances(params, region);
                 case "DescribeInstances" -> handleDescribeInstances(params, region);
+                case "DescribeIamInstanceProfileAssociations" ->
+                        handleDescribeIamInstanceProfileAssociations(params, region);
                 case "TerminateInstances" -> handleTerminateInstances(params, region);
                 case "StartInstances" -> handleStartInstances(params, region);
                 case "StopInstances" -> handleStopInstances(params, region);
@@ -70,8 +71,10 @@ public class Ec2QueryHandler {
                 case "RevokeSecurityGroupEgress" -> handleRevokeSecurityGroupEgress(params, region);
                 case "DescribeSecurityGroupRules" -> handleDescribeSecurityGroupRules(params, region);
                 case "ModifySecurityGroupRules" -> handleModifySecurityGroupRules(params, region);
-                case "UpdateSecurityGroupRuleDescriptionsIngress" -> handleUpdateSgRuleDescriptionsIngress(params, region);
-                case "UpdateSecurityGroupRuleDescriptionsEgress" -> handleUpdateSgRuleDescriptionsEgress(params, region);
+                case "UpdateSecurityGroupRuleDescriptionsIngress" ->
+                        handleUpdateSgRuleDescriptionsIngress(params, region);
+                case "UpdateSecurityGroupRuleDescriptionsEgress" ->
+                        handleUpdateSgRuleDescriptionsEgress(params, region);
                 // Key Pairs
                 case "CreateKeyPair" -> handleCreateKeyPair(params, region);
                 case "DescribeKeyPairs" -> handleDescribeKeyPairs(params, region);
@@ -103,6 +106,7 @@ public class Ec2QueryHandler {
                 case "DisassociateAddress" -> handleDisassociateAddress(params, region);
                 case "ReleaseAddress" -> handleReleaseAddress(params, region);
                 case "DescribeAddresses" -> handleDescribeAddresses(params, region);
+                case "DescribeAddressesAttribute" -> handleDescribeAddressesAttribute(params, region);
                 // Regions & Account
                 case "DescribeAvailabilityZones" -> handleDescribeAvailabilityZones(params, region);
                 case "DescribeRegions" -> handleDescribeRegions(params, region);
@@ -131,13 +135,13 @@ public class Ec2QueryHandler {
     private Response ec2Error(String code, String message, int status) {
         String xml = new XmlBuilder()
                 .start("Response")
-                  .start("Errors")
-                    .start("Error")
-                      .elem("Code", code)
-                      .elem("Message", message)
-                    .end("Error")
-                  .end("Errors")
-                  .elem("RequestID", UUID.randomUUID().toString())
+                .start("Errors")
+                .start("Error")
+                .elem("Code", code)
+                .elem("Message", message)
+                .end("Error")
+                .end("Errors")
+                .elem("RequestID", UUID.randomUUID().toString())
                 .end("Response")
                 .build();
         return Response.status(status).entity(xml).type(MediaType.APPLICATION_XML).build();
@@ -272,6 +276,71 @@ public class Ec2QueryHandler {
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
         return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeIamInstanceProfileAssociations(MultivaluedMap<String, String> p, String region) {
+        List<String> associationIds = getList(p, "AssociationId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<String> instanceFilter = filters.get("instance-id");
+
+        List<Reservation> reservations = service.describeInstances(region, List.of(), Map.of());
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeIamInstanceProfileAssociationsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("iamInstanceProfileAssociationSet");
+        for (Reservation res : reservations) {
+            for (Instance inst : res.getInstances()) {
+                if (inst.getIamInstanceProfileArn() == null) {
+                    continue;
+                }
+                String assocId = iamInstanceProfileAssociationId(inst.getInstanceId());
+                if (instanceFilter != null && !instanceFilter.contains(inst.getInstanceId())) {
+                    continue;
+                }
+                if (!associationIds.isEmpty() && !associationIds.contains(assocId)) {
+                    continue;
+                }
+                xml.start("item")
+                        .elem("associationId", assocId)
+                        .elem("instanceId", inst.getInstanceId())
+                        .start("iamInstanceProfile")
+                        .elem("arn", inst.getIamInstanceProfileArn())
+                        .elem("id", iamInstanceProfileId(inst.getInstanceId()))
+                        .end("iamInstanceProfile")
+                        .elem("state", "associated")
+                        .end("item");
+            }
+        }
+        xml.end("iamInstanceProfileAssociationSet")
+                .end("DescribeIamInstanceProfileAssociationsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * Deterministic instance-profile id derived from the instance id so repeated describes are stable.
+     */
+    private static String iamInstanceProfileId(String instanceId) {
+        return "AIPA" + stableSuffix(instanceId, 17).toUpperCase();
+    }
+
+    /**
+     * Deterministic association id derived from the instance id so repeated describes are stable.
+     */
+    private static String iamInstanceProfileAssociationId(String instanceId) {
+        return "iip-assoc-" + stableSuffix(instanceId, 17);
+    }
+
+    private static String stableSuffix(String seed, int length) {
+        StringBuilder sb = new StringBuilder();
+        int h = seed.hashCode();
+        String alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
+        long v = ((long) h) & 0xFFFFFFFFL;
+        for (int i = 0; i < length; i++) {
+            sb.append(alphabet.charAt((int) (v % alphabet.length())));
+            v = v * 1103515245L + 12345L + i;
+            v &= 0xFFFFFFFFL;
+        }
+        return sb.toString();
     }
 
     private Response handleDescribeInstances(MultivaluedMap<String, String> p, String region) {
@@ -973,7 +1042,7 @@ public class Ec2QueryHandler {
                 .elem("requestId", UUID.randomUUID().toString())
                 .elem("associationId", assoc.getRouteTableAssociationId())
                 .start("associationState")
-                    .elem("state", assoc.getAssociationState())
+                .elem("state", assoc.getAssociationState())
                 .end("associationState")
                 .end("AssociateRouteTableResponse");
         return xmlResponse(xml.build());
@@ -1047,6 +1116,26 @@ public class Ec2QueryHandler {
             xml.start("item").raw(addressXml(addr)).end("item");
         }
         xml.end("addressesSet").end("DescribeAddressesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeAddressesAttribute(MultivaluedMap<String, String> p, String region) {
+        List<String> allocationIds = getList(p, "AllocationId");
+        List<Address> addrs = service.describeAddresses(region, allocationIds, Map.of());
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeAddressesAttributeResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("addressSet");
+        for (Address addr : addrs) {
+            // AddressAttribute carries allocationId, publicIp and (optionally) ptrRecord.
+            // Floci does not model reverse DNS, so ptrRecord is omitted (null), matching
+            // real EC2 behaviour for EIPs without a configured PTR record.
+            xml.start("item")
+                    .elem("allocationId", addr.getAllocationId())
+                    .elem("publicIp", addr.getPublicIp())
+                    .end("item");
+        }
+        xml.end("addressSet").end("DescribeAddressesAttributeResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1335,16 +1424,22 @@ public class Ec2QueryHandler {
                 .end("capacityReservationSpecification");
         if (inst.getRootVolumeId() != null) {
             xml.start("blockDeviceMapping")
-                .start("item")
-                .elem("deviceName", inst.getRootDeviceName())
-                .start("ebs")
-                .elem("volumeId", inst.getRootVolumeId())
-                .elem("status", "attached")
-                .elem("deleteOnTermination", "true")
-                .elem("attachTime", inst.getLaunchTime() != null ? ISO_FMT.format(inst.getLaunchTime()) : "")
-                .end("ebs")
-                .end("item")
-                .end("blockDeviceMapping");
+                    .start("item")
+                    .elem("deviceName", inst.getRootDeviceName())
+                    .start("ebs")
+                    .elem("volumeId", inst.getRootVolumeId())
+                    .elem("status", "attached")
+                    .elem("deleteOnTermination", "true")
+                    .elem("attachTime", inst.getLaunchTime() != null ? ISO_FMT.format(inst.getLaunchTime()) : "")
+                    .end("ebs")
+                    .end("item")
+                    .end("blockDeviceMapping");
+        }
+        if (inst.getIamInstanceProfileArn() != null) {
+            xml.start("iamInstanceProfile")
+                    .elem("arn", inst.getIamInstanceProfileArn())
+                    .elem("id", iamInstanceProfileId(inst.getInstanceId()))
+                    .end("iamInstanceProfile");
         }
         xml.raw(tagSetXml(inst.getTags()));
         return xml.build();
@@ -1505,6 +1600,16 @@ public class Ec2QueryHandler {
         boolean encrypted = "true".equalsIgnoreCase(encryptedStr);
         String iopsStr = p.getFirst("Iops");
         int iops = iopsStr != null ? Integer.parseInt(iopsStr) : 0;
+        String throughputStr = p.getFirst("Throughput");
+        Integer throughput = null;
+        if (throughputStr != null) {
+            try {
+                throughput = Integer.parseInt(throughputStr);
+            } catch (NumberFormatException e) {
+                throw new AwsException("ValidationException", "Invalid Throughput value: " + throughputStr, 400);
+            }
+        }
+
         String snapshotId = p.getFirst("SnapshotId");
 
         List<Tag> volumeTags = new ArrayList<>();
@@ -1522,7 +1627,7 @@ public class Ec2QueryHandler {
         }
 
         Volume vol = service.createVolume(region, availabilityZone, volumeType, size,
-                encrypted, iops, snapshotId, volumeTags);
+                encrypted, iops, throughput, snapshotId, volumeTags);
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVolumeResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1563,6 +1668,9 @@ public class Ec2QueryHandler {
                 .elem("encrypted", String.valueOf(vol.isEncrypted()));
         if (vol.getIops() > 0) {
             xml.elem("iops", String.valueOf(vol.getIops()));
+        }
+        if (vol.getThroughput() != null) {
+            xml.elem("throughput", String.valueOf(vol.getThroughput()));
         }
         if (vol.getSnapshotId() != null) {
             xml.elem("snapshotId", vol.getSnapshotId());

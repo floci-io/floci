@@ -256,3 +256,14 @@ class TestKMSTagging:
             )
         finally:
             kms_client.schedule_key_deletion(KeyId=key_id, PendingWindowInDays=7)
+
+
+class TestKMSGenerateRandom:
+    """Test KMS GenerateRandom operation."""
+
+    def test_generate_random(self, kms_client):
+        """Test GenerateRandom returns random bytes."""
+        response = kms_client.generate_random(NumberOfBytes=32)
+        plaintext = response["Plaintext"]
+        assert plaintext
+        assert len(plaintext) == 32

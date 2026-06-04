@@ -15,6 +15,7 @@ import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
 import io.github.hectorvent.floci.services.ecs.model.ProtectedTask;
 import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
@@ -181,6 +182,7 @@ public class EcsService {
 
     public TaskDefinition registerTaskDefinition(String family, List<ContainerDefinition> containerDefs,
                                                   NetworkMode networkMode, String cpu, String memory,
+                                                  String taskRoleArn, String executionRoleArn,
                                                   String region) {
         int revision = latestRevisions.merge(family, 1, Integer::sum);
 
@@ -191,6 +193,8 @@ public class EcsService {
         td.setNetworkMode(networkMode != null ? networkMode : NetworkMode.bridge);
         td.setCpu(cpu);
         td.setMemory(memory);
+        td.setTaskRoleArn(taskRoleArn);
+        td.setExecutionRoleArn(executionRoleArn);
         td.setContainerDefinitions(containerDefs != null ? containerDefs : List.of());
         td.setTaskDefinitionArn(regionResolver.buildArn("ecs", region,
                 "task-definition/" + family + ":" + revision));
@@ -442,7 +446,8 @@ public class EcsService {
 
     public EcsServiceModel createService(String clusterRef, String serviceName, String taskDefinition,
                                           int desiredCount, LaunchType launchType,
-                                          List<EcsLoadBalancer> loadBalancers, String region) {
+                                          List<EcsLoadBalancer> loadBalancers,
+                                          NetworkConfiguration networkConfiguration, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         resolveTaskDefinitionOrThrow(taskDefinition, region);
 
@@ -461,6 +466,7 @@ public class EcsService {
         svc.setLaunchType(launchType != null ? launchType : LaunchType.FARGATE);
         svc.setDesiredCount(desiredCount);
         svc.setLoadBalancers(loadBalancers);
+        svc.setNetworkConfiguration(networkConfiguration);
         svc.setStatus("ACTIVE");
         svc.setCreatedAt(Instant.now());
 
@@ -472,7 +478,8 @@ public class EcsService {
     }
 
     public EcsServiceModel updateService(String clusterRef, String serviceName, String taskDefinition,
-                                          Integer desiredCount, String region) {
+                                          Integer desiredCount, NetworkConfiguration networkConfiguration,
+                                          String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         EcsServiceModel svc = services.get(key);
@@ -481,6 +488,9 @@ public class EcsService {
         }
         if (desiredCount != null) {
             svc.setDesiredCount(desiredCount);
+        }
+        if (networkConfiguration != null) {
+            svc.setNetworkConfiguration(networkConfiguration);
         }
         if (taskDefinition != null) {
             resolveTaskDefinitionOrThrow(taskDefinition, region);
