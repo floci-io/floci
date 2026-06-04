@@ -107,7 +107,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 `RunInstances` · `DescribeInstances` · `TerminateInstances` · `StartInstances` · `StopInstances` · `RebootInstances` · `DescribeInstanceStatus` · `DescribeInstanceAttribute` · `ModifyInstanceAttribute`
 
 ### VPCs
-`CreateVpc` · `DescribeVpcs` · `DeleteVpc` · `ModifyVpcAttribute` · `DescribeVpcAttribute` · `CreateDefaultVpc` · `AssociateVpcCidrBlock` · `DisassociateVpcCidrBlock`
+`CreateVpc` · `DescribeVpcs` · `DeleteVpc` · `ModifyVpcAttribute` · `DescribeVpcAttribute` · `DescribeVpcEndpointServices` · `CreateVpcEndpoint` · `DescribeVpcEndpoints` · `DeleteVpcEndpoints` · `CreateDefaultVpc` · `AssociateVpcCidrBlock` · `DisassociateVpcCidrBlock`
 
 ### Subnets
 `CreateSubnet` · `DescribeSubnets` · `DeleteSubnet` · `ModifySubnetAttribute`

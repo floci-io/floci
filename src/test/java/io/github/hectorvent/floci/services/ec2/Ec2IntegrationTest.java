@@ -49,6 +49,7 @@ class Ec2IntegrationTest {
     private static String rootVolumeId;
     private static String networkInterfaceId;
     private static String launchTemplateId;
+    private static String vpcEndpointId;
 
     // =========================================================================
     // Default resources
@@ -837,6 +838,60 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeRouteTablesResponse.routeTableSet.item.routeTableId", equalTo(routeTableId));
+    }
+
+    @Test
+    @Order(66)
+    void createVpcEndpoint() {
+        vpcEndpointId = given()
+            .formParam("Action", "CreateVpcEndpoint")
+            .formParam("VpcId", vpcId)
+            .formParam("ServiceName", "com.amazonaws.us-east-1.s3")
+            .formParam("VpcEndpointType", "Gateway")
+            .formParam("RouteTableId.1", routeTableId)
+            .formParam("TagSpecification.1.ResourceType", "vpc-endpoint")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "sample-s3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId", startsWith("vpce-"))
+            .body("CreateVpcEndpointResponse.vpcEndpoint.vpcId", equalTo(vpcId))
+            .body("CreateVpcEndpointResponse.vpcEndpoint.routeTableIdSet.item.routeTableId",
+                    equalTo(routeTableId))
+            .extract().path("CreateVpcEndpointResponse.vpcEndpoint.vpcEndpointId");
+    }
+
+    @Test
+    @Order(67)
+    void describeVpcEndpointById() {
+        given()
+            .formParam("Action", "DescribeVpcEndpoints")
+            .formParam("VpcEndpointId.1", vpcEndpointId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeVpcEndpointsResponse.vpcEndpointSet.item.vpcEndpointId",
+                    equalTo(vpcEndpointId))
+            .body("DescribeVpcEndpointsResponse.vpcEndpointSet.item.serviceName",
+                    equalTo("com.amazonaws.us-east-1.s3"));
+    }
+
+    @Test
+    @Order(68)
+    void deleteVpcEndpoint() {
+        given()
+            .formParam("Action", "DeleteVpcEndpoints")
+            .formParam("VpcEndpointId.1", vpcEndpointId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     // =========================================================================

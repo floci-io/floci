@@ -54,6 +54,7 @@ import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -82,6 +83,7 @@ public class Ec2Service {
     private final Map<String, Instance> instances = new ConcurrentHashMap<>();
     private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
     private final Map<String, LaunchTemplate> launchTemplates = new ConcurrentHashMap<>();
+    private final Map<String, VpcEndpoint> vpcEndpoints = new ConcurrentHashMap<>();
     // resourceId → List<Tag>
     private final Map<String, List<Tag>> tags = new ConcurrentHashMap<>();
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -632,6 +634,78 @@ public class Ec2Service {
         }
     }
 
+    // ─── VPC Endpoints ────────────────────────────────────────────────────────
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, List<Tag> endpointTags) {
+        ensureDefaultResources(region);
+        getRequiredVpc(region, vpcId);
+        for (String routeTableId : routeTableIds) {
+            getRequiredRouteTable(region, routeTableId);
+        }
+        for (String subnetId : subnetIds) {
+            getRequiredSubnet(region, subnetId);
+        }
+        for (String securityGroupId : securityGroupIds) {
+            getRequiredSecurityGroup(region, securityGroupId);
+        }
+
+        VpcEndpoint endpoint = new VpcEndpoint();
+        endpoint.setVpcEndpointId("vpce-" + randomHex(17));
+        endpoint.setVpcId(vpcId);
+        endpoint.setServiceName(serviceName);
+        endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        endpoint.setCreationTimestamp(Instant.now());
+        endpoint.setRegion(region);
+        endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
+        endpoint.setSubnetIds(new ArrayList<>(subnetIds));
+        endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        if (endpointTags != null && !endpointTags.isEmpty()) {
+            endpoint.setTags(new ArrayList<>(endpointTags));
+            tags.put(endpoint.getVpcEndpointId(), new ArrayList<>(endpointTags));
+        }
+        vpcEndpoints.put(key(region, endpoint.getVpcEndpointId()), endpoint);
+        return endpoint;
+    }
+
+    public List<VpcEndpoint> describeVpcEndpoints(String region, List<String> endpointIds,
+                                                  Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        if (!endpointIds.isEmpty()) {
+            for (String endpointId : endpointIds) {
+                getRequiredVpcEndpoint(region, endpointId);
+            }
+        }
+        return vpcEndpoints.values().stream()
+                .filter(endpoint -> endpoint.getRegion().equals(region))
+                .filter(endpoint -> endpointIds.isEmpty() || endpointIds.contains(endpoint.getVpcEndpointId()))
+                .filter(endpoint -> matchesFilters(endpoint, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public List<VpcEndpoint> deleteVpcEndpoints(String region, List<String> endpointIds) {
+        ensureDefaultResources(region);
+        List<VpcEndpoint> deleted = new ArrayList<>();
+        for (String endpointId : endpointIds) {
+            VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
+            endpoint.setState("deleted");
+            vpcEndpoints.remove(key(region, endpointId));
+            tags.remove(endpointId);
+            deleted.add(endpoint);
+        }
+        return deleted;
+    }
+
+    private VpcEndpoint getRequiredVpcEndpoint(String region, String endpointId) {
+        VpcEndpoint endpoint = vpcEndpoints.get(key(region, endpointId));
+        if (endpoint == null) {
+            throw new AwsException("InvalidVpcEndpointId.NotFound",
+                    "The vpcEndpoint ID '" + endpointId + "' does not exist", 400);
+        }
+        return endpoint;
+    }
+
     // ─── Subnets ───────────────────────────────────────────────────────────────
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
@@ -1168,7 +1242,9 @@ public class Ec2Service {
         KeyPair kp = keyPairs.get(key(region, resourceId));
         if (kp != null) { kp.setTags(new ArrayList<>(tagList)); return; }
         LaunchTemplate lt = launchTemplates.get(key(region, resourceId));
-        if (lt != null) { lt.setTags(new ArrayList<>(tagList)); }
+        if (lt != null) { lt.setTags(new ArrayList<>(tagList)); return; }
+        VpcEndpoint endpoint = vpcEndpoints.get(key(region, resourceId));
+        if (endpoint != null) { endpoint.setTags(new ArrayList<>(tagList)); }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -1661,9 +1737,24 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        if (resource instanceof VpcEndpoint endpoint) {
+            return switch (filterName) {
+                case "service-name" -> matchesValue(values, endpoint.getServiceName());
+                case "vpc-endpoint-id" -> matchesValue(values, endpoint.getVpcEndpointId());
+                case "vpc-endpoint-type" -> matchesValue(values, endpoint.getVpcEndpointType());
+                case "vpc-id" -> matchesValue(values, endpoint.getVpcId());
+                case "state" -> matchesValue(values, endpoint.getState());
+                case "route-table-id" -> endpoint.getRouteTableIds().stream()
+                        .anyMatch(routeTableId -> matchesValue(values, routeTableId));
+                case "subnet-id" -> endpoint.getSubnetIds().stream()
+                        .anyMatch(subnetId -> matchesValue(values, subnetId));
+                default -> true;
+            };
+        }
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
         if (resource instanceof LaunchTemplate lt) return lt.getTags();
+        if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
         if (resource instanceof NetworkInterface ni) return ni.getTagSet();
         return Collections.emptyList();
     }

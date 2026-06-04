@@ -56,6 +56,9 @@ public class Ec2QueryHandler {
                 case "ModifyVpcAttribute" -> handleModifyVpcAttribute(params, region);
                 case "DescribeVpcAttribute" -> handleDescribeVpcAttribute(params, region);
                 case "DescribeVpcEndpointServices" -> handleDescribeVpcEndpointServices(params, region);
+                case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
+                case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
+                case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -627,9 +630,62 @@ public class Ec2QueryHandler {
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .start("serviceNameSet").end("serviceNameSet")
-                .start("serviceDetailSet").end("serviceDetailSet")
+                .start("serviceNameSet")
+                .start("item").elem("serviceName", "com.amazonaws." + region + ".s3").end("item")
+                .end("serviceNameSet")
+                .start("serviceDetailSet")
+                .start("item")
+                .elem("serviceName", "com.amazonaws." + region + ".s3")
+                .elem("serviceType", "Gateway")
+                .start("serviceTypeSet").start("item").elem("serviceType", "Gateway").end("item").end("serviceTypeSet")
+                .start("availabilityZoneSet").end("availabilityZoneSet")
+                .end("item")
+                .end("serviceDetailSet")
                 .end("DescribeVpcEndpointServicesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateVpcEndpoint(MultivaluedMap<String, String> p, String region) {
+        VpcEndpoint endpoint = service.createVpcEndpoint(
+                region,
+                p.getFirst("VpcId"),
+                p.getFirst("ServiceName"),
+                p.getFirst("VpcEndpointType"),
+                getList(p, "RouteTableId"),
+                getList(p, "SubnetId"),
+                getList(p, "SecurityGroupId"),
+                parseTagsForResource(p, "vpc-endpoint"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcEndpoint").raw(vpcEndpointXml(endpoint)).end("vpcEndpoint")
+                .end("CreateVpcEndpointResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpcEndpoints(MultivaluedMap<String, String> p, String region) {
+        List<String> endpointIds = getList(p, "VpcEndpointId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<VpcEndpoint> endpoints = service.describeVpcEndpoints(region, endpointIds, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpcEndpointsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcEndpointSet");
+        for (VpcEndpoint endpoint : endpoints) {
+            xml.start("item").raw(vpcEndpointXml(endpoint)).end("item");
+        }
+        xml.end("vpcEndpointSet").end("DescribeVpcEndpointsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
+        List<String> endpointIds = getList(p, "VpcEndpointId");
+        service.deleteVpcEndpoints(region, endpointIds);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteVpcEndpointsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("unsuccessful").end("unsuccessful")
+                .end("DeleteVpcEndpointsResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1768,6 +1824,35 @@ public class Ec2QueryHandler {
             }
         }
         return new String(decoded, StandardCharsets.UTF_8);
+    }
+
+    private String vpcEndpointXml(VpcEndpoint endpoint) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("vpcEndpointId", endpoint.getVpcEndpointId())
+                .elem("vpcEndpointType", endpoint.getVpcEndpointType())
+                .elem("vpcId", endpoint.getVpcId())
+                .elem("serviceName", endpoint.getServiceName())
+                .elem("state", endpoint.getState());
+        if (endpoint.getCreationTimestamp() != null) {
+            xml.elem("creationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
+        }
+        xml.start("routeTableIdSet");
+        for (String routeTableId : endpoint.getRouteTableIds()) {
+            xml.start("item").elem("routeTableId", routeTableId).end("item");
+        }
+        xml.end("routeTableIdSet")
+                .start("subnetIdSet");
+        for (String subnetId : endpoint.getSubnetIds()) {
+            xml.start("item").elem("subnetId", subnetId).end("item");
+        }
+        xml.end("subnetIdSet")
+                .start("groupSet");
+        for (String securityGroupId : endpoint.getSecurityGroupIds()) {
+            xml.start("item").elem("groupId", securityGroupId).end("item");
+        }
+        xml.end("groupSet")
+                .raw(tagSetXml(endpoint.getTags()));
+        return xml.build();
     }
 
     private String addressXml(Address addr) {
