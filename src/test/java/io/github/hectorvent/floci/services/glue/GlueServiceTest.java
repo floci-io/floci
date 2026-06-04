@@ -12,12 +12,14 @@ import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.RegistryId;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.SchemaId;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -52,6 +54,7 @@ class GlueServiceTest {
                 new InMemoryStorage<String, Database>(),
                 new InMemoryStorage<String, Table>(),
                 new InMemoryStorage<String, Partition>(),
+                new InMemoryStorage<String, UserDefinedFunction>(),
                 schemaRegistryService, regionResolver);
         glueService.createDatabase(new Database("db1"));
     }
@@ -230,6 +233,104 @@ class GlueServiceTest {
     @Test
     void getTableVersionsReturnsEmptyListForAthenaCompatibility() {
         assertTrue(glueService.getTableVersions().isEmpty());
+    }
+
+    @Test
+    void userDefinedFunctionsCanBeCreatedListedUpdatedAndDeleted() {
+        UserDefinedFunction function = new UserDefinedFunction();
+        function.setFunctionName("udf__test__integer");
+        function.setClassName("ExampleFunction");
+        function.setFunctionType("REGULAR_FUNCTION");
+        function.setOwnerType("USER");
+        function.setOwnerName("owner");
+        function.setCreateTime(Instant.EPOCH);
+
+        glueService.createUserDefinedFunction("db1", function);
+
+        UserDefinedFunction fetched = glueService.getUserDefinedFunction("db1", "udf__test__integer");
+        assertEquals("db1", fetched.getDatabaseName());
+        assertEquals("ExampleFunction", fetched.getClassName());
+        assertEquals("REGULAR_FUNCTION", fetched.getFunctionType());
+        assertEquals("owner", fetched.getOwnerName());
+        assertNotNull(fetched.getCreateTime());
+        assertTrue(fetched.getCreateTime().isAfter(Instant.EPOCH));
+        assertEquals(1, glueService.getUserDefinedFunctions("db1", "udf__test__.*").size());
+        assertEquals(1, glueService.getUserDefinedFunctions("db1", "udf__\\Qtest\\E__.*").size());
+        assertEquals(0, glueService.getUserDefinedFunctions("db1", "other__.*").size());
+
+        UserDefinedFunction replacement = new UserDefinedFunction();
+        replacement.setFunctionName("ignored-name");
+        replacement.setClassName("ExampleFunction");
+        replacement.setFunctionType("REGULAR_FUNCTION");
+        replacement.setOwnerType("USER");
+        replacement.setOwnerName("new-owner");
+        glueService.updateUserDefinedFunction("db1", "udf__test__integer", replacement);
+
+        UserDefinedFunction updated = glueService.getUserDefinedFunction("db1", "udf__test__integer");
+        assertEquals("udf__test__integer", updated.getFunctionName());
+        assertEquals(fetched.getCreateTime(), updated.getCreateTime());
+        assertEquals("new-owner", updated.getOwnerName());
+
+        glueService.deleteUserDefinedFunction("db1", "udf__test__integer");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunction("db1", "udf__test__integer"));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void getUserDefinedFunctionsPaginatesFiltersAndScansAllDatabases() {
+        UserDefinedFunction db1Function = new UserDefinedFunction();
+        db1Function.setFunctionName("udf__test__integer");
+        db1Function.setFunctionType("REGULAR_FUNCTION");
+        glueService.createUserDefinedFunction("db1", db1Function);
+
+        UserDefinedFunction storedProcedure = new UserDefinedFunction();
+        storedProcedure.setFunctionName("udf__test__procedure");
+        storedProcedure.setFunctionType("STORED_PROCEDURE");
+        glueService.createUserDefinedFunction("db1", storedProcedure);
+
+        glueService.createDatabase(new Database("db2"));
+        UserDefinedFunction db2Function = new UserDefinedFunction();
+        db2Function.setFunctionName("udf__test__varchar");
+        db2Function.setFunctionType("REGULAR_FUNCTION");
+        glueService.createUserDefinedFunction("db2", db2Function);
+
+        GlueService.UserDefinedFunctionPage firstPage =
+                glueService.getUserDefinedFunctions(null, "udf__test__.*", "REGULAR_FUNCTION", 1, null);
+
+        assertEquals(1, firstPage.functions().size());
+        assertEquals("db1", firstPage.functions().getFirst().getDatabaseName());
+        assertEquals("udf__test__integer", firstPage.functions().getFirst().getFunctionName());
+        assertNotNull(firstPage.nextToken());
+
+        GlueService.UserDefinedFunctionPage secondPage =
+                glueService.getUserDefinedFunctions(
+                        null, "udf__test__.*", "REGULAR_FUNCTION", 1, firstPage.nextToken());
+
+        assertEquals(1, secondPage.functions().size());
+        assertEquals("db2", secondPage.functions().getFirst().getDatabaseName());
+        assertEquals("udf__test__varchar", secondPage.functions().getFirst().getFunctionName());
+        assertNull(secondPage.nextToken());
+    }
+
+    @Test
+    void getUserDefinedFunctionsRejectsInvalidPagingInput() {
+        AwsException maxResultsEx = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunctions("db1", ".*", null, 101, null));
+        assertEquals("InvalidInputException", maxResultsEx.getErrorCode());
+
+        AwsException nextTokenEx = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunctions("db1", ".*", null, 1, "invalid"));
+        assertEquals("InvalidInputException", nextTokenEx.getErrorCode());
+    }
+
+    @Test
+    void getUserDefinedFunctionsWithInvalidPatternThrows() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.getUserDefinedFunctions("db1", "udf__("));
+
+        assertEquals("InvalidInputException", ex.getErrorCode());
     }
 
     private Table tableReferencing(String registryName, String schemaName, Long versionNumber, String versionId) {

@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.SchemaToColumnsConverter;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.SchemaId;
@@ -21,18 +22,24 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
 
 @ApplicationScoped
 public class GlueService {
 
     private static final Logger LOG = Logger.getLogger(GlueService.class);
+    private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
+    private static final int MAX_FUNCTION_RESULTS = 100;
 
     private final StorageBackend<String, Database> databaseStore;
     private final StorageBackend<String, Table> tableStore;
     private final StorageBackend<String, Partition> partitionStore;
+    private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
 
@@ -40,9 +47,10 @@ public class GlueService {
     public GlueService(StorageFactory storageFactory,
                        GlueSchemaRegistryService schemaRegistryService,
                        RegionResolver regionResolver) {
-        this.databaseStore = storageFactory.create("glue", "databases.json", new TypeReference<Map<String, Database>>() {});
-        this.tableStore = storageFactory.create("glue", "tables.json", new TypeReference<Map<String, Table>>() {});
-        this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<Map<String, Partition>>() {});
+        this.databaseStore = storageFactory.create("glue", "databases.json", new TypeReference<>() {});
+        this.tableStore = storageFactory.create("glue", "tables.json", new TypeReference<>() {});
+        this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
+        this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
     }
@@ -50,11 +58,13 @@ public class GlueService {
     GlueService(StorageBackend<String, Database> databaseStore,
                 StorageBackend<String, Table> tableStore,
                 StorageBackend<String, Partition> partitionStore,
+                StorageBackend<String, UserDefinedFunction> functionStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver) {
         this.databaseStore = databaseStore;
         this.tableStore = tableStore;
         this.partitionStore = partitionStore;
+        this.functionStore = functionStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
     }
@@ -147,6 +157,75 @@ public class GlueService {
         return partitionStore.scan(k -> k.startsWith(prefix));
     }
 
+    public void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
+        getDatabase(databaseName);
+        String key = functionKey(databaseName, function.getFunctionName());
+        if (functionStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "Function already exists: " + databaseName + "." + function.getFunctionName(), 400);
+        }
+        function.setDatabaseName(databaseName);
+        function.setCreateTime(Instant.now());
+        functionStore.put(key, function);
+    }
+
+    public UserDefinedFunction getUserDefinedFunction(String databaseName, String functionName) {
+        getDatabase(databaseName);
+        return functionStore.get(functionKey(databaseName, functionName))
+                .orElseThrow(() -> new AwsException("EntityNotFoundException",
+                        "Function not found: " + databaseName + "." + functionName, 400));
+    }
+
+    public List<UserDefinedFunction> getUserDefinedFunctions(String databaseName, String pattern) {
+        return getUserDefinedFunctions(databaseName, pattern, null, null, null).functions();
+    }
+
+    public UserDefinedFunctionPage getUserDefinedFunctions(
+            String databaseName,
+            String pattern,
+            String functionType,
+            Integer maxResults,
+            String nextToken) {
+        if (databaseName != null) {
+            getDatabase(databaseName);
+        }
+        Pattern compiledPattern = compileFunctionPattern(pattern);
+        int offset = decodeFunctionNextToken(nextToken);
+        if (maxResults != null && (maxResults < 1 || maxResults > MAX_FUNCTION_RESULTS)) {
+            throw new AwsException("InvalidInputException", "MaxResults must be between 1 and 100", 400);
+        }
+        List<UserDefinedFunction> functions = functionStore.scan(k -> true).stream()
+                .filter(function -> databaseName == null || databaseName.equals(function.getDatabaseName()))
+                .filter(function -> functionType == null || functionType.equals(function.getFunctionType()))
+                .filter(function -> function.getFunctionName() != null)
+                .filter(function -> compiledPattern.matcher(function.getFunctionName()).matches())
+                .sorted(Comparator.comparing(
+                                UserDefinedFunction::getDatabaseName,
+                                Comparator.nullsFirst(String::compareTo))
+                        .thenComparing(UserDefinedFunction::getFunctionName, Comparator.nullsFirst(String::compareTo)))
+                .toList();
+        if (offset > functions.size()) {
+            throw new AwsException("InvalidInputException", "Invalid NextToken", 400);
+        }
+        int limit = maxResults == null ? functions.size() : maxResults;
+        int end = Math.min(functions.size(), offset + limit);
+        String newNextToken = end < functions.size() ? Integer.toString(end) : null;
+        return new UserDefinedFunctionPage(functions.subList(offset, end), newNextToken);
+    }
+
+    public void updateUserDefinedFunction(String databaseName, String functionName, UserDefinedFunction function) {
+        UserDefinedFunction existing = getUserDefinedFunction(databaseName, functionName);
+        function.setDatabaseName(databaseName);
+        function.setFunctionName(functionName);
+        function.setCreateTime(existing.getCreateTime());
+        functionStore.put(functionKey(databaseName, functionName), function);
+    }
+
+    public void deleteUserDefinedFunction(String databaseName, String functionName) {
+        getUserDefinedFunction(databaseName, functionName);
+        functionStore.delete(functionKey(databaseName, functionName));
+    }
+
     private void validateSchemaReference(Table table) {
         SchemaReference ref = schemaReferenceOf(table);
         if (ref == null) {
@@ -188,6 +267,43 @@ public class GlueService {
         StorageDescriptor sd = table != null ? table.getStorageDescriptor() : null;
         return sd != null ? sd.getSchemaReference() : null;
     }
+
+    private static String functionKey(String databaseName, String functionName) {
+        return databaseName + ":" + functionName;
+    }
+
+    private static Pattern compileFunctionPattern(String pattern) {
+        if (pattern == null) {
+            return Pattern.compile(".*");
+        }
+        if (pattern.length() > MAX_FUNCTION_PATTERN_LENGTH) {
+            throw new AwsException("InvalidInputException", "Invalid function pattern: pattern is too long", 400);
+        }
+        try {
+            return Pattern.compile(pattern);
+        }
+        catch (PatternSyntaxException e) {
+            throw new AwsException("InvalidInputException", "Invalid function pattern: " + pattern, 400);
+        }
+    }
+
+    private static int decodeFunctionNextToken(String nextToken) {
+        if (nextToken == null) {
+            return 0;
+        }
+        try {
+            int offset = Integer.parseInt(nextToken);
+            if (offset < 0) {
+                throw new NumberFormatException();
+            }
+            return offset;
+        }
+        catch (NumberFormatException e) {
+            throw new AwsException("InvalidInputException", "Invalid NextToken", 400);
+        }
+    }
+
+    public record UserDefinedFunctionPage(List<UserDefinedFunction> functions, String nextToken) {}
 
     private static Table copyTable(Table source) {
         Table copy = new Table();
