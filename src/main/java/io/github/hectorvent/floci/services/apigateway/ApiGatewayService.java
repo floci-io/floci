@@ -1,10 +1,13 @@
 package io.github.hectorvent.floci.services.apigateway;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
+import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import org.jboss.logging.Logger;
 
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -55,6 +58,11 @@ public class ApiGatewayService {
     private final StorageBackend<String, Account> accountStore;
     private final StorageBackend<String, CustomDomain> domainStore;
     private final StorageBackend<String, BasePathMapping> basePathMappingStore;
+
+    // Constants
+    private static final String EPC_KEY = "endpointConfiguration";
+    private static final String EPC_TYPES_KEY = "types";
+    private static final String EPC_VPC_IDS_KEY = "vpcEndpointIds";
 
     @Inject
     public ApiGatewayService(StorageFactory storageFactory, EmulatorConfig config) {
@@ -173,6 +181,60 @@ public class ApiGatewayService {
         api.setDescription(description);
         api.setCreatedDate(System.currentTimeMillis() / 1000L);
         api.setTags(tags);
+
+        EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
+        if (request.get(EPC_KEY) instanceof Map<?, ?> epMap) {
+            epMap.forEach((k, v) -> {
+                if (k instanceof String ks && v instanceof List<?> list) {
+                    if (EPC_TYPES_KEY.equals(ks)) {
+                        List<EndpointType> types = list.stream()
+                                .filter(String.class::isInstance)
+                                .map(String.class::cast)
+                                .map(String::toUpperCase)
+                                .map(typeStr -> {
+                                    try {
+                                        return EndpointType.valueOf(typeStr);
+                                    } catch (IllegalArgumentException e) {
+                                        throw new AwsException("BadRequestException",
+                                                "Endpoint configuration type must be REGIONAL, EDGE, or PRIVATE.", 400);
+                                    }
+                                })
+                                .toList();
+                        endpointConfiguration.setTypes(types);
+                    } else if (EPC_VPC_IDS_KEY.equals(ks)) {
+                        List<String> vpcIds = list.stream()
+                                .filter(String.class::isInstance)
+                                .map(String.class::cast)
+                                .toList();
+                        endpointConfiguration.setVpcEndpointIds(vpcIds);
+                    }
+                }
+            });
+        }
+
+        // Set default type if omitted
+        if (endpointConfiguration.getTypes().isEmpty()) {
+            endpointConfiguration.setTypes(List.of(EndpointType.REGIONAL));
+        }
+
+        // Enforce exactly one type
+        if (endpointConfiguration.getTypes().size() != 1) {
+            throw new AwsException("BadRequestException",
+                    "Endpoint configuration types must contain exactly one value.", 400);
+        }
+
+        EndpointType type = endpointConfiguration.getTypes().getFirst();
+        if (EndpointType.PRIVATE.equals(type)) {
+            if (endpointConfiguration.getVpcEndpointIds().isEmpty()) {
+                throw new AwsException("BadRequestException",
+                        "At least one vpcEndpointId is required for PRIVATE APIs.", 400);
+            }
+        } else {
+            // Reject/ignore vpcEndpointIds for REGIONAL and EDGE
+            endpointConfiguration.setVpcEndpointIds(new ArrayList<>());
+        }
+
+        api.setEndpointConfiguration(endpointConfiguration);
 
         apiStore.put(apiKey(region, api.getId()), api);
 
