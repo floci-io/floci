@@ -86,6 +86,17 @@ public class GlueService {
         return databaseStore.scan(k -> true);
     }
 
+    public void deleteDatabase(String name) {
+        getDatabase(name);
+        List<String> tableNames = tableStore.scan(k -> true).stream()
+                .filter(table -> name.equals(table.getDatabaseName()))
+                .map(Table::getName)
+                .toList();
+        tableNames.forEach(tableName -> deleteTable(name, tableName));
+        databaseStore.delete(name);
+        LOG.infov("Deleted Glue Database: {0}", name);
+    }
+
     public void createTable(String databaseName, Table table) {
         getDatabase(databaseName);
         String key = databaseName + ":" + table.getName();

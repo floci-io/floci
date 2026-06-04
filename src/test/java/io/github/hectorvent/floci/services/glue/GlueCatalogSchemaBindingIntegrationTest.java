@@ -11,6 +11,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.nullValue;
 
@@ -342,5 +344,43 @@ class GlueCatalogSchemaBindingIntegrationTest {
         .when().post("/").then()
             .statusCode(400)
             .body("__type", equalTo("EntityNotFoundException"));
+    }
+
+    @Test
+    @Order(9)
+    void deleteDatabaseRemovesCatalogDatabase() {
+        String database = "database-to-delete";
+
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.CreateDatabase")
+            .body("{ \"DatabaseInput\": { \"Name\": \"" + database + "\" } }")
+        .when().post("/").then().statusCode(200);
+
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.CreateTable")
+            .body("""
+                  {
+                    "DatabaseName": "%s",
+                    "TableInput": {
+                      "Name": "table_to_delete",
+                      "StorageDescriptor": {
+                        "Location": "s3://bucket/delete/"
+                      }
+                    }
+                  }
+                  """.formatted(database))
+        .when().post("/").then().statusCode(200);
+
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.DeleteDatabase")
+            .body("{ \"Name\": \"" + database + "\" }")
+        .when().post("/").then().statusCode(200);
+
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.GetDatabases")
+            .body("{}")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("DatabaseList.Name", not(hasItem(database)));
     }
 }

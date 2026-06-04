@@ -44,16 +44,20 @@ class GlueServiceTest {
 
     private GlueService glueService;
     private GlueSchemaRegistryService schemaRegistryService;
+    private StorageBackend<String, Table> tableStore;
+    private StorageBackend<String, Partition> partitionStore;
 
     @BeforeEach
     void setUp() {
         RegionResolver regionResolver = new RegionResolver(REGION, ACCOUNT_ID);
         StorageFactory storageFactory = new InMemoryStorageFactory();
         schemaRegistryService = new GlueSchemaRegistryService(storageFactory, regionResolver);
+        tableStore = new InMemoryStorage<>();
+        partitionStore = new InMemoryStorage<>();
         glueService = new GlueService(
                 new InMemoryStorage<String, Database>(),
-                new InMemoryStorage<String, Table>(),
-                new InMemoryStorage<String, Partition>(),
+                tableStore,
+                partitionStore,
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 schemaRegistryService, regionResolver);
         glueService.createDatabase(new Database("db1"));
@@ -228,6 +232,45 @@ class GlueServiceTest {
         assertEquals("SELECT 1 AS x", fetched.getViewOriginalText());
         assertEquals("SELECT 1 AS x", fetched.getViewExpandedText());
         assertEquals("true", fetched.getParameters().get("presto_view"));
+    }
+
+    @Test
+    void deleteDatabaseDeletesDatabaseTablesAndPartitions() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        Partition partition = new Partition();
+        partition.setValues(java.util.List.of("2026"));
+        glueService.createPartition("db1", "plain", partition);
+
+        glueService.deleteDatabase("db1");
+
+        assertThrows(AwsException.class, () -> glueService.getDatabase("db1"));
+        assertThrows(AwsException.class, () -> glueService.getTable("db1", "plain"));
+        assertTrue(tableStore.scan(k -> true).isEmpty());
+        assertTrue(partitionStore.scan(k -> true).isEmpty());
+    }
+
+    @Test
+    void deleteDatabaseDoesNotDeleteSimilarDatabaseNames() {
+        glueService.createDatabase(new Database("a"));
+        glueService.createDatabase(new Database("a:b"));
+        Table similarDatabaseTable = new Table();
+        similarDatabaseTable.setName("t");
+        glueService.createTable("a:b", similarDatabaseTable);
+
+        glueService.deleteDatabase("a");
+
+        assertEquals("t", glueService.getTable("a:b", "t").getName());
+    }
+
+    @Test
+    void deleteDatabaseForMissingDatabaseThrows() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.deleteDatabase("missing"));
+
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
     }
 
     @Test
