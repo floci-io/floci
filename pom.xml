@@ -162,6 +162,13 @@
             <version>2.4.1</version>
         </dependency>
 
+        <!-- GraphQL schema parsing and type system (AppSync execution engine) -->
+        <dependency>
+            <groupId>com.graphql-java</groupId>
+            <artifactId>graphql-java</artifactId>
+            <version>22.0</version>
+        </dependency>
+
         <!-- JSON Schema validation (API Gateway request validation) -->
         <dependency>
             <groupId>com.networknt</groupId>
