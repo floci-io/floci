@@ -272,7 +272,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeRouteTablesResponse.routeTableSet.item.vpcId", equalTo(vpcId))
-            .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item.main", equalTo("true"));
+            .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item.main", equalTo(true));
     }
 
     @Test
