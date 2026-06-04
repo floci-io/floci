@@ -31,7 +31,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
-import java.util.*;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -483,36 +489,8 @@ public class EcsService {
             EcsServiceModel existingSvc = services.get(key);
 
             if ("ACTIVE".equals(existingSvc.getStatus())) {
-                LaunchType incomingLaunchType = launchType != null ? launchType : LaunchType.FARGATE;
-
-                boolean networkMatches = false;
-                if (existingSvc.getNetworkConfiguration() == null && networkConfiguration == null) {
-                    networkMatches = true;
-                } else if (existingSvc.getNetworkConfiguration() != null && networkConfiguration != null) {
-                    var existingVpc = existingSvc.getNetworkConfiguration().getAwsvpcConfiguration();
-                    var incomingVpc = networkConfiguration.getAwsvpcConfiguration();
-
-                    if (existingVpc == null && incomingVpc == null) {
-                        networkMatches = true;
-                    } else if (existingVpc != null && incomingVpc != null) {
-                        networkMatches = Objects.equals(existingVpc.getSubnets(), incomingVpc.getSubnets())
-                                && Objects.equals(existingVpc.getSecurityGroups(), incomingVpc.getSecurityGroups())
-                                && Objects.equals(existingVpc.getAssignPublicIp(), incomingVpc.getAssignPublicIp());
-                    }
-                }
-
-                boolean isIdempotent = Objects.equals(existingSvc.getTaskDefinition(), taskDefinition)
-                        && existingSvc.getDesiredCount() == desiredCount
-                        && Objects.equals(existingSvc.getLaunchType(), incomingLaunchType)
-                        && networkMatches;
-
-                if (isIdempotent) {
-                    LOG.infov("Service {0} already exists with identical configuration. Returning existing instance (Idempotent).", serviceName);
-                    return existingSvc;
-                } else {
-                    throw new AwsException("InvalidParameterException",
-                            "Creation of service was not idempotent.", 400);
-                }
+                throw new AwsException("InvalidParameterException",
+                        "Creation of service was not idempotent.", 400);
             }
         }
 
@@ -544,9 +522,7 @@ public class EcsService {
                                           String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
 
-        if (serviceName != null && serviceName.contains("/")) {
-            serviceName = serviceName.substring(serviceName.lastIndexOf("/") + 1);
-        }
+        serviceName = extractServiceName(serviceName);
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         EcsServiceModel svc = services.get(key);
@@ -554,7 +530,8 @@ public class EcsService {
             throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
         }
         if ("INACTIVE".equals(svc.getStatus())) {
-            return svc;
+            throw new AwsException("ServiceNotActiveException",
+                    "Service " + serviceName + " is not active.", 400);
         }
         if (desiredCount != null) {
             svc.setDesiredCount(desiredCount);
@@ -573,16 +550,14 @@ public class EcsService {
     public EcsServiceModel deleteService(String clusterRef, String serviceName, boolean force, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
 
-        if (serviceName != null && serviceName.contains("/")) {
-            serviceName = serviceName.substring(serviceName.lastIndexOf("/") + 1);
-        }
+        serviceName = extractServiceName(serviceName);
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         EcsServiceModel svc = services.get(key);
         if (svc == null) {
             throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
         }
-        if("INACTIVE".equals(svc.getStatus())) {
+        if ("INACTIVE".equals(svc.getStatus())) {
             return svc;
         }
         if (!force && svc.getDesiredCount() > 0) {
@@ -627,6 +602,7 @@ public class EcsService {
         String prefix = serviceKeyPrefix(region, cluster.getClusterName());
         return services.entrySet().stream()
                 .filter(e -> e.getKey().startsWith(prefix))
+                .filter(e -> !"INACTIVE".equals(e.getValue().getStatus()))
                 .map(e -> e.getValue().getServiceArn())
                 .toList();
     }
@@ -634,6 +610,7 @@ public class EcsService {
     public List<String> listServicesByNamespace(String namespace, String region) {
         return services.values().stream()
                 .filter(s -> namespace.equals(s.getNamespace()))
+                .filter(s -> !"INACTIVE".equals(s.getStatus()))
                 .map(EcsServiceModel::getServiceArn)
                 .toList();
     }
@@ -1385,6 +1362,13 @@ public class EcsService {
 
     private static String extractRegionFromServiceKey(String key) {
         return key.substring(0, key.indexOf("::"));
+    }
+
+    private static String extractServiceName(String serviceName) {
+        if (serviceName != null && serviceName.contains("/")) {
+            return serviceName.substring(serviceName.lastIndexOf("/") + 1);
+        }
+        return serviceName;
     }
 
     private static String extractClusterNameFromServiceKey(String key) {

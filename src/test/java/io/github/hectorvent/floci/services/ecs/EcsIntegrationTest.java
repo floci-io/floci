@@ -37,6 +37,10 @@ class EcsIntegrationTest {
     private static final String TASK_DEF_FAMILY = "test-task";
     private static final String SERVICE_NAME = "test-service";
 
+    private static final String REVIEW_CLUSTER = "review-cluster";
+    private static final String REVIEW_SERVICE = "review-svc";
+    private static final String REVIEW_LB_SERVICE = "review-lb-svc";
+
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
 
     private static String taskArn;
@@ -421,7 +425,7 @@ class EcsIntegrationTest {
 
     @Test
     @Order(34)
-    void createServiceIdempotentWithSameParameters() {
+    void createServiceDuplicateActiveNameAlwaysFails() {
         ecs("CreateService")
                 .body("""
                 {
@@ -435,9 +439,9 @@ class EcsIntegrationTest {
                 .when()
                 .post("/")
                 .then()
-                .statusCode(200)
-                .body("service.serviceName", equalTo(SERVICE_NAME))
-                .body("service.status", equalTo("ACTIVE"));
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("Creation of service was not idempotent."));
     }
 
     @Test
@@ -548,7 +552,7 @@ class EcsIntegrationTest {
 
     @Test
     @Order(51)
-    void updateInactiveServiceHandlesDrainGracefully() {
+    void updateInactiveServiceReturnsServiceNotActiveException() {
         String fullServiceArn = "arn:aws:ecs:" + REGION + ":" + ACCOUNT + ":service/" + CLUSTER_NAME + "/" + SERVICE_NAME;
 
         ecs("UpdateService")
@@ -562,9 +566,8 @@ class EcsIntegrationTest {
                 .when()
                 .post("/")
                 .then()
-                .statusCode(200)
-                .body("service.serviceName", equalTo(SERVICE_NAME))
-                .body("service.status", equalTo("INACTIVE"));
+                .statusCode(400)
+                .body("__type", containsString("ServiceNotActiveException"));
     }
 
     @Test
@@ -607,5 +610,204 @@ class EcsIntegrationTest {
             .post("/")
         .then()
             .statusCode(400);
+    }
+
+    @Test
+    @Order(60)
+    void reviewSetup_createClusterAndService() {
+        ecs("CreateCluster")
+            .body("""
+                {"clusterName": "%s"}
+                """.formatted(REVIEW_CLUSTER))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "review-td",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "cpu": 256,
+                            "memory": 512,
+                            "essential": true,
+                            "portMappings": [{"containerPort": 80, "protocol": "tcp"}]
+                        }
+                    ],
+                    "requiresCompatibilities": ["FARGATE"],
+                    "cpu": "256",
+                    "memory": "512",
+                    "networkMode": "awsvpc"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        ecs("CreateService")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "%s",
+                    "taskDefinition": "review-td",
+                    "desiredCount": 1,
+                    "launchType": "FARGATE"
+                }
+                """.formatted(REVIEW_CLUSTER, REVIEW_SERVICE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("service.status", equalTo("ACTIVE"));
+    }
+
+    @Test
+    @Order(61)
+    void deleteServiceHidesFromListServices() {
+        ecs("DeleteService")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "service": "%s",
+                    "force": true
+                }
+                """.formatted(REVIEW_CLUSTER, REVIEW_SERVICE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("service.status", equalTo("INACTIVE"));
+
+        ecs("ListServices")
+            .body("""
+                {"cluster": "%s"}
+                """.formatted(REVIEW_CLUSTER))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("serviceArns", not(hasItem(containsString(REVIEW_SERVICE))));
+    }
+
+    @Test
+    @Order(62)
+    void deleteServiceStillDescribableAsInactive() {
+        ecs("DescribeServices")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "services": ["%s"]
+                }
+                """.formatted(REVIEW_CLUSTER, REVIEW_SERVICE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("services", hasSize(1))
+            .body("services[0].serviceName", equalTo(REVIEW_SERVICE))
+            .body("services[0].status", equalTo("INACTIVE"));
+    }
+
+    @Test
+    @Order(63)
+    void updateInactiveServiceShouldReturnError() {
+        ecs("UpdateService")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "service": "%s",
+                    "desiredCount": 5
+                }
+                """.formatted(REVIEW_CLUSTER, REVIEW_SERVICE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ServiceNotActiveException"));
+    }
+
+    @Test
+    @Order(64)
+    void createServiceIgnoresLoadBalancersInIdempotencyCheck() {
+        ecs("CreateService")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "%s",
+                    "taskDefinition": "review-td",
+                    "desiredCount": 1,
+                    "launchType": "FARGATE",
+                    "loadBalancers": [
+                        {
+                            "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-a/1234",
+                            "containerName": "app",
+                            "containerPort": 80
+                        }
+                    ]
+                }
+                """.formatted(REVIEW_CLUSTER, REVIEW_LB_SERVICE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("service.serviceName", equalTo(REVIEW_LB_SERVICE))
+            .body("service.status", equalTo("ACTIVE"));
+
+        ecs("CreateService")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "%s",
+                    "taskDefinition": "review-td",
+                    "desiredCount": 1,
+                    "launchType": "FARGATE",
+                    "loadBalancers": [
+                        {
+                            "targetGroupArn": "arn:aws:elasticloadbalancing:us-east-1:000000000000:targetgroup/tg-DIFFERENT/9999",
+                            "containerName": "app",
+                            "containerPort": 8080
+                        }
+                    ]
+                }
+                """.formatted(REVIEW_CLUSTER, REVIEW_LB_SERVICE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("InvalidParameterException"))
+            .body("message", containsString("Creation of service was not idempotent."));
+    }
+
+    // ── PR Review: Cleanup ───────────────────────────────────────────────────
+
+    @Test
+    @Order(69)
+    void reviewCleanup() {
+        ecs("DeleteService")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "service": "%s",
+                    "force": true
+                }
+                """.formatted(REVIEW_CLUSTER, REVIEW_LB_SERVICE))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        ecs("DeleteCluster")
+            .body("""
+                {"cluster": "%s"}
+                """.formatted(REVIEW_CLUSTER))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 }
