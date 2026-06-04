@@ -151,4 +151,40 @@ class GlueCatalogSchemaBindingIntegrationTest {
             .statusCode(200)
             .body("TableList[0].StorageDescriptor.Columns", hasSize(3));
     }
+
+    @Test
+    @Order(7)
+    void createTableRoundTripsViewFields() {
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.CreateTable")
+            .body("""
+                    {
+                      "DatabaseName": "%s",
+                      "TableInput": {
+                        "Name": "view_table",
+                        "Owner": "test-owner",
+                        "TableType": "VIRTUAL_VIEW",
+                        "StorageDescriptor": {
+                          "Columns": [{"Name":"x", "Type":"int"}]
+                        },
+                        "ViewOriginalText": "SELECT 1 AS x",
+                        "ViewExpandedText": "SELECT 1 AS x",
+                        "Parameters": {"presto_view":"true"}
+                      }
+                    }
+                    """.formatted(DATABASE))
+        .when().post("/").then().statusCode(200);
+
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.GetTable")
+            .body("{ \"DatabaseName\": \"" + DATABASE + "\", \"Name\": \"view_table\" }")
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Table.Name", equalTo("view_table"))
+            .body("Table.Owner", equalTo("test-owner"))
+            .body("Table.TableType", equalTo("VIRTUAL_VIEW"))
+            .body("Table.ViewOriginalText", equalTo("SELECT 1 AS x"))
+            .body("Table.ViewExpandedText", equalTo("SELECT 1 AS x"))
+            .body("Table.Parameters.presto_view", equalTo("true"));
+    }
 }

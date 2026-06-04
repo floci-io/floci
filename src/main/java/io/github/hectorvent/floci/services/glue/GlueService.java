@@ -194,12 +194,15 @@ public class GlueService {
         copy.setName(source.getName());
         copy.setDatabaseName(source.getDatabaseName());
         copy.setDescription(source.getDescription());
+        copy.setOwner(source.getOwner());
         copy.setCreateTime(source.getCreateTime());
         copy.setUpdateTime(source.getUpdateTime());
         copy.setLastAccessTime(source.getLastAccessTime());
         copy.setPartitionKeys(copyColumns(source.getPartitionKeys()));
         copy.setStorageDescriptor(copyStorageDescriptor(source.getStorageDescriptor()));
         copy.setTableType(source.getTableType());
+        copy.setViewOriginalText(source.getViewOriginalText());
+        copy.setViewExpandedText(source.getViewExpandedText());
         copy.setParameters(copyMap(source.getParameters()));
         return copy;
     }

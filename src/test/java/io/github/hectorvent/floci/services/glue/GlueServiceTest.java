@@ -204,6 +204,30 @@ class GlueServiceTest {
     }
 
     @Test
+    void getTableReturnsViewFieldsUnchanged() {
+        Table table = new Table();
+        table.setName("view");
+        table.setOwner("test-owner");
+        table.setTableType("VIRTUAL_VIEW");
+        table.setViewOriginalText("SELECT 1 AS x");
+        table.setViewExpandedText("SELECT 1 AS x");
+        table.setParameters(Map.of("presto_view", "true"));
+        StorageDescriptor storageDescriptor = new StorageDescriptor();
+        storageDescriptor.setColumns(java.util.List.of(new Column("x", "int")));
+        table.setStorageDescriptor(storageDescriptor);
+
+        glueService.createTable("db1", table);
+
+        Table fetched = glueService.getTable("db1", "view");
+
+        assertEquals("test-owner", fetched.getOwner());
+        assertEquals("VIRTUAL_VIEW", fetched.getTableType());
+        assertEquals("SELECT 1 AS x", fetched.getViewOriginalText());
+        assertEquals("SELECT 1 AS x", fetched.getViewExpandedText());
+        assertEquals("true", fetched.getParameters().get("presto_view"));
+    }
+
+    @Test
     void getTableVersionsReturnsEmptyListForAthenaCompatibility() {
         assertTrue(glueService.getTableVersions().isEmpty());
     }
