@@ -15,6 +15,10 @@ Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies 
 | `DeleteDBInstance` | Stop and remove an instance |
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
+| `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
+| `CreateDBSubnetGroup` | Create a DB subnet group |
+| `DescribeDBSubnetGroups` | List DB subnet groups |
+| `DeleteDBSubnetGroup` | Delete a DB subnet group |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters |
 | `DeleteDBCluster` | Delete a cluster |

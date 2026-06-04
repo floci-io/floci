@@ -19,6 +19,7 @@ public class DbInstance {
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
     private String parameterGroupName;
+    private String dbSubnetGroupName;
     private String dbClusterIdentifier;
     private String dbiResourceId;
     private String dbInstanceArn;
@@ -95,6 +96,9 @@ public class DbInstance {
 
     public String getParameterGroupName() { return parameterGroupName; }
     public void setParameterGroupName(String parameterGroupName) { this.parameterGroupName = parameterGroupName; }
+
+    public String getDbSubnetGroupName() { return dbSubnetGroupName; }
+    public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
 
     public String getDbClusterIdentifier() { return dbClusterIdentifier; }
     public void setDbClusterIdentifier(String dbClusterIdentifier) { this.dbClusterIdentifier = dbClusterIdentifier; }

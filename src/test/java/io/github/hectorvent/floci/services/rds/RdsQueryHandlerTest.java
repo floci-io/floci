@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -129,6 +130,43 @@ class RdsQueryHandlerTest {
         verify(service).listDbInstances(null);
     }
 
+    @Test
+    void describeDbInstances_usesStoredDbSubnetGroup() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setDbSubnetGroupName("sample-db-subnets");
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+        when(service.getDbSubnetGroup("sample-db-subnets")).thenReturn(new DbSubnetGroup(
+                "sample-db-subnets", "test subnets", "vpc-123", List.of("subnet-aaa", "subnet-bbb")));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-aaa</SubnetIdentifier>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-bbb</SubnetIdentifier>"));
+        assertFalse(body.contains("<SubnetIdentifier>subnet-00000000</SubnetIdentifier>"));
+    }
+
+    @Test
+    void describeOrderableDbInstanceOptions_usesServiceCatalog() {
+        when(service.describeOrderableDbInstanceOptions("postgres", "16.3", "db.t4g.medium"))
+                .thenReturn(List.of(java.util.Map.of(
+                        "engine", "postgres",
+                        "engineVersion", "16.3",
+                        "dbInstanceClass", "db.t4g.medium")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Engine", "postgres");
+        p.add("EngineVersion", "16.3");
+        p.add("DBInstanceClass", "db.t4g.medium");
+        Response response = handler.handle("DescribeOrderableDBInstanceOptions", p);
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<OrderableDBInstanceOption>"));
+        assertTrue(body.contains("<DBInstanceClass>db.t4g.medium</DBInstanceClass>"));
+    }
+
     // ──────────────────────────── DBParameterGroups XML tag ──────────────────────
 
     @Test
@@ -148,7 +186,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -161,7 +199,7 @@ class RdsQueryHandlerTest {
         handler.handle("CreateDBInstance", p);
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
-                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null);
+                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null);
     }
 
     @Test
@@ -171,7 +209,7 @@ class RdsQueryHandlerTest {
         // AwsException wrapping into a 400 query error.
         when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null)))
                 .thenThrow(new AwsException("InvalidParameterValue",
                         "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
 
@@ -182,6 +220,29 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
+    }
+
+    @Test
+    void createDbSubnetGroup_passesSubnetMembersToService() {
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb")))
+                .thenReturn(new DbSubnetGroup(
+                        "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "sample-db-subnets");
+        p.add("DBSubnetGroupDescription", "test");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-aaa");
+        p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
+        Response response = handler.handle("CreateDBSubnetGroup", p);
+
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"));
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
+        assertTrue(body.contains("<Subnets><Subnet>"));
+        assertFalse(body.contains("<Subnets><member>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-aaa</SubnetIdentifier>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-bbb</SubnetIdentifier>"));
     }
 
     @Test

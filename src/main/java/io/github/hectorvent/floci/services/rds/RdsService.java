@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -44,6 +45,7 @@ public class RdsService {
     private final StorageBackend<String, DbCluster> clusters;
     private final StorageBackend<String, DbParameterGroup> parameterGroups;
     private final StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups;
+    private final StorageBackend<String, DbSubnetGroup> subnetGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
     private final RegionResolver regionResolver;
@@ -68,6 +70,8 @@ public class RdsService {
                 new TypeReference<Map<String, DbParameterGroup>>() {});
         this.clusterParameterGroups = storageFactory.create("rds", "rds-cluster-parameter-groups.json",
                 new TypeReference<Map<String, DbClusterParameterGroup>>() {});
+        this.subnetGroups = storageFactory.create("rds", "rds-subnet-groups.json",
+                new TypeReference<Map<String, DbSubnetGroup>>() {});
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -77,7 +81,8 @@ public class RdsService {
                StorageBackend<String, DbInstance> instances,
                StorageBackend<String, DbCluster> clusters,
                StorageBackend<String, DbParameterGroup> parameterGroups,
-               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups) {
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.regionResolver = regionResolver;
@@ -86,6 +91,7 @@ public class RdsService {
         this.clusters = clusters;
         this.parameterGroups = parameterGroups;
         this.clusterParameterGroups = clusterParameterGroups;
+        this.subnetGroups = subnetGroups;
     }
 
     public void restorePersistedRuntime() {
@@ -99,13 +105,17 @@ public class RdsService {
                                        String masterUsername, String masterPassword,
                                        String dbName, String dbInstanceClass,
                                        int allocatedStorage, boolean iamEnabled,
-                                       String paramGroupName, String dbClusterIdentifier) {
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier) {
         if (instances.get(id).isPresent()) {
             throw new AwsException("DBInstanceAlreadyExists",
                     "DB instance " + id + " already exists.", 400);
         }
 
         DatabaseEngine engine = resolveEngine(engineParam);
+        if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
+            getDbSubnetGroup(dbSubnetGroupName);
+        }
         int proxyPort = allocateProxyPort();
 
         String backendHost;
@@ -146,6 +156,7 @@ public class RdsService {
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
+        instance.setDbSubnetGroupName(dbSubnetGroupName);
         instance.setContainerId(containerId);
         instance.setContainerHost(containerHost);
         instance.setContainerPort(containerPort);
@@ -187,7 +198,8 @@ public class RdsService {
         return instances.scan(k -> true);
     }
 
-    public DbInstance modifyDbInstance(String id, String newPassword, Boolean iamEnabled) {
+    public DbInstance modifyDbInstance(String id, String newPassword, Boolean iamEnabled,
+                                       String dbSubnetGroupName) {
         DbInstance instance = getDbInstance(id);
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         if (newPassword != null && !newPassword.isBlank()) {
@@ -196,9 +208,33 @@ public class RdsService {
         if (iamEnabled != null) {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
+        if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
+            instance.setDbSubnetGroupName(dbSubnetGroupName);
+        }
         instances.put(id, instance);
         LOG.infov("DB instance {0} modified", id);
         return instance;
+    }
+
+    public List<Map<String, String>> describeOrderableDbInstanceOptions(String engine,
+                                                                        String engineVersion,
+                                                                        String dbInstanceClass) {
+        List<Map<String, String>> options = List.of(
+                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t3.micro"),
+                Map.of("engine", "postgres", "engineVersion", "16.14", "dbInstanceClass", "db.t3.micro"),
+                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.micro"),
+                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.small"),
+                Map.of("engine", "postgres", "engineVersion", "16.3", "dbInstanceClass", "db.t4g.medium"),
+                Map.of("engine", "mysql", "engineVersion", "8.0", "dbInstanceClass", "db.t3.micro"),
+                Map.of("engine", "mariadb", "engineVersion", "11", "dbInstanceClass", "db.t3.micro")
+        );
+        return options.stream()
+                .filter(option -> engine == null || engine.isBlank() || engine.equalsIgnoreCase(option.get("engine")))
+                .filter(option -> engineVersion == null || engineVersion.isBlank()
+                        || engineVersion.equalsIgnoreCase(option.get("engineVersion")))
+                .filter(option -> dbInstanceClass == null || dbInstanceClass.isBlank()
+                        || dbInstanceClass.equalsIgnoreCase(option.get("dbInstanceClass")))
+                .toList();
     }
 
     public DbInstance rebootDbInstance(String id) {
@@ -409,6 +445,41 @@ public class RdsService {
         }
         parameterGroups.put(name, group);
         return group;
+    }
+
+    public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds) {
+        if (subnetGroups.get(name).isPresent()) {
+            throw new AwsException("DBSubnetGroupAlreadyExists",
+                    "DB subnet group " + name + " already exists.", 400);
+        }
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "SubnetIds must contain at least one subnet.", 400);
+        }
+        DbSubnetGroup group = new DbSubnetGroup(name, description, "vpc-00000000", subnetIds);
+        subnetGroups.put(name, group);
+        return group;
+    }
+
+    public DbSubnetGroup getDbSubnetGroup(String name) {
+        return subnetGroups.get(name).orElseThrow(() ->
+                new AwsException("DBSubnetGroupNotFoundFault",
+                        "DB subnet group " + name + " not found.", 404));
+    }
+
+    public Collection<DbSubnetGroup> listDbSubnetGroups(String filterName) {
+        if (filterName != null && !filterName.isBlank()) {
+            return subnetGroups.get(filterName).map(List::of).orElse(List.of());
+        }
+        return subnetGroups.scan(k -> true);
+    }
+
+    public void deleteDbSubnetGroup(String name) {
+        if (subnetGroups.get(name).isEmpty()) {
+            throw new AwsException("DBSubnetGroupNotFoundFault",
+                    "DB subnet group " + name + " not found.", 404);
+        }
+        subnetGroups.delete(name);
     }
 
     // ── Cluster Parameter Groups ──────────────────────────────────────────────

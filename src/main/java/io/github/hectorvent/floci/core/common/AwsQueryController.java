@@ -309,6 +309,8 @@ public class AwsQueryController {
     private static final Set<String> RDS_ACTIONS = Set.of(
             "CreateDBInstance", "DescribeDBInstances", "DeleteDBInstance",
             "ModifyDBInstance", "RebootDBInstance",
+            "DescribeOrderableDBInstanceOptions",
+            "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "DeleteDBSubnetGroup",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters"
