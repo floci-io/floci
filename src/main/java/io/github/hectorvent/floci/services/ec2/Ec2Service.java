@@ -40,6 +40,7 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -80,6 +81,7 @@ public class Ec2Service {
     private final Map<String, Address> addresses = new ConcurrentHashMap<>();
     private final Map<String, Instance> instances = new ConcurrentHashMap<>();
     private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
+    private final Map<String, LaunchTemplate> launchTemplates = new ConcurrentHashMap<>();
     // resourceId → List<Tag>
     private final Map<String, List<Tag>> tags = new ConcurrentHashMap<>();
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -938,6 +940,80 @@ public class Ec2Service {
                 .collect(Collectors.toList());
     }
 
+    // ─── Launch Templates ─────────────────────────────────────────────────────
+
+    public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
+                                               String instanceType, String keyName,
+                                               List<String> securityGroupIds, String userData,
+                                               List<Tag> launchTemplateTags) {
+        ensureDefaultResources(region);
+        if (name == null || name.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
+        }
+        boolean exists = launchTemplates.values().stream()
+                .anyMatch(lt -> lt.getRegion().equals(region) && name.equals(lt.getLaunchTemplateName()));
+        if (exists) {
+            throw new AwsException("InvalidLaunchTemplateName.AlreadyExistsException",
+                    "Launch template name already in use.", 400);
+        }
+
+        LaunchTemplate launchTemplate = new LaunchTemplate();
+        launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
+        launchTemplate.setLaunchTemplateName(name);
+        launchTemplate.setCreateTime(Instant.now());
+        launchTemplate.setCreatedBy("arn:aws:iam::" + accountId + ":root");
+        launchTemplate.setRegion(region);
+        launchTemplate.setImageId(imageId);
+        launchTemplate.setInstanceType(instanceType);
+        launchTemplate.setKeyName(keyName);
+        launchTemplate.setUserData(userData);
+        if (securityGroupIds != null) {
+            launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        }
+        if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
+            launchTemplate.setTags(new ArrayList<>(launchTemplateTags));
+            tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
+        }
+        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+        return launchTemplate;
+    }
+
+    public List<LaunchTemplate> describeLaunchTemplates(String region, List<String> ids,
+                                                        List<String> names, Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        return launchTemplates.values().stream()
+                .filter(lt -> lt.getRegion().equals(region))
+                .filter(lt -> ids.isEmpty() || ids.contains(lt.getLaunchTemplateId()))
+                .filter(lt -> names.isEmpty() || names.contains(lt.getLaunchTemplateName()))
+                .filter(lt -> matchesFilters(lt, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        launchTemplates.remove(key(region, launchTemplate.getLaunchTemplateId()));
+        tags.remove(launchTemplate.getLaunchTemplateId());
+        return launchTemplate;
+    }
+
+    private LaunchTemplate findLaunchTemplate(String region, String id, String name) {
+        if (id != null && !id.isBlank()) {
+            LaunchTemplate launchTemplate = launchTemplates.get(key(region, id));
+            if (launchTemplate != null) {
+                return launchTemplate;
+            }
+        } else if (name != null && !name.isBlank()) {
+            return launchTemplates.values().stream()
+                    .filter(lt -> lt.getRegion().equals(region) && name.equals(lt.getLaunchTemplateName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("InvalidLaunchTemplateName.NotFoundException",
+                            "The specified launch template does not exist.", 400));
+        }
+        throw new AwsException("InvalidLaunchTemplateId.NotFoundException",
+                "The specified launch template does not exist.", 400);
+    }
+
     private boolean matchesImageFilters(Ec2ImageCatalog.CatalogImage image, Map<String, List<String>> filters) {
         if (filters == null || filters.isEmpty()) {
             return true;
@@ -1036,7 +1112,9 @@ public class Ec2Service {
         RouteTable rt = routeTables.get(key(region, resourceId));
         if (rt != null) { rt.setTags(new ArrayList<>(tagList)); return; }
         KeyPair kp = keyPairs.get(key(region, resourceId));
-        if (kp != null) { kp.setTags(new ArrayList<>(tagList)); }
+        if (kp != null) { kp.setTags(new ArrayList<>(tagList)); return; }
+        LaunchTemplate lt = launchTemplates.get(key(region, resourceId));
+        if (lt != null) { lt.setTags(new ArrayList<>(tagList)); }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -1522,8 +1600,16 @@ public class Ec2Service {
         if (resource instanceof InternetGateway igw) return igw.getTags();
         if (resource instanceof RouteTable rt) return rt.getTags();
         if (resource instanceof KeyPair kp) return kp.getTags();
+        if (resource instanceof LaunchTemplate lt) {
+            return switch (filterName) {
+                case "launch-template-id" -> matchesValue(values, lt.getLaunchTemplateId());
+                case "launch-template-name" -> matchesValue(values, lt.getLaunchTemplateName());
+                default -> true;
+            };
+        }
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
+        if (resource instanceof LaunchTemplate lt) return lt.getTags();
         if (resource instanceof NetworkInterface ni) return ni.getTagSet();
         return Collections.emptyList();
     }

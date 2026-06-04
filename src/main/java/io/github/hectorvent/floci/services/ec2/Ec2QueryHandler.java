@@ -113,6 +113,10 @@ public class Ec2QueryHandler {
                 case "DescribeAccountAttributes" -> handleDescribeAccountAttributes(params, region);
                 // Instance Types
                 case "DescribeInstanceTypes" -> handleDescribeInstanceTypes(params, region);
+                // Launch Templates
+                case "CreateLaunchTemplate" -> handleCreateLaunchTemplate(params, region);
+                case "DescribeLaunchTemplates" -> handleDescribeLaunchTemplates(params, region);
+                case "DeleteLaunchTemplate" -> handleDeleteLaunchTemplate(params, region);
                 // Network Interfaces
                 case "DescribeNetworkInterfaces" -> handleDescribeNetworkInterfaces(params, region);
                 // Volumes
@@ -207,6 +211,23 @@ public class Ec2QueryHandler {
             perms.add(perm);
         }
         return perms;
+    }
+
+    private List<Tag> parseTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
+        List<Tag> tags = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
+            if (resType == null) break;
+            if (resourceType.equals(resType)) {
+                for (int j = 1; ; j++) {
+                    String key = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
+                    if (key == null) break;
+                    String value = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
+                    tags.add(new Tag(key, value));
+                }
+            }
+        }
+        return tags;
     }
 
     private Response xmlResponse(String xml) {
@@ -1224,6 +1245,53 @@ public class Ec2QueryHandler {
         return xmlResponse(xml.build());
     }
 
+    // ─── Launch Template handlers ─────────────────────────────────────────────
+
+    private Response handleCreateLaunchTemplate(MultivaluedMap<String, String> p, String region) {
+        LaunchTemplate launchTemplate = service.createLaunchTemplate(
+                region,
+                p.getFirst("LaunchTemplateName"),
+                p.getFirst("LaunchTemplateData.ImageId"),
+                p.getFirst("LaunchTemplateData.InstanceType"),
+                p.getFirst("LaunchTemplateData.KeyName"),
+                getList(p, "LaunchTemplateData.SecurityGroupId"),
+                p.getFirst("LaunchTemplateData.UserData"),
+                parseTagsForResource(p, "launch-template"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateLaunchTemplateResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("launchTemplate").raw(launchTemplateXml(launchTemplate)).end("launchTemplate")
+                .end("CreateLaunchTemplateResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeLaunchTemplates(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "LaunchTemplateId");
+        List<String> names = getList(p, "LaunchTemplateName");
+        Map<String, List<String>> filters = getFilters(p);
+        List<LaunchTemplate> launchTemplates = service.describeLaunchTemplates(region, ids, names, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeLaunchTemplatesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("launchTemplateSet");
+        for (LaunchTemplate launchTemplate : launchTemplates) {
+            xml.start("item").raw(launchTemplateXml(launchTemplate)).end("item");
+        }
+        xml.end("launchTemplateSet").end("DescribeLaunchTemplatesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteLaunchTemplate(MultivaluedMap<String, String> p, String region) {
+        LaunchTemplate launchTemplate = service.deleteLaunchTemplate(
+                region, p.getFirst("LaunchTemplateId"), p.getFirst("LaunchTemplateName"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteLaunchTemplateResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("launchTemplate").raw(launchTemplateXml(launchTemplate)).end("launchTemplate")
+                .end("DeleteLaunchTemplateResponse");
+        return xmlResponse(xml.build());
+    }
+
     // ─── Network Interface handlers ───────────────────────────────────────────
 
     private Response handleDescribeNetworkInterfaces(MultivaluedMap<String, String> p, String region) {
@@ -1562,6 +1630,20 @@ public class Ec2QueryHandler {
         }
         xml.end("associationSet")
                 .raw(tagSetXml(rt.getTags()));
+        return xml.build();
+    }
+
+    private String launchTemplateXml(LaunchTemplate launchTemplate) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("launchTemplateId", launchTemplate.getLaunchTemplateId())
+                .elem("launchTemplateName", launchTemplate.getLaunchTemplateName());
+        if (launchTemplate.getCreateTime() != null) {
+            xml.elem("createTime", ISO_FMT.format(launchTemplate.getCreateTime()));
+        }
+        xml.elem("createdBy", launchTemplate.getCreatedBy())
+                .elem("defaultVersionNumber", launchTemplate.getDefaultVersionNumber())
+                .elem("latestVersionNumber", launchTemplate.getLatestVersionNumber())
+                .raw(tagSetXml(launchTemplate.getTags()));
         return xml.build();
     }
 

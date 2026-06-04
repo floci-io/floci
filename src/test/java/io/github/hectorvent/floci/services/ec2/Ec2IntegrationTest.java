@@ -43,6 +43,7 @@ class Ec2IntegrationTest {
     private static String volumeId;
     private static String rootVolumeId;
     private static String networkInterfaceId;
+    private static String launchTemplateId;
 
     // =========================================================================
     // Default resources
@@ -524,6 +525,62 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("ImportKeyPairResponse.keyName", equalTo("imported-key"))
             .body("ImportKeyPairResponse.keyPairId", startsWith("key-"));
+    }
+
+    @Test
+    @Order(43)
+    void createLaunchTemplate() {
+        launchTemplateId = given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "sample-template")
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+            .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
+            .formParam("TagSpecification.1.ResourceType", "launch-template")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "sample-template")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId", startsWith("lt-"))
+            .body("CreateLaunchTemplateResponse.launchTemplate.launchTemplateName",
+                    equalTo("sample-template"))
+            .extract().path("CreateLaunchTemplateResponse.launchTemplate.launchTemplateId");
+    }
+
+    @Test
+    @Order(44)
+    void describeLaunchTemplateById() {
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateId.1", launchTemplateId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplatesResponse.launchTemplateSet.item.launchTemplateId",
+                    equalTo(launchTemplateId))
+            .body("DescribeLaunchTemplatesResponse.launchTemplateSet.item.launchTemplateName",
+                    equalTo("sample-template"));
+    }
+
+    @Test
+    @Order(45)
+    void deleteLaunchTemplate() {
+        given()
+            .formParam("Action", "DeleteLaunchTemplate")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeleteLaunchTemplateResponse.launchTemplate.launchTemplateId",
+                    equalTo(launchTemplateId));
     }
 
     // =========================================================================

@@ -139,6 +139,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 ### Instance Types
 `DescribeInstanceTypes`
 
+### Launch Templates
+`CreateLaunchTemplate` · `DescribeLaunchTemplates` · `DeleteLaunchTemplate`
+
 ### Volumes
 `CreateVolume` · `DescribeVolumes` · `DeleteVolume`
 
