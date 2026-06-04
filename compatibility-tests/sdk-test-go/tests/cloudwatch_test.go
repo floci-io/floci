@@ -150,13 +150,14 @@ func TestCloudWatch(t *testing.T) {
 		require.NoError(t, err)
 		require.NotEmpty(t, r.MetricDataResults)
 
-		var result cwtypes.MetricDataResult
-		for _, res := range r.MetricDataResults {
-			if res.Id != nil && *res.Id == "m1" {
-				result = res
+		var result *cwtypes.MetricDataResult
+		for i := range r.MetricDataResults {
+			if r.MetricDataResults[i].Id != nil && *r.MetricDataResults[i].Id == "m1" {
+				result = &r.MetricDataResults[i]
 				break
 			}
 		}
+		require.NotNil(t, result, "expected a MetricDataResult with Id \"m1\" in the response")
 		assert.NotEmpty(t, result.Timestamps)
 		assert.NotEmpty(t, result.Values)
 	})

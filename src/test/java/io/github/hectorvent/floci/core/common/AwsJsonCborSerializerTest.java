@@ -58,6 +58,7 @@ class AwsJsonCborSerializerTest {
         assertEquals(1, countTag1(cbor), "scalar Timestamp must be tagged exactly once");
         int tagIndex = indexOf(cbor, CBOR_TAG_1);
         assertTrue(tagIndex >= 0, "tag(1) byte must be present");
+        assertTrue(tagIndex + 1 < cbor.length, "tag(1) byte must not be the last byte in the output");
         assertEquals(CBOR_MAJOR_UNSIGNED_INT, majorType(cbor[tagIndex + 1]),
                 "integral epoch seconds must be encoded as a CBOR integer, not a float");
 
@@ -78,6 +79,7 @@ class AwsJsonCborSerializerTest {
         // Both tagged elements must be integers, not floats.
         for (int i = 0; i < cbor.length; i++) {
             if (cbor[i] == CBOR_TAG_1) {
+                assertTrue(i + 1 < cbor.length, "tag(1) byte at index " + i + " must not be the last byte in the output");
                 assertEquals(CBOR_MAJOR_UNSIGNED_INT, majorType(cbor[i + 1]),
                         "timestamp list elements must be encoded as CBOR integers");
             }
@@ -112,6 +114,7 @@ class AwsJsonCborSerializerTest {
 
         assertEquals(1, countTag1(cbor), "fractional Timestamp must still be tagged");
         int tagIndex = indexOf(cbor, CBOR_TAG_1);
+        assertTrue(tagIndex + 1 < cbor.length, "tag(1) byte must not be the last byte in the output");
         assertEquals(CBOR_MAJOR_FLOAT, majorType(cbor[tagIndex + 1]),
                 "fractional epoch seconds must be encoded as a CBOR float");
         assertEquals(1700000000.5, cborMapper.readTree(cbor).path("Timestamp").asDouble());
