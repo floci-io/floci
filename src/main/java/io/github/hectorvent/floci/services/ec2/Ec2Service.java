@@ -136,21 +136,7 @@ public class Ec2Service {
             subnets.put(key(region, subnetIds[i]), subnet);
         }
 
-        // Default security group
-        String sgId = "sg-default";
-        SecurityGroup defaultSg = new SecurityGroup();
-        defaultSg.setGroupId(sgId);
-        defaultSg.setGroupName("default");
-        defaultSg.setDescription("default VPC security group");
-        defaultSg.setVpcId(vpcId);
-        defaultSg.setOwnerId(accountId);
-        defaultSg.setRegion(region);
-        // Default egress: all traffic
-        IpPermission egressAll = new IpPermission();
-        egressAll.setIpProtocol("-1");
-        egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
-        defaultSg.getIpPermissionsEgress().add(egressAll);
-        securityGroups.put(key(region, sgId), defaultSg);
+        createDefaultSecurityGroup(region, vpcId, "sg-default");
 
         // Default internet gateway
         String igwId = "igw-default";
@@ -161,22 +147,48 @@ public class Ec2Service {
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
 
-        // Main route table for default VPC
-        String rtId = "rtb-default";
+        String rtId = createMainRouteTable(region, defaultVpc, "rtb-default", "rtbassoc-default");
+
+        RouteTable mainRt = routeTables.get(key(region, rtId));
+        if (mainRt != null) {
+            mainRt.getRoutes().add(new Route("0.0.0.0/0", igwId, "CreateRoute"));
+        }
+    }
+
+    private void createDefaultSecurityGroup(String region, String vpcId, String securityGroupId) {
+        SecurityGroup defaultSg = new SecurityGroup();
+        defaultSg.setGroupId(securityGroupId);
+        defaultSg.setGroupName("default");
+        defaultSg.setDescription("default VPC security group");
+        defaultSg.setVpcId(vpcId);
+        defaultSg.setOwnerId(accountId);
+        defaultSg.setRegion(region);
+
+        // Default egress: all traffic
+        IpPermission egressAll = new IpPermission();
+        egressAll.setIpProtocol("-1");
+        egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
+        defaultSg.getIpPermissionsEgress().add(egressAll);
+        securityGroups.put(key(region, securityGroupId), defaultSg);
+    }
+
+    private String createMainRouteTable(String region, Vpc vpc, String routeTableId, String associationId) {
         RouteTable mainRt = new RouteTable();
-        mainRt.setRouteTableId(rtId);
-        mainRt.setVpcId(vpcId);
+        mainRt.setRouteTableId(routeTableId);
+        mainRt.setVpcId(vpc.getVpcId());
         mainRt.setOwnerId(accountId);
         mainRt.setRegion(region);
-        mainRt.getRoutes().add(new Route("172.31.0.0/16", "local", "CreateRouteTable"));
-        mainRt.getRoutes().add(new Route("0.0.0.0/0", igwId, "CreateRoute"));
+        mainRt.getRoutes().add(new Route(vpc.getCidrBlock(), "local", "CreateRouteTable"));
+
         RouteTableAssociation mainAssoc = new RouteTableAssociation();
-        mainAssoc.setRouteTableAssociationId("rtbassoc-default");
-        mainAssoc.setRouteTableId(rtId);
+        mainAssoc.setRouteTableAssociationId(associationId);
+        mainAssoc.setRouteTableId(routeTableId);
         mainAssoc.setMain(true);
         mainAssoc.setAssociationState("associated");
         mainRt.getAssociations().add(mainAssoc);
-        routeTables.put(key(region, rtId), mainRt);
+
+        routeTables.put(key(region, routeTableId), mainRt);
+        return routeTableId;
     }
 
     private String key(String region, String id) {
@@ -538,6 +550,9 @@ public class Ec2Service {
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
         vpcs.put(key(region, vpcId), vpc);
+
+        createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
+        createMainRouteTable(region, vpc, "rtb-" + randomHex(8), "rtbassoc-" + randomHex(8));
         return vpc;
     }
 

@@ -241,6 +241,42 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(14)
+    void describeCreatedVpcDefaultSecurityGroup() {
+        given()
+            .formParam("Action", "DescribeSecurityGroups")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+            .formParam("Filter.2.Name", "group-name")
+            .formParam("Filter.2.Value.1", "default")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.groupName", equalTo("default"))
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item.vpcId", equalTo(vpcId));
+    }
+
+    @Test
+    @Order(15)
+    void describeCreatedVpcMainRouteTable() {
+        given()
+            .formParam("Action", "DescribeRouteTables")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpcId)
+            .formParam("Filter.2.Name", "association.main")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeRouteTablesResponse.routeTableSet.item.vpcId", equalTo(vpcId))
+            .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item.main", equalTo("true"));
+    }
+
+    @Test
+    @Order(16)
     void describeVpcEndpointServices() {
         given()
             .formParam("Action", "DescribeVpcEndpointServices")
