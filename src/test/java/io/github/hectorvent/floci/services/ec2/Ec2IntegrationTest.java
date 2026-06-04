@@ -53,8 +53,8 @@ class Ec2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
-        .then()
-            .statusCode(200)
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupName", equalTo("default"))
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo("vpc-default"));
             .contentType("application/xml")
             .body("DescribeVpcsResponse.vpcSet.item[0].vpcId", equalTo("vpc-default"))
             .body("DescribeVpcsResponse.vpcSet.item[0].cidrBlock", equalTo("172.31.0.0/16"))
