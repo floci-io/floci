@@ -106,6 +106,10 @@ public class Ec2QueryHandler {
                 case "DisassociateRouteTable" -> handleDisassociateRouteTable(params, region);
                 case "CreateRoute" -> handleCreateRoute(params, region);
                 case "DeleteRoute" -> handleDeleteRoute(params, region);
+                // NAT Gateways
+                case "CreateNatGateway" -> handleCreateNatGateway(params, region);
+                case "DescribeNatGateways" -> handleDescribeNatGateways(params, region);
+                case "DeleteNatGateway" -> handleDeleteNatGateway(params, region);
                 // Elastic IPs
                 case "AllocateAddress" -> handleAllocateAddress(params, region);
                 case "AssociateAddress" -> handleAssociateAddress(params, region);
@@ -119,6 +123,7 @@ public class Ec2QueryHandler {
                 case "DescribeAccountAttributes" -> handleDescribeAccountAttributes(params, region);
                 // Instance Types
                 case "DescribeInstanceTypes" -> handleDescribeInstanceTypes(params, region);
+                case "DescribeInstanceTypeOfferings" -> handleDescribeInstanceTypeOfferings(params, region);
                 // Launch Templates
                 case "CreateLaunchTemplate" -> handleCreateLaunchTemplate(params, region);
                 case "CreateLaunchTemplateVersion" -> handleCreateLaunchTemplateVersion(params, region);
@@ -1152,6 +1157,48 @@ public class Ec2QueryHandler {
         return booleanResponse("DeleteRoute");
     }
 
+    // ─── NAT Gateway handlers ─────────────────────────────────────────────────
+
+    private Response handleCreateNatGateway(MultivaluedMap<String, String> p, String region) {
+        NatGateway natGateway = service.createNatGateway(
+                region,
+                p.getFirst("SubnetId"),
+                p.getFirst("AllocationId"),
+                p.getFirst("ConnectivityType"),
+                parseTagsForResource(p, "natgateway"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateNatGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("natGateway").raw(natGatewayXml(natGateway)).end("natGateway")
+                .end("CreateNatGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeNatGateways(MultivaluedMap<String, String> p, String region) {
+        List<String> natGatewayIds = getList(p, "NatGatewayId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<NatGateway> natGateways = service.describeNatGateways(region, natGatewayIds, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeNatGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("natGatewaySet");
+        for (NatGateway natGateway : natGateways) {
+            xml.start("item").raw(natGatewayXml(natGateway)).end("item");
+        }
+        xml.end("natGatewaySet").end("DescribeNatGatewaysResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteNatGateway(MultivaluedMap<String, String> p, String region) {
+        NatGateway natGateway = service.deleteNatGateway(region, p.getFirst("NatGatewayId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteNatGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("natGateway").raw(natGatewayXml(natGateway)).end("natGateway")
+                .end("DeleteNatGatewayResponse");
+        return xmlResponse(xml.build());
+    }
+
     // ─── Elastic IP handlers ──────────────────────────────────────────────────
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
@@ -1304,6 +1351,26 @@ public class Ec2QueryHandler {
             xml.end("supportedArchitectures").end("item");
         }
         xml.end("instanceTypeSet").end("DescribeInstanceTypesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeInstanceTypeOfferings(MultivaluedMap<String, String> p, String region) {
+        List<String> typeNames = getList(p, "InstanceType");
+        Map<String, List<String>> filters = getFilters(p);
+        List<Map<String, String>> offerings = service.describeInstanceTypeOfferings(
+                region, typeNames, p.getFirst("LocationType"), filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeInstanceTypeOfferingsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("instanceTypeOfferingSet");
+        for (Map<String, String> offering : offerings) {
+            xml.start("item")
+                    .elem("instanceType", offering.get("instanceType"))
+                    .elem("locationType", offering.get("locationType"))
+                    .elem("location", offering.get("location"))
+                    .end("item");
+        }
+        xml.end("instanceTypeOfferingSet").end("DescribeInstanceTypeOfferingsResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1743,6 +1810,29 @@ public class Ec2QueryHandler {
         }
         xml.end("associationSet")
                 .raw(tagSetXml(rt.getTags()));
+        return xml.build();
+    }
+
+    private String natGatewayXml(NatGateway natGateway) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("natGatewayId", natGateway.getNatGatewayId())
+                .elem("subnetId", natGateway.getSubnetId())
+                .elem("vpcId", natGateway.getVpcId())
+                .elem("state", natGateway.getState())
+                .elem("connectivityType", natGateway.getConnectivityType());
+        if (natGateway.getCreateTime() != null) {
+            xml.elem("createTime", ISO_FMT.format(natGateway.getCreateTime()));
+        }
+        if (natGateway.getAllocationId() != null) {
+            xml.start("natGatewayAddressSet")
+                    .start("item")
+                    .elem("allocationId", natGateway.getAllocationId())
+                    .end("item")
+                    .end("natGatewayAddressSet");
+        } else {
+            xml.start("natGatewayAddressSet").end("natGatewayAddressSet");
+        }
+        xml.raw(tagSetXml(natGateway.getTags()));
         return xml.build();
     }
 

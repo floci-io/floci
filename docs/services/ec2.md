@@ -130,17 +130,26 @@ Floci seeds the following resources on first use in each region so Terraform, th
 ### Route Tables
 `CreateRouteTable` · `DescribeRouteTables` · `DeleteRouteTable` · `AssociateRouteTable` · `DisassociateRouteTable` · `CreateRoute` · `DeleteRoute`
 
+### NAT Gateways
+`CreateNatGateway` · `DescribeNatGateways` · `DeleteNatGateway`
+
 ### Elastic IPs
-`AllocateAddress` · `DescribeAddresses` · `AssociateAddress` · `DisassociateAddress` · `ReleaseAddress`
+`AllocateAddress` · `DescribeAddresses` · `DescribeAddressesAttribute` · `AssociateAddress` · `DisassociateAddress` · `ReleaseAddress`
 
 ### Availability Zones & Regions
 `DescribeAvailabilityZones` · `DescribeRegions` · `DescribeAccountAttributes`
 
 ### Instance Types
-`DescribeInstanceTypes`
+`DescribeInstanceTypes` · `DescribeInstanceTypeOfferings`
 
 ### Launch Templates
 `CreateLaunchTemplate` · `DescribeLaunchTemplates` · `DeleteLaunchTemplate`
+
+### IAM Instance Profiles
+`DescribeIamInstanceProfileAssociations`
+
+### Network Interfaces
+`DescribeNetworkInterfaces`
 
 ### Volumes
 `CreateVolume` · `DescribeVolumes` · `DeleteVolume`

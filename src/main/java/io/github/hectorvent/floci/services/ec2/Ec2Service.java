@@ -41,6 +41,7 @@ import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -84,6 +85,7 @@ public class Ec2Service {
     private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
     private final Map<String, LaunchTemplate> launchTemplates = new ConcurrentHashMap<>();
     private final Map<String, VpcEndpoint> vpcEndpoints = new ConcurrentHashMap<>();
+    private final Map<String, NatGateway> natGateways = new ConcurrentHashMap<>();
     // resourceId → List<Tag>
     private final Map<String, List<Tag>> tags = new ConcurrentHashMap<>();
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -1244,7 +1246,9 @@ public class Ec2Service {
         LaunchTemplate lt = launchTemplates.get(key(region, resourceId));
         if (lt != null) { lt.setTags(new ArrayList<>(tagList)); return; }
         VpcEndpoint endpoint = vpcEndpoints.get(key(region, resourceId));
-        if (endpoint != null) { endpoint.setTags(new ArrayList<>(tagList)); }
+        if (endpoint != null) { endpoint.setTags(new ArrayList<>(tagList)); return; }
+        NatGateway natGateway = natGateways.get(key(region, resourceId));
+        if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -1292,6 +1296,9 @@ public class Ec2Service {
         if (resourceId.startsWith("rtb-")) return "route-table";
         if (resourceId.startsWith("key-")) return "key-pair";
         if (resourceId.startsWith("eipalloc-")) return "elastic-ip";
+        if (resourceId.startsWith("lt-")) return "launch-template";
+        if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
+        if (resourceId.startsWith("nat-")) return "natgateway";
         return "unknown";
     }
 
@@ -1433,6 +1440,66 @@ public class Ec2Service {
         return rt;
     }
 
+    // ─── NAT Gateways ─────────────────────────────────────────────────────────
+
+    public NatGateway createNatGateway(String region, String subnetId, String allocationId,
+                                       String connectivityType, List<Tag> natGatewayTags) {
+        ensureDefaultResources(region);
+        Subnet subnet = getRequiredSubnet(region, subnetId);
+        if (allocationId != null && !allocationId.isBlank()) {
+            getRequiredAddress(region, allocationId);
+        }
+
+        NatGateway natGateway = new NatGateway();
+        natGateway.setNatGatewayId("nat-" + randomHex(17));
+        natGateway.setSubnetId(subnetId);
+        natGateway.setVpcId(subnet.getVpcId());
+        natGateway.setAllocationId(allocationId);
+        natGateway.setConnectivityType(connectivityType != null && !connectivityType.isBlank() ? connectivityType : "public");
+        natGateway.setCreateTime(Instant.now());
+        natGateway.setRegion(region);
+        if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
+            natGateway.setTags(new ArrayList<>(natGatewayTags));
+            tags.put(natGateway.getNatGatewayId(), new ArrayList<>(natGatewayTags));
+        }
+        natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
+        return natGateway;
+    }
+
+    public List<NatGateway> describeNatGateways(String region, List<String> natGatewayIds,
+                                                Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        if (!natGatewayIds.isEmpty()) {
+            for (String natGatewayId : natGatewayIds) {
+                getRequiredNatGateway(region, natGatewayId);
+            }
+        }
+        return natGateways.values().stream()
+                .filter(natGateway -> natGateway.getRegion().equals(region))
+                .filter(natGateway -> natGatewayIds.isEmpty()
+                        || natGatewayIds.contains(natGateway.getNatGatewayId()))
+                .filter(natGateway -> matchesFilters(natGateway, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public NatGateway deleteNatGateway(String region, String natGatewayId) {
+        ensureDefaultResources(region);
+        NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
+        natGateway.setState("deleted");
+        natGateways.remove(key(region, natGatewayId));
+        tags.remove(natGatewayId);
+        return natGateway;
+    }
+
+    private NatGateway getRequiredNatGateway(String region, String natGatewayId) {
+        NatGateway natGateway = natGateways.get(key(region, natGatewayId));
+        if (natGateway == null) {
+            throw new AwsException("NatGatewayNotFound",
+                    "NatGateway " + natGatewayId + " was not found", 400);
+        }
+        return natGateway;
+    }
+
     // ─── Elastic IPs ───────────────────────────────────────────────────────────
 
     public Address allocateAddress(String region) {
@@ -1533,6 +1600,8 @@ public class Ec2Service {
         allTypes.add(buildInstanceType("t3.small", 2, 2048));
         allTypes.add(buildInstanceType("t3.medium", 2, 4096));
         allTypes.add(buildInstanceType("m5.large", 2, 8192));
+        allTypes.add(buildInstanceType("t4g.micro", 2, 1024, List.of("arm64")));
+        allTypes.add(buildInstanceType("t4g.small", 2, 2048, List.of("arm64")));
 
         if (instanceTypeNames.isEmpty()) {
             return allTypes;
@@ -1543,13 +1612,52 @@ public class Ec2Service {
     }
 
     private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib) {
+        return buildInstanceType(name, vcpu, memMib, List.of("x86_64"));
+    }
+
+    private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib,
+                                                  List<String> supportedArchitectures) {
         Map<String, Object> t = new LinkedHashMap<>();
         t.put("instanceType", name);
         t.put("vcpu", vcpu);
         t.put("memoryMib", memMib);
-        t.put("supportedArchitectures", List.of("x86_64"));
+        t.put("supportedArchitectures", supportedArchitectures);
         t.put("currentGeneration", true);
         return t;
+    }
+
+    public List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
+                                                                   String locationType,
+                                                                   Map<String, List<String>> filters) {
+        List<String> effectiveTypeNames = new ArrayList<>(instanceTypeNames);
+        if (filters != null && filters.containsKey("instance-type")) {
+            effectiveTypeNames.addAll(filters.get("instance-type"));
+        }
+        String effectiveLocationType = locationType != null && !locationType.isBlank()
+                ? locationType
+                : "availability-zone";
+        List<String> locations = "region".equals(effectiveLocationType)
+                ? List.of(region)
+                : describeAvailabilityZones(region).stream()
+                        .map(zone -> zone.get("zoneName"))
+                        .toList();
+        List<String> locationFilter = filters != null ? filters.get("location") : null;
+
+        List<Map<String, String>> offerings = new ArrayList<>();
+        for (Map<String, Object> type : describeInstanceTypes(effectiveTypeNames)) {
+            String instanceType = (String) type.get("instanceType");
+            for (String location : locations) {
+                if (locationFilter != null && !matchesValue(location, locationFilter)) {
+                    continue;
+                }
+                Map<String, String> offering = new LinkedHashMap<>();
+                offering.put("instanceType", instanceType);
+                offering.put("locationType", effectiveLocationType);
+                offering.put("location", location);
+                offerings.add(offering);
+            }
+        }
+        return offerings;
     }
 
     // ─── Filter matching ───────────────────────────────────────────────────────
@@ -1689,6 +1797,37 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        if (resource instanceof LaunchTemplate lt) {
+            return switch (filterName) {
+                case "launch-template-id" -> matchesValue(values, lt.getLaunchTemplateId());
+                case "launch-template-name" -> matchesValue(values, lt.getLaunchTemplateName());
+                default -> true;
+            };
+        }
+        if (resource instanceof VpcEndpoint endpoint) {
+            return switch (filterName) {
+                case "service-name" -> matchesValue(values, endpoint.getServiceName());
+                case "vpc-endpoint-id" -> matchesValue(values, endpoint.getVpcEndpointId());
+                case "vpc-endpoint-type" -> matchesValue(values, endpoint.getVpcEndpointType());
+                case "vpc-id" -> matchesValue(values, endpoint.getVpcId());
+                case "state" -> matchesValue(values, endpoint.getState());
+                case "route-table-id" -> endpoint.getRouteTableIds().stream()
+                        .anyMatch(routeTableId -> matchesValue(values, routeTableId));
+                case "subnet-id" -> endpoint.getSubnetIds().stream()
+                        .anyMatch(subnetId -> matchesValue(values, subnetId));
+                default -> true;
+            };
+        }
+        if (resource instanceof NatGateway natGateway) {
+            return switch (filterName) {
+                case "nat-gateway-id" -> matchesValue(values, natGateway.getNatGatewayId());
+                case "subnet-id" -> matchesValue(values, natGateway.getSubnetId());
+                case "vpc-id" -> matchesValue(values, natGateway.getVpcId());
+                case "state" -> matchesValue(values, natGateway.getState());
+                case "connectivity-type" -> matchesValue(values, natGateway.getConnectivityType());
+                default -> true;
+            };
+        }
         if (resource instanceof Volume vol) {
             return switch (filterName) {
                 case "volume-id" -> matchesValue(values, vol.getVolumeId());
@@ -1730,32 +1869,12 @@ public class Ec2Service {
         if (resource instanceof InternetGateway igw) return igw.getTags();
         if (resource instanceof RouteTable rt) return rt.getTags();
         if (resource instanceof KeyPair kp) return kp.getTags();
-        if (resource instanceof LaunchTemplate lt) {
-            return switch (filterName) {
-                case "launch-template-id" -> matchesValue(values, lt.getLaunchTemplateId());
-                case "launch-template-name" -> matchesValue(values, lt.getLaunchTemplateName());
-                default -> true;
-            };
-        }
-        if (resource instanceof VpcEndpoint endpoint) {
-            return switch (filterName) {
-                case "service-name" -> matchesValue(values, endpoint.getServiceName());
-                case "vpc-endpoint-id" -> matchesValue(values, endpoint.getVpcEndpointId());
-                case "vpc-endpoint-type" -> matchesValue(values, endpoint.getVpcEndpointType());
-                case "vpc-id" -> matchesValue(values, endpoint.getVpcId());
-                case "state" -> matchesValue(values, endpoint.getState());
-                case "route-table-id" -> endpoint.getRouteTableIds().stream()
-                        .anyMatch(routeTableId -> matchesValue(values, routeTableId));
-                case "subnet-id" -> endpoint.getSubnetIds().stream()
-                        .anyMatch(subnetId -> matchesValue(values, subnetId));
-                default -> true;
-            };
-        }
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
+        if (resource instanceof NetworkInterface ni) return ni.getTagSet();
         if (resource instanceof LaunchTemplate lt) return lt.getTags();
         if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
-        if (resource instanceof NetworkInterface ni) return ni.getTagSet();
+        if (resource instanceof NatGateway natGateway) return natGateway.getTags();
         return Collections.emptyList();
     }
 

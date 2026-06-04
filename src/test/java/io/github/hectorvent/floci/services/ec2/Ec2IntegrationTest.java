@@ -50,6 +50,7 @@ class Ec2IntegrationTest {
     private static String networkInterfaceId;
     private static String launchTemplateId;
     private static String vpcEndpointId;
+    private static String natGatewayId;
 
     // =========================================================================
     // Default resources
@@ -232,6 +233,26 @@ class Ec2IntegrationTest {
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", greaterThan(0));
     }
 
+    @Test
+    @Order(9)
+    void describeInstanceTypeOfferings() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "availability-zone")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m5.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].instanceType",
+                    equalTo("m5.large"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].location",
+                    startsWith("us-east-1"));
+    }
+
     // =========================================================================
     // VPCs
     // =========================================================================
@@ -344,6 +365,19 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(15)
+    void describeNatGatewaysInitiallyEmpty() {
+        given()
+            .formParam("Action", "DescribeNatGateways")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.size()", equalTo(0));
     }
 
     // =========================================================================
@@ -926,6 +960,51 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeAddressesResponse.addressesSet.item.allocationId", equalTo(allocationId));
+    }
+
+    @Test
+    @Order(72)
+    void createDescribeAndDeleteNatGateway() {
+        natGatewayId = given()
+            .formParam("Action", "CreateNatGateway")
+            .formParam("SubnetId", subnetId)
+            .formParam("AllocationId", allocationId)
+            .formParam("TagSpecification.1.ResourceType", "natgateway")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "sample-nat")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateNatGatewayResponse.natGateway.natGatewayId", startsWith("nat-"))
+            .body("CreateNatGatewayResponse.natGateway.subnetId", equalTo(subnetId))
+            .body("CreateNatGatewayResponse.natGateway.natGatewayAddressSet.item.allocationId",
+                    equalTo(allocationId))
+            .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
+
+        given()
+            .formParam("Action", "DescribeNatGateways")
+            .formParam("NatGatewayId.1", natGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.natGatewayId",
+                    equalTo(natGatewayId))
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.state", equalTo("available"));
+
+        given()
+            .formParam("Action", "DeleteNatGateway")
+            .formParam("NatGatewayId", natGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeleteNatGatewayResponse.natGateway.natGatewayId", equalTo(natGatewayId))
+            .body("DeleteNatGatewayResponse.natGateway.state", equalTo("deleted"));
     }
 
     // =========================================================================
