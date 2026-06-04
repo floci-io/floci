@@ -89,6 +89,8 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupName", equalTo("default"))
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].description",
+                equalTo("default security group"))
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo("vpc-default"));
     }
 
@@ -105,6 +107,8 @@ class Ec2IntegrationTest {
         .when()
             .post("/")
         .then()
+            .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].description",
+                equalTo("default security group"))
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeAvailabilityZonesResponse.availabilityZoneInfo.item.size()", equalTo(3))
