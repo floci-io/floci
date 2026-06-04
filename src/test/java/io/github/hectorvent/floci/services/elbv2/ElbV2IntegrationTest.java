@@ -56,7 +56,7 @@ class ElbV2IntegrationTest {
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
                         equalTo("subnet-test-a"))
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.DNSName",
-                        containsString(".elb.localhost"))
+                        containsString(".elb.localhost.floci.io"))
                 .extract()
                 .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
     }
