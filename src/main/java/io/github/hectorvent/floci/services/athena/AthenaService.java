@@ -32,8 +32,11 @@ public class AthenaService {
     private static final Logger LOG = Logger.getLogger(AthenaService.class);
     public static final String DEFAULT_CATALOG = "AwsDataCatalog";
     private static final String DEFAULT_OUTPUT_BUCKET = "floci-athena-results";
+    private static final String DEFAULT_WORKGROUP = "primary";
+    private static final String DEFAULT_ENGINE_VERSION = "Athena engine version 3";
 
     private final StorageBackend<String, QueryExecution> queryStore;
+    private final StorageBackend<String, WorkGroup> workGroupStore;
     private final FlociDuckClient duckClient;
     private final GlueService glueService;
     private final S3Service s3Service;
@@ -48,6 +51,8 @@ public class AthenaService {
                          EmulatorConfig config,
                          Vertx vertx) {
         this.queryStore = storageFactory.create("athena", "queries.json",
+                new TypeReference<>() {});
+        this.workGroupStore = storageFactory.create("athena", "workgroups.json",
                 new TypeReference<>() {});
         this.duckClient = duckClient;
         this.glueService = glueService;
@@ -122,14 +127,36 @@ public class AthenaService {
         queryStore.put(id, execution);
     }
 
+    public WorkGroup createWorkGroup(CreateWorkGroupRequest request, String region) {
+        validateWorkGroupName(request.getName());
+        if (DEFAULT_WORKGROUP.equals(request.getName())) {
+            throw new AwsException("InvalidRequestException",
+                    DEFAULT_WORKGROUP + " workGroup could not be created", 400);
+        }
+        String key = workGroupKey(region, request.getName());
+        if (workGroupStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException", "WorkGroup already exists: " + request.getName(), 400);
+        }
+
+        WorkGroup workGroup = new WorkGroup();
+        workGroup.setName(request.getName());
+        workGroup.setDescription(request.getDescription());
+        workGroup.setState("ENABLED");
+        workGroup.setCreationTime(Instant.now());
+        workGroup.setTags(normalizeTags(request.getTags()));
+        workGroup.setConfiguration(normalizeWorkGroupConfiguration(request.getConfiguration()));
+        workGroupStore.put(key, workGroup);
+        return workGroup;
+    }
+
     public Map<String, Object> getWorkGroup(String name) {
         return Map.of(
-                "Name", name == null || name.isBlank() ? "primary" : name,
+                "Name", name == null || name.isBlank() ? DEFAULT_WORKGROUP : name,
                 "State", "ENABLED",
                 "Configuration", Map.of(
                         "EngineVersion", Map.of(
-                                "SelectedEngineVersion", "Athena engine version 3",
-                                "EffectiveEngineVersion", "Athena engine version 3"
+                                "SelectedEngineVersion", DEFAULT_ENGINE_VERSION,
+                                "EffectiveEngineVersion", DEFAULT_ENGINE_VERSION
                         ),
                         "ResultConfiguration", Map.of("OutputLocation", "s3://" + DEFAULT_OUTPUT_BUCKET + "/results/"),
                         "EnforceWorkGroupConfiguration", false,
@@ -140,7 +167,7 @@ public class AthenaService {
     }
 
     public List<Map<String, Object>> listWorkGroups() {
-        return List.of(Map.of("Name", "primary", "State", "ENABLED"));
+        return List.of(Map.of("Name", DEFAULT_WORKGROUP, "State", "ENABLED"));
     }
 
     public List<Map<String, Object>> listDataCatalogs() {
@@ -249,6 +276,94 @@ public class AthenaService {
                 ? rc.getOutputLocation()
                 : "s3://" + DEFAULT_OUTPUT_BUCKET + "/results/";
         return base.endsWith("/") ? base + queryId + "/" : base + "/" + queryId + "/";
+    }
+
+    private WorkGroupConfiguration normalizeWorkGroupConfiguration(CreateWorkGroupConfigurationRequest configuration) {
+        WorkGroupConfiguration normalized = defaultWorkGroupConfiguration();
+        if (configuration == null) {
+            return normalized;
+        }
+
+        if (configuration.getResultConfiguration() != null
+                && configuration.getResultConfiguration().getOutputLocation() != null
+                && !configuration.getResultConfiguration().getOutputLocation().isBlank()) {
+            normalized.setResultConfiguration(
+                    new ResultConfiguration(configuration.getResultConfiguration().getOutputLocation()));
+        }
+        if (configuration.getEnforceWorkGroupConfiguration() != null) {
+            normalized.setEnforceWorkGroupConfiguration(configuration.getEnforceWorkGroupConfiguration());
+        }
+        if (configuration.getPublishCloudWatchMetricsEnabled() != null) {
+            normalized.setPublishCloudWatchMetricsEnabled(configuration.getPublishCloudWatchMetricsEnabled());
+        }
+        if (configuration.getRequesterPaysEnabled() != null) {
+            normalized.setRequesterPaysEnabled(configuration.getRequesterPaysEnabled());
+        }
+        if (configuration.getBytesScannedCutoffPerQuery() != null) {
+            normalized.setBytesScannedCutoffPerQuery(configuration.getBytesScannedCutoffPerQuery());
+        }
+        if (configuration.getEngineVersion() != null) {
+            String selectedEngineVersion = configuration.getEngineVersion().getSelectedEngineVersion();
+            String effectiveEngineVersion = configuration.getEngineVersion().getEffectiveEngineVersion();
+            boolean hasSelectedEngineVersion = selectedEngineVersion != null && !selectedEngineVersion.isBlank();
+            boolean hasEffectiveEngineVersion = effectiveEngineVersion != null && !effectiveEngineVersion.isBlank();
+
+            if (hasSelectedEngineVersion || hasEffectiveEngineVersion) {
+                QueryExecution.EngineVersion engineVersion = new QueryExecution.EngineVersion();
+                if (hasSelectedEngineVersion) {
+                    engineVersion.setSelectedEngineVersion(selectedEngineVersion);
+                } else {
+                    engineVersion.setSelectedEngineVersion(normalized.getEngineVersion().getSelectedEngineVersion());
+                }
+                if (hasEffectiveEngineVersion) {
+                    engineVersion.setEffectiveEngineVersion(effectiveEngineVersion);
+                } else {
+                    engineVersion.setEffectiveEngineVersion(engineVersion.getSelectedEngineVersion());
+                }
+                normalized.setEngineVersion(engineVersion);
+            }
+        }
+        return normalized;
+    }
+
+    private WorkGroupConfiguration defaultWorkGroupConfiguration() {
+        WorkGroupConfiguration configuration = new WorkGroupConfiguration();
+        configuration.setResultConfiguration(new ResultConfiguration("s3://" + DEFAULT_OUTPUT_BUCKET + "/results/"));
+        configuration.setEnforceWorkGroupConfiguration(false);
+        configuration.setPublishCloudWatchMetricsEnabled(false);
+        configuration.setRequesterPaysEnabled(false);
+        configuration.setEngineVersion(defaultEngineVersion());
+        return configuration;
+    }
+
+    private QueryExecution.EngineVersion defaultEngineVersion() {
+        QueryExecution.EngineVersion engineVersion = new QueryExecution.EngineVersion();
+        engineVersion.setSelectedEngineVersion(DEFAULT_ENGINE_VERSION);
+        engineVersion.setEffectiveEngineVersion(DEFAULT_ENGINE_VERSION);
+        return engineVersion;
+    }
+
+    private List<WorkGroupTag> normalizeTags(List<WorkGroupTag> tags) {
+        if (tags == null || tags.isEmpty()) {
+            return List.of();
+        }
+        return tags.stream()
+                .filter(Objects::nonNull)
+                .map(tag -> new WorkGroupTag(tag.getKey(), tag.getValue()))
+                .toList();
+    }
+
+    private String workGroupKey(String region, String name) {
+        return region + ":" + name;
+    }
+
+    private void validateWorkGroupName(String name) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("InvalidRequestException", "WorkGroup name is required", 400);
+        }
+        if (!name.matches("[A-Za-z0-9._-]{1,128}")) {
+            throw new AwsException("InvalidRequestException", "Invalid WorkGroup name: " + name, 400);
+        }
     }
 
     private void ensureOutputBucket(String s3Path) {

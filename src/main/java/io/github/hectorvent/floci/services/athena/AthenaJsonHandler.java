@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.athena;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupRequest;
 import io.github.hectorvent.floci.services.athena.model.QueryExecution;
 import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
 import io.github.hectorvent.floci.services.athena.model.ResultConfiguration;
@@ -68,7 +69,11 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("WorkGroup", athenaService.getWorkGroup(name))).build();
             }
             case "ListWorkGroups" -> Response.ok(Map.of("WorkGroups", athenaService.listWorkGroups())).build();
-            case "CreateWorkGroup" -> Response.ok(Map.of()).build();
+            case "CreateWorkGroup" -> {
+                CreateWorkGroupRequest createRequest = mapper.treeToValue(request, CreateWorkGroupRequest.class);
+                athenaService.createWorkGroup(createRequest, region);
+                yield Response.ok().build();
+            }
             case "ListDataCatalogs" -> Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs())).build();
             case "GetDataCatalog" -> {
                 String name = request.has("Name") ? request.get("Name").asText() : AthenaService.DEFAULT_CATALOG;
