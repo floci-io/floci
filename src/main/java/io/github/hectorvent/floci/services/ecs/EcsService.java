@@ -292,6 +292,14 @@ public class EcsService {
                                        LaunchType launchType, String group, String startedBy,
                                        String containerInstanceArn,
                                        List<ContainerOverride> containerOverrides, String region) {
+        // Fail loudly instead of silently launching zero containers and leaving
+        // a task that looks RUNNING with nothing behind it.
+        if (taskDef.getContainerDefinitions() == null || taskDef.getContainerDefinitions().isEmpty()) {
+            LOG.warnv("Task definition {0} has no container definitions; refusing to launch tasks",
+                    taskDef.getTaskDefinitionArn());
+            throw new AwsException("ClientException",
+                    "Task definition " + taskDef.getTaskDefinitionArn() + " has no container definitions.", 400);
+        }
         List<EcsTask> launched = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             String taskId = UUID.randomUUID().toString().replace("-", "");

@@ -323,6 +323,49 @@ class EcsIntegrationTest {
             .body("task.lastStatus", equalTo("STOPPED"));
     }
 
+    @Test
+    @Order(24)
+    void runTaskWithEmptyContainerDefinitionsFailsLoudly() {
+        ecs("RegisterTaskDefinition")
+            .body("""
+                {
+                    "family": "empty-containers-task",
+                    "containerDefinitions": []
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        ecs("RunTask")
+            .body("""
+                {
+                    "cluster": "%s",
+                    "taskDefinition": "empty-containers-task",
+                    "launchType": "FARGATE",
+                    "count": 1
+                }
+                """.formatted(CLUSTER_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ClientException"))
+            .body("message", containsString("no container definitions"));
+
+        // The failed launch must not leave a phantom task behind.
+        ecs("ListTasks")
+            .body("""
+                {"cluster": "%s", "family": "empty-containers-task"}
+                """.formatted(CLUSTER_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("taskArns", empty());
+    }
+
     // ── Services ──────────────────────────────────────────────────────────────
 
     @Test
