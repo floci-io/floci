@@ -1208,13 +1208,28 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
+        // Create a data source first (function requires it)
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "cascade-fn-ds",
+                  "type": "NONE"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/datasources")
+        .then()
+            .statusCode(200);
+
         String fnId = given()
             .header("Authorization", AUTH)
             .contentType("application/json")
             .body("""
                 {
                   "name": "cascade-fn",
-                  "dataSourceName": "none-ds"
+                  "dataSourceName": "cascade-fn-ds"
                 }
                 """)
         .when()
