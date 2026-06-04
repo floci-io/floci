@@ -25,7 +25,9 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -415,6 +417,24 @@ public class S3Service {
 
     public S3Object headObject(String bucketName, String key, String versionId) {
         return getObjectMetadata(bucketName, key, versionId);
+    }
+
+    public InputStream openObjectStream(String bucketName, String key, String versionId) {
+        getObjectMetadata(bucketName, key, versionId);
+        if (inMemory) {
+            byte[] data = versionId != null
+                    ? memoryDataStore.get(versionedKey(bucketName, key, versionId))
+                    : memoryDataStore.get(objectKey(bucketName, key));
+            return new ByteArrayInputStream(data != null ? data : new byte[0]);
+        }
+        try {
+            Path path = versionId != null
+                    ? resolveVersionedPath(bucketName, key, versionId)
+                    : resolveObjectPath(bucketName, key);
+            return Files.newInputStream(path);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to open S3 object stream", e);
+        }
     }
 
     public S3Object getObjectMetadata(String bucketName, String key, String versionId) {

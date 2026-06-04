@@ -30,8 +30,10 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.StringReader;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -594,7 +596,7 @@ public class S3Controller {
                     return preconditionResponse;
                 }
             }
-            S3Object obj = s3Service.getObject(bucket, key, versionId);
+            S3Object obj = s3Service.headObject(bucket, key, versionId);
             S3Service.validateSseCustomerAccess(
                     obj,
                     httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -609,17 +611,26 @@ public class S3Controller {
             }
 
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(obj, rangeHeader, overrides);
+                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides);
             }
 
-            return fullObjectResponse(obj, overrides);
+            return fullObjectResponse(bucket, key, versionId, obj, overrides);
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
     }
 
-    private Response fullObjectResponse(S3Object obj, ResponseHeaderOverrides overrides) {
-        var resp = Response.ok(obj.getData())
+    private Response fullObjectResponse(String bucket, String key, String versionId,
+                                        S3Object obj, ResponseHeaderOverrides overrides) {
+        String streamBucket = bucket;
+        String streamKey = key;
+        String streamVersionId = versionId;
+        StreamingOutput stream = output -> {
+            try (InputStream input = s3Service.openObjectStream(streamBucket, streamKey, streamVersionId)) {
+                input.transferTo(output);
+            }
+        };
+        var resp = Response.ok(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                 .header("Content-Length", obj.getSize())
                 .header("ETag", obj.getETag())
@@ -632,12 +643,13 @@ public class S3Controller {
         return resp.build();
     }
 
-    private Response handleRangeRequest(S3Object obj, String rangeHeader, ResponseHeaderOverrides overrides) {
-        byte[] data = obj.getData();
-        int totalSize = data.length;
+    private Response handleRangeRequest(String bucket, String key, String versionId,
+                                        S3Object obj, String rangeHeader,
+                                        ResponseHeaderOverrides overrides) {
+        long totalSize = obj.getSize();
         String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
 
-        int start, end;
+        long start, end;
         try {
             int dash = rangeSpec.indexOf('-');
             if (dash < 0) {
@@ -649,15 +661,15 @@ public class S3Controller {
                 return invalidRangeResponse(totalSize);
             }
             if (before.isEmpty()) {
-                int suffix = Integer.parseInt(after);
+                long suffix = Long.parseLong(after);
                 if (suffix <= 0) {
                     return invalidRangeResponse(totalSize);
                 }
                 start = Math.max(0, totalSize - suffix);
                 end = totalSize - 1;
             } else {
-                start = Integer.parseInt(before);
-                end = after.isEmpty() ? totalSize - 1 : Math.min(Integer.parseInt(after), totalSize - 1);
+                start = Long.parseLong(before);
+                end = after.isEmpty() ? totalSize - 1 : Math.min(Long.parseLong(after), totalSize - 1);
             }
         } catch (NumberFormatException e) {
             return invalidRangeResponse(totalSize);
@@ -665,16 +677,22 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(obj, overrides);
+                return fullObjectResponse(bucket, key, versionId, obj, overrides);
             }
             return invalidRangeResponse(totalSize);
         }
 
-        byte[] rangeData = java.util.Arrays.copyOfRange(data, start, end + 1);
+        long length = end - start + 1;
+        StreamingOutput stream = output -> {
+            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
+                input.skipNBytes(start);
+                transferLimited(input, output, length);
+            }
+        };
         var resp = Response.status(206)
-                .entity(rangeData)
+                .entity(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                .header("Content-Length", rangeData.length)
+                .header("Content-Length", length)
                 .header("Content-Range", "bytes " + start + "-" + end + "/" + totalSize)
                 .header("ETag", obj.getETag())
                 .header("Last-Modified", RFC_822.format(obj.getLastModified()))
@@ -687,7 +705,21 @@ public class S3Controller {
         return resp.build();
     }
 
-    private Response invalidRangeResponse(int totalSize) {
+    private static void transferLimited(InputStream input, java.io.OutputStream output, long bytes)
+            throws java.io.IOException {
+        byte[] buffer = new byte[8192];
+        long remaining = bytes;
+        while (remaining > 0) {
+            int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+            if (count < 0) {
+                break;
+            }
+            output.write(buffer, 0, count);
+            remaining -= count;
+        }
+    }
+
+    private Response invalidRangeResponse(long totalSize) {
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")
