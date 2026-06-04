@@ -246,6 +246,28 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void modifyDbSubnetGroup_passesSubnetMembersToService() {
+        when(service.modifyDbSubnetGroup("sample-db-subnets", List.of("subnet-new-a", "subnet-new-b")))
+                .thenReturn(new DbSubnetGroup(
+                        "sample-db-subnets", "test", "vpc-123", List.of("subnet-new-a", "subnet-new-b")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "sample-db-subnets");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-new-a");
+        p.add("SubnetIds.SubnetIdentifier.2", "subnet-new-b");
+        Response response = handler.handle("ModifyDBSubnetGroup", p);
+
+        verify(service).modifyDbSubnetGroup("sample-db-subnets", List.of("subnet-new-a", "subnet-new-b"));
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
+        assertTrue(body.contains("<Subnets><Subnet>"));
+        assertFalse(body.contains("<Subnets><member>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-new-a</SubnetIdentifier>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-new-b</SubnetIdentifier>"));
+    }
+
+    @Test
     void modifyDbParameterGroup_ignoresParametersWithoutValue() {
         DbParameterGroup group = new DbParameterGroup("pg1", "postgres15", "test group");
         when(service.modifyDbParameterGroup(eq("pg1"), eq(java.util.Map.of("max_connections", "200"))))

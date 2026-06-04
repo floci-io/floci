@@ -474,6 +474,17 @@ public class RdsService {
         return subnetGroups.scan(k -> true);
     }
 
+    public DbSubnetGroup modifyDbSubnetGroup(String name, List<String> subnetIds) {
+        DbSubnetGroup group = getDbSubnetGroup(name);
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            throw new AwsException("InvalidParameterValue",
+                    "SubnetIds must contain at least one subnet.", 400);
+        }
+        group.setSubnetIds(subnetIds);
+        subnetGroups.put(name, group);
+        return group;
+    }
+
     public void deleteDbSubnetGroup(String name) {
         if (subnetGroups.get(name).isEmpty()) {
             throw new AwsException("DBSubnetGroupNotFoundFault",

@@ -52,6 +52,7 @@ public class RdsQueryHandler {
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
                 case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params);
                 case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params);
+                case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params);
                 case "DeleteDBSubnetGroup" -> handleDeleteDbSubnetGroup(params);
                 case "CreateDBCluster" -> handleCreateDbCluster(params);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
@@ -220,6 +221,22 @@ public class RdsQueryHandler {
             }
             xml.end("DBSubnetGroups").start("Marker").end("Marker");
             return Response.ok(AwsQueryResponse.envelope("DescribeDBSubnetGroups", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyDbSubnetGroup(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBSubnetGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "DBSubnetGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        List<String> subnetIds = memberList(params, "SubnetIds");
+        try {
+            DbSubnetGroup group = service.modifyDbSubnetGroup(name, subnetIds);
+            return Response.ok(AwsQueryResponse.envelope("ModifyDBSubnetGroup",
+                    AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
