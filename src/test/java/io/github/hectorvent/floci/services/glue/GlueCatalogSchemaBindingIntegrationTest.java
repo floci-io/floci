@@ -101,6 +101,7 @@ class GlueCatalogSchemaBindingIntegrationTest {
             .body("Table.StorageDescriptor.Columns[0].Type", equalTo("bigint"))
             .body("Table.StorageDescriptor.Columns[1].Name", equalTo("name"))
             .body("Table.StorageDescriptor.Columns[1].Type", equalTo("string"))
+            .body("Table.VersionId", equalTo("0"))
             .body("Table.StorageDescriptor.SchemaReference", notNullValue());
     }
 
@@ -119,6 +120,7 @@ class GlueCatalogSchemaBindingIntegrationTest {
         .when().post("/").then()
             .statusCode(200)
             .body("Table.StorageDescriptor.Columns", hasSize(3))
+            .body("Table.VersionId", equalTo("0"))
             .body("Table.StorageDescriptor.Columns[2].Name", equalTo("email"))
             .body("Table.StorageDescriptor.Columns[2].Type", equalTo("string"));
     }
@@ -382,5 +384,55 @@ class GlueCatalogSchemaBindingIntegrationTest {
         .when().post("/").then()
             .statusCode(200)
             .body("DatabaseList.Name", not(hasItem(database)));
+    }
+
+    @Test
+    @Order(10)
+    void updateTableRejectsStaleVersionId() {
+        String versionId = given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.GetTable")
+            .body("""
+                  {
+                    "DatabaseName": "%s",
+                    "Name": "%s"
+                  }
+                  """.formatted(DATABASE, TABLE))
+        .when().post().then()
+            .statusCode(200)
+            .extract().path("Table.VersionId");
+
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.UpdateTable")
+            .body("""
+                  {
+                    "DatabaseName": "%s",
+                    "VersionId": "stale-version",
+                    "TableInput": {
+                      "Name": "%s",
+                      "StorageDescriptor": {
+                        "Location": "s3://bucket/users/",
+                        "Columns": []
+                      },
+                      "Parameters": {
+                        "metadata_location": "s3://bucket/v2.metadata.json"
+                      }
+                    }
+                  }
+                  """.formatted(DATABASE, TABLE))
+        .when().post("/").then()
+            .statusCode(400)
+            .body("__type", equalTo("ConcurrentModificationException"));
+
+        given().contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSGlue.GetTable")
+            .body("""
+                  {
+                    "DatabaseName": "%s",
+                    "Name": "%s"
+                  }
+                  """.formatted(DATABASE, TABLE))
+        .when().post("/").then()
+            .statusCode(200)
+            .body("Table.VersionId", equalTo(versionId));
     }
 }

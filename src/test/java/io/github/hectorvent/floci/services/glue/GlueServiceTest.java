@@ -20,6 +20,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -76,6 +77,7 @@ class GlueServiceTest {
 
         assertEquals(1, fetched.getStorageDescriptor().getColumns().size());
         assertEquals("a", fetched.getStorageDescriptor().getColumns().get(0).getName());
+        assertEquals("0", fetched.getVersionId());
         assertNull(fetched.getStorageDescriptor().getSchemaReference());
     }
 
@@ -206,6 +208,7 @@ class GlueServiceTest {
         Table fetched = glueService.getTable("db1", "plain");
         assertEquals(created.getCreateTime(), fetched.getCreateTime());
         assertNotNull(fetched.getUpdateTime());
+        assertEquals("1", fetched.getVersionId());
         assertEquals(1, fetched.getStorageDescriptor().getColumns().size());
         assertEquals("b", fetched.getStorageDescriptor().getColumns().get(0).getName());
     }
@@ -271,6 +274,81 @@ class GlueServiceTest {
                 () -> glueService.deleteDatabase("missing"));
 
         assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void updateTableWithCurrentVersionIdSucceedsAndIncrementsVersionId() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setParameters(Map.of("metadata_location", "s3://bucket/v1.metadata.json"));
+        glueService.createTable("db1", table);
+
+        Table created = glueService.getTable("db1", "plain");
+        Table replacement = new Table();
+        replacement.setName("plain");
+        replacement.setParameters(Map.of("metadata_location", "s3://bucket/v2.metadata.json"));
+
+        glueService.updateTable("db1", replacement, created.getVersionId());
+
+        Table fetched = glueService.getTable("db1", "plain");
+        assertEquals("1", fetched.getVersionId());
+        assertEquals("s3://bucket/v2.metadata.json", fetched.getParameters().get("metadata_location"));
+    }
+
+    @Test
+    void updateTableWithStaleVersionIdThrowsAndDoesNotOverwrite() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setParameters(Map.of("metadata_location", "s3://bucket/v1.metadata.json"));
+        glueService.createTable("db1", table);
+
+        Table replacement = new Table();
+        replacement.setName("plain");
+        replacement.setParameters(Map.of("metadata_location", "s3://bucket/v2.metadata.json"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.updateTable("db1", replacement, "stale-version"));
+
+        assertEquals("ConcurrentModificationException", ex.getErrorCode());
+        Table fetched = glueService.getTable("db1", "plain");
+        assertEquals("0", fetched.getVersionId());
+        assertEquals("s3://bucket/v1.metadata.json", fetched.getParameters().get("metadata_location"));
+    }
+
+    @Test
+    void createTableIgnoresProvidedVersionId() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setVersionId("7");
+
+        glueService.createTable("db1", table);
+
+        assertEquals("0", glueService.getTable("db1", "plain").getVersionId());
+    }
+
+    @Test
+    void updateTableWithSameVersionIdRejectsSecondUpdate() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setParameters(Map.of("metadata_location", "s3://bucket/v1.metadata.json"));
+        glueService.createTable("db1", table);
+        String versionId = glueService.getTable("db1", "plain").getVersionId();
+
+        Table firstReplacement = new Table();
+        firstReplacement.setName("plain");
+        firstReplacement.setParameters(Map.of("metadata_location", "s3://bucket/v2a.metadata.json"));
+        glueService.updateTable("db1", firstReplacement, versionId);
+
+        Table secondReplacement = new Table();
+        secondReplacement.setName("plain");
+        secondReplacement.setParameters(Map.of("metadata_location", "s3://bucket/v2b.metadata.json"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.updateTable("db1", secondReplacement, versionId));
+
+        assertEquals("ConcurrentModificationException", ex.getErrorCode());
+        Table fetched = glueService.getTable("db1", "plain");
+        assertEquals("1", fetched.getVersionId());
+        assertEquals("s3://bucket/v2a.metadata.json", fetched.getParameters().get("metadata_location"));
     }
 
     @Test

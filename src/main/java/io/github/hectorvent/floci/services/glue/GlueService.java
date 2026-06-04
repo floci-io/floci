@@ -108,6 +108,7 @@ public class GlueService {
         if (table.getCreateTime() == null) {
             table.setCreateTime(Instant.now());
         }
+        table.setVersionId("0");
         tableStore.put(key, table);
         LOG.infov("Created Glue Table: {0}.{1}", databaseName, table.getName());
     }
@@ -129,15 +130,24 @@ public class GlueService {
     }
 
     public void updateTable(String databaseName, Table table) {
+        updateTable(databaseName, table, null);
+    }
+
+    public synchronized void updateTable(String databaseName, Table table, String versionId) {
         getDatabase(databaseName);
         String key = databaseName + ":" + table.getName();
         Table existing = tableStore.get(key)
                 .orElseThrow(() -> new AwsException("EntityNotFoundException",
                         "Table not found: " + databaseName + "." + table.getName(), 400));
+        if (versionId != null && !versionId.equals(existing.getVersionId())) {
+            throw new AwsException("ConcurrentModificationException",
+                    "Table was modified concurrently: " + databaseName + "." + table.getName(), 400);
+        }
         validateSchemaReference(table);
         table.setDatabaseName(databaseName);
         table.setCreateTime(existing.getCreateTime());
         table.setUpdateTime(Instant.now());
+        table.setVersionId(nextVersionId(existing.getVersionId()));
         tableStore.put(key, table);
         LOG.infov("Updated Glue Table: {0}.{1}", databaseName, table.getName());
     }
@@ -330,8 +340,21 @@ public class GlueService {
         copy.setTableType(source.getTableType());
         copy.setViewOriginalText(source.getViewOriginalText());
         copy.setViewExpandedText(source.getViewExpandedText());
+        copy.setVersionId(source.getVersionId());
         copy.setParameters(copyMap(source.getParameters()));
         return copy;
+    }
+
+    private static String nextVersionId(String versionId) {
+        if (versionId == null) {
+            return "1";
+        }
+        try {
+            return Long.toString(Math.addExact(Long.parseLong(versionId), 1));
+        }
+        catch (ArithmeticException | NumberFormatException e) {
+            throw new AwsException("InvalidInputException", "Invalid table VersionId: " + versionId, 400);
+        }
     }
 
     private static StorageDescriptor copyStorageDescriptor(StorageDescriptor source) {
