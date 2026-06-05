@@ -62,7 +62,8 @@ class DynamoDbIntegrationTest {
             .statusCode(200)
             .body("TableDescription.TableName", equalTo("TestTable"))
             .body("TableDescription.TableStatus", equalTo("ACTIVE"))
-            .body("TableDescription.KeySchema.size()", equalTo(2));
+            .body("TableDescription.KeySchema.size()", equalTo(2))
+            .body("TableDescription.SSEDescription", nullValue());
     }
 
     @Test
@@ -83,6 +84,83 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceInUseException"));
+    }
+
+    @Test
+    void createTableWithEnabledSseReturnsStableDescription() throws Exception {
+        Response createResponse = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "SseTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "SSESpecification": {"Enabled": true}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription.Status", equalTo("ENABLED"))
+            .body("TableDescription.SSEDescription.SSEType", equalTo("KMS"))
+            .body("TableDescription.SSEDescription.KMSMasterKeyArn",
+                    startsWith("arn:aws:kms:us-east-1:000000000000:key/"))
+            .extract()
+            .response();
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode createSseDescription = mapper.readTree(createResponse.asString())
+                .path("TableDescription").path("SSEDescription");
+
+        Response firstDescribeResponse = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription.Status", equalTo("ENABLED"))
+            .body("Table.SSEDescription.SSEType", equalTo("KMS"))
+            .extract()
+            .response();
+
+        JsonNode firstDescribeSseDescription = mapper.readTree(firstDescribeResponse.asString())
+                .path("Table").path("SSEDescription");
+        assertEquals(createSseDescription, firstDescribeSseDescription);
+
+        Response secondDescribeResponse = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract()
+            .response();
+
+        JsonNode secondDescribeSseDescription = mapper.readTree(secondDescribeResponse.asString())
+                .path("Table").path("SSEDescription");
+        assertEquals(firstDescribeSseDescription, secondDescribeSseDescription);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
