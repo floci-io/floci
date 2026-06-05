@@ -310,6 +310,8 @@ floci:
     bcm-data-exports:
       enabled: true
       emit-mode: synchronous
+    cloudtrail:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:

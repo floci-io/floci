@@ -364,8 +364,14 @@ public interface EmulatorConfig {
         CurServiceConfig cur();
         BcmDataExportsServiceConfig bcmDataExports();
         ConfigServiceConfig configservice();
+        CloudTrailServiceConfig cloudtrail();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
+    }
+
+    interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface TransferServiceConfig {
