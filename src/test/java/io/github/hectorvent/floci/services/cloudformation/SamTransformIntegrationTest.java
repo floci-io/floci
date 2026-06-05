@@ -69,15 +69,7 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -134,15 +126,7 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -562,23 +546,7 @@ class SamTransformIntegrationTest {
         .then()
             .statusCode(200);
 
-        String describeBody = null;
-        for (int attempt = 0; attempt < 50; attempt++) {
-            describeBody = given()
-                .contentType("application/x-www-form-urlencoded")
-                .formParam("Action", "DescribeStacks")
-                .formParam("StackName", stackName)
-            .when()
-                .post("/")
-            .then()
-                .statusCode(200)
-                .extract().asString();
-            if (describeBody.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")) {
-                break;
-            }
-            Thread.sleep(100);
-        }
-        assertThat(describeBody, containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -600,5 +568,33 @@ class SamTransformIntegrationTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void waitForStackStatus(String stackName, String status) {
+        String expected = "<StackStatus>" + status + "</StackStatus>";
+        String body = "";
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+            if (body.contains(expected)) {
+                return;
+            }
+            try {
+                Thread.sleep(25);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                break;
+            }
+        }
+        assertThat(body, containsString(expected));
     }
 }
