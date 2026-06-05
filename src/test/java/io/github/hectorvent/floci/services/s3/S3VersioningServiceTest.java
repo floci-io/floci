@@ -8,6 +8,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -200,6 +201,22 @@ class S3VersioningServiceTest {
                 .resolve(v1.getVersionId() + ".s3data");
         assertTrue(Files.exists(versionedPath),
                 "versioned file should be stored with .s3data suffix");
+    }
+
+    @Test
+    void openObjectStreamReadsSpecificVersionFromDisk() throws Exception {
+        S3Service diskService = new S3Service(new InMemoryStorage<>(), new InMemoryStorage<>(), tempDir, false);
+        diskService.createBucket("versioned-bucket", "us-east-1");
+        diskService.putBucketVersioning("versioned-bucket", "Enabled");
+        S3Object v1 = diskService.putObject("versioned-bucket", "stream.txt",
+                "first-version".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+        diskService.putObject("versioned-bucket", "stream.txt",
+                "second-version".getBytes(StandardCharsets.UTF_8), "text/plain", null);
+
+        try (InputStream stream = diskService.openObjectStream(
+                "versioned-bucket", "stream.txt", v1.getVersionId())) {
+            assertEquals("first-version", new String(stream.readAllBytes(), StandardCharsets.UTF_8));
+        }
     }
 
     @Test

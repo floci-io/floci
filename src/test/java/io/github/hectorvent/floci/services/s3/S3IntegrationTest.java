@@ -630,6 +630,47 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(42)
+    void getObjectRangeStreamsExactBytesFromLargeObject() {
+        String bucket = "stream-range-bucket";
+        String key = "large-range.txt";
+        byte[] body = alphabetBytes(1024 * 1024);
+        int start = 512 * 1024 + 13;
+        int end = start + 31;
+
+        given()
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/octet-stream")
+            .header("x-amz-meta-kind", "stream-range")
+            .body(body)
+        .when()
+            .put("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Range", "bytes=" + start + "-" + end)
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(206)
+            .header("Content-Range", equalTo("bytes " + start + "-" + end + "/" + body.length))
+            .header("Content-Length", equalTo("32"))
+            .header("Accept-Ranges", equalTo("bytes"))
+            .header("x-amz-meta-kind", equalTo("stream-range"))
+            .header("x-amz-checksum-crc64nvme", nullValue())
+            .body(equalTo(asciiSlice(body, start, 32)));
+
+        given().delete("/" + bucket + "/" + key).then().statusCode(204);
+        given().delete("/" + bucket).then().statusCode(204);
+    }
+
+    @Test
     @Order(50)
     void getObjectIfNoneMatchReturns304() {
         String eTag = given()
@@ -1946,5 +1987,17 @@ class S3IntegrationTest {
         catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("MD5 is not available", e);
         }
+    }
+
+    private static byte[] alphabetBytes(int size) {
+        byte[] bytes = new byte[size];
+        for (int i = 0; i < size; i++) {
+            bytes[i] = (byte) ('a' + (i % 26));
+        }
+        return bytes;
+    }
+
+    private static String asciiSlice(byte[] bytes, int start, int length) {
+        return new String(bytes, start, length, StandardCharsets.US_ASCII);
     }
 }
