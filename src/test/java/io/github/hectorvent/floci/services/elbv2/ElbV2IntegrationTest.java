@@ -662,6 +662,21 @@ class ElbV2IntegrationTest {
 
     @Test
     @Order(72)
+    void deleteTargetGroupIncludesEmptyResult() {
+        given()
+                .formParam("Action", "DeleteTargetGroup")
+                .formParam("TargetGroupArn", tgArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<DeleteTargetGroupResult"))
+                .body("DeleteTargetGroupResponse.ResponseMetadata.RequestId", not(isEmptyOrNullString()));
+    }
+
+    @Test
+    @Order(73)
     void deleteLoadBalancerCascades() {
         given()
                 .formParam("Action", "DeleteLoadBalancer")

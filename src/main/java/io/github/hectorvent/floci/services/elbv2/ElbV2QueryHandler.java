@@ -339,7 +339,8 @@ public class ElbV2QueryHandler {
     private Response handleDeleteTargetGroup(MultivaluedMap<String, String> p, String region) {
         String arn = p.getFirst("TargetGroupArn");
         service.deleteTargetGroup(region, arn);
-        return voidResponse("DeleteTargetGroupResponse");
+        String xml = AwsQueryResponse.envelopeEmptyResult("DeleteTargetGroup", AwsNamespaces.ELB_V2);
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
     private Response handleModifyTargetGroup(MultivaluedMap<String, String> p, String region) {
