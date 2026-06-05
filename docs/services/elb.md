@@ -2,12 +2,12 @@
 
 **Protocol:** Query (XML) — `POST http://localhost:4566/` with `Action=` parameter
 
-Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB) through the ELBv2 management API. This is a Phase 1 implementation: the full CRUD control plane is available and AWS SDK / CLI / Terraform compatible. Data-plane traffic forwarding (actual TCP listener ports) is planned for Phase 2.
+Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB) through the ELBv2 management API. The control plane is AWS SDK / CLI / Terraform compatible, and HTTP listeners can forward to registered instance targets using the target's reachable local address.
 
 ## Supported Actions
 
 ### Load Balancers
-`CreateLoadBalancer` · `DescribeLoadBalancers` · `DeleteLoadBalancer` · `ModifyLoadBalancerAttributes` · `DescribeLoadBalancerAttributes` · `SetSecurityGroups` · `SetSubnets` · `SetIpAddressType`
+`CreateLoadBalancer` · `DescribeLoadBalancers` · `DeleteLoadBalancer` · `ModifyLoadBalancerAttributes` · `DescribeLoadBalancerAttributes` · `DescribeCapacityReservation` · `SetSecurityGroups` · `SetSubnets` · `SetIpAddressType`
 
 ### Target Groups
 `CreateTargetGroup` · `DescribeTargetGroups` · `ModifyTargetGroup` · `DeleteTargetGroup` · `ModifyTargetGroupAttributes` · `DescribeTargetGroupAttributes`
@@ -16,7 +16,7 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 `RegisterTargets` · `DeregisterTargets` · `DescribeTargetHealth`
 
 ### Listeners
-`CreateListener` · `DescribeListeners` · `ModifyListener` · `DeleteListener` · `AddListenerCertificates` · `RemoveListenerCertificates` · `DescribeListenerCertificates`
+`CreateListener` · `DescribeListeners` · `ModifyListener` · `ModifyListenerAttributes` · `DescribeListenerAttributes` · `DeleteListener` · `AddListenerCertificates` · `RemoveListenerCertificates` · `DescribeListenerCertificates`
 
 ### Rules
 `CreateRule` · `DescribeRules` · `ModifyRule` · `DeleteRule` · `SetRulePriorities`
@@ -29,8 +29,11 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 
 ## Behavior Notes
 
-- Load balancers are created in `provisioning` state and transition to `active` immediately on subsequent describes.
-- Target health always returns `initial` state with reason `Elb.RegistrationInProgress` — data-plane health checks are not performed in Phase 1.
+- Load balancer, target group, listener, rule, and tag state is persisted through Floci storage and rebuilt on service startup.
+- Load balancers are created in `active` state.
+- HTTP listener sockets are preserved when listener actions change and are restarted only when socket-level settings such as port change.
+- Instance targets are resolved through EC2 instance private addresses so local load balancer traffic can reach containers.
+- Target health starts in `initial` state with reason `Elb.RegistrationInProgress` and is updated by Floci's health checker when monitoring is active.
 - Each `CreateListener` automatically creates an immutable default rule (`priority=default`, `isDefault=true`). This rule cannot be deleted; use `ModifyListener` to change its action.
 - Rule priorities are validated for uniqueness. `SetRulePriorities` is atomic: all priority assignments are validated before any change is committed.
 - `DeleteTargetGroup` is rejected with `ResourceInUse` while the target group is referenced by any listener or rule.
@@ -111,6 +114,6 @@ aws elbv2 delete-target-group \
 |---|---|---|
 | `FLOCI_SERVICES_ELBV2_ENABLED` | `true` | Enable or disable the ELBv2 service |
 
-## Phase 2 (Planned)
+## Listener Ports
 
-Phase 2 will bind real TCP listener ports on the host so traffic sent to a listener port is forwarded to registered targets. This requires exposing a port range (e.g., `8300-8399`) in the Docker Compose configuration, similar to how ElastiCache and RDS proxy ports work today.
+Listener sockets bind on the Floci host. Expose any listener ports you need in Docker Compose when Floci itself runs in a container, similar to RDS and ElastiCache proxy ports.

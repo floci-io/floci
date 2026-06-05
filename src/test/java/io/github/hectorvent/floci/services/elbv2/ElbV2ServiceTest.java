@@ -1,9 +1,16 @@
 package io.github.hectorvent.floci.services.elbv2;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
+import io.github.hectorvent.floci.services.elbv2.model.RuleCondition;
+import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -12,17 +19,20 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 
@@ -99,6 +109,58 @@ class ElbV2ServiceTest {
         verify(dataPlane, never()).startListener(any(Listener.class), anyString(), anyList());
     }
 
+    @Test
+    void initializeStorageReloadsPersistedResourcesAndRebuildsIndexes() {
+        SharedStorageFactory storageFactory = new SharedStorageFactory();
+        ElbV2DataPlane firstDataPlane = mock(ElbV2DataPlane.class);
+        ElbV2HealthChecker firstHealthChecker = mock(ElbV2HealthChecker.class);
+        ElbV2Service first = serviceWithStorage(storageFactory, firstDataPlane, firstHealthChecker);
+        String lbArn = first.createLoadBalancer(
+                REGION, "persisted-lb", "internal", "application", "ipv4",
+                List.of("subnet-a"), List.of("sg-a"), Map.of("owner", "platform")).getLoadBalancerArn();
+        String tgArn = first.createTargetGroup(
+                REGION, "persisted-tg", "HTTP", "HTTP1", 8080, "vpc-a", "instance",
+                "HTTP", "traffic-port", true, "/health", 15, 5, 3, 2, "200",
+                "ipv4", Map.of("tier", "web")).getTargetGroupArn();
+        TargetDescription target = new TargetDescription();
+        target.setId("i-1234567890abcdef0");
+        target.setPort(8080);
+        first.registerTargets(REGION, tgArn, List.of(target));
+        String listenerArn = first.createListener(
+                REGION, lbArn, "HTTP", 9080, null, List.of(),
+                List.of(forwardAction(tgArn)), List.of(), Map.of("listener", "frontdoor")).getListenerArn();
+        Rule rule = first.createRule(
+                REGION, listenerArn, List.of(pathPattern("/api/*")),
+                10, List.of(forwardAction(tgArn)), Map.of("rule", "api"));
+        first.addTags(List.of(lbArn, tgArn, listenerArn, rule.getRuleArn()), Map.of("env", "test"));
+
+        ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
+        ElbV2HealthChecker reloadedHealthChecker = mock(ElbV2HealthChecker.class);
+        ElbV2Service reloaded = serviceWithStorage(storageFactory, reloadedDataPlane, reloadedHealthChecker);
+
+        assertEquals(lbArn, reloaded.describeLoadBalancers(REGION, null, List.of("persisted-lb"), null, null)
+                .getFirst().getLoadBalancerArn());
+        TargetGroup reloadedTargetGroup = reloaded.describeTargetGroups(REGION, lbArn, null, null).getFirst();
+        assertEquals(tgArn, reloadedTargetGroup.getTargetGroupArn());
+        assertEquals(List.of(lbArn), reloadedTargetGroup.getLoadBalancerArns());
+        assertEquals("i-1234567890abcdef0", reloadedTargetGroup.getTargets().getFirst().getId());
+        Listener reloadedListener = reloaded.describeListeners(REGION, lbArn, null).getFirst();
+        assertEquals(listenerArn, reloadedListener.getListenerArn());
+        List<Rule> reloadedRules = reloaded.describeRules(REGION, listenerArn, null);
+        assertEquals(2, reloadedRules.size());
+        assertTrue(reloadedRules.stream().anyMatch(Rule::isDefault));
+        assertTrue(reloadedRules.stream().anyMatch(candidate -> "10".equals(candidate.getPriority())));
+        assertEquals("test", reloaded.describeTags(List.of(lbArn)).get(lbArn).get("env"));
+        assertThrows(AwsException.class, () -> reloaded.deleteTargetGroup(REGION, tgArn));
+        verify(reloadedHealthChecker).startMonitoring(any(TargetGroup.class));
+        verify(reloadedDataPlane).startListener(any(Listener.class), eq(REGION), anyList());
+
+        reloaded.removeTags(List.of(rule.getRuleArn()), List.of("env"));
+        ElbV2Service updatedReload = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        assertFalse(updatedReload.describeTags(List.of(rule.getRuleArn()))
+                .get(rule.getRuleArn()).containsKey("env"));
+    }
+
     private String createTargetGroup(String name) {
         return service.createTargetGroup(
                 REGION, name, "HTTP", "HTTP1", 9999, "vpc-a", "instance",
@@ -111,5 +173,41 @@ class ElbV2ServiceTest {
         action.setType("forward");
         action.setTargetGroupArn(targetGroupArn);
         return action;
+    }
+
+    private static RuleCondition pathPattern(String value) {
+        RuleCondition condition = new RuleCondition();
+        condition.setField("path-pattern");
+        condition.setValues(List.of(value));
+        condition.setPathPatternValues(List.of(value));
+        return condition;
+    }
+
+    private static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
+                                                   ElbV2DataPlane dataPlane,
+                                                   ElbV2HealthChecker healthChecker) {
+        ElbV2Service service = new ElbV2Service();
+        service.dataPlane = dataPlane;
+        service.healthChecker = healthChecker;
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.storageFactory = storageFactory;
+        service.initializeStorage();
+        return service;
+    }
+
+    private static final class SharedStorageFactory extends StorageFactory {
+        private final Map<String, StorageBackend<String, ?>> stores = new HashMap<>();
+
+        private SharedStorageFactory() {
+            super(null, null);
+        }
+
+        @Override
+        @SuppressWarnings("unchecked")
+        public <V> StorageBackend<String, V> create(String serviceName,
+                                                     String fileName,
+                                                     TypeReference<Map<String, V>> typeReference) {
+            return (StorageBackend<String, V>) stores.computeIfAbsent(fileName, ignored -> new InMemoryStorage<>());
+        }
     }
 }
