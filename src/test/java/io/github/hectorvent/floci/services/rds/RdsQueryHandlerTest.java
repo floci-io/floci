@@ -148,6 +148,78 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_includesTagList() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setTags(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"));
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<TagList>"));
+        assertTrue(body.contains("<Key>example:ClusterId</Key>"));
+        assertTrue(body.contains("<Value>cluster-a</Value>"));
+        assertTrue(body.contains("<Key>Name</Key>"));
+        assertTrue(body.contains("<Value>mydb</Value>"));
+    }
+
+    @Test
+    void createDbInstance_passesCreateTagsToService() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq(null), eq(null), eq(null), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null),
+                eq(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"))))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("Tags.member.1.Key", "example:ClusterId");
+        p.add("Tags.member.1.Value", "cluster-a");
+        p.add("Tags.member.2.Key", "Name");
+        p.add("Tags.member.2.Value", "mydb");
+        handler.handle("CreateDBInstance", p);
+
+        verify(service).createDbInstance("mydb", "postgres", "16.3",
+                null, null, null, "db.t3.micro", 20, false, null, null, null, false, null,
+                java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"));
+    }
+
+    @Test
+    void listTagsForResource_returnsStoredTags() {
+        when(service.listTagsForResource("arn:aws:rds:us-east-1:000000000000:db:mydb"))
+                .thenReturn(java.util.Map.of("Name", "mydb"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
+        Response response = handler.handle("ListTagsForResource", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<TagList>"));
+        assertTrue(body.contains("<Key>Name</Key>"));
+        assertTrue(body.contains("<Value>mydb</Value>"));
+    }
+
+    @Test
+    void addAndRemoveTagsForResource_passThrough() {
+        MultivaluedMap<String, String> add = params();
+        add.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
+        add.add("Tags.member.1.Key", "Name");
+        add.add("Tags.member.1.Value", "mydb");
+        handler.handle("AddTagsToResource", add);
+
+        verify(service).addTagsToResource("arn:aws:rds:us-east-1:000000000000:db:mydb", java.util.Map.of("Name", "mydb"));
+
+        MultivaluedMap<String, String> remove = params();
+        remove.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
+        remove.add("TagKeys.member.1", "Name");
+        handler.handle("RemoveTagsFromResource", remove);
+
+        verify(service).removeTagsFromResource("arn:aws:rds:us-east-1:000000000000:db:mydb", List.of("Name"));
+    }
+
+    @Test
     void describeOrderableDbInstanceOptions_usesServiceCatalog() {
         when(service.describeOrderableDbInstanceOptions("postgres", "16.3", "db.t4g.medium"))
                 .thenReturn(List.of(java.util.Map.of(
@@ -186,7 +258,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null), eq(java.util.Map.of())))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -199,7 +271,7 @@ class RdsQueryHandlerTest {
         handler.handle("CreateDBInstance", p);
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
-                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, false, null);
+                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, false, null, java.util.Map.of());
     }
 
     @Test
@@ -210,7 +282,7 @@ class RdsQueryHandlerTest {
         instance.setMasterUserSecretKmsKeyId("kms-key-1");
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq(null), eq("dbname"), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null), eq(null), eq(true), eq("kms-key-1")))
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(true), eq("kms-key-1"), eq(java.util.Map.of())))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -228,7 +300,7 @@ class RdsQueryHandlerTest {
         assertTrue(body.contains("<SecretStatus>active</SecretStatus>"));
         assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
         verify(service).createDbInstance("mydb", "postgres", "16.3",
-                "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, true, "kms-key-1");
+                "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, true, "kms-key-1", java.util.Map.of());
     }
 
     @Test
@@ -238,7 +310,7 @@ class RdsQueryHandlerTest {
         // AwsException wrapping into a 400 query error.
         when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null), eq(java.util.Map.of())))
                 .thenThrow(new AwsException("InvalidParameterValue",
                         "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
 

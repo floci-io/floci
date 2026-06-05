@@ -75,6 +75,25 @@ class RdsServiceTest {
     }
 
     @Test
+    void dbInstanceTagsRoundTripAndMutateByArn() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, false, null,
+                java.util.Map.of("example:ClusterId", "cluster-a"));
+
+        assertEquals(java.util.Map.of("example:ClusterId", "cluster-a"),
+                rdsService.listTagsForResource(instance.getDbInstanceArn()));
+
+        rdsService.addTagsToResource(instance.getDbInstanceArn(), java.util.Map.of("Name", "mydb"));
+        assertEquals(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"),
+                rdsService.listTagsForResource(instance.getDbInstanceArn()));
+
+        rdsService.removeTagsFromResource(instance.getDbInstanceArn(), java.util.List.of("Name"));
+        assertEquals(java.util.Map.of("example:ClusterId", "cluster-a"),
+                rdsService.listTagsForResource(instance.getDbInstanceArn()));
+    }
+
+    @Test
     void createDbInstanceWithManagedMasterPasswordCreatesSecret() {
         SecretsManagerService secretsManager = mock(SecretsManagerService.class);
         Secret secret = new Secret();

@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.rds.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class DbInstance {
@@ -26,6 +28,7 @@ public class DbInstance {
     private String masterUserSecretArn;
     private String masterUserSecretStatus;
     private String masterUserSecretKmsKeyId;
+    private Map<String, String> tags = new LinkedHashMap<>();
     private Instant createdAt;
     private int proxyPort;
 
@@ -120,6 +123,9 @@ public class DbInstance {
 
     public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
     public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) { this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

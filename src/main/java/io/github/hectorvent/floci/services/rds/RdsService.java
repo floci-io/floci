@@ -143,6 +143,21 @@ public class RdsService {
                                        String dbClusterIdentifier,
                                        boolean manageMasterUserPassword,
                                        String masterUserSecretKmsKeyId) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, manageMasterUserPassword,
+                masterUserSecretKmsKeyId, Map.of());
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier,
+                                       boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags) {
         if (instances.get(id).isPresent()) {
             throw new AwsException("DBInstanceAlreadyExists",
                     "DB instance " + id + " already exists.", 400);
@@ -204,6 +219,7 @@ public class RdsService {
         instance.setContainerPort(containerPort);
         instance.setVolumeId(instanceVolumeId);
         instance.setDockerVolumeName(instanceDockerVolumeName);
+        instance.setTags(tags);
 
         String region = regionResolver.getDefaultRegion();
         instance.setDbiResourceId("db-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
@@ -227,6 +243,40 @@ public class RdsService {
         instances.put(id, instance);
         LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
         return instance;
+    }
+
+    public Map<String, String> listTagsForResource(String resourceName) {
+        DbInstance instance = getDbInstance(dbInstanceIdentifierFromResourceName(resourceName));
+        return Map.copyOf(instance.getTags());
+    }
+
+    public void addTagsToResource(String resourceName, Map<String, String> tags) {
+        String id = dbInstanceIdentifierFromResourceName(resourceName);
+        DbInstance instance = getDbInstance(id);
+        Map<String, String> updated = new java.util.LinkedHashMap<>(instance.getTags());
+        updated.putAll(tags);
+        instance.setTags(updated);
+        instances.put(id, instance);
+    }
+
+    public void removeTagsFromResource(String resourceName, Collection<String> tagKeys) {
+        String id = dbInstanceIdentifierFromResourceName(resourceName);
+        DbInstance instance = getDbInstance(id);
+        Map<String, String> updated = new java.util.LinkedHashMap<>(instance.getTags());
+        tagKeys.forEach(updated::remove);
+        instance.setTags(updated);
+        instances.put(id, instance);
+    }
+
+    private static String dbInstanceIdentifierFromResourceName(String resourceName) {
+        if (resourceName == null || resourceName.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
+        }
+        int marker = resourceName.lastIndexOf(":db:");
+        if (marker >= 0) {
+            return resourceName.substring(marker + 4);
+        }
+        return resourceName;
     }
 
     private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
