@@ -186,7 +186,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null)))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -199,7 +199,36 @@ class RdsQueryHandlerTest {
         handler.handle("CreateDBInstance", p);
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
-                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null);
+                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, false, null);
+    }
+
+    @Test
+    void createDbInstancePassesManagedMasterUserSecretOptions() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456");
+        instance.setMasterUserSecretStatus("active");
+        instance.setMasterUserSecretKmsKeyId("kms-key-1");
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq("admin"), eq(null), eq("dbname"), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(true), eq("kms-key-1")))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("MasterUsername", "admin");
+        p.add("DBName", "dbname");
+        p.add("ManageMasterUserPassword", "true");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+        Response response = handler.handle("CreateDBInstance", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<MasterUserSecret>"));
+        assertTrue(body.contains("<SecretArn>arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456</SecretArn>"));
+        assertTrue(body.contains("<SecretStatus>active</SecretStatus>"));
+        assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
+        verify(service).createDbInstance("mydb", "postgres", "16.3",
+                "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, true, "kms-key-1");
     }
 
     @Test
@@ -209,7 +238,7 @@ class RdsQueryHandlerTest {
         // AwsException wrapping into a 400 query error.
         when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null)))
                 .thenThrow(new AwsException("InvalidParameterValue",
                         "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
 

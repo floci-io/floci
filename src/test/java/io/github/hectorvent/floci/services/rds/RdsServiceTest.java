@@ -14,8 +14,11 @@ import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.Collection;
 
@@ -69,6 +72,37 @@ class RdsServiceTest {
         assertNotNull(instance.getDbiResourceId());
         assertTrue(instance.getDbiResourceId().startsWith("db-"));
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:mydb", instance.getDbInstanceArn());
+    }
+
+    @Test
+    void createDbInstanceWithManagedMasterPasswordCreatesSecret() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, "kms-key-1");
+
+        assertEquals("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret", instance.getMasterUserSecretArn());
+        assertEquals("active", instance.getMasterUserSecretStatus());
+        assertEquals("kms-key-1", instance.getMasterUserSecretKmsKeyId());
+        assertNotNull(instance.getMasterPassword());
+        assertTrue(instance.getMasterPassword().startsWith("floci-"));
+
+        ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> secretString = ArgumentCaptor.forClass(String.class);
+        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1"));
+        assertTrue(secretName.getValue().startsWith("rds!db-"));
+        assertTrue(secretString.getValue().contains("\"username\":\"admin\""));
+        assertTrue(secretString.getValue().contains("\"password\":\"" + instance.getMasterPassword() + "\""));
+        assertTrue(secretString.getValue().contains("\"dbInstanceIdentifier\":\"mydb\""));
     }
 
     @Test
@@ -315,7 +349,17 @@ class RdsServiceTest {
                                   StorageBackend<String, DbCluster> clusters,
                                   StorageBackend<String, DbParameterGroup> parameterGroups,
                                   StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups) {
+        return newService(containerManager, proxyManager, instances, clusters, parameterGroups, clusterParameterGroups, null);
+    }
+
+    private RdsService newService(RdsContainerManager containerManager,
+                                  RdsProxyManager proxyManager,
+                                  StorageBackend<String, DbInstance> instances,
+                                  StorageBackend<String, DbCluster> clusters,
+                                  StorageBackend<String, DbParameterGroup> parameterGroups,
+                                  StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+                                  SecretsManagerService secretsManager) {
         return new RdsService(containerManager, proxyManager, regionResolver, config,
-                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>());
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(), secretsManager);
     }
 }

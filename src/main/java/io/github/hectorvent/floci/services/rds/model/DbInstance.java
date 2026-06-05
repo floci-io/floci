@@ -23,6 +23,9 @@ public class DbInstance {
     private String dbClusterIdentifier;
     private String dbiResourceId;
     private String dbInstanceArn;
+    private String masterUserSecretArn;
+    private String masterUserSecretStatus;
+    private String masterUserSecretKmsKeyId;
     private Instant createdAt;
     private int proxyPort;
 
@@ -108,6 +111,15 @@ public class DbInstance {
 
     public String getDbInstanceArn() { return dbInstanceArn; }
     public void setDbInstanceArn(String dbInstanceArn) { this.dbInstanceArn = dbInstanceArn; }
+
+    public String getMasterUserSecretArn() { return masterUserSecretArn; }
+    public void setMasterUserSecretArn(String masterUserSecretArn) { this.masterUserSecretArn = masterUserSecretArn; }
+
+    public String getMasterUserSecretStatus() { return masterUserSecretStatus; }
+    public void setMasterUserSecretStatus(String masterUserSecretStatus) { this.masterUserSecretStatus = masterUserSecretStatus; }
+
+    public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
+    public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) { this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId; }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.rds;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -19,6 +21,8 @@ import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -40,6 +44,7 @@ import java.util.concurrent.ConcurrentHashMap;
 public class RdsService {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
 
     private final StorageBackend<String, DbInstance> instances;
     private final StorageBackend<String, DbCluster> clusters;
@@ -50,6 +55,7 @@ public class RdsService {
     private final RdsProxyManager proxyManager;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
+    private final SecretsManagerService secretsManagerService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
 
     @Inject
@@ -57,11 +63,13 @@ public class RdsService {
                       RdsProxyManager proxyManager,
                       RegionResolver regionResolver,
                       EmulatorConfig config,
-                      StorageFactory storageFactory) {
+                      StorageFactory storageFactory,
+                      SecretsManagerService secretsManagerService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.regionResolver = regionResolver;
         this.config = config;
+        this.secretsManagerService = secretsManagerService;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -83,10 +91,25 @@ public class RdsService {
                StorageBackend<String, DbParameterGroup> parameterGroups,
                StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
                StorageBackend<String, DbSubnetGroup> subnetGroups) {
+        this(containerManager, proxyManager, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups, null);
+    }
+
+    RdsService(RdsContainerManager containerManager,
+               RdsProxyManager proxyManager,
+               RegionResolver regionResolver,
+               EmulatorConfig config,
+               StorageBackend<String, DbInstance> instances,
+               StorageBackend<String, DbCluster> clusters,
+               StorageBackend<String, DbParameterGroup> parameterGroups,
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups,
+               SecretsManagerService secretsManagerService) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.regionResolver = regionResolver;
         this.config = config;
+        this.secretsManagerService = secretsManagerService;
         this.instances = instances;
         this.clusters = clusters;
         this.parameterGroups = parameterGroups;
@@ -107,6 +130,19 @@ public class RdsService {
                                        int allocatedStorage, boolean iamEnabled,
                                        String paramGroupName, String dbSubnetGroupName,
                                        String dbClusterIdentifier) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, false, null);
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier,
+                                       boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId) {
         if (instances.get(id).isPresent()) {
             throw new AwsException("DBInstanceAlreadyExists",
                     "DB instance " + id + " already exists.", 400);
@@ -117,6 +153,12 @@ public class RdsService {
             getDbSubnetGroup(dbSubnetGroupName);
         }
         int proxyPort = allocateProxyPort();
+        if (masterUsername == null || masterUsername.isBlank()) {
+            masterUsername = "root";
+        }
+        if (manageMasterUserPassword && (masterPassword == null || masterPassword.isBlank())) {
+            masterPassword = generatedMasterPassword();
+        }
 
         String backendHost;
         int backendPort;
@@ -166,10 +208,12 @@ public class RdsService {
         String region = regionResolver.getDefaultRegion();
         instance.setDbiResourceId("db-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
         instance.setDbInstanceArn(regionResolver.buildArn("rds", region, "db:" + id));
+        if (manageMasterUserPassword) {
+            attachManagedMasterUserSecret(instance, region, masterUserSecretKmsKeyId);
+        }
 
-        String effectiveMasterUser = masterUsername != null ? masterUsername : "root";
         proxyManager.startProxy(id, engine, iamEnabled, proxyPort, backendHost, backendPort,
-                effectiveMasterUser, masterPassword, dbName,
+                masterUsername, masterPassword, dbName,
                 (user, pw) -> validateDbPassword(id, user, pw));
 
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
@@ -183,6 +227,44 @@ public class RdsService {
         instances.put(id, instance);
         LOG.infov("DB instance {0} created, engine={1}, endpoint=localhost:{2}", id, engine, String.valueOf(proxyPort));
         return instance;
+    }
+
+    private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
+        if (secretsManagerService == null) {
+            throw new AwsException("InvalidParameterCombination",
+                    "ManageMasterUserPassword requires Secrets Manager support.", 400);
+        }
+        String secretName = "rds!" + instance.getDbiResourceId();
+        Secret secret = secretsManagerService.createSecret(
+                secretName,
+                managedMasterSecretString(instance),
+                null,
+                "Managed RDS master user secret for " + instance.getDbInstanceIdentifier(),
+                kmsKeyId,
+                null,
+                region);
+        instance.setMasterUserSecretArn(secret.getArn());
+        instance.setMasterUserSecretStatus("active");
+        instance.setMasterUserSecretKmsKeyId(kmsKeyId);
+    }
+
+    private static String managedMasterSecretString(DbInstance instance) {
+        try {
+            return JSON.writeValueAsString(Map.of(
+                    "username", instance.getMasterUsername(),
+                    "password", instance.getMasterPassword(),
+                    "engine", instance.getEngine().name().toLowerCase(),
+                    "host", instance.getEndpoint().address(),
+                    "port", instance.getEndpoint().port(),
+                    "dbname", instance.getDbName() == null ? "" : instance.getDbName(),
+                    "dbInstanceIdentifier", instance.getDbInstanceIdentifier()));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Unable to serialize RDS master user secret", e);
+        }
+    }
+
+    private static String generatedMasterPassword() {
+        return "floci-" + java.util.UUID.randomUUID().toString().replace("-", "");
     }
 
     public DbInstance getDbInstance(String id) {
