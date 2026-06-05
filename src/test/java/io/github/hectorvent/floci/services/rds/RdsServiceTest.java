@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
@@ -116,6 +117,21 @@ class RdsServiceTest {
         rdsService.removeTagsFromResource(instance.getDbInstanceArn(), java.util.List.of("Name"));
         assertEquals(java.util.Map.of("example:ClusterId", "cluster-a"),
                 rdsService.listTagsForResource(instance.getDbInstanceArn()));
+    }
+
+    @Test
+    void dbInstanceEndpointUsesResolvedProxyHost() {
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci.local");
+        RdsService service = new RdsService(containerManager, proxyManager, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver);
+
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        assertEquals("floci.local", instance.getEndpoint().address());
     }
 
     @Test

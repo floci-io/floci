@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -58,6 +59,7 @@ public class RdsService {
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
+    private final DockerHostResolver dockerHostResolver;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
     private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
     private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
@@ -68,12 +70,14 @@ public class RdsService {
                       RegionResolver regionResolver,
                       EmulatorConfig config,
                       StorageFactory storageFactory,
-                      SecretsManagerService secretsManagerService) {
+                      SecretsManagerService secretsManagerService,
+                      DockerHostResolver dockerHostResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
+        this.dockerHostResolver = dockerHostResolver;
         this.instances = storageFactory.create("rds", "rds-instances.json",
                 new TypeReference<Map<String, DbInstance>>() {});
         this.clusters = storageFactory.create("rds", "rds-clusters.json",
@@ -96,7 +100,7 @@ public class RdsService {
                StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
                StorageBackend<String, DbSubnetGroup> subnetGroups) {
         this(containerManager, proxyManager, regionResolver, config,
-                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups, null);
+                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups, null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
@@ -109,11 +113,28 @@ public class RdsService {
                StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
                StorageBackend<String, DbSubnetGroup> subnetGroups,
                SecretsManagerService secretsManagerService) {
+        this(containerManager, proxyManager, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
+                secretsManagerService, null);
+    }
+
+    RdsService(RdsContainerManager containerManager,
+               RdsProxyManager proxyManager,
+               RegionResolver regionResolver,
+               EmulatorConfig config,
+               StorageBackend<String, DbInstance> instances,
+               StorageBackend<String, DbCluster> clusters,
+               StorageBackend<String, DbParameterGroup> parameterGroups,
+               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+               StorageBackend<String, DbSubnetGroup> subnetGroups,
+               SecretsManagerService secretsManagerService,
+               DockerHostResolver dockerHostResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
+        this.dockerHostResolver = dockerHostResolver;
         this.instances = instances;
         this.clusters = clusters;
         this.parameterGroups = parameterGroups;
@@ -213,7 +234,7 @@ public class RdsService {
             instanceDockerVolumeName = volumeName(instanceVolumeId, id);
         }
 
-        DbEndpoint endpoint = new DbEndpoint("localhost", proxyPort);
+        DbEndpoint endpoint = new DbEndpoint(proxyEndpointHost(), proxyPort);
         DbInstance instance = new DbInstance(id, engine, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, DbInstanceStatus.AVAILABLE,
                 endpoint, iamEnabled, paramGroupName, dbClusterIdentifier, Instant.now(), proxyPort);
@@ -465,7 +486,7 @@ public class RdsService {
 
         RdsContainerHandle handle = containerManager.start(id, clusterVolumeId, engine, image, masterUsername, masterPassword, databaseName);
 
-        DbEndpoint endpoint = new DbEndpoint("localhost", proxyPort);
+        DbEndpoint endpoint = new DbEndpoint(proxyEndpointHost(), proxyPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
                 iamEnabled, new ArrayList<>(), paramGroupName, Instant.now(), proxyPort);
@@ -767,6 +788,10 @@ public class RdsService {
         usedPorts.remove(port);
     }
 
+    private String proxyEndpointHost() {
+        return dockerHostResolver != null ? dockerHostResolver.resolve() : "localhost";
+    }
+
     private void restoreClusters() {
         for (DbCluster cluster : allClusters()) {
             if (cluster.getStatus() == DbInstanceStatus.DELETING) {
@@ -774,8 +799,8 @@ public class RdsService {
             }
             int proxyPort = reserveOrAllocateProxyPort(cluster.getProxyPort());
             cluster.setProxyPort(proxyPort);
-            cluster.setEndpoint(new DbEndpoint("localhost", proxyPort));
-            cluster.setReaderEndpoint(new DbEndpoint("localhost", proxyPort));
+            cluster.setEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
+            cluster.setReaderEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
             if (cluster.getDockerVolumeName() == null) {
                 cluster.setDockerVolumeName(volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier()));
             }
@@ -810,7 +835,7 @@ public class RdsService {
             }
             int proxyPort = reserveOrAllocateProxyPort(instance.getProxyPort());
             instance.setProxyPort(proxyPort);
-            instance.setEndpoint(new DbEndpoint("localhost", proxyPort));
+            instance.setEndpoint(new DbEndpoint(proxyEndpointHost(), proxyPort));
             try {
                 String backendHost;
                 int backendPort;
