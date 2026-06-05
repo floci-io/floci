@@ -25,6 +25,52 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void updateKeyDescriptionRoundTripThroughJsonHandler() {
+        String keyId = given()
+            .header("X-Amz-Target", "TrentService.CreateKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "Description": "old description"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KeyMetadata.KeyId", notNullValue())
+            .extract().jsonPath().getString("KeyMetadata.KeyId");
+
+        given()
+            .header("X-Amz-Target", "TrentService.UpdateKeyDescription")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "KeyId": "%s",
+                    "Description": "new description"
+                }
+                """.formatted(keyId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "TrentService.DescribeKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "KeyId": "%s"
+                }
+                """.formatted(keyId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KeyMetadata.Description", equalTo("new description"));
+    }
+
+    @Test
     void generateMacAndVerifyMacRoundTripThroughJsonHandler() {
         String keyId = given()
             .header("X-Amz-Target", "TrentService.CreateKey")

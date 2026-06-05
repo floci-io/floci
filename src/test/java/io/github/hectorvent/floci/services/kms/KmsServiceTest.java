@@ -62,6 +62,16 @@ class KmsServiceTest {
     }
 
     @Test
+    void updateKeyDescriptionPersistsDescription() {
+        KmsKey key = kmsService.createKey("old description", REGION);
+
+        kmsService.updateKeyDescription(key.getKeyId(), "new description", REGION);
+
+        KmsKey updated = kmsService.describeKey(key.getKeyId(), REGION);
+        assertEquals("new description", updated.getDescription());
+    }
+
+    @Test
     void listKeys() {
         kmsService.createKey("key1", REGION);
         kmsService.createKey("key2", REGION);

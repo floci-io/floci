@@ -65,6 +65,7 @@ public class KmsJsonHandler {
             case "ListResourceTags" -> handleListResourceTags(request, region);
             case "GetKeyPolicy" -> handleGetKeyPolicy(request, region);
             case "PutKeyPolicy" -> handlePutKeyPolicy(request, region);
+            case "UpdateKeyDescription" -> handleUpdateKeyDescription(request, region);
             case "GetKeyRotationStatus" -> handleGetKeyRotationStatus(request, region);
             case "EnableKeyRotation" -> handleEnableKeyRotation(request, region);
             case "DisableKeyRotation" -> handleDisableKeyRotation(request, region);
@@ -472,6 +473,14 @@ public class KmsJsonHandler {
         service.putKeyPolicy(
                 request.path("KeyId").asText(),
                 request.path("Policy").asText(),
+                region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleUpdateKeyDescription(JsonNode request, String region) {
+        service.updateKeyDescription(
+                request.path("KeyId").asText(),
+                request.path("Description").asText(null),
                 region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
