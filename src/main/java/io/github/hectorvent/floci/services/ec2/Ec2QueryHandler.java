@@ -11,10 +11,13 @@ import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayInputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.*;
+import java.util.zip.GZIPInputStream;
 
 @ApplicationScoped
 public class Ec2QueryHandler {
@@ -115,7 +118,10 @@ public class Ec2QueryHandler {
                 case "DescribeInstanceTypes" -> handleDescribeInstanceTypes(params, region);
                 // Launch Templates
                 case "CreateLaunchTemplate" -> handleCreateLaunchTemplate(params, region);
+                case "CreateLaunchTemplateVersion" -> handleCreateLaunchTemplateVersion(params, region);
                 case "DescribeLaunchTemplates" -> handleDescribeLaunchTemplates(params, region);
+                case "DescribeLaunchTemplateVersions" -> handleDescribeLaunchTemplateVersions(params, region);
+                case "ModifyLaunchTemplate" -> handleModifyLaunchTemplate(params, region);
                 case "DeleteLaunchTemplate" -> handleDeleteLaunchTemplate(params, region);
                 // Network Interfaces
                 case "DescribeNetworkInterfaces" -> handleDescribeNetworkInterfaces(params, region);
@@ -260,7 +266,7 @@ public class Ec2QueryHandler {
         String userDataEncoded = p.getFirst("UserData");
         String userData = null;
         if (userDataEncoded != null && !userDataEncoded.isBlank()) {
-            userData = new String(Base64.getDecoder().decode(userDataEncoded), StandardCharsets.UTF_8);
+            userData = decodeUserData(userDataEncoded);
         }
 
         // IamInstanceProfile
@@ -1254,14 +1260,32 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.ImageId"),
                 p.getFirst("LaunchTemplateData.InstanceType"),
                 p.getFirst("LaunchTemplateData.KeyName"),
-                getList(p, "LaunchTemplateData.SecurityGroupId"),
-                p.getFirst("LaunchTemplateData.UserData"),
+                parseLaunchTemplateSecurityGroupIds(p),
+                decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
                 parseTagsForResource(p, "launch-template"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("launchTemplate").raw(launchTemplateXml(launchTemplate)).end("launchTemplate")
                 .end("CreateLaunchTemplateResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCreateLaunchTemplateVersion(MultivaluedMap<String, String> p, String region) {
+        LaunchTemplate launchTemplate = service.createLaunchTemplateVersion(
+                region,
+                p.getFirst("LaunchTemplateId"),
+                p.getFirst("LaunchTemplateName"),
+                p.getFirst("LaunchTemplateData.ImageId"),
+                p.getFirst("LaunchTemplateData.InstanceType"),
+                p.getFirst("LaunchTemplateData.KeyName"),
+                parseLaunchTemplateSecurityGroupIds(p),
+                decodeUserData(p.getFirst("LaunchTemplateData.UserData")));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("launchTemplateVersion").raw(launchTemplateVersionXml(launchTemplate)).end("launchTemplateVersion")
+                .end("CreateLaunchTemplateVersionResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1273,11 +1297,44 @@ public class Ec2QueryHandler {
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeLaunchTemplatesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
-                .start("launchTemplateSet");
+                .start("launchTemplates");
         for (LaunchTemplate launchTemplate : launchTemplates) {
             xml.start("item").raw(launchTemplateXml(launchTemplate)).end("item");
         }
-        xml.end("launchTemplateSet").end("DescribeLaunchTemplatesResponse");
+        xml.end("launchTemplates").end("DescribeLaunchTemplatesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeLaunchTemplateVersions(MultivaluedMap<String, String> p, String region) {
+        String id = p.getFirst("LaunchTemplateId");
+        String name = p.getFirst("LaunchTemplateName");
+        List<LaunchTemplate> launchTemplates = service.describeLaunchTemplates(
+                region,
+                id != null && !id.isBlank() ? List.of(id) : List.of(),
+                name != null && !name.isBlank() ? List.of(name) : List.of(),
+                Map.of());
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeLaunchTemplateVersionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("launchTemplateVersionSet");
+        for (LaunchTemplate launchTemplate : launchTemplates) {
+            xml.start("item").raw(launchTemplateVersionXml(launchTemplate)).end("item");
+        }
+        xml.end("launchTemplateVersionSet").end("DescribeLaunchTemplateVersionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleModifyLaunchTemplate(MultivaluedMap<String, String> p, String region) {
+        LaunchTemplate launchTemplate = service.modifyLaunchTemplate(
+                region,
+                p.getFirst("LaunchTemplateId"),
+                p.getFirst("LaunchTemplateName"),
+                p.getFirst("DefaultVersion"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ModifyLaunchTemplateResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("launchTemplate").raw(launchTemplateXml(launchTemplate)).end("launchTemplate")
+                .end("ModifyLaunchTemplateResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1645,6 +1702,72 @@ public class Ec2QueryHandler {
                 .elem("latestVersionNumber", launchTemplate.getLatestVersionNumber())
                 .raw(tagSetXml(launchTemplate.getTags()));
         return xml.build();
+    }
+
+    private String launchTemplateVersionXml(LaunchTemplate launchTemplate) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("launchTemplateId", launchTemplate.getLaunchTemplateId())
+                .elem("launchTemplateName", launchTemplate.getLaunchTemplateName())
+                .elem("versionNumber", launchTemplate.getLatestVersionNumber())
+                .elem("defaultVersion", String.valueOf(Objects.equals(
+                        launchTemplate.getDefaultVersionNumber(), launchTemplate.getLatestVersionNumber())));
+        if (launchTemplate.getCreateTime() != null) {
+            xml.elem("createTime", ISO_FMT.format(launchTemplate.getCreateTime()));
+        }
+        xml.elem("createdBy", launchTemplate.getCreatedBy())
+                .start("launchTemplateData")
+                .elem("imageId", launchTemplate.getImageId())
+                .elem("instanceType", launchTemplate.getInstanceType());
+        if (launchTemplate.getKeyName() != null) {
+            xml.elem("keyName", launchTemplate.getKeyName());
+        }
+        if (launchTemplate.getUserData() != null) {
+            xml.elem("userData", launchTemplate.getUserData());
+        }
+        xml.start("securityGroupIdSet");
+        for (String securityGroupId : launchTemplate.getSecurityGroupIds()) {
+            xml.elem("item", securityGroupId);
+        }
+        xml.end("securityGroupIdSet")
+                .end("launchTemplateData");
+        return xml.build();
+    }
+
+    private List<String> parseLaunchTemplateSecurityGroupIds(MultivaluedMap<String, String> p) {
+        LinkedHashSet<String> groups = new LinkedHashSet<>(getList(p, "LaunchTemplateData.SecurityGroupId"));
+        for (int i = 1; ; i++) {
+            boolean sawInterface = false;
+            for (String prefix : List.of(
+                    "LaunchTemplateData.NetworkInterface." + i + ".Groups",
+                    "LaunchTemplateData.NetworkInterface." + i + ".GroupId",
+                    "LaunchTemplateData.NetworkInterface." + i + ".SecurityGroupId")) {
+                List<String> values = getList(p, prefix);
+                if (!values.isEmpty()) {
+                    sawInterface = true;
+                    groups.addAll(values);
+                }
+            }
+            if (!sawInterface && p.getFirst("LaunchTemplateData.NetworkInterface." + i + ".DeviceIndex") == null) {
+                break;
+            }
+        }
+        return new ArrayList<>(groups);
+    }
+
+    private String decodeUserData(String userDataEncoded) {
+        if (userDataEncoded == null || userDataEncoded.isBlank()) {
+            return null;
+        }
+        byte[] decoded = Base64.getDecoder().decode(userDataEncoded);
+        if (decoded.length >= 2 && (decoded[0] & 0xff) == 0x1f && (decoded[1] & 0xff) == 0x8b) {
+            try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(decoded))) {
+                decoded = gzip.readAllBytes();
+            }
+            catch (IOException e) {
+                throw new AwsException("InvalidParameterValue", "UserData is not valid gzip content.", 400);
+            }
+        }
+        return new String(decoded, StandardCharsets.UTF_8);
     }
 
     private String addressXml(Address addr) {

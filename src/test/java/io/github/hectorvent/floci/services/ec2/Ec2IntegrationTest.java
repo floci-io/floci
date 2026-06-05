@@ -9,7 +9,12 @@ import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.hamcrest.Matchers.containsString;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.List;
+import java.util.zip.GZIPOutputStream;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
@@ -529,7 +534,8 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(43)
-    void createLaunchTemplate() {
+    void createLaunchTemplate()
+            throws IOException {
         launchTemplateId = given()
             .formParam("Action", "CreateLaunchTemplate")
             .formParam("LaunchTemplateName", "sample-template")
@@ -537,6 +543,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.InstanceType", "t3.micro")
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
+            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
             .formParam("TagSpecification.1.ResourceType", "launch-template")
             .formParam("TagSpecification.1.Tag.1.Key", "Name")
             .formParam("TagSpecification.1.Tag.1.Value", "sample-template")
@@ -562,14 +569,107 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeLaunchTemplatesResponse.launchTemplateSet.item.launchTemplateId",
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.launchTemplateId",
                     equalTo(launchTemplateId))
-            .body("DescribeLaunchTemplatesResponse.launchTemplateSet.item.launchTemplateName",
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.launchTemplateName",
                     equalTo("sample-template"));
     }
 
     @Test
     @Order(45)
+    void describeLaunchTemplateVersionsById() {
+        given()
+            .formParam("Action", "DescribeLaunchTemplateVersions")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("Versions.1", "$Latest")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateId",
+                    equalTo(launchTemplateId))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.imageId",
+                    equalTo("ami-0abcdef1234567890"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
+                    equalTo("t3.micro"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
+                    equalTo("#!/bin/sh\necho launch-template\n"));
+    }
+
+    @Test
+    @Order(46)
+    void createLaunchTemplateVersion()
+            throws IOException {
+        given()
+            .formParam("Action", "CreateLaunchTemplateVersion")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("SourceVersion", "$Latest")
+            .formParam("VersionDescription", "updated by test")
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceType", "t3.small")
+            .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
+            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateId",
+                    equalTo(launchTemplateId))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.versionNumber",
+                    equalTo("2"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.defaultVersion",
+                    equalTo("false"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.instanceType",
+                    equalTo("t3.small"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
+                    equalTo("#!/bin/sh\necho launch-template-version\n"));
+    }
+
+    @Test
+    @Order(47)
+    void modifyLaunchTemplateDefaultVersion() {
+        given()
+            .formParam("Action", "ModifyLaunchTemplate")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("DefaultVersion", "2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ModifyLaunchTemplateResponse.launchTemplate.launchTemplateId",
+                    equalTo(launchTemplateId))
+            .body("ModifyLaunchTemplateResponse.launchTemplate.defaultVersionNumber",
+                    equalTo("2"))
+            .body("ModifyLaunchTemplateResponse.launchTemplate.latestVersionNumber",
+                    equalTo("2"));
+    }
+
+    @Test
+    @Order(48)
+    void describeUpdatedLaunchTemplateVersionById() {
+        given()
+            .formParam("Action", "DescribeLaunchTemplateVersions")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("Versions.1", "$Latest")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.versionNumber",
+                    equalTo("2"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.defaultVersion",
+                    equalTo("true"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
+                    equalTo("t3.small"));
+    }
+
+    @Test
+    @Order(49)
     void deleteLaunchTemplate() {
         given()
             .formParam("Action", "DeleteLaunchTemplate")
@@ -581,6 +681,16 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("DeleteLaunchTemplateResponse.launchTemplate.launchTemplateId",
                     equalTo(launchTemplateId));
+    }
+
+    private static String gzipBase64(String value)
+            throws IOException
+    {
+        ByteArrayOutputStream buffer = new ByteArrayOutputStream();
+        try (GZIPOutputStream gzip = new GZIPOutputStream(buffer)) {
+            gzip.write(value.getBytes(StandardCharsets.UTF_8));
+        }
+        return Base64.getEncoder().encodeToString(buffer.toByteArray());
     }
 
     // =========================================================================

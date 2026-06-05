@@ -110,6 +110,7 @@ public class AwsQueryController {
             "CreateLaunchConfiguration", "DescribeLaunchConfigurations", "DeleteLaunchConfiguration",
             "CreateAutoScalingGroup", "UpdateAutoScalingGroup", "DeleteAutoScalingGroup",
             "DescribeAutoScalingGroups", "SetDesiredCapacity",
+            "CreateOrUpdateTags", "DeleteTags",
             "DescribeAutoScalingInstances", "AttachInstances", "DetachInstances",
             "TerminateInstanceInAutoScalingGroup",
             "AttachLoadBalancerTargetGroups", "DetachLoadBalancerTargetGroups",
@@ -161,7 +162,8 @@ public class AwsQueryController {
             "DescribeIamInstanceProfileAssociations",
             "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
             "DescribeInstanceTypes",
-            "CreateLaunchTemplate", "DescribeLaunchTemplates", "DeleteLaunchTemplate",
+            "CreateLaunchTemplate", "CreateLaunchTemplateVersion", "DescribeLaunchTemplates", "DescribeLaunchTemplateVersions",
+            "ModifyLaunchTemplate", "DeleteLaunchTemplate",
             "DescribeNetworkInterfaces"
     );
 

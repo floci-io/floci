@@ -978,6 +978,51 @@ public class Ec2Service {
         return launchTemplate;
     }
 
+    public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
+                                                      String imageId, String instanceType, String keyName,
+                                                      List<String> securityGroupIds, String userData) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
+        launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
+        if (imageId != null && !imageId.isBlank()) {
+            launchTemplate.setImageId(imageId);
+        }
+        if (instanceType != null && !instanceType.isBlank()) {
+            launchTemplate.setInstanceType(instanceType);
+        }
+        if (keyName != null && !keyName.isBlank()) {
+            launchTemplate.setKeyName(keyName);
+        }
+        if (userData != null && !userData.isBlank()) {
+            launchTemplate.setUserData(userData);
+        }
+        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
+            launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        }
+        return launchTemplate;
+    }
+
+    public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        if (defaultVersion != null && !defaultVersion.isBlank()) {
+            String resolved = switch (defaultVersion) {
+                case "$Latest" -> launchTemplate.getLatestVersionNumber();
+                case "$Default" -> launchTemplate.getDefaultVersionNumber();
+                default -> defaultVersion;
+            };
+            int requested = parseLaunchTemplateVersion(resolved);
+            int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
+            if (requested < 1 || requested > latest) {
+                throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
+                        "The specified launch template version does not exist.", 400);
+            }
+            launchTemplate.setDefaultVersionNumber(String.valueOf(requested));
+        }
+        return launchTemplate;
+    }
+
     public List<LaunchTemplate> describeLaunchTemplates(String region, List<String> ids,
                                                         List<String> names, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
@@ -1012,6 +1057,15 @@ public class Ec2Service {
         }
         throw new AwsException("InvalidLaunchTemplateId.NotFoundException",
                 "The specified launch template does not exist.", 400);
+    }
+
+    private int parseLaunchTemplateVersion(String version) {
+        try {
+            return Integer.parseInt(version);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidLaunchTemplateVersion.Malformed",
+                    "The specified launch template version is not valid.", 400);
+        }
     }
 
     private boolean matchesImageFilters(Ec2ImageCatalog.CatalogImage image, Map<String, List<String>> filters) {
