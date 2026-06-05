@@ -35,6 +35,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Core RDS business logic — DB instances, clusters, and parameter groups.
@@ -57,6 +59,8 @@ public class RdsService {
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
     private final Set<Integer> usedPorts = ConcurrentHashMap.newKeySet();
+    private static final Pattern IMAGE_TAG_VERSION_PATTERN = Pattern.compile("^(\\d+(?:\\.\\d+)*)(.*)$");
+    private static final Pattern SAFE_IMAGE_TAG_PATTERN = Pattern.compile("[A-Za-z0-9._-]+");
 
     @Inject
     public RdsService(RdsContainerManager containerManager,
@@ -198,7 +202,7 @@ public class RdsService {
                     : volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier());
         } else {
             // Standalone instance — start its own container
-            String image = imageForEngine(engine);
+            String image = imageForEngine(engine, engineVersion);
             instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
             RdsContainerHandle handle = containerManager.start(id, instanceVolumeId, engine, image, masterUsername, masterPassword, dbName);
             backendHost = handle.getHost();
@@ -385,7 +389,7 @@ public class RdsService {
             } catch (Exception e) {
                 LOG.warnv("Error stopping container during reboot of {0}: {1}", id, e.getMessage());
             }
-            String image = imageForEngine(instance.getEngine());
+            String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
             RdsContainerHandle handle = containerManager.start(id, instance.getVolumeId(), instance.getEngine(), image,
                     instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
             instance.setContainerId(handle.getContainerId());
@@ -456,7 +460,7 @@ public class RdsService {
 
         DatabaseEngine engine = resolveEngine(engineParam);
         int proxyPort = allocateProxyPort();
-        String image = imageForEngine(engine);
+        String image = imageForEngine(engine, engineVersion);
         String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
 
         RdsContainerHandle handle = containerManager.start(id, clusterVolumeId, engine, image, masterUsername, masterPassword, databaseName);
@@ -707,12 +711,44 @@ public class RdsService {
         };
     }
 
-    private String imageForEngine(DatabaseEngine engine) {
-        return switch (engine) {
+    private String imageForEngine(DatabaseEngine engine, String engineVersion) {
+        String defaultImage = switch (engine) {
             case POSTGRES -> config.services().rds().defaultPostgresImage();
             case MYSQL -> config.services().rds().defaultMysqlImage();
             case MARIADB -> config.services().rds().defaultMariadbImage();
         };
+        return imageForRequestedVersion(defaultImage, engineVersion);
+    }
+
+    static String imageForRequestedVersion(String defaultImage, String engineVersion) {
+        if (engineVersion == null || engineVersion.isBlank()) {
+            return defaultImage;
+        }
+
+        String requestedTag = engineVersion.trim();
+        if (!SAFE_IMAGE_TAG_PATTERN.matcher(requestedTag).matches()) {
+            throw new AwsException("InvalidParameterValue",
+                    "Unsupported engine version tag: " + engineVersion, 400);
+        }
+
+        int tagSeparator = defaultImage.lastIndexOf(':');
+        int lastSlash = defaultImage.lastIndexOf('/');
+        if (tagSeparator <= lastSlash) {
+            return defaultImage + ":" + requestedTag;
+        }
+
+        String imageName = defaultImage.substring(0, tagSeparator);
+        String defaultTag = defaultImage.substring(tagSeparator + 1);
+        Matcher matcher = IMAGE_TAG_VERSION_PATTERN.matcher(defaultTag);
+        if (!matcher.matches()) {
+            return imageName + ":" + requestedTag;
+        }
+
+        String suffix = matcher.group(2);
+        if (!suffix.isEmpty() && !requestedTag.endsWith(suffix)) {
+            requestedTag += suffix;
+        }
+        return imageName + ":" + requestedTag;
     }
 
     private int allocateProxyPort() {
@@ -744,7 +780,7 @@ public class RdsService {
                 cluster.setDockerVolumeName(volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier()));
             }
             try {
-                String image = imageForEngine(cluster.getEngine());
+                String image = imageForEngine(cluster.getEngine(), cluster.getEngineVersion());
                 RdsContainerHandle handle = containerManager.start(cluster.getDbClusterIdentifier(),
                         cluster.getVolumeId(), cluster.getEngine(), image,
                         cluster.getMasterUsername(), cluster.getMasterPassword(), cluster.getDatabaseName());
@@ -801,7 +837,7 @@ public class RdsService {
                     if (instance.getDockerVolumeName() == null) {
                         instance.setDockerVolumeName(volumeName(instance.getVolumeId(), instance.getDbInstanceIdentifier()));
                     }
-                    String image = imageForEngine(instance.getEngine());
+                    String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
                     RdsContainerHandle handle = containerManager.start(instance.getDbInstanceIdentifier(),
                             instance.getVolumeId(), instance.getEngine(), image,
                             instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());

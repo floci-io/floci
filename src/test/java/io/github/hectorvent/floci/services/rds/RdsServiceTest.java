@@ -53,6 +53,9 @@ class RdsServiceTest {
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(rdsConfig.proxyBasePort()).thenReturn(7000);
         when(rdsConfig.proxyMaxPort()).thenReturn(7099);
+        when(rdsConfig.defaultPostgresImage()).thenReturn("postgres:16-alpine");
+        when(rdsConfig.defaultMysqlImage()).thenReturn("mysql:8.0");
+        when(rdsConfig.defaultMariadbImage()).thenReturn("mariadb:11");
 
         rdsService = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -72,6 +75,28 @@ class RdsServiceTest {
         assertNotNull(instance.getDbiResourceId());
         assertTrue(instance.getDbiResourceId().startsWith("db-"));
         assertEquals("arn:aws:rds:us-east-1:123456789012:db:mydb", instance.getDbInstanceArn());
+    }
+
+    @Test
+    void postgresImageUsesRequestedEngineVersionAndDefaultFlavor() {
+        assertEquals("postgres:18.1-alpine",
+                RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1"));
+        assertEquals("example.com/library/postgres:18.1-alpine",
+                RdsService.imageForRequestedVersion("example.com/library/postgres:16-alpine", "18.1"));
+        assertEquals("postgres:18.1",
+                RdsService.imageForRequestedVersion("postgres", "18.1"));
+        assertEquals("postgres:18.1-alpine",
+                RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1-alpine"));
+    }
+
+    @Test
+    void createDbInstanceStartsContainerWithRequestedEngineVersionImage() {
+        rdsService.createDbInstance("mydb", "postgres", "18.1",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        verify(containerManager).start(eq("mydb"), any(), eq(DatabaseEngine.POSTGRES),
+                eq("postgres:18.1-alpine"), eq("admin"), eq("password"), eq("dbname"));
     }
 
     @Test
@@ -308,7 +333,7 @@ class RdsServiceTest {
         assertEquals(15432, restored.getContainerPort());
 
         verify(restoredContainerManager).start(eq("mydb"), eq(persistedVolumeId),
-                eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("secret"), eq("app"));
+                eq(DatabaseEngine.POSTGRES), eq("postgres:16.3-alpine"), eq("admin"), eq("secret"), eq("app"));
         verify(restoredProxyManager).startProxy(eq("mydb"), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(persistedProxyPort), eq("127.0.0.1"), eq(15432),
                 eq("admin"), eq("secret"), eq("app"), any());
@@ -353,7 +378,7 @@ class RdsServiceTest {
         assertEquals(15432, restoredMember.getContainerPort());
 
         verify(restoredContainerManager).start(eq("cluster1"), eq(cluster.getVolumeId()),
-                eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("secret"), eq("app"));
+                eq(DatabaseEngine.POSTGRES), eq("postgres:16.3-alpine"), eq("admin"), eq("secret"), eq("app"));
         verify(restoredProxyManager).startProxy(eq("cluster1"), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(cluster.getProxyPort()), eq("127.0.0.1"), eq(15432),
                 eq("admin"), eq("secret"), eq("app"), any());
