@@ -466,6 +466,18 @@ class IamServiceTest {
                 "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
         assertEquals("AWSLambdaBasicExecutionRole", lambda.getPolicyName());
         assertEquals("/service-role/", lambda.getPath());
+
+        IamPolicy ssm = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore");
+        assertEquals("AmazonSSMManagedInstanceCore", ssm.getPolicyName());
+        assertEquals("/", ssm.getPath());
+
+        IamPolicy cloudWatchAgent = iamService.getPolicy("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy");
+        assertEquals("CloudWatchAgentServerPolicy", cloudWatchAgent.getPolicyName());
+        assertEquals("/", cloudWatchAgent.getPath());
+
+        IamPolicy ecrReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly");
+        assertEquals("AmazonEC2ContainerRegistryReadOnly", ecrReadOnly.getPolicyName());
+        assertEquals("/", ecrReadOnly.getPath());
     }
 
     @Test
@@ -488,6 +500,45 @@ class IamServiceTest {
         iamService.attachRolePolicy("LambdaExec", policyArn);
 
         List<IamPolicy> attached = iamService.listAttachedRolePolicies("LambdaExec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachSsmManagedInstanceCorePolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachCloudWatchAgentServerPolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachEcrReadOnlyPolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
         assertEquals(1, attached.size());
         assertEquals(policyArn, attached.getFirst().getArn());
     }

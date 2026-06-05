@@ -178,6 +178,60 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(6)
+    void getSsmManagedInstanceCorePolicy() {
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName",
+                    equalTo("AmazonSSMManagedInstanceCore"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn",
+                    equalTo("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"));
+    }
+
+    @Test
+    @Order(7)
+    void getCloudWatchAgentServerPolicy() {
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName",
+                    equalTo("CloudWatchAgentServerPolicy"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn",
+                    equalTo("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy"));
+    }
+
+    @Test
+    @Order(8)
+    void getEcrReadOnlyPolicy() {
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName",
+                    equalTo("AmazonEC2ContainerRegistryReadOnly"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn",
+                    equalTo("arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"));
+    }
+
+    @Test
     @Order(35)
     void attachManagedPolicyToRole() {
         given()
