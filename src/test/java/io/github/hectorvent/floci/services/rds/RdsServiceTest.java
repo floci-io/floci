@@ -238,11 +238,11 @@ class RdsServiceTest {
     @Test
     void describeOrderableDbInstanceOptionsFiltersByEngineVersionAndClass() {
         var result = rdsService.describeOrderableDbInstanceOptions(
-                "postgres", "16.14", "db.t3.micro");
+                "postgres", "18.1", "db.t3.micro");
 
         assertEquals(1, result.size());
         assertEquals("postgres", result.getFirst().get("engine"));
-        assertEquals("16.14", result.getFirst().get("engineVersion"));
+        assertEquals("18.1", result.getFirst().get("engineVersion"));
         assertEquals("db.t3.micro", result.getFirst().get("dbInstanceClass"));
     }
 
