@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
@@ -60,6 +61,9 @@ public class ElbV2DataPlane {
 
     @Inject
     LambdaService lambdaService;
+
+    @Inject
+    Ec2Service ec2Service;
 
     @Inject
     ObjectMapper objectMapper;
@@ -192,7 +196,7 @@ public class ElbV2DataPlane {
         int idx = Math.abs(counter.getAndIncrement() % candidates.size());
         TargetDescription target = candidates.get(idx);
         int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
-        proxyRequest(req, target.getId(), targetPort);
+        proxyRequest(req, ElbV2TargetResolver.resolveHost(ec2Service, tg, target), targetPort);
     }
 
     private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {
