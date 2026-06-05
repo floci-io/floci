@@ -109,10 +109,27 @@ public class ElbV2DataPlane {
 
         server.requestHandler(req -> handleRequest(req, listenerArn, region));
         server.listen()
-                .onSuccess(s -> LOG.infov("ELBv2 listener started on port {0} for {1}", String.valueOf(listener.getPort()), listenerArn))
-                .onFailure(err -> LOG.warnv("ELBv2 listener failed to start on port {0}: {1}", String.valueOf(listener.getPort()), err.getMessage()));
+                .onSuccess(s -> {
+                    servers.put(listenerArn, s);
+                    LOG.infov("ELBv2 listener started on port {0} for {1}", String.valueOf(listener.getPort()), listenerArn);
+                })
+                .onFailure(err -> {
+                    ruleChains.remove(listenerArn);
+                    listenerRegions.remove(listenerArn);
+                    LOG.warnv("ELBv2 listener failed to start on port {0}: {1}", String.valueOf(listener.getPort()), err.getMessage());
+                });
+    }
 
-        servers.put(listenerArn, server);
+    public void restartListener(Listener listener, String region, List<Rule> rules) {
+        if (config.services().elbv2().mock()) {
+            return;
+        }
+        HttpServer server = servers.remove(listener.getListenerArn());
+        if (server == null) {
+            startListener(listener, region, rules);
+            return;
+        }
+        server.close().onComplete(ignored -> startListener(listener, region, rules));
     }
 
     public void stopListener(String listenerArn) {

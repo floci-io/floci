@@ -495,6 +495,8 @@ public class ElbV2Service {
                                     String sslPolicy, List<String> certificates,
                                     List<Action> defaultActions, List<String> alpnPolicy) {
         Listener listener = requireListener(region, listenerArn);
+        boolean restartDataPlane = false;
+        boolean recompileRules = false;
 
         if (port != null && !Objects.equals(listener.getPort(), port)) {
             // check duplicate port on same LB
@@ -507,6 +509,7 @@ public class ElbV2Service {
                         "A listener already exists on port " + port + " for this load balancer.", 400);
             }
             listener.setPort(port);
+            restartDataPlane = true;
         }
         if (protocol != null)      listener.setProtocol(protocol);
         if (sslPolicy != null)     listener.setSslPolicy(sslPolicy);
@@ -519,11 +522,19 @@ public class ElbV2Service {
                     .map(ra -> rules.getOrDefault(region, Map.of()).get(ra))
                 .filter(r -> r != null && r.isDefault())
                 .forEach(r -> r.setActions(new ArrayList<>(defaultActions)));
+            for (Action action : defaultActions) {
+                linkTgToLb(action, listener.getLoadBalancerArn());
+            }
+            unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
+            recompileRules = true;
         }
         listeners.put(region, listeners.getOrDefault(region, Map.of()));
         rules.put(region, rules.getOrDefault(region, Map.of()));
-        dataPlane.stopListener(listenerArn);
-        dataPlane.startListener(requireListener(region, listenerArn), region, getListenerRules(region, listenerArn));
+        if (restartDataPlane) {
+            dataPlane.restartListener(requireListener(region, listenerArn), region, getListenerRules(region, listenerArn));
+        } else if (recompileRules) {
+            dataPlane.recompileRules(listenerArn, getListenerRules(region, listenerArn));
+        }
         return listener;
     }
 
