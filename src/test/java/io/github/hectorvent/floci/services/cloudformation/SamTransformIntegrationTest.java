@@ -521,7 +521,7 @@ class SamTransformIntegrationTest {
     }
 
     @Test
-    void samFunction_viaChangeSet_createsLambda() {
+    void samFunction_viaChangeSet_createsLambda() throws Exception {
         String stackName = "sam-changeset-stack";
         stacksToDelete.add(stackName);
 
@@ -562,15 +562,23 @@ class SamTransformIntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        String describeBody = null;
+        for (int attempt = 0; attempt < 50; attempt++) {
+            describeBody = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+            if (describeBody.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")) {
+                break;
+            }
+            Thread.sleep(100);
+        }
+        assertThat(describeBody, containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
 
         given()
         .when()
