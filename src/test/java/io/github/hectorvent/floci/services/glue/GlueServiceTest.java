@@ -69,7 +69,9 @@ class GlueServiceTest {
         Table table = new Table();
         table.setName("plain");
         StorageDescriptor sd = new StorageDescriptor();
-        sd.setColumns(java.util.List.of(new Column("a", "string")));
+        Column column = new Column("a", "string");
+        column.setParameters(Map.of("trino_type_id", "varchar"));
+        sd.setColumns(java.util.List.of(column));
         table.setStorageDescriptor(sd);
         glueService.createTable("db1", table);
 
@@ -78,6 +80,7 @@ class GlueServiceTest {
         assertEquals(1, fetched.getStorageDescriptor().getColumns().size());
         assertEquals("a", fetched.getStorageDescriptor().getColumns().get(0).getName());
         assertEquals("0", fetched.getVersionId());
+        assertEquals("varchar", fetched.getStorageDescriptor().getColumns().get(0).getParameters().get("trino_type_id"));
         assertNull(fetched.getStorageDescriptor().getSchemaReference());
     }
 
