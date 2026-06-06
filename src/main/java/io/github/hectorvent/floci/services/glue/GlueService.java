@@ -141,7 +141,7 @@ public class GlueService {
                         "Table not found: " + databaseName + "." + table.getName(), 400));
         if (versionId != null && !versionId.equals(existing.getVersionId())) {
             throw new AwsException("ConcurrentModificationException",
-                    "Table was modified concurrently: " + databaseName + "." + table.getName(), 400);
+                    "Update table failed due to concurrent modifications.", 400);
         }
         validateSchemaReference(table);
         table.setDatabaseName(databaseName);
@@ -418,4 +418,5 @@ public class GlueService {
     private static Map<String, String> copyMap(Map<String, String> source) {
         return source != null ? new LinkedHashMap<>(source) : null;
     }
+
 }

@@ -214,6 +214,56 @@ class GlueServiceTest {
     }
 
     @Test
+    void updateTableChecksVersionId() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        assertEquals("0", glueService.getTable("db1", "plain").getVersionId());
+
+        Table nonCanonicalVersionReplacement = new Table();
+        nonCanonicalVersionReplacement.setName("plain");
+        AwsException nonCanonicalVersionEx = assertThrows(AwsException.class,
+                () -> glueService.updateTable("db1", nonCanonicalVersionReplacement, "00"));
+        assertEquals("ConcurrentModificationException", nonCanonicalVersionEx.getErrorCode());
+        assertEquals("0", glueService.getTable("db1", "plain").getVersionId());
+
+        Table nonNumericVersionReplacement = new Table();
+        nonNumericVersionReplacement.setName("plain");
+        AwsException nonNumericVersionEx = assertThrows(AwsException.class,
+                () -> glueService.updateTable("db1", nonNumericVersionReplacement, "invalid"));
+        assertEquals("ConcurrentModificationException", nonNumericVersionEx.getErrorCode());
+        assertEquals("0", glueService.getTable("db1", "plain").getVersionId());
+
+        Table firstReplacement = new Table();
+        firstReplacement.setName("plain");
+        firstReplacement.setDescription("first");
+        glueService.updateTable("db1", firstReplacement, "0");
+        assertEquals("1", glueService.getTable("db1", "plain").getVersionId());
+
+        Table staleReplacement = new Table();
+        staleReplacement.setName("plain");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.updateTable("db1", staleReplacement, "0"));
+
+        assertEquals("ConcurrentModificationException", ex.getErrorCode());
+        assertEquals("Update table failed due to concurrent modifications.", ex.getMessage());
+    }
+
+    @Test
+    void updateTableIncrementsMissingVersionId() {
+        Table existing = new Table();
+        existing.setName("plain");
+        existing.setDatabaseName("db1");
+        tableStore.put("db1:plain", existing);
+
+        Table replacement = new Table();
+        replacement.setName("plain");
+        glueService.updateTable("db1", replacement);
+
+        assertEquals("1", glueService.getTable("db1", "plain").getVersionId());
+    }
+
+    @Test
     void getTableReturnsViewFieldsUnchanged() {
         Table table = new Table();
         table.setName("view");
