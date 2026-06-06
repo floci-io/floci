@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.SchemaReference;
 import io.github.hectorvent.floci.services.glue.model.StorageDescriptor;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.glue.model.TableVersion;
 import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.RegistryId;
@@ -20,6 +21,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -57,7 +59,10 @@ class GlueServiceTest {
         glueService = new GlueService(
                 new InMemoryStorage<String, Database>(),
                 tableStore,
+                new InMemoryStorage<String, TableVersion>(),
                 partitionStore,
+                new InMemoryStorage<String, Map<String, Object>>(),
+                new InMemoryStorage<String, Map<String, Object>>(),
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 schemaRegistryService, regionResolver);
         glueService.createDatabase(new Database("db1"));
@@ -68,7 +73,9 @@ class GlueServiceTest {
         Table table = new Table();
         table.setName("plain");
         StorageDescriptor sd = new StorageDescriptor();
-        sd.setColumns(java.util.List.of(new Column("a", "string")));
+        Column column = new Column("a", "string");
+        column.setParameters(Map.of("trino_type_id", "varchar"));
+        sd.setColumns(java.util.List.of(column));
         table.setStorageDescriptor(sd);
         glueService.createTable("db1", table);
 
@@ -76,6 +83,7 @@ class GlueServiceTest {
 
         assertEquals(1, fetched.getStorageDescriptor().getColumns().size());
         assertEquals("a", fetched.getStorageDescriptor().getColumns().get(0).getName());
+        assertEquals("varchar", fetched.getStorageDescriptor().getColumns().get(0).getParameters().get("trino_type_id"));
         assertNull(fetched.getStorageDescriptor().getSchemaReference());
     }
 
@@ -211,6 +219,28 @@ class GlueServiceTest {
     }
 
     @Test
+    void updateTableChecksVersionId() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        assertEquals("0", glueService.getTable("db1", "plain").getVersionId());
+
+        Table firstReplacement = new Table();
+        firstReplacement.setName("plain");
+        firstReplacement.setDescription("first");
+        glueService.updateTable("db1", firstReplacement, false, "0");
+        assertEquals("1", glueService.getTable("db1", "plain").getVersionId());
+
+        Table staleReplacement = new Table();
+        staleReplacement.setName("plain");
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.updateTable("db1", staleReplacement, false, "0"));
+
+        assertEquals("ConcurrentModificationException", ex.getErrorCode());
+        assertEquals("Update table failed due to concurrent modifications.", ex.getMessage());
+    }
+
+    @Test
     void getTableReturnsViewFieldsUnchanged() {
         Table table = new Table();
         table.setName("view");
@@ -274,8 +304,174 @@ class GlueServiceTest {
     }
 
     @Test
-    void getTableVersionsReturnsEmptyListForAthenaCompatibility() {
-        assertTrue(glueService.getTableVersions().isEmpty());
+    void getTableVersionsReturnsCurrentTableVersion() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        List<TableVersion> versions = glueService.getTableVersions("db1", "plain");
+
+        assertEquals(1, versions.size());
+        assertEquals("1", versions.getFirst().getVersionId());
+        assertEquals("plain", versions.getFirst().getTable().getName());
+    }
+
+    @Test
+    void updateTableArchivesPreviousVersionWhenSkipArchiveIsFalse() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        Table replacement = new Table();
+        replacement.setName("plain");
+        replacement.setDescription("updated");
+        glueService.updateTable("db1", replacement, false);
+
+        List<TableVersion> versions = glueService.getTableVersions("db1", "plain");
+        assertEquals(2, versions.size());
+        assertEquals("2", versions.get(0).getVersionId());
+        assertEquals("1", versions.get(1).getVersionId());
+        assertEquals("updated", versions.get(0).getTable().getDescription());
+        assertNull(versions.get(1).getTable().getDescription());
+    }
+
+    @Test
+    void updateTableReplacesCurrentVersionWhenSkipArchiveIsTrue() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        Table firstReplacement = new Table();
+        firstReplacement.setName("plain");
+        firstReplacement.setDescription("archived");
+        glueService.updateTable("db1", firstReplacement, false);
+
+        Table secondReplacement = new Table();
+        secondReplacement.setName("plain");
+        secondReplacement.setDescription("current");
+        glueService.updateTable("db1", secondReplacement, true);
+
+        List<TableVersion> versions = glueService.getTableVersions("db1", "plain");
+        assertEquals(2, versions.size());
+        assertEquals("3", versions.get(0).getVersionId());
+        assertEquals("1", versions.get(1).getVersionId());
+        assertEquals("current", versions.get(0).getTable().getDescription());
+        assertNull(versions.get(1).getTable().getDescription());
+    }
+
+    @Test
+    void deleteMissingTableThrowsEntityNotFound() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.deleteTable("db1", "missing"));
+
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void createDatabaseStoresLowercaseNameAndLookupIsCaseInsensitive() {
+        glueService.createDatabase(new Database("MixedCaseDatabase"));
+
+        assertEquals("mixedcasedatabase", glueService.getDatabase("MixedCaseDatabase").getName());
+        assertEquals("mixedcasedatabase", glueService.getDatabase("mixedcasedatabase").getName());
+    }
+
+    @Test
+    void batchDeleteTablesDeletesExistingTablesAndReportsMissingTables() {
+        Table table = new Table();
+        table.setName("existing");
+        glueService.createTable("db1", table);
+
+        List<Map<String, Object>> errors = glueService.batchDeleteTables("db1", List.of("existing", "missing"));
+
+        assertEquals(1, errors.size());
+        assertEquals("missing", errors.getFirst().get("TableName"));
+        Map<?, ?> errorDetail = (Map<?, ?>) errors.getFirst().get("ErrorDetail");
+        assertEquals("EntityNotFoundException", errorDetail.get("ErrorCode"));
+        assertEquals("Table missing not found", errorDetail.get("ErrorMessage"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.getTable("db1", "existing"));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteDatabaseRemovesCatalogEntries() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        glueService.updateTableColumnStatistics("db1", "plain", List.of(columnStatistic("value")));
+
+        glueService.deleteDatabase("db1");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.getDatabase("db1"));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        assertTrue(glueService.getDatabases().isEmpty());
+    }
+
+    @Test
+    void partitionsCanBeUpdatedDeletedAndFiltered() {
+        Table table = new Table();
+        table.setName("partitioned");
+        table.setPartitionKeys(List.of(new Column("region", "string"), new Column("year", "int")));
+        glueService.createTable("db1", table);
+        glueService.batchCreatePartitions("db1", "partitioned", List.of(
+                partition("us", "2023"),
+                partition("us", "2024"),
+                partition("eu", "2024")));
+
+        assertEquals("us", glueService.getPartition("db1", "partitioned", List.of("us", "2024")).getValues().getFirst());
+        assertEquals(2, glueService.batchGetPartitions("db1", "partitioned", List.of(
+                List.of("us", "2024"),
+                List.of("eu", "2024"))).size());
+        assertEquals(1, glueService.getPartitions("db1", "partitioned", "((region = 'us')) AND ((year >= 2024))").size());
+        assertEquals(2, glueService.getPartitions("db1", "partitioned", "((region in ('us', 'eu')) AND (year = 2024))").size());
+
+        Partition replacement = partition("us", "2024");
+        replacement.setParameters(Map.of("updated", "true"));
+        glueService.batchUpdatePartitions("db1", "partitioned", Map.of(List.of("us", "2024"), replacement));
+        assertEquals("true", glueService.getPartitions("db1", "partitioned", "(region = 'us') AND (year = 2024)")
+                .getFirst().getParameters().get("updated"));
+
+        glueService.deletePartition("db1", "partitioned", List.of("us", "2023"));
+
+        assertEquals(2, glueService.getPartitions("db1", "partitioned").size());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.deletePartition("db1", "partitioned", List.of("missing", "2024")));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void tableAndPartitionColumnStatisticsRoundTrip() {
+        Table table = new Table();
+        table.setName("partitioned");
+        table.setPartitionKeys(List.of(new Column("region", "string")));
+        glueService.createTable("db1", table);
+        glueService.createPartition("db1", "partitioned", partition("us"));
+
+        glueService.updateTableColumnStatistics("db1", "partitioned", List.of(columnStatistic("value")));
+        glueService.updatePartitionColumnStatistics("db1", "partitioned", List.of("us"), List.of(columnStatistic("value")));
+
+        assertEquals(1, glueService.getTableColumnStatistics("db1", "partitioned", List.of("value")).size());
+        assertEquals(1, glueService.getPartitionColumnStatistics("db1", "partitioned", List.of("us"), List.of("value")).size());
+
+        glueService.deleteTableColumnStatistics("db1", "partitioned", "value");
+        glueService.deletePartitionColumnStatistics("db1", "partitioned", List.of("us"), "value");
+
+        assertTrue(glueService.getTableColumnStatistics("db1", "partitioned", List.of("value")).isEmpty());
+        assertTrue(glueService.getPartitionColumnStatistics("db1", "partitioned", List.of("us"), List.of("value")).isEmpty());
+    }
+
+    @Test
+    void partitionExpressionSupportsDateAndDecimalValues() {
+        Table table = new Table();
+        table.setName("typed");
+        table.setPartitionKeys(List.of(new Column("dt", "date"), new Column("amount", "decimal(10,5)")));
+        glueService.createTable("db1", table);
+        glueService.createPartition("db1", "typed", partition("2024-01-01", "10.13400"));
+        glueService.createPartition("db1", "typed", partition("2024-01-15", "25.00000"));
+
+        assertEquals(1, glueService.getPartitions("db1", "typed", "((dt >= '2024-01-01' AND dt <= '2024-01-10'))").size());
+        assertEquals(1, glueService.getPartitions("db1", "typed", "((amount = 10.13400))").size());
     }
 
     @Test
@@ -388,6 +584,16 @@ class GlueServiceTest {
         sd.setSchemaReference(ref);
         table.setStorageDescriptor(sd);
         return table;
+    }
+
+    private static Partition partition(String... values) {
+        Partition partition = new Partition();
+        partition.setValues(List.of(values));
+        return partition;
+    }
+
+    private static Map<String, Object> columnStatistic(String columnName) {
+        return Map.of("ColumnName", columnName);
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {

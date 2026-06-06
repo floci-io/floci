@@ -38,6 +38,8 @@ public class Table {
     private String viewExpandedText;
     @JsonProperty("Parameters")
     private Map<String, String> parameters;
+    @JsonProperty("VersionId")
+    private String versionId;
 
     public Table() {}
 
@@ -67,4 +69,6 @@ public class Table {
     public void setViewExpandedText(String viewExpandedText) { this.viewExpandedText = viewExpandedText; }
     public Map<String, String> getParameters() { return parameters; }
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
+    public String getVersionId() { return versionId; }
+    public void setVersionId(String versionId) { this.versionId = versionId; }
 }
