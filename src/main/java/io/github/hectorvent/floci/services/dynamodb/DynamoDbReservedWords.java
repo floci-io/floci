@@ -64,7 +64,7 @@ final class DynamoDbReservedWords {
         "LEFT", "LENGTH", "LESS", "LEVEL", "LIKE", "LIMIT", "LIMITED", "LINES",
         "LIST", "LOAD", "LOCAL", "LOCALTIME", "LOCALTIMESTAMP", "LOCATION", "LOCATOR",
         "LOCK", "LOCKS", "LOG", "LOGED", "LONG", "LOOP", "LOWER",
-        "MAP", "MATCH", "MATERIALIZED", "MAX", "MAXLEN", "MERGE", "METADATA", "MIN",
+        "MAP", "MATCH", "MATERIALIZED", "MAX", "MAXLEN", "MERGE", "MIN",
         "MINUS", "MODIFIES", "MODIFY", "MODULE", "MONTH", "MULTI", "MULTISET",
         "NAME", "NAMES", "NATIONAL", "NATURAL", "NCHAR", "NCLOB", "NEW", "NEXT",
         "NO", "NONE", "NOT", "NULL", "NULLIF", "NUMBER", "NUMERIC",
