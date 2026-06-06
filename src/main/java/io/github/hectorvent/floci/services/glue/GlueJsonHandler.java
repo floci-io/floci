@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.glue;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
@@ -26,6 +27,8 @@ import java.util.Objects;
 
 @ApplicationScoped
 public class GlueJsonHandler {
+
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
 
     private final GlueService glueService;
     private final GlueSchemaRegistryService schemaRegistryService;
@@ -90,6 +93,11 @@ public class GlueJsonHandler {
                 String tableName = request.get("Name").asText();
                 glueService.deleteTable(dbName, tableName);
                 yield Response.ok().build();
+            }
+            case "BatchDeleteTable" -> {
+                String dbName = request.get("DatabaseName").asText();
+                List<String> tableNames = mapper.convertValue(request.get("TablesToDelete"), STRING_LIST);
+                yield Response.ok(Map.of("Errors", glueService.batchDeleteTables(dbName, tableNames))).build();
             }
             case "CreatePartition" -> {
                 String dbName = request.get("DatabaseName").asText();

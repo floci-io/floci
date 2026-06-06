@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.glue;
 
+import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
@@ -27,6 +28,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -168,6 +170,23 @@ public class GlueService {
             partitionStore.delete(key + ":" + String.join(",", p.getValues()));
         });
         LOG.infov("Deleted Glue Table: {0}.{1}", databaseName, tableName);
+    }
+
+    public List<BatchDeleteTableError> batchDeleteTables(String databaseName, List<String> tableNames) {
+        getDatabase(databaseName);
+        List<BatchDeleteTableError> errors = new ArrayList<>();
+        for (String tableName : tableNames) {
+            String key = tableKey(databaseName, tableName);
+            Optional<Table> table = tableStore.get(key);
+            if (table.isEmpty()) {
+                errors.add(new BatchDeleteTableError(
+                        tableName,
+                        new ErrorDetail("EntityNotFoundException", "Table " + tableName + " not found")));
+                continue;
+            }
+            deleteTable(databaseName, tableName);
+        }
+        return errors;
     }
 
     public void createPartition(String databaseName, String tableName, Partition partition) {
@@ -337,6 +356,14 @@ public class GlueService {
     }
 
     public record UserDefinedFunctionPage(List<UserDefinedFunction> functions, String nextToken) {}
+
+    public record BatchDeleteTableError(
+            @JsonProperty("TableName") String tableName,
+            @JsonProperty("ErrorDetail") ErrorDetail errorDetail) {}
+
+    public record ErrorDetail(
+            @JsonProperty("ErrorCode") String errorCode,
+            @JsonProperty("ErrorMessage") String errorMessage) {}
 
     private static Table copyTable(Table source) {
         Table copy = new Table();

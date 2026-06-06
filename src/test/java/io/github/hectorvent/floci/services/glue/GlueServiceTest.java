@@ -483,6 +483,25 @@ class GlueServiceTest {
     }
 
     @Test
+    void batchDeleteTablesDeletesExistingTablesAndReportsMissingTables() {
+        Table table = new Table();
+        table.setName("existing");
+        glueService.createTable("db1", table);
+
+        List<GlueService.BatchDeleteTableError> errors =
+                glueService.batchDeleteTables("db1", List.of("existing", "missing"));
+
+        assertEquals(1, errors.size());
+        assertEquals("missing", errors.get(0).tableName());
+        GlueService.ErrorDetail errorDetail = errors.get(0).errorDetail();
+        assertEquals("EntityNotFoundException", errorDetail.errorCode());
+        assertEquals("Table missing not found", errorDetail.errorMessage());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.getTable("db1", "existing"));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
     void getTableVersionsReturnsEmptyListForAthenaCompatibility() {
         assertTrue(glueService.getTableVersions().isEmpty());
     }
