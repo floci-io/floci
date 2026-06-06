@@ -167,6 +167,54 @@ class ElbV2IntegrationTest {
                 .body("ErrorResponse.Error.Code", equalTo("LoadBalancerNotFound"));
     }
 
+    @Test
+    @Order(9)
+    void createAndDescribeLoadBalancerWithSubnetsExposeSubnetAndZoneName() {
+        String subnetAwareLbArn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "lb-with-subnets")
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", "subnet-default-a")
+                .formParam("Subnets.member.2", "subnet-default-b")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .contentType("application/xml")
+                .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member.size()",
+                        equalTo(2))
+                .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member[0].SubnetId",
+                        equalTo("subnet-default-a"))
+                .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member[0].ZoneName",
+                        equalTo("us-east-1a"))
+                .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member[1].SubnetId",
+                        equalTo("subnet-default-b"))
+                .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member[1].ZoneName",
+                        equalTo("us-east-1b"))
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", subnetAwareLbArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.size()",
+                        equalTo(2))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member[0].SubnetId",
+                        equalTo("subnet-default-a"))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member[0].ZoneName",
+                        equalTo("us-east-1a"))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member[1].SubnetId",
+                        equalTo("subnet-default-b"))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member[1].ZoneName",
+                        equalTo("us-east-1b"));
+    }
+
     // ── Target Groups ─────────────────────────────────────────────────────────
 
     @Test

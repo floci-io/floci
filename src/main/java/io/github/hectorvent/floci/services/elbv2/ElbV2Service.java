@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.elbv2;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elbv2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -23,6 +25,9 @@ public class ElbV2Service {
 
     @Inject
     RegionResolver regionResolver;
+
+    @Inject
+    Ec2Service ec2Service;
 
     private static final String CANONICAL_HOSTED_ZONE_ID = "Z35SXDOTRQ7X7K";
 
@@ -75,7 +80,7 @@ public class ElbV2Service {
         lb.setType(lbType);
         lb.setIpAddressType(ipType);
         lb.setRegion(region);
-        if (subnets != null) lb.setAvailabilityZones(new ArrayList<>(subnets));
+        if (subnets != null) lb.setAvailabilityZones(resolveAvailabilityZones(region, subnets));
         if (securityGroups != null) lb.setSecurityGroups(new ArrayList<>(securityGroups));
 
         regionLbs.put(arn, lb);
@@ -164,7 +169,7 @@ public class ElbV2Service {
 
     public void setSubnets(String region, String arn, List<String> subnets) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
-        lb.setAvailabilityZones(new ArrayList<>(subnets));
+        lb.setAvailabilityZones(resolveAvailabilityZones(region, subnets));
     }
 
     public void setIpAddressType(String region, String arn, String ipAddressType) {
@@ -674,6 +679,18 @@ public class ElbV2Service {
                     "One or more load balancers not found.", 400);
         }
         return lb;
+    }
+
+    private List<AvailabilityZone> resolveAvailabilityZones(String region, List<String> subnetIds) {
+        List<AvailabilityZone> availabilityZones = new ArrayList<>();
+        for (String subnetId : subnetIds) {
+            Subnet subnet = ec2Service.requireSubnet(region, subnetId);
+            AvailabilityZone availabilityZone = new AvailabilityZone();
+            availabilityZone.setSubnetId(subnet.getSubnetId());
+            availabilityZone.setZoneName(subnet.getAvailabilityZone());
+            availabilityZones.add(availabilityZone);
+        }
+        return availabilityZones;
     }
 
     private TargetGroup requireTargetGroup(String region, String arn) {

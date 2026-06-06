@@ -22,7 +22,7 @@ public class LoadBalancer {
     private String vpcId;
     private String state;
     private String type;
-    private List<String> availabilityZones = new ArrayList<>();
+    private List<AvailabilityZone> availabilityZones = new ArrayList<>();
     private List<String> securityGroups = new ArrayList<>();
     private String ipAddressType;
     private String region;
@@ -57,8 +57,8 @@ public class LoadBalancer {
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
 
-    public List<String> getAvailabilityZones() { return availabilityZones; }
-    public void setAvailabilityZones(List<String> availabilityZones) { this.availabilityZones = availabilityZones; }
+    public List<AvailabilityZone> getAvailabilityZones() { return availabilityZones; }
+    public void setAvailabilityZones(List<AvailabilityZone> availabilityZones) { this.availabilityZones = availabilityZones; }
 
     public List<String> getSecurityGroups() { return securityGroups; }
     public void setSecurityGroups(List<String> securityGroups) { this.securityGroups = securityGroups; }

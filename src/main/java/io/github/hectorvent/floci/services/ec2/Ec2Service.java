@@ -96,7 +96,7 @@ public class Ec2Service {
 
     // ─── Default resource seeding ──────────────────────────────────────────────
 
-    void ensureDefaultResources(String region) {
+    public void ensureDefaultResources(String region) {
         if (!seededRegions.add(region)) {
             return;
         }
@@ -204,7 +204,7 @@ public class Ec2Service {
         // Resolve subnet
         Subnet subnet = null;
         if (subnetId != null && !subnetId.isEmpty()) {
-            subnet = getRequiredSubnet(region, subnetId);
+            subnet = requireSubnet(region, subnetId);
         } else {
             // Pick first default subnet
             subnet = subnets.values().stream()
@@ -319,7 +319,8 @@ public class Ec2Service {
         return reservation;
     }
     
-    private Subnet getRequiredSubnet(String region, String subnetId) {
+    public Subnet requireSubnet(String region, String subnetId) {
+        ensureDefaultResources(region);
         Subnet subnet = subnets.get(key(region, subnetId));
         if (subnet == null) 
             throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
@@ -649,7 +650,7 @@ public class Ec2Service {
 
     public void modifySubnetAttribute(String region, String subnetId, String attribute, String value) {
         ensureDefaultResources(region);
-        Subnet subnet = getRequiredSubnet(region, subnetId);
+        Subnet subnet = requireSubnet(region, subnetId);
         switch (attribute) {
             case "mapPublicIpOnLaunch"           -> subnet.setMapPublicIpOnLaunch(Boolean.parseBoolean(value));
             case "assignIpv6AddressOnCreation"   -> subnet.setAssignIpv6AddressOnCreation(Boolean.parseBoolean(value));

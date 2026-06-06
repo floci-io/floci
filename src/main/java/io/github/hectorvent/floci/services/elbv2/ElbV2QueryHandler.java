@@ -829,8 +829,11 @@ public class ElbV2QueryHandler {
         xml.start("State").elem("Code", safe(lb.getState())).end("State");
         xml.elem("Type", safe(lb.getType()));
         xml.start("AvailabilityZones");
-        for (String az : lb.getAvailabilityZones()) {
-            xml.start("member").elem("ZoneName", az).end("member");
+        for (AvailabilityZone az : lb.getAvailabilityZones()) {
+            xml.start("member")
+                    .elem("SubnetId", safe(az.getSubnetId()))
+                    .elem("ZoneName", safe(az.getZoneName()))
+                    .end("member");
         }
         xml.end("AvailabilityZones");
         xml.start("SecurityGroups");
