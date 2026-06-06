@@ -89,6 +89,9 @@ public class AthenaJsonHandler {
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
             }
+            case "DeleteWorkGroup" -> {
+                yield Response.ok(Map.of()).build();
+            }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
     }

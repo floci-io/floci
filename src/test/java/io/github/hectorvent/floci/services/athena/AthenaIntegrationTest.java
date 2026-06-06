@@ -192,4 +192,18 @@ class AthenaIntegrationTest {
             .body("TableMetadata.Columns[0].Type", equalTo("varchar"))
             .body("TableMetadata.Columns[1].Type", equalTo("varchar"));
     }
+
+    @Test
+    @Order(8)
+    void deleteWorkGroup() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"athena-workgroup-sample\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(equalTo("{}"));
+    }
 }
