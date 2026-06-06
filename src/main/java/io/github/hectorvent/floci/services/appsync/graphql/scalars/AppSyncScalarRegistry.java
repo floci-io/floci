@@ -7,10 +7,12 @@ import jakarta.inject.Inject;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 @ApplicationScoped
 public class AppSyncScalarRegistry {
     private final List<GraphQLScalarType> scalars;
+    private final Map<String, GraphQLScalarType> scalarMap;
 
     @Inject
     public AppSyncScalarRegistry() {
@@ -33,6 +35,8 @@ public class AppSyncScalarRegistry {
             AppSyncScalars.AWS_BIG_INT,
             AppSyncScalars.AWS_BYTE
         );
+        this.scalarMap = scalars.stream()
+            .collect(Collectors.toUnmodifiableMap(GraphQLScalarType::getName, s -> s));
     }
 
     public List<GraphQLScalarType> allScalars() {
@@ -40,14 +44,10 @@ public class AppSyncScalarRegistry {
     }
 
     public Optional<GraphQLScalarType> getScalar(String name) {
-        return scalars.stream().filter(s -> s.getName().equals(name)).findFirst();
+        return Optional.ofNullable(scalarMap.get(name));
     }
 
     public Map<String, GraphQLScalarType> scalarMap() {
-        Map<String, GraphQLScalarType> map = new java.util.HashMap<>();
-        for (GraphQLScalarType s : scalars) {
-            map.put(s.getName(), s);
-        }
-        return map;
+        return scalarMap;
     }
 }
