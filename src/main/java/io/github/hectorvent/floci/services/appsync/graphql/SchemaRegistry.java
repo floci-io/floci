@@ -5,6 +5,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
@@ -22,15 +23,11 @@ public class SchemaRegistry {
         schemas.put(apiId, schema);
     }
 
-    public GraphQLSchema getSchema(String apiId) {
-        return schemas.get(apiId);
+    public Optional<GraphQLSchema> getSchema(String apiId) {
+        return Optional.ofNullable(schemas.get(apiId));
     }
 
     public void remove(String apiId) {
         schemas.remove(apiId);
-    }
-
-    public boolean hasSchema(String apiId) {
-        return schemas.containsKey(apiId);
     }
 }
