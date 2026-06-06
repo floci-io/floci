@@ -5117,7 +5117,7 @@ class CloudFormationIntegrationTest {
                     "Name": "cfn-alb",
                     "Type": "application",
                     "Scheme": "internet-facing",
-                    "Subnets": ["subnet-aaa", "subnet-bbb"],
+                    "Subnets": ["subnet-default-a", "subnet-default-b"],
                     "SecurityGroups": ["sg-123"]
                   }
                 },
