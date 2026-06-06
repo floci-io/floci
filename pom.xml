@@ -16,7 +16,7 @@
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <quarkus.platform.version>3.36.0</quarkus.platform.version>
-        <apicurio.version>2.6.9.Final</apicurio.version>
+        <apicurio.version>3.2.4</apicurio.version>
     </properties>
 
     <dependencyManagement>
