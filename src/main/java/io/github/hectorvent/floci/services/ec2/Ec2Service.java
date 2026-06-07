@@ -555,7 +555,7 @@ public class Ec2Service {
         vpcs.put(key(region, vpcId), vpc);
 
         createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
-        createMainRouteTable(region, vpc, "rtb-" + randomHex(8), "rtbassoc-" + randomHex(8));
+        createMainRouteTable(region, vpc, "rtb-" + randomHex(17), "rtbassoc-" + randomHex(17));
         return vpc;
     }
 
