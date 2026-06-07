@@ -135,7 +135,7 @@ public class AthenaService {
         }
         String key = workGroupKey(region, request.getName());
         if (workGroupStore.get(key).isPresent()) {
-            throw new AwsException("AlreadyExistsException", "WorkGroup already exists: " + request.getName(), 400);
+            throw new AwsException("InvalidRequestException", "WorkGroup already exists", 400);
         }
 
         WorkGroup workGroup = new WorkGroup();
@@ -304,26 +304,23 @@ public class AthenaService {
         }
         if (configuration.getEngineVersion() != null) {
             String selectedEngineVersion = configuration.getEngineVersion().getSelectedEngineVersion();
-            String effectiveEngineVersion = configuration.getEngineVersion().getEffectiveEngineVersion();
             boolean hasSelectedEngineVersion = selectedEngineVersion != null && !selectedEngineVersion.isBlank();
-            boolean hasEffectiveEngineVersion = effectiveEngineVersion != null && !effectiveEngineVersion.isBlank();
 
-            if (hasSelectedEngineVersion || hasEffectiveEngineVersion) {
+            if (hasSelectedEngineVersion) {
                 QueryExecution.EngineVersion engineVersion = new QueryExecution.EngineVersion();
-                if (hasSelectedEngineVersion) {
-                    engineVersion.setSelectedEngineVersion(selectedEngineVersion);
-                } else {
-                    engineVersion.setSelectedEngineVersion(normalized.getEngineVersion().getSelectedEngineVersion());
-                }
-                if (hasEffectiveEngineVersion) {
-                    engineVersion.setEffectiveEngineVersion(effectiveEngineVersion);
-                } else {
-                    engineVersion.setEffectiveEngineVersion(engineVersion.getSelectedEngineVersion());
-                }
+                engineVersion.setSelectedEngineVersion(selectedEngineVersion);
+                engineVersion.setEffectiveEngineVersion(resolveEffectiveEngineVersion(selectedEngineVersion));
                 normalized.setEngineVersion(engineVersion);
             }
         }
         return normalized;
+    }
+
+    private String resolveEffectiveEngineVersion(String selectedEngineVersion) {
+        if (selectedEngineVersion == null || selectedEngineVersion.isBlank() || "AUTO".equals(selectedEngineVersion)) {
+            return DEFAULT_ENGINE_VERSION;
+        }
+        return selectedEngineVersion;
     }
 
     private WorkGroupConfiguration defaultWorkGroupConfiguration() {

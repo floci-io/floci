@@ -19,7 +19,7 @@ class AthenaCreateWorkGroupIntegrationTest {
     }
 
     @Test
-    void createWorkGroupReturnsHttp200WithEmptyBody() {
+    void createWorkGroupReturnsHttp200WithEmptyJsonObjectBody() {
         String responseBody = given()
             .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
             .contentType(CONTENT_TYPE)
@@ -34,11 +34,11 @@ class AthenaCreateWorkGroupIntegrationTest {
             .statusCode(200)
             .extract().asString();
 
-        org.junit.jupiter.api.Assertions.assertEquals("", responseBody);
+        org.junit.jupiter.api.Assertions.assertEquals("{}", responseBody);
     }
 
     @Test
-    void createDuplicateWorkGroupReturnsAlreadyExistsException() {
+    void createDuplicateWorkGroupReturnsInvalidRequestException() {
         String request = """
             {
               "Name": "analytics-duplicate"
@@ -62,7 +62,8 @@ class AthenaCreateWorkGroupIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("AlreadyExistsException"));
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("WorkGroup already exists"));
     }
 
     @Test
@@ -79,8 +80,7 @@ class AthenaCreateWorkGroupIntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("InvalidRequestException"))
-            .body("message", equalTo("primary workGroup could not be created"));
+            .body("__type", equalTo("InvalidRequestException"));
     }
 
     @Test

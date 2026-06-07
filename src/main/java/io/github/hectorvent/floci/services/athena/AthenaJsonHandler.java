@@ -72,7 +72,7 @@ public class AthenaJsonHandler {
             case "CreateWorkGroup" -> {
                 CreateWorkGroupRequest createRequest = mapper.treeToValue(request, CreateWorkGroupRequest.class);
                 athenaService.createWorkGroup(createRequest, region);
-                yield Response.ok().build();
+                yield Response.ok(Map.of()).build();
             }
             case "ListDataCatalogs" -> Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs())).build();
             case "GetDataCatalog" -> {

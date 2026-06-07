@@ -178,11 +178,11 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         Map<String, Object> engineVersion = (Map<String, Object>) configuration.get("EngineVersion");
 
         assertEquals("AUTO", engineVersion.get("SelectedEngineVersion"));
-        assertEquals("AUTO", engineVersion.get("EffectiveEngineVersion"));
+        assertEquals("Athena engine version 3", engineVersion.get("EffectiveEngineVersion"));
     }
 
     @Test
-    void createWorkGroupPreservesExplicitEffectiveEngineVersion() throws Exception {
+    void createWorkGroupIgnoresExplicitEffectiveEngineVersionFromRequest() throws Exception {
         Files.deleteIfExists(WORKGROUPS_FILE);
 
         given()
@@ -245,6 +245,43 @@ class AthenaCreateWorkGroupPersistenceIntegrationTest {
         store.load();
 
         Map<String, Object> persisted = store.get("000000000000/us-east-1:engine-empty").orElseThrow();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> configuration = (Map<String, Object>) persisted.get("Configuration");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> engineVersion = (Map<String, Object>) configuration.get("EngineVersion");
+
+        assertEquals("Athena engine version 3", engineVersion.get("SelectedEngineVersion"));
+        assertEquals("Athena engine version 3", engineVersion.get("EffectiveEngineVersion"));
+    }
+
+    @Test
+    void createWorkGroupResolvesBlankSelectedEngineVersionToDefaultEffectiveVersion() throws Exception {
+        Files.deleteIfExists(WORKGROUPS_FILE);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "Name": "engine-blank-selected",
+                  "Configuration": {
+                    "EngineVersion": {
+                      "SelectedEngineVersion": ""
+                    }
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        var store = new PersistentStorage<String, Map<String, Object>>(
+                WORKGROUPS_FILE,
+                new TypeReference<Map<String, Map<String, Object>>>() {});
+        store.load();
+
+        Map<String, Object> persisted = store.get("000000000000/us-east-1:engine-blank-selected").orElseThrow();
         @SuppressWarnings("unchecked")
         Map<String, Object> configuration = (Map<String, Object>) persisted.get("Configuration");
         @SuppressWarnings("unchecked")
