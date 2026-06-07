@@ -101,6 +101,9 @@ public class ElbV2Service {
                         .addAll(targetGroup.getLoadBalancerArns());
                 if (healthChecker != null) {
                     healthChecker.startMonitoring(targetGroup);
+                    if (!targetGroup.getTargets().isEmpty()) {
+                        healthChecker.addTargets(targetGroup.getTargetGroupArn(), targetGroup.getTargets(), targetGroup);
+                    }
                 }
             }
             for (Listener listener : listeners.getOrDefault(region, Map.of()).values()) {

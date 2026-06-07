@@ -153,6 +153,10 @@ class ElbV2ServiceTest {
         assertEquals("test", reloaded.describeTags(List.of(lbArn)).get(lbArn).get("env"));
         assertThrows(AwsException.class, () -> reloaded.deleteTargetGroup(REGION, tgArn));
         verify(reloadedHealthChecker).startMonitoring(any(TargetGroup.class));
+        ArgumentCaptor<List<TargetDescription>> targetsCaptor = ArgumentCaptor.captor();
+        verify(reloadedHealthChecker).addTargets(eq(tgArn), targetsCaptor.capture(), any(TargetGroup.class));
+        assertEquals("i-1234567890abcdef0", targetsCaptor.getValue().getFirst().getId());
+        assertEquals(8080, targetsCaptor.getValue().getFirst().getPort());
         verify(reloadedDataPlane).startListener(any(Listener.class), eq(REGION), anyList());
 
         reloaded.removeTags(List.of(rule.getRuleArn()), List.of("env"));
