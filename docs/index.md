@@ -12,7 +12,7 @@ Floci is a fast, free, and open-source local AWS service emulator built for deve
 
 ## Supported Services
 
-Floci emulates 52 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
+Floci emulates 53 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
 
 | Service | Protocol |
 |---|---|
@@ -36,6 +36,7 @@ Floci emulates 52 AWS services. See the [Services Overview](services/index.md) f
 | STS | Query |
 | ElastiCache (Redis / Valkey) | Query + RESP proxy |
 | RDS (PostgreSQL / MySQL) | Query + wire proxy |
+| Neptune (graph DB / Gremlin) | Query + WebSocket proxy |
 | MSK (Kafka / Redpanda) | REST JSON + Kafka |
 | Athena | JSON 1.1 |
 | Glue Data Catalog + Schema Registry | JSON 1.1 |
@@ -44,8 +45,10 @@ Floci emulates 52 AWS services. See the [Services Overview](services/index.md) f
 | EC2 | EC2 Query |
 | ACM | JSON 1.1 |
 | ECR | JSON 1.1 + OCI Distribution |
+| Resource Groups Tagging API | JSON 1.1 |
 | OpenSearch | REST JSON |
 | EventBridge | JSON 1.1 |
+| EventBridge Pipes | REST JSON |
 | EventBridge Scheduler | REST JSON |
 | CloudWatch Logs & Metrics | JSON 1.1 / Query |
 | AppConfig + AppConfigData | REST JSON |
@@ -56,9 +59,12 @@ Floci emulates 52 AWS services. See the [Services Overview](services/index.md) f
 | CodeBuild | JSON 1.1 |
 | CodeDeploy | JSON 1.1 |
 | AWS Backup | REST JSON |
+| CloudFront | REST XML |
 | Route53 | REST XML |
+| Cloud Map | JSON 1.1 |
 | AWS Config | JSON 1.1 |
 | Textract | JSON 1.1 |
+| Transcribe | JSON 1.1 |
 | Pricing | JSON 1.1 |
 | Cost Explorer | JSON 1.1 |
 | Cost and Usage Reports | JSON 1.1 |
