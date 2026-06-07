@@ -206,4 +206,45 @@ class AthenaIntegrationTest {
             .statusCode(200)
             .body(equalTo("{}"));
     }
+
+    @Test
+    @Order(9)
+    void deleteWorkGroupMissingOrBlank() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("WorkGroup is required."));
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"  \" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("WorkGroup is required."));
+    }
+
+    @Test
+    @Order(10)
+    void deletePrimaryWorkGroup() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("{ \"WorkGroup\": \"primary\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidRequestException"))
+            .body("message", equalTo("The primary workgroup cannot be deleted."));
+    }
 }

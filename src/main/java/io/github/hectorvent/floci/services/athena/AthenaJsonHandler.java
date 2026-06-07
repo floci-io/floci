@@ -90,6 +90,13 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
             }
             case "DeleteWorkGroup" -> {
+                String wg = request.path("WorkGroup").asText(null);
+                if (wg == null || wg.isBlank()) {
+                    throw new AwsException("InvalidRequestException", "WorkGroup is required.", 400);
+                }
+                if ("primary".equals(wg)) {
+                    throw new AwsException("InvalidRequestException", "The primary workgroup cannot be deleted.", 400);
+                }
                 yield Response.ok(Map.of()).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
