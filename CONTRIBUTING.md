@@ -149,7 +149,7 @@ Always implement the **real AWS wire protocol** — never invent custom endpoint
 
 1. Branch off `main`: `git checkout -b feature/my-feature`
 2. Open a PR targeting `main`.
-3. CI runs tests automatically — all checks must pass before merge.
+3. CI runs tests automatically — all checks must pass before merge.v
 4. Keep PRs focused — one feature or fix per PR.
 5. Reference any related issues in the PR description.
 

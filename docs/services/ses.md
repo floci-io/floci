@@ -42,6 +42,10 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `DescribeConfigurationSet`          | Read a configuration set                                  |
 | `ListConfigurationSets`             | List configuration sets                                   |
 | `DeleteConfigurationSet`            | Delete a configuration set                                |
+| `CreateConfigurationSetEventDestination` | Attach an event destination to a configuration set        |
+| `UpdateConfigurationSetEventDestination` | Update an existing event destination on a configuration set |
+| `DeleteConfigurationSetEventDestination` | Remove an event destination from a configuration set      |
+| `UpdateConfigurationSetSendingEnabled`   | Enable or disable email sending through a configuration set |
 
 ## Configuration
 
@@ -188,6 +192,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `PUT` | `/v2/email/configuration-sets/{name}/event-destinations/{eventDestinationName}` | `UpdateConfigurationSetEventDestination` |
 | `DELETE` | `/v2/email/configuration-sets/{name}/event-destinations/{eventDestinationName}` | `DeleteConfigurationSetEventDestination` |
 | `PUT` | `/v2/email/configuration-sets/{name}/suppression-options` | `PutConfigurationSetSuppressionOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/sending` | `PutConfigurationSetSendingOptions` |
 | `PUT` | `/v2/email/suppression/addresses` | `PutSuppressedDestination` |
 | `GET` | `/v2/email/suppression/addresses/{EmailAddress}` | `GetSuppressedDestination` |
 | `DELETE` | `/v2/email/suppression/addresses/{EmailAddress}` | `DeleteSuppressedDestination` |

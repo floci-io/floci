@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.Registry;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.RegistryId;
@@ -54,6 +55,11 @@ public class GlueJsonHandler {
             case "GetDatabases" -> {
                 yield Response.ok(Map.of("DatabaseList", glueService.getDatabases())).build();
             }
+            case "DeleteDatabase" -> {
+                String name = request.get("Name").asText();
+                glueService.deleteDatabase(name);
+                yield Response.ok().build();
+            }
             case "CreateTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 Table table = mapper.treeToValue(request.get("TableInput"), Table.class);
@@ -73,7 +79,7 @@ public class GlueJsonHandler {
             case "UpdateTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 Table table = mapper.treeToValue(request.get("TableInput"), Table.class);
-                glueService.updateTable(dbName, table);
+                glueService.updateTable(dbName, table, request.path("VersionId").asText(null));
                 yield Response.ok().build();
             }
             case "GetTableVersions" -> {
@@ -97,6 +103,11 @@ public class GlueJsonHandler {
                 String tableName = request.get("TableName").asText();
                 yield Response.ok(Map.of("Partitions", glueService.getPartitions(dbName, tableName))).build();
             }
+            case "CreateUserDefinedFunction" -> handleCreateUserDefinedFunction(request);
+            case "GetUserDefinedFunction" -> handleGetUserDefinedFunction(request);
+            case "GetUserDefinedFunctions" -> handleGetUserDefinedFunctions(request);
+            case "UpdateUserDefinedFunction" -> handleUpdateUserDefinedFunction(request);
+            case "DeleteUserDefinedFunction" -> handleDeleteUserDefinedFunction(request);
             case "CreateRegistry" -> handleCreateRegistry(request, region);
             case "GetRegistry" -> handleGetRegistry(request, region);
             case "ListRegistries" -> handleListRegistries(request);
@@ -122,6 +133,46 @@ public class GlueJsonHandler {
             case "GetTags" -> handleGetTags(request);
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    private Response handleCreateUserDefinedFunction(JsonNode request) throws Exception {
+        String dbName = request.get("DatabaseName").asText();
+        UserDefinedFunction function = mapper.treeToValue(request.get("FunctionInput"), UserDefinedFunction.class);
+        glueService.createUserDefinedFunction(dbName, function);
+        return Response.ok().build();
+    }
+
+    private Response handleGetUserDefinedFunction(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String functionName = request.get("FunctionName").asText();
+        return Response.ok(Map.of(
+                "UserDefinedFunction",
+                glueService.getUserDefinedFunction(dbName, functionName)))
+                .build();
+    }
+
+    private Response handleGetUserDefinedFunctions(JsonNode request) {
+        String dbName = request.path("DatabaseName").asText(null);
+        String pattern = request.path("Pattern").asText(null);
+        String functionType = request.path("FunctionType").asText(null);
+        var page = glueService.getUserDefinedFunctions(
+                dbName, pattern, functionType, readMaxResults(request), readNextToken(request));
+        return Response.ok(pageResponse("UserDefinedFunctions", page.functions(), page.nextToken())).build();
+    }
+
+    private Response handleUpdateUserDefinedFunction(JsonNode request) throws Exception {
+        String dbName = request.get("DatabaseName").asText();
+        String functionName = request.get("FunctionName").asText();
+        UserDefinedFunction function = mapper.treeToValue(request.get("FunctionInput"), UserDefinedFunction.class);
+        glueService.updateUserDefinedFunction(dbName, functionName, function);
+        return Response.ok().build();
+    }
+
+    private Response handleDeleteUserDefinedFunction(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String functionName = request.get("FunctionName").asText();
+        glueService.deleteUserDefinedFunction(dbName, functionName);
+        return Response.ok().build();
     }
 
     private Response handleCreateRegistry(JsonNode request, String region) {

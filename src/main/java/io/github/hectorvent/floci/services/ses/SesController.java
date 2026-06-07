@@ -655,6 +655,8 @@ public class SesController {
                     reasons.add(r);
                 }
             }
+            ObjectNode sendingNode = result.putObject("SendingOptions");
+            sendingNode.put("SendingEnabled", cs.isSendingEnabledEffective());
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
@@ -689,6 +691,33 @@ public class SesController {
             }
             sesService.putConfigurationSetSuppressionOptions(name, reasons, region);
             LOG.infov("SES V2 PutConfigurationSetSuppressionOptions: {0} on {1}", reasons, name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/sending")
+    public Response putConfigurationSetSendingOptions(@Context HttpHeaders headers,
+                                                       @PathParam("configurationSetName") String name,
+                                                       String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            JsonNode enabledNode = request.path("SendingEnabled");
+            if (enabledNode.isMissingNode() || enabledNode.isNull() || !enabledNode.isBoolean()) {
+                throw new AwsException("BadRequestException",
+                        "SendingEnabled must be present and must be a boolean.", 400);
+            }
+            sesService.setConfigurationSetSendingEnabled(name, enabledNode.booleanValue(), region);
+            LOG.infov("SES V2 PutConfigurationSetSendingOptions: {0} on {1}",
+                    enabledNode.booleanValue(), name);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
@@ -1310,6 +1339,8 @@ public class SesController {
                     new AwsException("NotFoundException", e.getMessage(), 404);
             case "AlreadyExists", "ConfigurationSetAlreadyExists" ->
                     new AwsException("AlreadyExistsException", e.getMessage(), 400);
+            case "ConfigurationSetSendingPausedException" ->
+                    new AwsException("SendingPausedException", e.getMessage(), 400);
             default -> e;
         };
     }

@@ -110,15 +110,17 @@ public class CloudWatchLogsHandler {
     }
 
     private Response handleDescribeLogStreams(JsonNode request, String region) {
-        String groupName = request.path("logGroupName").asText();
+        String groupName = resolveLogGroupName(request);
         String prefix = request.path("logStreamNamePrefix").asText(null);
         List<LogStream> streams = logsService.describeLogStreams(groupName, prefix, region);
 
+        String logGroupArn = logsService.buildArn(groupName, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode streamsArray = objectMapper.createArrayNode();
         for (LogStream s : streams) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("logStreamName", s.getLogStreamName());
+            node.put("arn", logGroupArn + ":log-stream:" + s.getLogStreamName());
             node.put("createdTime", s.getCreatedTime());
             node.put("lastIngestionTime", s.getLastIngestionTime());
             node.put("uploadSequenceToken", s.getUploadSequenceToken());
@@ -136,7 +138,7 @@ public class CloudWatchLogsHandler {
     }
 
     private Response handlePutLogEvents(JsonNode request, String region) {
-        String groupName = request.path("logGroupName").asText();
+        String groupName = resolveLogGroupName(request);
         String streamName = request.path("logStreamName").asText();
 
         List<Map<String, Object>> events = new ArrayList<>();
@@ -154,8 +156,8 @@ public class CloudWatchLogsHandler {
     }
 
     private Response handleGetLogEvents(JsonNode request, String region) {
-        String groupName = request.path("logGroupName").asText();
-        String streamName = request.path("logStreamName").asText();
+        String groupName = resolveLogGroupName(request);
+        String streamName = resolveLogStreamName(request.path("logStreamName").asText(null));
         Long startTime = request.has("startTime") ? request.path("startTime").asLong() : null;
         Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
         int limit = request.path("limit").asInt(0);
@@ -173,14 +175,14 @@ public class CloudWatchLogsHandler {
     }
 
     private Response handleFilterLogEvents(JsonNode request, String region) {
-        String groupName = request.path("logGroupName").asText();
+        String groupName = resolveLogGroupName(request);
         Long startTime = request.has("startTime") ? request.path("startTime").asLong() : null;
         Long endTime = request.has("endTime") ? request.path("endTime").asLong() : null;
         String filterPattern = request.path("filterPattern").asText(null);
         int limit = request.path("limit").asInt(0);
 
         List<String> streamNames = new ArrayList<>();
-        request.path("logStreamNames").forEach(n -> streamNames.add(n.asText()));
+        request.path("logStreamNames").forEach(n -> streamNames.add(resolveLogStreamName(n.asText(null))));
 
         CloudWatchLogsService.FilteredLogEventsResult result =
                 logsService.filterLogEvents(groupName, streamNames, startTime, endTime, filterPattern, limit, region);
@@ -307,6 +309,21 @@ public class CloudWatchLogsHandler {
         String filterName = request.path("filterName").asText();
         logsService.deleteSubscriptionFilter(logGroupName, filterName, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private String resolveLogGroupName(JsonNode request) {
+        String name = request.path("logGroupName").asText(null);
+        if (name == null || name.isBlank()) {
+            name = request.path("logGroupIdentifier").asText(null);
+        }
+        return extractLogGroupNameFromArn(name);
+    }
+
+    private String resolveLogStreamName(String name) {
+        if (name != null && name.contains(":log-stream:")) {
+            return name.substring(name.indexOf(":log-stream:") + ":log-stream:".length());
+        }
+        return name;
     }
 
     private String extractLogGroupNameFromArn(String arn) {

@@ -162,6 +162,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
         </dependency>
+        <!-- Cloud Map (servicediscovery) client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>servicediscovery</artifactId>
+        </dependency>
         <!-- Kinesis client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

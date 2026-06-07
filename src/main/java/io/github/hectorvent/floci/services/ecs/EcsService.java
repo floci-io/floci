@@ -31,11 +31,13 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
@@ -292,6 +294,14 @@ public class EcsService {
                                        LaunchType launchType, String group, String startedBy,
                                        String containerInstanceArn,
                                        List<ContainerOverride> containerOverrides, String region) {
+        // Fail loudly instead of silently launching zero containers and leaving
+        // a task that looks RUNNING with nothing behind it.
+        if (taskDef.getContainerDefinitions() == null || taskDef.getContainerDefinitions().isEmpty()) {
+            LOG.warnv("Task definition {0} has no container definitions; refusing to launch tasks",
+                    taskDef.getTaskDefinitionArn());
+            throw new AwsException("ClientException",
+                    "Task definition " + taskDef.getTaskDefinitionArn() + " has no container definitions.", 400);
+        }
         List<EcsTask> launched = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             String taskId = UUID.randomUUID().toString().replace("-", "");
@@ -484,8 +494,12 @@ public class EcsService {
 
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         if (services.containsKey(key)) {
-            throw new AwsException("InvalidParameterException",
-                    "Creation of service was not idempotent.", 400);
+            EcsServiceModel existingSvc = services.get(key);
+
+            if ("ACTIVE".equals(existingSvc.getStatus())) {
+                throw new AwsException("InvalidParameterException",
+                        "Creation of service was not idempotent.", 400);
+            }
         }
 
         EcsServiceModel svc = new EcsServiceModel();
@@ -515,10 +529,17 @@ public class EcsService {
                                           Integer desiredCount, NetworkConfiguration networkConfiguration,
                                           String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
+
+        serviceName = extractServiceName(serviceName);
+
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         EcsServiceModel svc = services.get(key);
         if (svc == null) {
             throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+        }
+        if ("INACTIVE".equals(svc.getStatus())) {
+            throw new AwsException("ServiceNotActiveException",
+                    "Service " + serviceName + " is not active.", 400);
         }
         if (desiredCount != null) {
             svc.setDesiredCount(desiredCount);
@@ -536,10 +557,16 @@ public class EcsService {
 
     public EcsServiceModel deleteService(String clusterRef, String serviceName, boolean force, String region) {
         EcsCluster cluster = resolveClusterOrDefault(clusterRef, region);
+
+        serviceName = extractServiceName(serviceName);
+
         String key = serviceKey(region, cluster.getClusterName(), serviceName);
         EcsServiceModel svc = services.get(key);
         if (svc == null) {
             throw new AwsException("ServiceNotFoundException", "Service " + serviceName + " not found.", 404);
+        }
+        if ("INACTIVE".equals(svc.getStatus())) {
+            return svc;
         }
         if (!force && svc.getDesiredCount() > 0) {
             throw new AwsException("InvalidParameterException",
@@ -563,7 +590,6 @@ public class EcsService {
                                 t.getTaskArn(), e.getMessage());
                     }
                 });
-        services.remove(key);
         return svc;
     }
 
@@ -584,6 +610,7 @@ public class EcsService {
         String prefix = serviceKeyPrefix(region, cluster.getClusterName());
         return services.entrySet().stream()
                 .filter(e -> e.getKey().startsWith(prefix))
+                .filter(e -> !"INACTIVE".equals(e.getValue().getStatus()))
                 .map(e -> e.getValue().getServiceArn())
                 .toList();
     }
@@ -591,6 +618,7 @@ public class EcsService {
     public List<String> listServicesByNamespace(String namespace, String region) {
         return services.values().stream()
                 .filter(s -> namespace.equals(s.getNamespace()))
+                .filter(s -> !"INACTIVE".equals(s.getStatus()))
                 .map(EcsServiceModel::getServiceArn)
                 .toList();
     }
@@ -1342,6 +1370,13 @@ public class EcsService {
 
     private static String extractRegionFromServiceKey(String key) {
         return key.substring(0, key.indexOf("::"));
+    }
+
+    private static String extractServiceName(String serviceName) {
+        if (serviceName != null && serviceName.contains("/")) {
+            return serviceName.substring(serviceName.lastIndexOf("/") + 1);
+        }
+        return serviceName;
     }
 
     private static String extractClusterNameFromServiceKey(String key) {

@@ -140,14 +140,15 @@ public class AslExecutor {
                         currentStateName = null;
                     }
                 } catch (FailStateException e) {
-                    exec.setStatus("FAILED");
-                    exec.setStopDate(System.currentTimeMillis() / 1000.0);
-                    String failError = e.error != null ? e.error : "States.Runtime";
-                    String failCause = e.cause != null ? e.cause : "";
-                    exec.setError(failError);
-                    exec.setCause(failCause);
-                    addEvent(history, eventId, "ExecutionFailed", null,
-                            Map.of("error", failError, "cause", failCause));
+                    StateResult caught = handleCatch(stateDef, currentInput, e);
+                    if (caught != null) {
+                        addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
+                                Map.of("name", currentStateName, "output", caught.output().toString()));
+                        currentInput = caught.output();
+                        currentStateName = caught.nextState();
+                        continue;
+                    }
+                    failExecution(exec, history, eventId, e);
                     onUpdate.accept(exec, history);
                     return;
                 } catch (Exception e) {
@@ -938,8 +939,17 @@ public class AslExecutor {
             }
             String type = stateDef.path("Type").asText();
             boolean stateJsonata = isJsonata(stateDef, topLevelQueryLanguage);
-            StateResult result = executeState(currentState, type, stateDef, currentInput, ignored, eventId, sm,
-                    stateJsonata, topLevelQueryLanguage, context);
+            StateResult result;
+            try {
+                result = executeState(currentState, type, stateDef, currentInput, ignored, eventId, sm,
+                        stateJsonata, topLevelQueryLanguage, context);
+            } catch (FailStateException e) {
+                StateResult caught = handleCatch(stateDef, currentInput, e);
+                if (caught == null) {
+                    throw e;
+                }
+                result = caught;
+            }
             currentInput = result.output();
             currentState = result.nextState();
             if ("Succeed".equals(type) || stateDef.path("End").asBoolean(false)) {
@@ -1309,6 +1319,64 @@ public class AslExecutor {
         event.setPreviousEventId(prevId);
         event.setDetails(details);
         history.add(event);
+    }
+
+    private void failExecution(Execution exec, List<HistoryEvent> history, AtomicLong eventId, FailStateException e) {
+        exec.setStatus("FAILED");
+        exec.setStopDate(System.currentTimeMillis() / 1000.0);
+        String failError = e.error != null ? e.error : "States.Runtime";
+        String failCause = e.cause != null ? e.cause : "";
+        exec.setError(failError);
+        exec.setCause(failCause);
+        addEvent(history, eventId, "ExecutionFailed", null,
+                Map.of("error", failError, "cause", failCause));
+    }
+
+    private StateResult handleCatch(JsonNode stateDef, JsonNode input, FailStateException failure) throws Exception {
+        JsonNode catchers = stateDef.path("Catch");
+        if (!catchers.isArray()) {
+            return null;
+        }
+        String error = failure.error != null ? failure.error : "States.Runtime";
+        String cause = failure.cause != null ? failure.cause : "";
+        for (JsonNode catcher : catchers) {
+            if (!catchMatches(catcher, error)) {
+                continue;
+            }
+            String next = catcher.path("Next").asText(null);
+            if (next == null || next.isBlank()) {
+                return null;
+            }
+            ObjectNode errorOutput = objectMapper.createObjectNode();
+            errorOutput.put("Error", error);
+            errorOutput.put("Cause", cause);
+            return new StateResult(mergeResult(catcher, input, errorOutput), next);
+        }
+        return null;
+    }
+
+    private boolean catchMatches(JsonNode catcher, String error) {
+        JsonNode errors = catcher.path("ErrorEquals");
+        if (!errors.isArray()) {
+            return false;
+        }
+        for (JsonNode candidate : errors) {
+            String expected = candidate.asText();
+            if (expected.equals(error)) {
+                return true;
+            }
+            if ("States.TaskFailed".equals(expected)
+                    && !"States.Timeout".equals(error)
+                    && !"States.Runtime".equals(error)) {
+                return true;
+            }
+            if ("States.ALL".equals(expected)
+                    && !"States.Runtime".equals(error)
+                    && !"States.DataLimitExceeded".equals(error)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private String stateEnteredEventType(String stateType) {

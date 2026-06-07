@@ -189,6 +189,8 @@ floci:
       default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
       enabled: true
+    cloudmap:
+      enabled: true
     scheduler:
       enabled: true
     cloudwatchlogs:

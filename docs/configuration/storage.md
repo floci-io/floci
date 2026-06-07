@@ -46,6 +46,8 @@ When not set for a service, it inherits `FLOCI_STORAGE_MODE`. Only override when
 | `FLOCI_STORAGE_SERVICES_SECRETSMANAGER_FLUSH_INTERVAL_MS` | `5000` | Secrets Manager flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_ACM_MODE` | global default | ACM storage mode |
 | `FLOCI_STORAGE_SERVICES_ACM_FLUSH_INTERVAL_MS` | `5000` | ACM flush interval (ms) |
+| `FLOCI_STORAGE_SERVICES_APPSYNC_MODE` | global default | AppSync storage mode |
+| `FLOCI_STORAGE_SERVICES_APPSYNC_FLUSH_INTERVAL_MS` | `5000` | AppSync flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_OPENSEARCH_MODE` | global default | OpenSearch storage mode |
 | `FLOCI_STORAGE_SERVICES_OPENSEARCH_FLUSH_INTERVAL_MS` | `5000` | OpenSearch flush interval (ms) |
 | `FLOCI_STORAGE_SERVICES_RDS_MODE` | global default | RDS metadata storage mode (see note below) |

@@ -88,6 +88,8 @@ public class SesQueryHandler {
                         handleUpdateConfigurationSetEventDestination(params, region);
                 case "DeleteConfigurationSetEventDestination" ->
                         handleDeleteConfigurationSetEventDestination(params, region);
+                case "UpdateConfigurationSetSendingEnabled" ->
+                        handleUpdateConfigurationSetSendingEnabled(params, region);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
             };
@@ -573,6 +575,11 @@ public class SesQueryHandler {
             }
             xml.end("EventDestinations");
         }
+        if (attrs.contains("reputationOptions")) {
+            xml.start("ReputationOptions")
+                .elem("SendingEnabled", String.valueOf(cs.isSendingEnabledEffective()))
+               .end("ReputationOptions");
+        }
         return Response.ok(AwsQueryResponse.envelope("DescribeConfigurationSet",
                 AwsNamespaces.SES, xml.build())).build();
     }
@@ -682,6 +689,15 @@ public class SesQueryHandler {
         sesService.deleteConfigurationSetEventDestination(configSet, edName, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "DeleteConfigurationSetEventDestination", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleUpdateConfigurationSetSendingEnabled(MultivaluedMap<String, String> params,
+                                                                String region) {
+        String configSet = requireParam(params, "ConfigurationSetName");
+        boolean enabled = parseRequiredBoolean(params, "Enabled");
+        sesService.setConfigurationSetSendingEnabled(configSet, enabled, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "UpdateConfigurationSetSendingEnabled", AwsNamespaces.SES)).build();
     }
 
     /**

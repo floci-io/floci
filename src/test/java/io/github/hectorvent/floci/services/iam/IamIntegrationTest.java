@@ -6,6 +6,8 @@ import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -147,6 +149,32 @@ class IamIntegrationTest {
                     equalTo("AWSLambdaBasicExecutionRole"))
             .body("GetPolicyResponse.GetPolicyResult.Policy.Arn",
                     equalTo("arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"));
+    }
+
+    // The standard EKS managed policies the EKS console/SDK and the
+    // terraform-aws-modules/eks module attach to cluster and node roles (#1092).
+    @ParameterizedTest
+    @Order(6)
+    @ValueSource(strings = {
+            "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
+            "arn:aws:iam::aws:policy/AmazonEKSServicePolicy",
+            "arn:aws:iam::aws:policy/AmazonEKSVPCResourceController",
+            "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy",
+            "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy",
+    })
+    void getEksManagedPolicy(String arn) {
+        String expectedName = arn.substring(arn.lastIndexOf('/') + 1);
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn", arn)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName", equalTo(expectedName))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn", equalTo(arn));
     }
 
     @Test

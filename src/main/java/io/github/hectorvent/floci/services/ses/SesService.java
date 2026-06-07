@@ -285,20 +285,30 @@ public class SesService {
     }
 
     /**
-     * Validate that a non-blank {@code ConfigurationSetName} refers to a configuration set
-     * that exists in the given region. Always raises {@code ConfigurationSetDoesNotExist}
-     * with {@code httpStatus = 400}; the V2 REST controller's {@code remapV1Exception}
-     * then translates that into a {@code NotFoundException 404}, while V1 Query keeps the
-     * original code/status. Mirrors AWS SES behaviour: invalid set name fails fast instead
-     * of silently storing/relaying the message and skipping event publishing later.
+     * Validate that a non-blank {@code ConfigurationSetName} is usable for a send. Performs
+     * two gates:
+     *   1. Existence — raises {@code ConfigurationSetDoesNotExist} (400) when the set is
+     *      missing in the given region. The V2 REST controller's {@code remapV1Exception}
+     *      translates that into {@code NotFoundException 404}; V1 Query keeps the original.
+     *   2. Sending-enabled — raises {@code ConfigurationSetSendingPausedException} (400)
+     *      when the set's {@code SendingEnabled} flag has been turned off via
+     *      {@code UpdateConfigurationSetSendingEnabled} (v1) /
+     *      {@code PutConfigurationSetSendingOptions} (v2). The V2 controller narrows that
+     *      code to {@code SendingPausedException}; V1 keeps the longer form, matching the
+     *      exact wire shape AWS returns on each surface.
+     * Mirrors AWS SES behaviour: invalid or paused set fails fast instead of silently
+     * storing/relaying the message and skipping event publishing later.
      */
     private void validateConfigurationSet(String configurationSetName, String region) {
         if (configurationSetName == null || configurationSetName.isBlank()) {
             return;
         }
-        if (configSetStore.get(configSetKey(region, configurationSetName)).isEmpty()) {
-            throw new AwsException("ConfigurationSetDoesNotExist",
-                    "Configuration set <" + configurationSetName + "> does not exist.", 400);
+        ConfigurationSet cs = configSetStore.get(configSetKey(region, configurationSetName))
+                .orElseThrow(() -> new AwsException("ConfigurationSetDoesNotExist",
+                        "Configuration set <" + configurationSetName + "> does not exist.", 400));
+        if (cs.getSendingEnabled() != null && !cs.getSendingEnabled()) {
+            throw new AwsException("ConfigurationSetSendingPausedException",
+                    "Sending is paused for configuration set " + configurationSetName, 400);
         }
     }
 
@@ -532,6 +542,14 @@ public class SesService {
     public void setAccountSendingEnabled(String region, boolean enabled) {
         accountSettingsStore.put("sending::" + region, enabled);
         LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);
+    }
+
+    public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        cs.setSendingEnabled(enabled);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated SendingEnabled on configuration set {0} in region {1}: {2}",
+                configSetName, region, enabled);
     }
 
     // ──────────────────────────── Templates ────────────────────────────
