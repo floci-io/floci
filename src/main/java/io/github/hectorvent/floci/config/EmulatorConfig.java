@@ -488,6 +488,12 @@ public interface EmulatorConfig {
 
         @WithDefault("redpandadata/redpanda:latest")
         String defaultImage();
+
+        @WithDefault("9300")
+        int kafkaHostPortBase();
+
+        @WithDefault("9399")
+        int kafkaHostPortMax();
     }
 
     interface ElastiCacheServiceConfig {
