@@ -607,20 +607,18 @@ public class AppSyncController {
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
         String apiId = (String) request.get("apiId");
-        service.associateApi(domainName, apiId);
+        var assoc = service.associateApi(domainName, apiId);
         ObjectNode root = objectMapper.createObjectNode();
-        ObjectNode assoc = root.putObject("apiAssociation");
-        assoc.put("domainName", domainName);
-        assoc.put("apiId", apiId);
+        root.set("apiAssociation", objectMapper.valueToTree(assoc));
         return Response.status(200).entity(root).build();
     }
 
     @GET
     @Path("/v1/domainnames/{domainName}/apiassociation")
-    public Response getAssociatedApi(@PathParam("domainName") String domainName) {
-        GraphqlApi api = service.getAssociatedApi(domainName);
+    public Response getApiAssociation(@PathParam("domainName") String domainName) {
+        var assoc = service.getApiAssociation(domainName);
         ObjectNode root = objectMapper.createObjectNode();
-        root.set("graphqlApi", objectMapper.valueToTree(api));
+        root.set("apiAssociation", objectMapper.valueToTree(assoc));
         return Response.ok(root).build();
     }
 
@@ -700,9 +698,9 @@ public class AppSyncController {
         String region = regionResolver.resolveRegion(headers);
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
-        ApiAssociation assoc = service.createMergedApiAssociation(sourceApiIdentifier, request, region);
+        var assoc = service.createMergedApiAssociation(sourceApiIdentifier, request, region);
         ObjectNode root = objectMapper.createObjectNode();
-        root.set("apiAssociation", objectMapper.valueToTree(assoc));
+        root.set("sourceApiAssociation", objectMapper.valueToTree(assoc));
         return Response.status(200).entity(root).build();
     }
 
@@ -714,9 +712,9 @@ public class AppSyncController {
         String region = regionResolver.resolveRegion(headers);
         @SuppressWarnings("unchecked")
         Map<String, Object> request = objectMapper.readValue(body, Map.class);
-        ApiAssociation assoc = service.createSourceApiAssociation(mergedApiIdentifier, request, region);
+        var assoc = service.createSourceApiAssociation(mergedApiIdentifier, request, region);
         ObjectNode root = objectMapper.createObjectNode();
-        root.set("apiAssociation", objectMapper.valueToTree(assoc));
+        root.set("sourceApiAssociation", objectMapper.valueToTree(assoc));
         return Response.status(200).entity(root).build();
     }
 
@@ -724,9 +722,22 @@ public class AppSyncController {
     @Path("/v1/mergedApis/{mergedApiIdentifier}/sourceApiAssociations/{associationId}")
     public Response getSourceApiAssociation(@PathParam("mergedApiIdentifier") String mergedApiIdentifier,
                                              @PathParam("associationId") String associationId) {
-        ApiAssociation assoc = service.getSourceApiAssociation(mergedApiIdentifier, associationId);
+        var assoc = service.getSourceApiAssociation(mergedApiIdentifier, associationId);
         ObjectNode root = objectMapper.createObjectNode();
-        root.set("apiAssociation", objectMapper.valueToTree(assoc));
+        root.set("sourceApiAssociation", objectMapper.valueToTree(assoc));
+        return Response.ok(root).build();
+    }
+
+    @POST
+    @Path("/v1/mergedApis/{mergedApiIdentifier}/sourceApiAssociations/{associationId}")
+    public Response updateSourceApiAssociation(@PathParam("mergedApiIdentifier") String mergedApiIdentifier,
+                                                @PathParam("associationId") String associationId,
+                                                String body) throws IOException {
+        @SuppressWarnings("unchecked")
+        Map<String, Object> request = objectMapper.readValue(body, Map.class);
+        var assoc = service.updateSourceApiAssociation(mergedApiIdentifier, associationId, request);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.set("sourceApiAssociation", objectMapper.valueToTree(assoc));
         return Response.ok(root).build();
     }
 
@@ -737,7 +748,7 @@ public class AppSyncController {
                                                @QueryParam("nextToken") String nextToken) {
         var page = service.listSourceApiAssociations(apiId, maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("sourceApiAssociations");
+        ArrayNode items = root.putArray("sourceApiAssociationSummaries");
         page.items().forEach(items::addPOJO);
         if (page.nextToken() != null) {
             root.put("nextToken", page.nextToken());
@@ -752,6 +763,18 @@ public class AppSyncController {
     public Response disassociateSourceGraphqlApi(@PathParam("mergedApiIdentifier") String mergedApiIdentifier,
                                                     @PathParam("associationId") String associationId) {
         service.deleteSourceApiAssociation(mergedApiIdentifier, associationId);
-        return Response.noContent().build();
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("sourceApiAssociationStatus", "DELETION_SCHEDULED");
+        return Response.ok(root).build();
+    }
+
+    @DELETE
+    @Path("/v1/sourceApis/{sourceApiIdentifier}/mergedApiAssociations/{associationId}")
+    public Response disassociateMergedGraphqlApi(@PathParam("sourceApiIdentifier") String sourceApiIdentifier,
+                                                    @PathParam("associationId") String associationId) {
+        var assoc = service.deleteMergedApiAssociation(sourceApiIdentifier, associationId);
+        ObjectNode root = objectMapper.createObjectNode();
+        root.put("sourceApiAssociationStatus", assoc.getSourceApiAssociationStatus());
+        return Response.ok(root).build();
     }
 }
