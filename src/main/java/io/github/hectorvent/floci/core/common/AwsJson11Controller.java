@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.transcribe.TranscribeJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
+import io.github.hectorvent.floci.services.cloudmap.CloudMapHandler;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
@@ -54,6 +55,7 @@ public class AwsJson11Controller {
     private final RegionResolver regionResolver;
     private final SsmJsonHandler ssmJsonHandler;
     private final EventBridgeHandler eventBridgeHandler;
+    private final CloudMapHandler cloudMapHandler;
     private final CloudWatchLogsHandler cloudWatchLogsHandler;
     private final SecretsManagerJsonHandler secretsManagerJsonHandler;
     private final KinesisJsonHandler kinesisJsonHandler;
@@ -83,6 +85,7 @@ public class AwsJson11Controller {
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
                                RegionResolver regionResolver,
                                SsmJsonHandler ssmJsonHandler, EventBridgeHandler eventBridgeHandler,
+                               CloudMapHandler cloudMapHandler,
                                CloudWatchLogsHandler cloudWatchLogsHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
                                KinesisJsonHandler kinesisJsonHandler,
@@ -109,6 +112,7 @@ public class AwsJson11Controller {
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
         this.eventBridgeHandler = eventBridgeHandler;
+        this.cloudMapHandler = cloudMapHandler;
         this.cloudWatchLogsHandler = cloudWatchLogsHandler;
         this.secretsManagerJsonHandler = secretsManagerJsonHandler;
         this.kinesisJsonHandler = kinesisJsonHandler;
@@ -163,6 +167,7 @@ public class AwsJson11Controller {
             Response delegated = switch (serviceKey) {
                 case "ssm" -> ssmJsonHandler.handle(action, request, region);
                 case "events" -> eventBridgeHandler.handle(action, request, region);
+                case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);

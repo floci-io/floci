@@ -322,6 +322,7 @@ public interface EmulatorConfig {
         ElastiCacheServiceConfig elasticache();
         RdsServiceConfig rds();
         EventBridgeServiceConfig eventbridge();
+        CloudMapServiceConfig cloudmap();
         SchedulerServiceConfig scheduler();
         CloudWatchLogsServiceConfig cloudwatchlogs();
         CloudWatchMetricsServiceConfig cloudwatchmetrics();
@@ -547,6 +548,16 @@ public interface EmulatorConfig {
     interface EventBridgeServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface CloudMapServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** Delay before an async operation (CreateNamespace, RegisterInstance, …)
+         *  transitions from PENDING to SUCCESS. 0 = complete immediately. */
+        @WithDefault("0")
+        int operationCompletionDelaySeconds();
     }
 
     interface SchedulerServiceConfig {
