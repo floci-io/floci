@@ -730,4 +730,47 @@ class ElbV2IntegrationTest {
                 .statusCode(400)
                 .body("ErrorResponse.Error.Code", equalTo("LoadBalancerNotFound"));
     }
+
+    @Test
+    @Order(73)
+    void createLoadBalancerWithMissingSubnetReturnsSubnetNotFound() {
+        given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "lb-missing-subnet")
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", "subnet-does-not-exist")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("SubnetNotFound"));
+    }
+
+    @Test
+    @Order(74)
+    void setSubnetsWithMissingSubnetReturnsSubnetNotFound() {
+        String setSubnetsLbArn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "lb-set-subnets")
+                .formParam("Type", "application")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", setSubnetsLbArn)
+                .formParam("Subnets.member.1", "subnet-does-not-exist")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("SubnetNotFound"));
+    }
 }

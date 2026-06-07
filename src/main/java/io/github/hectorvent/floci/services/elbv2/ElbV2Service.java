@@ -684,7 +684,16 @@ public class ElbV2Service {
     private List<AvailabilityZone> resolveAvailabilityZones(String region, List<String> subnetIds) {
         List<AvailabilityZone> availabilityZones = new ArrayList<>();
         for (String subnetId : subnetIds) {
-            Subnet subnet = ec2Service.requireSubnet(region, subnetId);
+            Subnet subnet;
+            try {
+                subnet = ec2Service.requireSubnet(region, subnetId);
+            } catch (AwsException e) {
+                if ("InvalidSubnetID.NotFound".equals(e.getErrorCode())) {
+                    throw new AwsException("SubnetNotFound",
+                            "Subnet '" + subnetId + "' not found", 400);
+                }
+                throw e;
+            }
             AvailabilityZone availabilityZone = new AvailabilityZone();
             availabilityZone.setSubnetId(subnet.getSubnetId());
             availabilityZone.setZoneName(subnet.getAvailabilityZone());
