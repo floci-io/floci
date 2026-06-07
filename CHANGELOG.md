@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.23] - 2026-06-07
+
+### Added
+
+- **iam:** seed the standard EKS cluster and node-group managed policies ([#1216](https://github.com/floci-io/floci/pull/1216))
+- **appsync:** Phase 2 — schema registry, model fixes, CRUDL completion, and AWS scalars ([#1185](https://github.com/floci-io/floci/pull/1185))
+- **cloudwatch:** accept a log group ARN via `logGroupIdentifier` ([#1172](https://github.com/floci-io/floci/pull/1172))
+- **ecs:** honour task-definition volumes and container `mountPoints` ([#1171](https://github.com/floci-io/floci/pull/1171))
+- **ses:** per-configuration-set sending toggle (v1 + v2) ([#1193](https://github.com/floci-io/floci/pull/1193))
+- **glue:** support `DeleteDatabase` ([#1181](https://github.com/floci-io/floci/pull/1181))
+- **glue:** support user-defined functions ([#1187](https://github.com/floci-io/floci/pull/1187))
+
+### Fixed
+
+- **glue:** enforce table version checks ([#1184](https://github.com/floci-io/floci/pull/1184), [#1211](https://github.com/floci-io/floci/pull/1211))
+- **glue:** preserve view table fields ([#1182](https://github.com/floci-io/floci/pull/1182))
+- **dynamodb:** persist the SSE specification and return `SSEDescription` for encrypted tables ([#1191](https://github.com/floci-io/floci/pull/1191))
+- **dynamodb:** accept `AttributesToGet` with `Select=SPECIFIC_ATTRIBUTES` in `Query` ([#1190](https://github.com/floci-io/floci/pull/1190))
+- **dynamodb:** update the reserved keywords list ([#1176](https://github.com/floci-io/floci/pull/1176))
+- **ecs:** retain inactive services for Terraform draining and recreation with correct idempotency ([#1166](https://github.com/floci-io/floci/pull/1166))
+- **ec2:** include `AttachTime` in the describe-instances network interface response ([#1214](https://github.com/floci-io/floci/pull/1214))
+- **stepfunctions:** honor `Catch` on Lambda task failures ([#1196](https://github.com/floci-io/floci/pull/1196))
+- **cloudformation:** poll for `CREATE_COMPLETE` in the SAM changeset test ([#1199](https://github.com/floci-io/floci/pull/1199))
+- **sns:** align mobile push error codes, payload resolution, and Token rotation with AWS ([#1165](https://github.com/floci-io/floci/pull/1165))
+- **elbv2:** align `DeleteTargetGroup` with the AWS Query response ([#1194](https://github.com/floci-io/floci/pull/1194))
+- **cloudwatch:** tag rpc-v2-cbor timestamp lists so `GetMetricData` decodes ([#1162](https://github.com/floci-io/floci/pull/1162))
+
+### Documentation
+
+- **ses:** list the v1 `ConfigurationSetEventDestination` actions ([#1192](https://github.com/floci-io/floci/pull/1192))
+
+### Build
+
+- bump Quarkus to 3.36.0 and patch build dependencies ([#1197](https://github.com/floci-io/floci/pull/1197))
+
 ## [1.5.22] - 2026-06-04
 
 ### Added
