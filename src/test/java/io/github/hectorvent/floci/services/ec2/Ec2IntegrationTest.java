@@ -93,7 +93,7 @@ class Ec2IntegrationTest {
             .contentType("application/xml")
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupName", equalTo("default"))
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].groupDescription",
-                equalTo("default security group"))
+                equalTo("default VPC security group"))
             .body("DescribeSecurityGroupsResponse.securityGroupInfo.item[0].vpcId", equalTo("vpc-default"));
     }
 

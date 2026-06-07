@@ -159,7 +159,7 @@ public class Ec2Service {
         SecurityGroup defaultSg = new SecurityGroup();
         defaultSg.setGroupId(securityGroupId);
         defaultSg.setGroupName("default");
-        defaultSg.setDescription("default security group");
+        defaultSg.setDescription("default VPC security group");
         defaultSg.setVpcId(vpcId);
         defaultSg.setOwnerId(accountId);
         defaultSg.setRegion(region);
