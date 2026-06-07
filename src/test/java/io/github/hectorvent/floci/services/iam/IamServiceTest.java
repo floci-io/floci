@@ -492,6 +492,29 @@ class IamServiceTest {
     }
 
     @Test
+    void seedDefaultsCreatesDefaultDeployerPrincipal() {
+        iamService.seedDefaults();
+
+        IamUser user = iamService.getUser("floci-deployer");
+        assertEquals("arn:aws:iam::000000000000:user/floci-deployer", user.getArn());
+        assertTrue(user.getAttachedPolicyArns().contains("arn:aws:iam::aws:policy/AdministratorAccess"));
+        assertEquals(
+                "arn:aws:iam::000000000000:user/floci-deployer",
+                iamService.resolveCallerArn("floci").orElseThrow());
+        assertNotNull(iamService.resolveCallerContext("floci"));
+        assertNotNull(iamService.resolvePrincipalContext(user.getArn()));
+    }
+
+    @Test
+    void simulatePrincipalPolicyRejectsUnsupportedPrincipalArnType() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.resolvePrincipalContext("arn:aws:iam::000000000000:group/admins"));
+
+        assertEquals("InvalidInput", ex.getErrorCode());
+        assertEquals("PolicySourceArn must identify an IAM user or role.", ex.getMessage());
+    }
+
+    @Test
     void attachManagedPolicyToRole() {
         iamService.seedAwsManagedPolicies();
         iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
