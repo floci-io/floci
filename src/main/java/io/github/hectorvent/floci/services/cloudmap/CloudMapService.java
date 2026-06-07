@@ -502,7 +502,6 @@ public class CloudMapService {
     }
 
     private List<Instance> scanInstances(String serviceId) {
-        String prefix = serviceId + "/";
         List<Instance> result = new ArrayList<>();
         for (Instance i : scan(instanceStore)) {
             if (serviceId.equals(i.getServiceId())) {
