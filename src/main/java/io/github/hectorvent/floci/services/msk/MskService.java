@@ -29,6 +29,7 @@ import java.util.concurrent.TimeUnit;
 public class MskService {
 
     private static final Logger LOG = Logger.getLogger(MskService.class);
+    private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
     private final StorageBackend<String, MskCluster> storage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -60,6 +61,10 @@ public class MskService {
     }
 
     public MskCluster createCluster(String clusterName) {
+        return createCluster(clusterName, DEFAULT_KAFKA_VERSION);
+    }
+
+    public MskCluster createCluster(String clusterName, String kafkaVersion) {
         if (storage.scan(k -> true).stream().anyMatch(c -> c.getClusterName().equals(clusterName))) {
             throw new AwsException("ConflictException", "Cluster already exists: " + clusterName, 409);
         }
@@ -67,7 +72,8 @@ public class MskService {
         String accountId = regionResolver.getAccountId();
         String clusterArn = AwsArnUtils.Arn.of("kafka", config.defaultRegion(), accountId, "cluster/" + clusterName + "/" + java.util.UUID.randomUUID()).toString();
 
-        MskCluster cluster = new MskCluster(clusterArn, clusterName);
+        String resolvedKafkaVersion = (kafkaVersion == null || kafkaVersion.isBlank()) ? DEFAULT_KAFKA_VERSION : kafkaVersion;
+        MskCluster cluster = new MskCluster(clusterArn, clusterName, resolvedKafkaVersion);
         cluster.setAccountId(accountId);
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
         
