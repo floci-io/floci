@@ -48,7 +48,10 @@ table_input() {
                 Columns: [
                     {
                         Name: "id",
-                        Type: "int"
+                        Type: "int",
+                        Parameters: {
+                            comment: "identifier"
+                        }
                     }
                 ]
             }
@@ -114,8 +117,10 @@ function_input() {
     assert_success
     name=$(json_get "$output" '.Table.Name')
     version_id=$(json_get "$output" '.Table.VersionId')
+    column_comment=$(json_get "$output" '.Table.StorageDescriptor.Columns[0].Parameters.comment')
     [ "$name" = "$TABLE_NAME" ]
     [ "$version_id" = "0" ]
+    [ "$column_comment" = "identifier" ]
 
     run aws_cmd glue get-tables --database-name "$DB_NAME"
     assert_success
