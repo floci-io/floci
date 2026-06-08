@@ -46,6 +46,7 @@ class GlueServiceTest {
     private GlueService glueService;
     private GlueSchemaRegistryService schemaRegistryService;
     private StorageBackend<String, Table> tableStore;
+    private StorageBackend<String, Table> tableVersionStore;
     private StorageBackend<String, Partition> partitionStore;
 
     @BeforeEach
@@ -54,10 +55,12 @@ class GlueServiceTest {
         StorageFactory storageFactory = new InMemoryStorageFactory();
         schemaRegistryService = new GlueSchemaRegistryService(storageFactory, regionResolver);
         tableStore = new InMemoryStorage<>();
+        tableVersionStore = new InMemoryStorage<>();
         partitionStore = new InMemoryStorage<>();
         glueService = new GlueService(
                 new InMemoryStorage<String, Database>(),
                 tableStore,
+                tableVersionStore,
                 partitionStore,
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 schemaRegistryService, regionResolver);
@@ -206,7 +209,7 @@ class GlueServiceTest {
         replacementSd.setColumns(java.util.List.of(new Column("b", "bigint")));
         replacement.setStorageDescriptor(replacementSd);
 
-        glueService.updateTable("db1", replacement);
+        glueService.updateTable("db1", replacement, null, false);
 
         Table fetched = glueService.getTable("db1", "plain");
         assertEquals(created.getCreateTime(), fetched.getCreateTime());
@@ -226,27 +229,27 @@ class GlueServiceTest {
         Table nonCanonicalVersionReplacement = new Table();
         nonCanonicalVersionReplacement.setName("plain");
         AwsException nonCanonicalVersionEx = assertThrows(AwsException.class,
-                () -> glueService.updateTable("db1", nonCanonicalVersionReplacement, "00"));
+                () -> glueService.updateTable("db1", nonCanonicalVersionReplacement, "00", false));
         assertEquals("ConcurrentModificationException", nonCanonicalVersionEx.getErrorCode());
         assertEquals("0", glueService.getTable("db1", "plain").getVersionId());
 
         Table nonNumericVersionReplacement = new Table();
         nonNumericVersionReplacement.setName("plain");
         AwsException nonNumericVersionEx = assertThrows(AwsException.class,
-                () -> glueService.updateTable("db1", nonNumericVersionReplacement, "invalid"));
+                () -> glueService.updateTable("db1", nonNumericVersionReplacement, "invalid", false));
         assertEquals("ConcurrentModificationException", nonNumericVersionEx.getErrorCode());
         assertEquals("0", glueService.getTable("db1", "plain").getVersionId());
 
         Table firstReplacement = new Table();
         firstReplacement.setName("plain");
         firstReplacement.setDescription("first");
-        glueService.updateTable("db1", firstReplacement, "0");
+        glueService.updateTable("db1", firstReplacement, "0", false);
         assertEquals("1", glueService.getTable("db1", "plain").getVersionId());
 
         Table staleReplacement = new Table();
         staleReplacement.setName("plain");
         AwsException ex = assertThrows(AwsException.class,
-                () -> glueService.updateTable("db1", staleReplacement, "0"));
+                () -> glueService.updateTable("db1", staleReplacement, "0", false));
 
         assertEquals("ConcurrentModificationException", ex.getErrorCode());
         assertEquals("Update table failed due to concurrent modifications.", ex.getMessage());
@@ -261,7 +264,7 @@ class GlueServiceTest {
 
         Table replacement = new Table();
         replacement.setName("plain");
-        glueService.updateTable("db1", replacement);
+        glueService.updateTable("db1", replacement, null, false);
 
         assertEquals("1", glueService.getTable("db1", "plain").getVersionId());
     }
@@ -341,7 +344,7 @@ class GlueServiceTest {
         replacement.setName("plain");
         replacement.setParameters(Map.of("metadata_location", "s3://bucket/v2.metadata.json"));
 
-        glueService.updateTable("db1", replacement, created.getVersionId());
+        glueService.updateTable("db1", replacement, created.getVersionId(), false);
 
         Table fetched = glueService.getTable("db1", "plain");
         assertEquals("1", fetched.getVersionId());
@@ -360,7 +363,7 @@ class GlueServiceTest {
         replacement.setParameters(Map.of("metadata_location", "s3://bucket/v2.metadata.json"));
 
         AwsException ex = assertThrows(AwsException.class,
-                () -> glueService.updateTable("db1", replacement, "stale-version"));
+                () -> glueService.updateTable("db1", replacement, "stale-version", false));
 
         assertEquals("ConcurrentModificationException", ex.getErrorCode());
         Table fetched = glueService.getTable("db1", "plain");
@@ -390,13 +393,13 @@ class GlueServiceTest {
         Table firstReplacement = new Table();
         firstReplacement.setName("plain");
         firstReplacement.setParameters(Map.of("metadata_location", "s3://bucket/v2a.metadata.json"));
-        glueService.updateTable("db1", firstReplacement, versionId);
+        glueService.updateTable("db1", firstReplacement, versionId, false);
 
         Table secondReplacement = new Table();
         secondReplacement.setName("plain");
         secondReplacement.setParameters(Map.of("metadata_location", "s3://bucket/v2b.metadata.json"));
         AwsException ex = assertThrows(AwsException.class,
-                () -> glueService.updateTable("db1", secondReplacement, versionId));
+                () -> glueService.updateTable("db1", secondReplacement, versionId, false));
 
         assertEquals("ConcurrentModificationException", ex.getErrorCode());
         Table fetched = glueService.getTable("db1", "plain");
@@ -436,7 +439,7 @@ class GlueServiceTest {
         Table replacement = new Table();
         replacement.setName("MIXEDCASETABLE");
         replacement.setDescription("updated");
-        glueService.updateTable("MIXEDCASEDATABASE", replacement, fetchedTable.getVersionId());
+        glueService.updateTable("MIXEDCASEDATABASE", replacement, fetchedTable.getVersionId(), false);
         assertEquals("updated", glueService.getTable("mixedcasedatabase", "mixedcasetable").getDescription());
 
         Partition partition = new Partition();
@@ -505,8 +508,40 @@ class GlueServiceTest {
     }
 
     @Test
-    void getTableVersionsReturnsEmptyListForAthenaCompatibility() {
-        assertTrue(glueService.getTableVersions().isEmpty());
+    void getTableVersionsReturnsCurrentAndArchivedVersions() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setDescription("created");
+        glueService.createTable("db1", table);
+
+        Table replacement = new Table();
+        replacement.setName("plain");
+        replacement.setDescription("updated");
+        glueService.updateTable("db1", replacement, "0", false);
+
+        List<Map<String, Object>> tableVersions = glueService.getTableVersions("db1", "plain");
+
+        assertEquals(2, tableVersions.size());
+        assertEquals("1", tableVersions.get(0).get("VersionId"));
+        assertEquals("updated", ((Table) tableVersions.get(0).get("Table")).getDescription());
+        assertEquals("0", tableVersions.get(1).get("VersionId"));
+        assertEquals("created", ((Table) tableVersions.get(1).get("Table")).getDescription());
+    }
+
+    @Test
+    void updateTableSkipsArchiveWhenSkipArchiveIsTrue() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        Table replacement = new Table();
+        replacement.setName("plain");
+        glueService.updateTable("db1", replacement, "0", true);
+
+        List<Map<String, Object>> tableVersions = glueService.getTableVersions("db1", "plain");
+
+        assertEquals(1, tableVersions.size());
+        assertEquals("1", tableVersions.get(0).get("VersionId"));
     }
 
     @Test

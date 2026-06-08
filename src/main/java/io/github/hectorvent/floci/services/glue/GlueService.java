@@ -41,6 +41,7 @@ public class GlueService {
 
     private final StorageBackend<String, Database> databaseStore;
     private final StorageBackend<String, Table> tableStore;
+    private final StorageBackend<String, Table> tableVersionStore;
     private final StorageBackend<String, Partition> partitionStore;
     private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final GlueSchemaRegistryService schemaRegistryService;
@@ -52,6 +53,7 @@ public class GlueService {
                        RegionResolver regionResolver) {
         this.databaseStore = storageFactory.create("glue", "databases.json", new TypeReference<>() {});
         this.tableStore = storageFactory.create("glue", "tables.json", new TypeReference<>() {});
+        this.tableVersionStore = storageFactory.create("glue", "table_versions.json", new TypeReference<>() {});
         this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
@@ -60,12 +62,14 @@ public class GlueService {
 
     GlueService(StorageBackend<String, Database> databaseStore,
                 StorageBackend<String, Table> tableStore,
+                StorageBackend<String, Table> tableVersionStore,
                 StorageBackend<String, Partition> partitionStore,
                 StorageBackend<String, UserDefinedFunction> functionStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver) {
         this.databaseStore = databaseStore;
         this.tableStore = tableStore;
+        this.tableVersionStore = tableVersionStore;
         this.partitionStore = partitionStore;
         this.functionStore = functionStore;
         this.schemaRegistryService = schemaRegistryService;
@@ -135,11 +139,7 @@ public class GlueService {
         return resolved;
     }
 
-    public void updateTable(String databaseName, Table table) {
-        updateTable(databaseName, table, null);
-    }
-
-    public synchronized void updateTable(String databaseName, Table table, String versionId) {
+    public synchronized void updateTable(String databaseName, Table table, String versionId, boolean skipArchive) {
         Database database = getDatabase(databaseName);
         String key = tableKey(databaseName, table.getName());
         Table existing = tableStore.get(key)
@@ -148,6 +148,10 @@ public class GlueService {
         if (versionId != null && !versionId.equals(existing.getVersionId())) {
             throw new AwsException("ConcurrentModificationException",
                     "Update table failed due to concurrent modifications.", 400);
+        }
+        if (!skipArchive) {
+            tableVersionStore.put(tableVersionKey(existing.getDatabaseName(), existing.getName(), existing.getVersionId()),
+                    copyTable(existing));
         }
         validateSchemaReference(table);
         table.setName(normalizeName(table.getName()));
@@ -159,13 +163,27 @@ public class GlueService {
         LOG.infov("Updated Glue Table: {0}.{1}", databaseName, table.getName());
     }
 
-    public List<Map<String, Object>> getTableVersions() {
-        return List.of();
+    public List<Map<String, Object>> getTableVersions(String databaseName, String tableName) {
+        Table current = getTable(databaseName, tableName);
+        String prefix = tableKey(databaseName, tableName) + ":";
+        List<Table> versions = new ArrayList<>();
+        versions.add(current);
+        versions.addAll(tableVersionStore.scan(k -> k.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(GlueService::versionIdAsLong).reversed())
+                .toList());
+        return versions.stream()
+                .map(table -> Map.<String, Object>of(
+                        "Table", withResolvedSchemaReference(table),
+                        "VersionId", table.getVersionId()))
+                .toList();
     }
 
     public void deleteTable(String databaseName, String tableName) {
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
+        tableVersionStore.keys().stream()
+                .filter(versionKey -> versionKey.startsWith(key + ":"))
+                .forEach(tableVersionStore::delete);
         partitionStore.scan(k -> k.startsWith(key + ":")).forEach(p -> {
             partitionStore.delete(key + ":" + String.join(",", p.getValues()));
         });
@@ -320,6 +338,10 @@ public class GlueService {
         return normalizeName(databaseName) + ":" + normalizeName(tableName);
     }
 
+    private static String tableVersionKey(String databaseName, String tableName, String versionId) {
+        return tableKey(databaseName, tableName) + ":" + versionId;
+    }
+
     private static String normalizeName(String name) {
         return name.toLowerCase(Locale.ROOT);
     }
@@ -394,6 +416,10 @@ public class GlueService {
         catch (ArithmeticException | NumberFormatException e) {
             throw new AwsException("InvalidInputException", "Invalid table VersionId: " + versionId, 400);
         }
+    }
+
+    private static long versionIdAsLong(Table table) {
+        return Long.parseLong(table.getVersionId());
     }
 
     private static StorageDescriptor copyStorageDescriptor(StorageDescriptor source) {

@@ -149,6 +149,21 @@ function_input() {
     [ "$description" = "updated" ]
     [ "$version_id" = "1" ]
 
+    run aws_cmd glue get-table-versions \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME"
+    assert_success
+    version_count=$(echo "$output" | jq '.TableVersions | length')
+    current_version=$(json_get "$output" '.TableVersions[0].VersionId')
+    current_description=$(json_get "$output" '.TableVersions[0].Table.Description')
+    archived_version=$(json_get "$output" '.TableVersions[1].VersionId')
+    archived_description=$(json_get "$output" '.TableVersions[1].Table.Description')
+    [ "$version_count" = "2" ]
+    [ "$current_version" = "1" ]
+    [ "$current_description" = "updated" ]
+    [ "$archived_version" = "0" ]
+    [ "$archived_description" = "created" ]
+
     run aws_cmd glue create-partition \
         --database-name "$DB_NAME" \
         --table-name "$TABLE_NAME" \

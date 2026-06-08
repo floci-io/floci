@@ -82,11 +82,14 @@ public class GlueJsonHandler {
             case "UpdateTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 Table table = mapper.treeToValue(request.get("TableInput"), Table.class);
-                glueService.updateTable(dbName, table, request.path("VersionId").asText(null));
+                glueService.updateTable(dbName, table, request.path("VersionId").asText(null),
+                        request.path("SkipArchive").asBoolean(false));
                 yield Response.ok().build();
             }
             case "GetTableVersions" -> {
-                yield Response.ok(Map.of("TableVersions", glueService.getTableVersions())).build();
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                yield Response.ok(Map.of("TableVersions", glueService.getTableVersions(dbName, tableName))).build();
             }
             case "DeleteTable" -> {
                 String dbName = request.get("DatabaseName").asText();
