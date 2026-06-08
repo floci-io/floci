@@ -119,6 +119,9 @@ public class Ec2QueryHandler {
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
                 case "DeleteVolume" -> handleDeleteVolume(params, region);
+                // Nat Gateway
+                case "CreateNatGateway" -> handleCreateNatGateway(params, region);
+                case "DescribeNatGateways" -> handleDescribeNatGateways(params, region);
                 default -> ec2Error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", 400);
             };
@@ -184,6 +187,22 @@ public class Ec2QueryHandler {
             filters.put(name, values);
         }
         return filters;
+    }
+
+    private List<Tag> parseTagSpecifications(MultivaluedMap<String, String> p, String resourceType) {
+        List<Tag> parsedTags = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String specResourceType = p.getFirst("TagSpecification." + i + ".ResourceType");
+            if (specResourceType == null) break;
+            if (!resourceType.equals(specResourceType)) continue;
+            for (int j = 1; ; j++) {
+                String key = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
+                if (key == null) break;
+                String value = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
+                parsedTags.add(new Tag(key, value));
+            }
+        }
+        return parsedTags;
     }
 
     private List<IpPermission> parseIpPermissions(MultivaluedMap<String, String> p, String prefix) {
@@ -1727,6 +1746,84 @@ public class Ec2QueryHandler {
             xml.end("groups").end("item");
         }
         xml.end(wrapperTag);
+        return xml.build();
+    }
+
+    private Response handleCreateNatGateway(MultivaluedMap<String, String> p, String region) {
+        String subnetId = p.getFirst("SubnetId");
+        String allocationId = p.getFirst("AllocationId");
+        String clientToken = p.getFirst("ClientToken");
+        String connectivityType = p.getFirst("ConnectivityType");
+        String privateIpAddress = p.getFirst("PrivateIpAddress");
+        String vpcId = p.getFirst("VpcId");
+
+        List<Tag> tags = parseTagSpecifications(p, "natgateway");
+
+        NatGateway natGateway = service.createNatGateway(
+                region,
+                subnetId,
+                allocationId,
+                clientToken,
+                connectivityType,
+                privateIpAddress,
+                vpcId,
+                tags
+        );
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateNatGatewayResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("clientToken", natGateway.getClientToken())
+                .start("natGateway")
+                .raw(natGatewayXml(natGateway))
+                .end("natGateway")
+                .end("CreateNatGatewayResponse");
+
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeNatGateways(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "NatGatewayId");
+        Map<String, List<String>> filters = getFilters(p);
+        int maxResults = parseIntParam(p, "MaxResults", 0);
+        String nextToken = p.getFirst("NextToken");
+        NatGatewayListResult result = service.describeNatGateways(region, ids, filters, maxResults, nextToken);
+        List<NatGateway> natGateways = result.natGateways();
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeNatGatewaysResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("natGatewaySet");
+        for (NatGateway natGateway : natGateways) {
+            xml.start("item").raw(natGatewayXml(natGateway)).end("item");
+        }
+        xml.end("natGatewaySet");
+        if (result.nextToken() != null) {
+            xml.elem("nextToken", result.nextToken());
+        }
+        xml.end("DescribeNatGatewaysResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String natGatewayXml(NatGateway natGateway) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("subnetId", natGateway.getSubnetId())
+                .start("natGatewayAddressSet");
+        for (NatGatewayAddress address : natGateway.getNatGatewayAddressSet()) {
+            xml.start("item")
+                    .elem("allocationId", address.getAllocationId())
+                    .elem("associationId", address.getAssociationId())
+                    .elem("networkInterfaceId", address.getNetworkInterfaceId())
+                    .elem("privateIp", address.getPrivateIp())
+                    .elem("publicIp", address.getPublicIp())
+                    .end("item");
+        }
+        xml.end("natGatewayAddressSet")
+                .elem("createTime", natGateway.getCreateTime() != null ? ISO_FMT.format(natGateway.getCreateTime()) : null)
+                .elem("vpcId", natGateway.getVpcId())
+                .elem("natGatewayId", natGateway.getNatGatewayId())
+                .elem("connectivityType", natGateway.getConnectivityType())
+                .elem("state", natGateway.getState())
+                .raw(tagSetXml(natGateway.getTagSet()));
         return xml.build();
     }
 }

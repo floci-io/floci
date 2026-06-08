@@ -30,6 +30,9 @@ import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
+import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayAddress;
+import io.github.hectorvent.floci.services.ec2.model.NatGatewayListResult;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterfaceAttachment;
@@ -79,6 +82,7 @@ public class Ec2Service {
     private final Map<String, Address> addresses = new ConcurrentHashMap<>();
     private final Map<String, Instance> instances = new ConcurrentHashMap<>();
     private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
+    private final Map<String, NatGateway> natGateways = new ConcurrentHashMap<>();
     // resourceId → List<Tag>
     private final Map<String, List<Tag>> tags = new ConcurrentHashMap<>();
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -990,6 +994,8 @@ public class Ec2Service {
         if (igw != null) { igw.setTags(new ArrayList<>(tagList)); return; }
         RouteTable rt = routeTables.get(key(region, resourceId));
         if (rt != null) { rt.setTags(new ArrayList<>(tagList)); return; }
+        NatGateway natGateway = natGateways.get(key(region, resourceId));
+        if (natGateway != null) { natGateway.setTagSet(new ArrayList<>(tagList)); return; }
         KeyPair kp = keyPairs.get(key(region, resourceId));
         if (kp != null) { kp.setTags(new ArrayList<>(tagList)); }
     }
@@ -1037,6 +1043,7 @@ public class Ec2Service {
         if (resourceId.startsWith("sg-")) return "security-group";
         if (resourceId.startsWith("igw-")) return "internet-gateway";
         if (resourceId.startsWith("rtb-")) return "route-table";
+        if (resourceId.startsWith("nat-")) return "natgateway";
         if (resourceId.startsWith("key-")) return "key-pair";
         if (resourceId.startsWith("eipalloc-")) return "elastic-ip";
         return "unknown";
@@ -1235,6 +1242,131 @@ public class Ec2Service {
                 .filter(a -> a.getRegion().equals(region))
                 .filter(a -> allocationIds.isEmpty() || allocationIds.contains(a.getAllocationId()))
                 .collect(Collectors.toList());
+    }
+
+    // ─── NAT Gateways ─────────────────────────────────────────────────────────
+
+    public NatGateway createNatGateway(String region, String subnetId, String allocationId,
+                                       String clientToken, String connectivityType, String privateIpAddress,
+                                       String vpcId, List<Tag> natGatewayTags) {
+        ensureDefaultResources(region);
+        if (subnetId == null || subnetId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SubnetId", 400);
+        }
+
+        Subnet subnet = getRequiredSubnet(region, subnetId);
+        if (vpcId != null && !vpcId.isBlank() && !vpcId.equals(subnet.getVpcId())) {
+            throw new AwsException("InvalidParameterValue",
+                    "VpcId does not match the VPC for subnet '" + subnetId + "'", 400);
+        }
+
+        String effectiveConnectivityType = connectivityType == null || connectivityType.isBlank()
+                ? "public"
+                : connectivityType;
+        if (!"public".equals(effectiveConnectivityType) && !"private".equals(effectiveConnectivityType)) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value (" + effectiveConnectivityType + ") for parameter ConnectivityType is invalid.", 400);
+        }
+
+        Address elasticIp = null;
+        if ("public".equals(effectiveConnectivityType)) {
+            if (allocationId == null || allocationId.isBlank()) {
+                throw new AwsException("MissingParameter",
+                        "The request must contain the parameter AllocationId for public NAT gateways", 400);
+            }
+            elasticIp = getRequiredAddress(region, allocationId);
+            if (elasticIp.getAssociationId() != null) {
+                throw new AwsException("Resource.AlreadyAssociated",
+                        "Elastic IP address " + allocationId + " is already associated", 400);
+            }
+        } else if (allocationId != null && !allocationId.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "AllocationId cannot be specified for private NAT gateways", 400);
+        }
+
+        String natGatewayId = "nat-" + randomHex(17);
+        String privateIp = privateIpAddress == null || privateIpAddress.isBlank()
+                ? assignPrivateIp(region, subnetId)
+                : privateIpAddress;
+        String networkInterfaceId = "eni-" + randomHex(17);
+
+        NatGatewayAddress address = new NatGatewayAddress();
+        address.setNetworkInterfaceId(networkInterfaceId);
+        address.setPrivateIp(privateIp);
+        if (elasticIp != null) {
+            String associationId = "eipassoc-" + randomHex(17);
+            elasticIp.setAssociationId(associationId);
+            elasticIp.setNetworkInterfaceId(networkInterfaceId);
+            elasticIp.setPrivateIpAddress(privateIp);
+            address.setAllocationId(elasticIp.getAllocationId());
+            address.setAssociationId(associationId);
+            address.setPublicIp(elasticIp.getPublicIp());
+        }
+
+        NatGateway natGateway = new NatGateway();
+        natGateway.setNatGatewayId(natGatewayId);
+        natGateway.setSubnetId(subnetId);
+        natGateway.setVpcId(subnet.getVpcId());
+        natGateway.setState("available");
+        natGateway.setCreateTime(Instant.now());
+        natGateway.setConnectivityType(effectiveConnectivityType);
+        natGateway.setClientToken(clientToken);
+        natGateway.setRegion(region);
+        natGateway.getNatGatewayAddressSet().add(address);
+        if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
+            natGateway.setTagSet(new ArrayList<>(natGatewayTags));
+            tags.put(natGatewayId, new ArrayList<>(natGatewayTags));
+        }
+
+        natGateways.put(key(region, natGatewayId), natGateway);
+        return natGateway;
+    }
+
+    public NatGatewayListResult describeNatGateways(String region, List<String> natGatewayIds,
+                                                    Map<String, List<String>> filters,
+                                                    int maxResults, String nextToken) {
+        if (maxResults > 0 && (maxResults < 5 || maxResults > 1000)) {
+            throw new AwsException("InvalidMaxResults",
+                    "Value (" + maxResults + ") for parameter MaxResults is invalid. "
+                            + "Expecting a value between 5 and 1000.", 400);
+        }
+        int offset = decodeToken(nextToken);
+
+        ensureDefaultResources(region);
+        if (natGatewayIds != null && !natGatewayIds.isEmpty()) {
+            for (String natGatewayId : natGatewayIds) {
+                getRequiredNatGateway(region, natGatewayId);
+            }
+        }
+        List<NatGateway> result = natGateways.values().stream()
+                .filter(ngw -> ngw.getRegion().equals(region))
+                .filter(ngw -> natGatewayIds == null || natGatewayIds.isEmpty()
+                        || natGatewayIds.contains(ngw.getNatGatewayId()))
+                .filter(ngw -> matchesFilters(ngw, filters, region))
+                .collect(Collectors.toList());
+
+        if (maxResults > 0) {
+            int total = result.size();
+            int toIndex = Math.min(offset + maxResults, total);
+            List<NatGateway> page = (offset < total)
+                    ? result.subList(offset, toIndex)
+                    : Collections.emptyList();
+            String newNextToken = (toIndex < total)
+                    ? encodeToken(toIndex)
+                    : null;
+            return new NatGatewayListResult(new ArrayList<>(page), newNextToken);
+        }
+
+        return new NatGatewayListResult(result, null);
+    }
+
+    private NatGateway getRequiredNatGateway(String region, String natGatewayId) {
+        NatGateway natGateway = natGateways.get(key(region, natGatewayId));
+        if (natGateway == null) {
+            throw new AwsException("NatGatewayNotFound",
+                    "The natGateway ID '" + natGatewayId + "' does not exist", 400);
+        }
+        return natGateway;
     }
 
     // ─── Availability Zones & Regions ─────────────────────────────────────────
@@ -1436,6 +1568,16 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        if (resource instanceof NatGateway natGateway) {
+            return switch (filterName) {
+                case "nat-gateway-id" -> matchesValue(values, natGateway.getNatGatewayId());
+                case "state" -> matchesValue(values, natGateway.getState());
+                case "subnet-id" -> matchesValue(values, natGateway.getSubnetId());
+                case "vpc-id" -> matchesValue(values, natGateway.getVpcId());
+                case "connectivity-type" -> matchesValue(values, natGateway.getConnectivityType());
+                default -> true;
+            };
+        }
         if (resource instanceof Volume vol) {
             return switch (filterName) {
                 case "volume-id" -> matchesValue(values, vol.getVolumeId());
@@ -1480,6 +1622,7 @@ public class Ec2Service {
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
         if (resource instanceof NetworkInterface ni) return ni.getTagSet();
+        if (resource instanceof NatGateway natGateway) return natGateway.getTagSet();
         return Collections.emptyList();
     }
 

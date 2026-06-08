@@ -161,7 +161,8 @@ public class AwsQueryController {
             "DescribeIamInstanceProfileAssociations",
             "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
             "DescribeInstanceTypes",
-            "DescribeNetworkInterfaces"
+            "DescribeNetworkInterfaces",
+            "CreateNatGateway", "DescribeNatGateways"
     );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;
