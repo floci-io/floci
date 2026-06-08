@@ -39,10 +39,15 @@ public class GlueService {
     private static final Logger LOG = Logger.getLogger(GlueService.class);
     private static final int MAX_FUNCTION_PATTERN_LENGTH = 255;
     private static final int MAX_FUNCTION_RESULTS = 100;
+    static final String COLUMN_NAME = "ColumnName";
+    static final String COLUMN_TYPE = "ColumnType";
+    static final String ANALYZED_TIME = "AnalyzedTime";
+    static final String STATISTICS_DATA = "StatisticsData";
 
     private final StorageBackend<String, Database> databaseStore;
     private final StorageBackend<String, Table> tableStore;
     private final StorageBackend<String, Table> tableVersionStore;
+    private final StorageBackend<String, Map<String, Object>> columnStatisticsStore;
     private final StorageBackend<String, Partition> partitionStore;
     private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final GlueSchemaRegistryService schemaRegistryService;
@@ -57,6 +62,7 @@ public class GlueService {
         this.databaseStore = storageFactory.create("glue", "databases.json", new TypeReference<>() {});
         this.tableStore = storageFactory.create("glue", "tables.json", new TypeReference<>() {});
         this.tableVersionStore = storageFactory.create("glue", "table_versions.json", new TypeReference<>() {});
+        this.columnStatisticsStore = storageFactory.create("glue", "column_statistics.json", new TypeReference<>() {});
         this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
@@ -67,6 +73,7 @@ public class GlueService {
     GlueService(StorageBackend<String, Database> databaseStore,
                 StorageBackend<String, Table> tableStore,
                 StorageBackend<String, Table> tableVersionStore,
+                StorageBackend<String, Map<String, Object>> columnStatisticsStore,
                 StorageBackend<String, Partition> partitionStore,
                 StorageBackend<String, UserDefinedFunction> functionStore,
                 GlueSchemaRegistryService schemaRegistryService,
@@ -75,6 +82,7 @@ public class GlueService {
         this.databaseStore = databaseStore;
         this.tableStore = tableStore;
         this.tableVersionStore = tableVersionStore;
+        this.columnStatisticsStore = columnStatisticsStore;
         this.partitionStore = partitionStore;
         this.functionStore = functionStore;
         this.schemaRegistryService = schemaRegistryService;
@@ -218,6 +226,9 @@ public class GlueService {
         tableVersionStore.keys().stream()
                 .filter(versionKey -> versionKey.startsWith(key + ":"))
                 .forEach(tableVersionStore::delete);
+        columnStatisticsStore.keys().stream()
+                .filter(statisticsKey -> statisticsKey.startsWith(key + ":"))
+                .forEach(columnStatisticsStore::delete);
         partitionStore.scan(k -> k.startsWith(key + ":")).forEach(p -> {
             partitionStore.delete(key + ":" + String.join(",", p.getValues()));
         });
@@ -239,6 +250,44 @@ public class GlueService {
             deleteTable(databaseName, tableName);
         }
         return errors;
+    }
+
+    public void updateColumnStatisticsForTable(
+            String databaseName,
+            String tableName,
+            List<Map<String, Object>> columnStatistics) {
+        Table table = getTable(databaseName, tableName);
+        for (Map<String, Object> statistics : columnStatistics) {
+            String columnNameString = requireColumnStatisticsString(statistics, COLUMN_NAME);
+            requireColumnStatisticsString(statistics, COLUMN_TYPE);
+            requireColumnStatisticsField(statistics, ANALYZED_TIME);
+            requireColumnStatisticsField(statistics, STATISTICS_DATA);
+            columnStatisticsStore.put(
+                    columnStatisticsKey(table.getDatabaseName(), table.getName(), columnNameString),
+                    new LinkedHashMap<>(statistics));
+        }
+    }
+
+    public ColumnStatisticsResult getColumnStatisticsForTable(
+            String databaseName,
+            String tableName,
+            List<String> columnNames) {
+        Table table = getTable(databaseName, tableName);
+        List<Map<String, Object>> columnStatistics = new ArrayList<>();
+        List<ColumnError> errors = new ArrayList<>();
+        for (String columnName : columnNames) {
+            Optional<Map<String, Object>> statistics =
+                    columnStatisticsStore.get(columnStatisticsKey(table.getDatabaseName(), table.getName(), columnName));
+            if (statistics.isPresent()) {
+                columnStatistics.add(new LinkedHashMap<>(statistics.get()));
+            }
+            else {
+                errors.add(new ColumnError(
+                        columnName,
+                        new ErrorDetail("EntityNotFoundException", "Statistics do not exist for this column")));
+            }
+        }
+        return new ColumnStatisticsResult(columnStatistics, errors);
     }
 
     public void createPartition(String databaseName, String tableName, Partition partition) {
@@ -376,6 +425,26 @@ public class GlueService {
         return tableKey(databaseName, tableName) + ":" + versionId;
     }
 
+    private static String columnStatisticsKey(String databaseName, String tableName, String columnName) {
+        return tableKey(databaseName, tableName) + ":" + normalizeName(columnName);
+    }
+
+    private static String requireColumnStatisticsString(Map<String, Object> statistics, String field) {
+        Object value = requireColumnStatisticsField(statistics, field);
+        if (!(value instanceof String stringValue) || stringValue.isBlank()) {
+            throw new AwsException("InvalidInputException", field + " is required", 400);
+        }
+        return stringValue;
+    }
+
+    private static Object requireColumnStatisticsField(Map<String, Object> statistics, String field) {
+        Object value = statistics.get(field);
+        if (value == null) {
+            throw new AwsException("InvalidInputException", field + " is required", 400);
+        }
+        return value;
+    }
+
     private static String normalizeName(String name) {
         return name.toLowerCase(Locale.ROOT);
     }
@@ -424,6 +493,14 @@ public class GlueService {
     public record ErrorDetail(
             @JsonProperty("ErrorCode") String errorCode,
             @JsonProperty("ErrorMessage") String errorMessage) {}
+
+    public record ColumnStatisticsResult(
+            @JsonProperty("ColumnStatisticsList") List<Map<String, Object>> columnStatisticsList,
+            @JsonProperty("Errors") List<ColumnError> errors) {}
+
+    public record ColumnError(
+            @JsonProperty("ColumnName") String columnName,
+            @JsonProperty("Error") ErrorDetail error) {}
 
     private static Table copyTable(Table source) {
         Table copy = new Table();

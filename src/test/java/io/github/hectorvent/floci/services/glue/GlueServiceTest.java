@@ -21,6 +21,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -48,6 +49,7 @@ class GlueServiceTest {
     private GlueSchemaRegistryService schemaRegistryService;
     private StorageBackend<String, Table> tableStore;
     private StorageBackend<String, Table> tableVersionStore;
+    private StorageBackend<String, Map<String, Object>> columnStatisticsStore;
     private StorageBackend<String, Partition> partitionStore;
 
     @BeforeEach
@@ -57,11 +59,13 @@ class GlueServiceTest {
         schemaRegistryService = new GlueSchemaRegistryService(storageFactory, regionResolver);
         tableStore = new InMemoryStorage<>();
         tableVersionStore = new InMemoryStorage<>();
+        columnStatisticsStore = new InMemoryStorage<>();
         partitionStore = new InMemoryStorage<>();
         glueService = new GlueService(
                 new InMemoryStorage<String, Database>(),
                 tableStore,
                 tableVersionStore,
+                columnStatisticsStore,
                 partitionStore,
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService());
@@ -576,6 +580,73 @@ class GlueServiceTest {
     }
 
     @Test
+    void columnStatisticsCanBeUpdatedAndRetrieved() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        Map<String, Object> statistics = columnStatistics("id");
+
+        glueService.updateColumnStatisticsForTable("db1", "plain", List.of(statistics));
+
+        GlueService.ColumnStatisticsResult fetched =
+                glueService.getColumnStatisticsForTable("db1", "plain", List.of("id"));
+        assertEquals(1, fetched.columnStatisticsList().size());
+        assertTrue(fetched.errors().isEmpty());
+        assertEquals("id", fetched.columnStatisticsList().get(0).get(GlueService.COLUMN_NAME));
+        assertEquals("LONG", ((Map<?, ?>) fetched.columnStatisticsList().get(0).get("StatisticsData")).get("Type"));
+    }
+
+    @Test
+    void getColumnStatisticsReportsMissingColumns() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        GlueService.ColumnStatisticsResult fetched =
+                glueService.getColumnStatisticsForTable("db1", "plain", List.of("missing"));
+
+        assertTrue(fetched.columnStatisticsList().isEmpty());
+        assertEquals(1, fetched.errors().size());
+        assertEquals("missing", fetched.errors().getFirst().columnName());
+        assertEquals("EntityNotFoundException", fetched.errors().getFirst().error().errorCode());
+        assertEquals("Statistics do not exist for this column", fetched.errors().getFirst().error().errorMessage());
+    }
+
+    @Test
+    void updateColumnStatisticsRejectsMissingRequiredFields() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        for (String field : List.of(
+                GlueService.COLUMN_NAME,
+                GlueService.COLUMN_TYPE,
+                GlueService.ANALYZED_TIME,
+                GlueService.STATISTICS_DATA)) {
+            Map<String, Object> statistics = new LinkedHashMap<>(columnStatistics("id"));
+            statistics.remove(field);
+
+            AwsException exception = assertThrows(AwsException.class,
+                    () -> glueService.updateColumnStatisticsForTable("db1", "plain", List.of(statistics)));
+
+            assertEquals("InvalidInputException", exception.getErrorCode());
+            assertEquals(field + " is required", exception.getMessage());
+        }
+    }
+
+    @Test
+    void deleteTableDeletesColumnStatistics() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        glueService.updateColumnStatisticsForTable("db1", "plain", List.of(columnStatistics("id")));
+
+        glueService.deleteTable("db1", "plain");
+
+        assertTrue(columnStatisticsStore.scan(k -> true).isEmpty());
+    }
+
+    @Test
     void userDefinedFunctionsCanBeCreatedListedUpdatedAndDeleted() {
         UserDefinedFunction function = new UserDefinedFunction();
         function.setFunctionName("udf__test__integer");
@@ -685,6 +756,21 @@ class GlueServiceTest {
         sd.setSchemaReference(ref);
         table.setStorageDescriptor(sd);
         return table;
+    }
+
+    private static Map<String, Object> columnStatistics(String columnName) {
+        Map<String, Object> statistics = new LinkedHashMap<>();
+        statistics.put(GlueService.COLUMN_NAME, columnName);
+        statistics.put(GlueService.COLUMN_TYPE, "int");
+        statistics.put(GlueService.ANALYZED_TIME, Instant.parse("2026-06-08T00:00:00Z"));
+        statistics.put(GlueService.STATISTICS_DATA, Map.of(
+                "Type", "LONG",
+                "LongColumnStatisticsData", Map.of(
+                        "MinimumValue", 1,
+                        "MaximumValue", 10,
+                        "NumberOfNulls", 0,
+                        "NumberOfDistinctValues", 10)));
+        return statistics;
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
