@@ -34,8 +34,10 @@ import software.amazon.awssdk.services.glue.model.UpdateTableRequest;
 import software.amazon.awssdk.services.glue.model.UpdateUserDefinedFunctionRequest;
 import software.amazon.awssdk.services.glue.model.UserDefinedFunction;
 import software.amazon.awssdk.services.glue.model.UserDefinedFunctionInput;
+import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
 
 import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -48,12 +50,15 @@ class GlueCatalogTest {
     private static final String TABLE_NAME = "catalog_table";
     private static final String SECOND_TABLE_NAME = "catalog_table_second";
     private static final String FUNCTION_NAME = "catalog_function";
+    private static final String DATABASE_TAGGED_NAME = TestFixtures.uniqueName("catalog_tagged_db");
 
     private static GlueClient glue;
+    private static ResourceGroupsTaggingApiClient tagging;
 
     @BeforeAll
     static void setup() {
         glue = TestFixtures.glueClient();
+        tagging = TestFixtures.resourceGroupsTaggingApiClient();
     }
 
     @AfterAll
@@ -84,6 +89,12 @@ class GlueCatalogTest {
         catch (Exception ignored) {}
         try {
             glue.deleteDatabase(DeleteDatabaseRequest.builder()
+                    .name(DATABASE_TAGGED_NAME)
+                    .build());
+        }
+        catch (Exception ignored) {}
+        try {
+            glue.deleteDatabase(DeleteDatabaseRequest.builder()
                     .name(BATCH_DELETE_DATABASE_NAME)
                     .build());
         }
@@ -95,6 +106,7 @@ class GlueCatalogTest {
         }
         catch (Exception ignored) {}
         glue.close();
+        tagging.close();
     }
 
     @Test
@@ -262,6 +274,27 @@ class GlueCatalogTest {
         glue.deleteDatabase(DeleteDatabaseRequest.builder()
                 .name(BATCH_DELETE_DATABASE_NAME)
                 .build());
+    }
+
+    @Test
+    void createDatabaseWithTags_tagsReturnedByResourceGroupsTaggingApi() {
+        glue.createDatabase(CreateDatabaseRequest.builder()
+                .databaseInput(DatabaseInput.builder()
+                        .name(DATABASE_TAGGED_NAME)
+                        .description("catalog compatibility database with tags")
+                        .build())
+                .tags(Map.of("Environment", "dev", "Project", "project1"))
+                .build());
+
+        String databaseArn = "arn:aws:glue:us-east-1:000000000000:database/" + DATABASE_TAGGED_NAME;
+        var response = tagging.getResources(b -> b.resourceARNList(databaseArn));
+
+        assertThat(response.resourceTagMappingList()).singleElement().satisfies(mapping -> {
+            assertThat(mapping.resourceARN()).isEqualTo(databaseArn);
+            assertThat(mapping.tags().stream().collect(Collectors.toMap(t -> t.key(), t -> t.value())))
+                    .containsEntry("Environment", "dev")
+                    .containsEntry("Project", "project1");
+        });
     }
 
     private static TableInput tableInput(String description) {

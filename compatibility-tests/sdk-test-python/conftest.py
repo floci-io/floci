@@ -116,6 +116,18 @@ def cloudwatch_client(aws_config, client_config):
 
 
 @pytest.fixture
+def glue_client(aws_config, client_config):
+    """Create Glue client."""
+    return boto3.client("glue", config=client_config, **aws_config)
+
+
+@pytest.fixture
+def resourcegroupstaggingapi_client(aws_config, client_config):
+    """Create Resource Groups Tagging API client."""
+    return boto3.client("resourcegroupstaggingapi", config=client_config, **aws_config)
+
+
+@pytest.fixture
 def logs_client(aws_config, client_config):
     """Create CloudWatch Logs client."""
     return boto3.client("logs", config=client_config, **aws_config)
