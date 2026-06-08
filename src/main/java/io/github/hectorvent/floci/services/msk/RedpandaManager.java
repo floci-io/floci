@@ -29,7 +29,7 @@ public class RedpandaManager {
 
     private static final Logger LOG = Logger.getLogger(RedpandaManager.class);
     private static final int KAFKA_PORT = 9092;
-    private static final int ADMIN_PORT = 9644;
+    static final int ADMIN_PORT = 9644;
 
     // Redpanda's Admin API exposes readiness at /v1/status/ready. /ready always returns 404
     private static final String ADMIN_READY_PATH = "/v1/status/ready";
