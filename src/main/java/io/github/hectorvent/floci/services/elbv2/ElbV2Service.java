@@ -67,6 +67,7 @@ public class ElbV2Service {
         String id = randomHex16();
         String arn = AwsArnUtils.Arn.of("elasticloadbalancing", region, regionResolver.getAccountId(), "loadbalancer/" + typePrefix + "/" + name + "/" + id).toString();
         String dnsName = name + "-" + id + ".elb.localhost";
+        String vpcId = resolveSubnetVpcId(region, subnets);
 
         LoadBalancer lb = new LoadBalancer();
         lb.setLoadBalancerArn(arn);
@@ -75,7 +76,7 @@ public class ElbV2Service {
         lb.setCreatedTime(Instant.now());
         lb.setLoadBalancerName(name);
         lb.setScheme(lbScheme);
-        lb.setVpcId("vpc-00000001");
+        lb.setVpcId(vpcId);
         lb.setState("active");
         lb.setType(lbType);
         lb.setIpAddressType(ipType);
@@ -169,7 +170,15 @@ public class ElbV2Service {
 
     public void setSubnets(String region, String arn, List<String> subnets) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
+        String vpcId = resolveSubnetVpcId(region, subnets);
+        if (vpcId != null && lb.getVpcId() != null && !lb.getVpcId().equals(vpcId)) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "All subnets must belong to the load balancer VPC.", 400);
+        }
         lb.setAvailabilityZones(resolveAvailabilityZones(region, subnets));
+        if (vpcId != null) {
+            lb.setVpcId(vpcId);
+        }
     }
 
     public void setIpAddressType(String region, String arn, String ipAddressType) {
@@ -700,6 +709,35 @@ public class ElbV2Service {
             availabilityZones.add(availabilityZone);
         }
         return availabilityZones;
+    }
+
+    private String resolveSubnetVpcId(String region, List<String> subnetIds) {
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            return null;
+        }
+
+        List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
+        Map<String, Subnet> subnetsById = subnets.stream()
+                .collect(Collectors.toMap(Subnet::getSubnetId, subnet -> subnet, (left, right) -> left));
+
+        for (String subnetId : subnetIds) {
+            if (!subnetsById.containsKey(subnetId)) {
+                throw new AwsException("SubnetNotFound",
+                        "The subnet ID '" + subnetId + "' does not exist", 400);
+            }
+        }
+
+        Set<String> vpcIds = subnetIds.stream()
+                .map(subnetsById::get)
+                .map(Subnet::getVpcId)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+
+        if (vpcIds.size() > 1) {
+            throw new AwsException("InvalidConfigurationRequest",
+                    "All subnets must belong to the same VPC.", 400);
+        }
+
+        return vpcIds.iterator().next();
     }
 
     private TargetGroup requireTargetGroup(String region, String arn) {

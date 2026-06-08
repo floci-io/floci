@@ -18,6 +18,8 @@ class ElbV2IntegrationTest {
 
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/elasticloadbalancing/aws4_request";
+    private static final String EC2_AUTH =
+            "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/ec2/aws4_request";
 
     private static String lbArn;
     private static String tgArn;
@@ -215,10 +217,183 @@ class ElbV2IntegrationTest {
                         equalTo("us-east-1b"));
     }
 
+    @Test
+    @Order(10)
+    void createLoadBalancerWithSubnetsFromDifferentVpcsThrows() {
+        String otherVpcId = given()
+                .formParam("Action", "CreateVpc")
+                .formParam("CidrBlock", "10.0.0.0/16")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateVpcResponse.vpc.vpcId");
+
+        String otherSubnetId = given()
+                .formParam("Action", "CreateSubnet")
+                .formParam("VpcId", otherVpcId)
+                .formParam("CidrBlock", "10.0.1.0/24")
+                .formParam("AvailabilityZone", "us-east-1a")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateSubnetResponse.subnet.subnetId");
+
+        given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "mixed-vpc-lb")
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", "subnet-default-a")
+                .formParam("Subnets.member.2", otherSubnetId)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
+    }
+
+    @Test
+    @Order(11)
+    void setSubnetsWithSubnetsFromDifferentVpcsThrows() {
+        String otherVpcId = given()
+                .formParam("Action", "CreateVpc")
+                .formParam("CidrBlock", "10.1.0.0/16")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateVpcResponse.vpc.vpcId");
+
+        String otherSubnetId = given()
+                .formParam("Action", "CreateSubnet")
+                .formParam("VpcId", otherVpcId)
+                .formParam("CidrBlock", "10.1.1.0/24")
+                .formParam("AvailabilityZone", "us-east-1b")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateSubnetResponse.subnet.subnetId");
+
+        String subnetLbArn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "set-subnets-test-lb")
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", "subnet-default-a")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", subnetLbArn)
+                .formParam("Subnets.member.1", "subnet-default-a")
+                .formParam("Subnets.member.2", otherSubnetId)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("InvalidConfigurationRequest"));
+    }
+
+    @Test
+    @Order(12)
+    void setSubnetsAfterSubnetlessCreateCanAdoptCustomVpc() {
+        String customVpcId = given()
+                .formParam("Action", "CreateVpc")
+                .formParam("CidrBlock", "10.2.0.0/16")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateVpcResponse.vpc.vpcId");
+
+        String customSubnetId = given()
+                .formParam("Action", "CreateSubnet")
+                .formParam("VpcId", customVpcId)
+                .formParam("CidrBlock", "10.2.1.0/24")
+                .formParam("AvailabilityZone", "us-east-1c")
+                .header("Authorization", EC2_AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateSubnetResponse.subnet.subnetId");
+
+        String subnetlessLbArn = given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "subnetless-lb")
+                .formParam("Type", "application")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", subnetlessLbArn)
+                .formParam("Subnets.member.1", customSubnetId)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", subnetlessLbArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.VpcId",
+                        equalTo(customVpcId))
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        equalTo(customSubnetId));
+    }
+
+    @Test
+    @Order(13)
+    void createLoadBalancerWithMissingSubnetThrowsSubnetNotFound() {
+        given()
+                .formParam("Action", "CreateLoadBalancer")
+                .formParam("Name", "missing-subnet-lb")
+                .formParam("Type", "application")
+                .formParam("Subnets.member.1", "subnet-does-not-exist")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("SubnetNotFound"));
+    }
+
     // ── Target Groups ─────────────────────────────────────────────────────────
 
     @Test
-    @Order(10)
+    @Order(14)
     void createTargetGroup() {
         tgArn = given()
                 .formParam("Action", "CreateTargetGroup")
@@ -249,7 +424,7 @@ class ElbV2IntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(15)
     void describeTargetGroups() {
         given()
                 .formParam("Action", "DescribeTargetGroups")
@@ -264,7 +439,7 @@ class ElbV2IntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(16)
     void duplicateTargetGroupNameThrows() {
         given()
                 .formParam("Action", "CreateTargetGroup")
@@ -278,7 +453,7 @@ class ElbV2IntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(17)
     void modifyTargetGroupAttributes() {
         given()
                 .formParam("Action", "ModifyTargetGroupAttributes")
@@ -295,7 +470,7 @@ class ElbV2IntegrationTest {
     }
 
     @Test
-    @Order(14)
+    @Order(18)
     void describeTargetGroupsByMissingNameThrows() {
         given()
                 .formParam("Action", "DescribeTargetGroups")
@@ -309,7 +484,7 @@ class ElbV2IntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(19)
     void describeTargetGroupsByMissingArnThrows() {
         given()
                 .formParam("Action", "DescribeTargetGroups")
