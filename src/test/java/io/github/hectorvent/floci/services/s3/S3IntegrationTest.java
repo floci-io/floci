@@ -157,26 +157,6 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(10)
-    void pathTraversalInUrlIsNormalizedByFramework() {
-        // Vertx normalizes raw `..` in URL paths before the application layer,
-        // so /test-bucket/../../secret.txt becomes /secret.txt at the framework level
-        // and routes to a bucket-level handler (not S3Service.putObject for test-bucket).
-        //
-        // The actual service-layer traversal guard (resolveObjectPath) is tested
-        // in S3ServiceTest.resolvePathWithTraversalThrows.
-        //
-        // Verify that the normalized path does NOT result in a 500 error.
-        given()
-            .contentType("text/plain")
-            .body("safe-data")
-        .when()
-            .put("/test-bucket/../../secret.txt")
-        .then()
-            .statusCode(not(equalTo(500)));
-    }
-
-    @Test
     @Order(11)
     void listObjectsWithPrefix() {
         given()
@@ -1936,6 +1916,80 @@ class S3IntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("BadDigest"));
+    }
+
+    @Test
+    @Order(200)
+    void putObjectWithRawTraversalAboveBucketReturnsBadRequest() {
+        given()
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/../../secret.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidKey"));
+    }
+
+    @Test
+    @Order(201)
+    void putObjectWithEncodedTraversalAboveBucketReturnsBadRequest() {
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/%2E%2E/%2E%2E/secret.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidKey"));
+    }
+
+    @Test
+    @Order(202)
+    void putObjectWithEncodedSlashTraversalAboveBucketReturnsBadRequest() {
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/%2E%2E%2Fsecret.txt")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidKey"));
+    }
+
+    @Test
+    @Order(203)
+    void putObjectWithInternalTraversalSucceeds() {
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/docs/%2E%2E/file.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/test-bucket/docs/%2E%2E/file.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("safe-data"));
+    }
+
+    @Test
+    @Order(204)
+    void listObjectsAllowsTraversalInQueryString() {
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/test-bucket?prefix=../x")
+        .then()
+            .statusCode(200)
+            .body(containsString("ListBucketResult"));
     }
 
     private static String customerKeyMd5(String customerKey) {

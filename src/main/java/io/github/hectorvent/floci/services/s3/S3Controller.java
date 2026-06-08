@@ -151,6 +151,7 @@ public class S3Controller {
                                   @Context HttpHeaders httpHeaders,
                                   byte[] body) {
         try {
+            validateRawUri();
             if (hasQueryParam(uriInfo, "notification")) {
                 return handlePutBucketNotification(bucket, body);
             }
@@ -237,6 +238,7 @@ public class S3Controller {
     public Response deleteBucket(@PathParam("bucket") String bucket,
                                   @Context UriInfo uriInfo) {
         try {
+            validateRawUri();
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.deleteBucketTagging(bucket);
                 return Response.noContent().build();
@@ -2486,9 +2488,37 @@ public class S3Controller {
 
     private void validateRawUri() {
         String rawUri = currentVertxRequest.getCurrent().request().uri();
-        String lower = rawUri.toLowerCase();
-        if (lower.contains("/..") || lower.contains("../") || lower.contains("%2e%2e") || lower.contains("%2e.") || lower.contains(".%2e")) {
+        int queryIndex = rawUri.indexOf('?');
+        String rawPath = queryIndex >= 0 ? rawUri.substring(0, queryIndex) : rawUri;
+        String decodedPath;
+        try {
+            decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
+        }
+        catch (IllegalArgumentException e) {
             throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
+        }
+
+        String[] segments = decodedPath.split("/", -1);
+        int firstKeySegment = decodedPath.startsWith("/") ? 2 : 1;
+        if (segments.length <= firstKeySegment) {
+            return;
+        }
+
+        int depth = 0;
+        for (int index = firstKeySegment; index < segments.length; index++) {
+            String segment = segments[index];
+            if (segment.isEmpty() || ".".equals(segment)) {
+                continue;
+            }
+            if ("..".equals(segment)) {
+                if (depth == 0) {
+                    throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
+                }
+                depth--;
+            }
+            else {
+                depth++;
+            }
         }
     }
 
