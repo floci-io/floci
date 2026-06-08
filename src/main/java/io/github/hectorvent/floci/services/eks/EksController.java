@@ -76,9 +76,7 @@ public class EksController {
 
     @GET
     @Path("/clusters/{name}/node-groups")
-    public Response listNodegroups(@PathParam("name") String name,
-                                   @QueryParam("nextToken") String nextToken,
-                                   @QueryParam("maxResults") Integer maxResults) {
+    public Response listNodegroups(@PathParam("name") String name) {
         List<String> nodegroups = eksService.listNodegroups(name);
         return Response.ok(Map.of("nodegroups", nodegroups)).build();
     }
