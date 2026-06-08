@@ -24,10 +24,12 @@ public class Ec2QueryHandler {
             .withZone(ZoneOffset.UTC);
 
     private final Ec2Service service;
+    private final FlowLogService flowLogService;
 
     @Inject
-    public Ec2QueryHandler(Ec2Service service) {
+    public Ec2QueryHandler(Ec2Service service, FlowLogService flowLogService) {
         this.service = service;
+        this.flowLogService = flowLogService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -115,6 +117,15 @@ public class Ec2QueryHandler {
                 case "DescribeInstanceTypes" -> handleDescribeInstanceTypes(params, region);
                 // Network Interfaces
                 case "DescribeNetworkInterfaces" -> handleDescribeNetworkInterfaces(params, region);
+                // VPC Flow Logs
+                case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
+                case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
+                case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
+
+                case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
+                case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
+                case "DescribeVpcEndpointConnections" -> handleDescribeVpcEndpointConnections(params, region);
+                case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
                 // Volumes
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
@@ -1589,6 +1600,209 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("tagSet");
+        return xml.build();
+    }
+
+    // ─── VPC Flow Logs handlers ─────────────────────────────────────────────────
+
+    private Response handleCreateFlowLogs(MultivaluedMap<String, String> p, String region) {
+        String resourceType = p.getFirst("ResourceType");
+        List<String> resourceIds = getList(p, "ResourceId");
+        String trafficType = p.getFirst("TrafficType");
+        String logDestinationType = p.getFirst("LogDestinationType");
+        String logDestination = p.getFirst("LogDestination");
+        if (logDestination == null) {
+            logDestination = p.getFirst("LogDestinationArn");
+        }
+        String logFormat = p.getFirst("LogFormat");
+        int maxAgg = parseIntParam(p, "MaxAggregationInterval", 600);
+
+        if (resourceIds.isEmpty()) {
+            // Some SDKs send ResourceIds.member.N — fall back to that prefix.
+            resourceIds = getList(p, "ResourceIds.member");
+        }
+        if (resourceIds.isEmpty()) {
+            return ec2Error("MissingParameter", "The request must contain at least one ResourceId.", 400);
+        }
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("flowLogIdSet");
+        for (String resourceId : resourceIds) {
+            FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
+                    logDestinationType, logDestination, logFormat, maxAgg);
+            xml.elem("item", fl.getFlowLogId());
+        }
+        xml.end("flowLogIdSet")
+                .start("unsuccessful").end("unsuccessful")
+                .end("CreateFlowLogsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeFlowLogs(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "FlowLogId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "FlowLogIds.member");
+        }
+        List<FlowLog> logs = flowLogService.describeFlowLogs(region, ids);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("flowLogSet");
+        for (FlowLog fl : logs) {
+            xml.start("item")
+                    .elem("flowLogId", fl.getFlowLogId())
+                    .elem("resourceId", fl.getResourceId())
+                    .elem("trafficType", fl.getTrafficType())
+                    .elem("logDestinationType", fl.getLogDestinationType())
+                    .elem("logDestination", fl.getLogDestination())
+                    .elem("flowLogStatus", fl.getFlowLogStatus())
+                    .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
+                    .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
+                    .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
+                    .end("item");
+        }
+        xml.end("flowLogSet").end("DescribeFlowLogsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteFlowLogs(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "FlowLogId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "FlowLogIds.member");
+        }
+        flowLogService.deleteFlowLogs(ids);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("unsuccessful").end("unsuccessful")
+                .end("DeleteFlowLogsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    // ─── VPC Endpoints ──────────────────────────────────────────────────────────
+
+    private Response handleCreateVpcEndpoint(MultivaluedMap<String, String> p, String region) {
+        String serviceName = p.getFirst("ServiceName");
+        String vpcId = p.getFirst("VpcId");
+        String endpointType = p.getFirst("VpcEndpointType"); // Interface | Gateway
+        List<String> subnetIds = getList(p, "SubnetId");
+        List<String> securityGroupIds = getList(p, "SecurityGroupId");
+        List<String> routeTableIds = getList(p, "RouteTableId");
+
+        io.github.hectorvent.floci.services.ec2.model.VpcEndpoint ep =
+                service.createVpcEndpoint(region, serviceName, vpcId, endpointType,
+                        subnetIds, securityGroupIds, routeTableIds);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .raw(vpcEndpointXml(ep, "vpcEndpoint"))
+                .end("CreateVpcEndpointResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpcEndpoints(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "VpcEndpointId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<io.github.hectorvent.floci.services.ec2.model.VpcEndpoint> eps =
+                service.describeVpcEndpoints(region, ids, filters);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpcEndpointsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcEndpointSet");
+        for (io.github.hectorvent.floci.services.ec2.model.VpcEndpoint ep : eps) {
+            xml.raw(vpcEndpointXml(ep, "item"));
+        }
+        xml.end("vpcEndpointSet").end("DescribeVpcEndpointsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeVpcEndpointConnections(MultivaluedMap<String, String> p, String region) {
+        // Interface endpoints to a real AWS service (e.g. S3) have no inbound
+        // service connections, so return an empty set. cloudsync calls this
+        // per-endpoint and SKIPS the endpoint entirely if this errors — so it
+        // must succeed (empty) for the endpoint to sync.
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeVpcEndpointConnectionsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("vpcEndpointConnectionSet").end("vpcEndpointConnectionSet")
+                .end("DescribeVpcEndpointConnectionsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteVpcEndpoints(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "VpcEndpointId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "VpcEndpointId.member");
+        }
+        // Remove the endpoints (and their interface-endpoint ENIs). AWS returns an
+        // <unsuccessful> set listing only the ids it could NOT delete; an empty set
+        // means every requested id was deleted.
+        service.deleteVpcEndpoints(region, ids);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteVpcEndpointsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("unsuccessful").end("unsuccessful")
+                .end("DeleteVpcEndpointsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    /**
+     * Serialize one VPC endpoint. AWS wraps the endpoint in {@code <vpcEndpoint>}
+     * for {@code CreateVpcEndpoint} and in {@code <item>} for each member of the
+     * {@code DescribeVpcEndpoints} set, so the wrapper element is parameterized.
+     */
+    private String vpcEndpointXml(io.github.hectorvent.floci.services.ec2.model.VpcEndpoint ep,
+                                  String wrapperElement) {
+        XmlBuilder xml = new XmlBuilder()
+                .start(wrapperElement)
+                .elem("vpcEndpointId", ep.getVpcEndpointId())
+                .elem("vpcEndpointType", ep.getVpcEndpointType())
+                .elem("vpcId", ep.getVpcId())
+                .elem("serviceName", ep.getServiceName())
+                .elem("state", ep.getState())
+                .elem("privateDnsEnabled", String.valueOf(ep.isPrivateDnsEnabled()))
+                .elem("ipAddressType", ep.getIpAddressType())
+                .elem("ownerId", ep.getOwnerId())
+                .elem("creationTimestamp", ISO_FMT.format(ep.getCreationTimestamp()));
+        // subnetIdSet
+        xml.start("subnetIdSet");
+        for (String s : ep.getSubnetIds()) {
+            xml.elem("item", s);
+        }
+        xml.end("subnetIdSet");
+        // networkInterfaceIdSet
+        xml.start("networkInterfaceIdSet");
+        for (String e : ep.getNetworkInterfaceIds()) {
+            xml.elem("item", e);
+        }
+        xml.end("networkInterfaceIdSet");
+        // routeTableIdSet
+        xml.start("routeTableIdSet");
+        for (String r : ep.getRouteTableIds()) {
+            xml.elem("item", r);
+        }
+        xml.end("routeTableIdSet");
+        // groupSet (security groups)
+        xml.start("groupSet");
+        for (GroupIdentifier g : ep.getGroups()) {
+            xml.start("item")
+                    .elem("groupId", g.getGroupId())
+                    .elem("groupName", g.getGroupName())
+                    .end("item");
+        }
+        xml.end("groupSet");
+        // dnsEntrySet
+        xml.start("dnsEntrySet");
+        for (String dns : ep.getDnsNames()) {
+            xml.start("item").elem("dnsName", dns).end("item");
+        }
+        xml.end("dnsEntrySet");
+        xml.raw(tagSetXml(ep.getTagSet()));
+        xml.end(wrapperElement);
         return xml.build();
     }
 
