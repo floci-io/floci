@@ -335,7 +335,8 @@ public class AwsQueryController {
             "ListConfigurationSets", "DeleteConfigurationSet",
             "CreateConfigurationSetEventDestination",
             "UpdateConfigurationSetEventDestination",
-            "DeleteConfigurationSetEventDestination"
+            "DeleteConfigurationSetEventDestination",
+            "UpdateConfigurationSetSendingEnabled"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(

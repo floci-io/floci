@@ -216,6 +216,9 @@ floci:
       enabled: true
       mock: false                             # true = tasks go to RUNNING without Docker (useful for CI)
 
+    appsync:
+      enabled: true
+
     appconfig:
       enabled: true
 

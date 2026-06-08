@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -35,6 +36,8 @@ final class SesEventPayload {
                             String sourceArn, String sendingAccountId, String subject,
                             List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> envelopeDestinations,
+                            List<String> suppressionBounceRecipients,
+                            List<String> suppressionComplaintRecipients,
                             String configurationSetName, List<MessageTag> emailTags,
                             List<MessageHeader> additionalHeaders, Instant timestamp) {
         ObjectNode root = mapper.createObjectNode();
@@ -43,7 +46,8 @@ final class SesEventPayload {
                 subject, toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
                 configurationSetName, emailTags, additionalHeaders, timestamp));
         root.set(blockName(eventType),
-                buildEventBlock(mapper, eventType, messageId, envelopeDestinations, timestamp));
+                buildEventBlock(mapper, eventType, messageId, envelopeDestinations,
+                        suppressionBounceRecipients, suppressionComplaintRecipients, timestamp));
         return root;
     }
 
@@ -146,7 +150,10 @@ final class SesEventPayload {
     }
 
     private static ObjectNode buildEventBlock(ObjectMapper mapper, String eventType, String messageId,
-                                              List<String> destination, Instant timestamp) {
+                                              List<String> destination,
+                                              List<String> suppressionBounceRecipients,
+                                              List<String> suppressionComplaintRecipients,
+                                              Instant timestamp) {
         ObjectNode body = mapper.createObjectNode();
         switch (eventType) {
             case "DELIVERY" -> {
@@ -164,24 +171,16 @@ final class SesEventPayload {
             case "BOUNCE" -> {
                 body.put("bounceType", "Permanent");
                 body.put("bounceSubType", "General");
-                ArrayNode bounced = body.putArray("bouncedRecipients");
-                for (String d : destination) {
-                    if (SimulatorAddresses.isBounce(d)) {
-                        ObjectNode br = bounced.addObject();
-                        br.put("emailAddress", d.trim());
-                    }
-                }
+                emitDedupedRecipientObjects(body.putArray("bouncedRecipients"),
+                        destination, SimulatorAddresses::isBounce,
+                        suppressionBounceRecipients);
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
                 body.put("feedbackId", "feedback-" + messageId);
             }
             case "COMPLAINT" -> {
-                ArrayNode complained = body.putArray("complainedRecipients");
-                for (String d : destination) {
-                    if (SimulatorAddresses.isComplaint(d)) {
-                        ObjectNode cr = complained.addObject();
-                        cr.put("emailAddress", d.trim());
-                    }
-                }
+                emitDedupedRecipientObjects(body.putArray("complainedRecipients"),
+                        destination, SimulatorAddresses::isComplaint,
+                        suppressionComplaintRecipients);
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
                 body.put("feedbackId", "feedback-" + messageId);
             }
@@ -191,6 +190,33 @@ final class SesEventPayload {
             }
         }
         return body;
+    }
+
+    /**
+     * Emit `{emailAddress: ...}` objects into {@code arr} for every recipient that either
+     * matches {@code simulatorPredicate} in {@code envelope} or is listed in
+     * {@code suppressionRecipients}. Addresses are trimmed and deduplicated by trimmed
+     * form so the same address never appears twice when both inputs claim it.
+     */
+    private static void emitDedupedRecipientObjects(ArrayNode arr,
+                                                    List<String> envelope,
+                                                    java.util.function.Predicate<String> simulatorPredicate,
+                                                    List<String> suppressionRecipients) {
+        LinkedHashSet<String> emitted = new LinkedHashSet<>();
+        if (envelope != null) {
+            for (String d : envelope) {
+                if (d != null && simulatorPredicate.test(d) && emitted.add(d.trim())) {
+                    arr.addObject().put("emailAddress", d.trim());
+                }
+            }
+        }
+        if (suppressionRecipients != null) {
+            for (String d : suppressionRecipients) {
+                if (d != null && emitted.add(d.trim())) {
+                    arr.addObject().put("emailAddress", d.trim());
+                }
+            }
+        }
     }
 
     private static String eventTypeLabel(String eventType) {

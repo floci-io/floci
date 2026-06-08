@@ -1375,8 +1375,11 @@ public class Ec2QueryHandler {
                     .start("attachment")
                     .elem("attachmentId", eni.getAttachmentId())
                     .elem("deviceIndex", String.valueOf(eni.getDeviceIndex()))
-                    .elem("status", "attached")
-                    .elem("deleteOnTermination", "true")
+                    .elem("status", "attached");
+            if (eni.getAttachTime() != null) {
+                xml.elem("attachTime", eni.getAttachTime());
+            }
+            xml.elem("deleteOnTermination", "true")
                     .end("attachment")
                     .start("privateIpAddressesSet")
                     .start("item")

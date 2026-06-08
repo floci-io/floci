@@ -308,4 +308,13 @@ class KmsTest {
 
         assertThat(verifyResponse.signatureValid()).isTrue();
     }
+
+    @Test
+    @Order(19)
+    void generateRandom() {
+        var response = kms.generateRandom(b -> b.numberOfBytes(32));
+
+        assertThat(response.plaintext()).isNotNull();
+        assertThat(response.plaintext().asByteArray()).hasSize(32);
+    }
 }

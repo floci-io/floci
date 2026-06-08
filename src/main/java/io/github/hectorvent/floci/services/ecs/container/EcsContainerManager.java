@@ -10,10 +10,13 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.Volume;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.ExposedPort;
@@ -63,20 +66,43 @@ public class EcsContainerManager {
      * Starts Docker containers for all container definitions in a task.
      * Updates the task's container list in-place with runtime network bindings and docker IDs.
      */
-    public EcsTaskHandle startTask(EcsTask task, TaskDefinition taskDef, String region) {
+    public EcsTaskHandle startTask(EcsTask task, TaskDefinition taskDef,
+                                   List<ContainerOverride> containerOverrides, String region) {
         String taskId = extractTaskId(task.getTaskArn());
 
         Map<String, String> containerIds = new LinkedHashMap<>();
         List<Closeable> logStreams = new ArrayList<>();
         List<Container> runtimeContainers = new ArrayList<>();
 
+        // Task-level volumes: map volume name -> host source path, consumed by per-container mountPoints.
+        Map<String, String> volumeSourcePaths = new LinkedHashMap<>();
+        if (taskDef.getVolumes() != null) {
+            for (Volume v : taskDef.getVolumes()) {
+                if (v.name() != null && v.hostSourcePath() != null) {
+                    volumeSourcePaths.put(v.name(), v.hostSourcePath());
+                }
+            }
+        }
+
         for (ContainerDefinition def : taskDef.getContainerDefinitions()) {
             String containerName = "floci-ecs-" + taskId + "-" + def.getName();
+
+            // RunTask containerOverrides matched by container name: command replaces
+            // the task-def command; environment is merged over the task-def environment.
+            ContainerOverride override = null;
+            if (containerOverrides != null) {
+                for (ContainerOverride co : containerOverrides) {
+                    if (def.getName() != null && def.getName().equals(co.getName())) {
+                        override = co;
+                        break;
+                    }
+                }
+            }
 
             // Build container spec
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(def.getImage())
                     .withName(containerName)
-                    .withEnv(buildEnvVars(def))
+                    .withEnv(buildEnvVars(def, override))
                     .withDockerNetwork(config.services().ecs().dockerNetwork())
                     .withLogRotation();
 
@@ -98,12 +124,36 @@ public class EcsContainerManager {
                 }
             }
 
-            // Add command and entrypoint if specified
-            if (def.getCommand() != null && !def.getCommand().isEmpty()) {
-                specBuilder.withCmd(def.getCommand());
+            // Add command and entrypoint if specified. An override command (from
+            // RunTask containerOverrides) takes precedence over the task-def command.
+            List<String> effectiveCommand =
+                    (override != null && override.getCommand() != null && !override.getCommand().isEmpty())
+                            ? override.getCommand()
+                            : def.getCommand();
+            if (effectiveCommand != null && !effectiveCommand.isEmpty()) {
+                specBuilder.withCmd(effectiveCommand);
             }
             if (def.getEntryPoint() != null && !def.getEntryPoint().isEmpty()) {
                 specBuilder.withEntrypoint(def.getEntryPoint());
+            }
+
+            // Bind-mount task-level volumes referenced by this container's mountPoints.
+            // The host source path resolves on the Docker daemon (sibling-container launch),
+            // so it must be an absolute host path. Unresolved volume references are skipped.
+            if (def.getMountPoints() != null) {
+                for (MountPoint mp : def.getMountPoints()) {
+                    String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
+                    if (sourcePath == null || mp.containerPath() == null) {
+                        LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
+                                mp.sourceVolume(), def.getName());
+                        continue;
+                    }
+                    if (mp.readOnly()) {
+                        specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
+                    } else {
+                        specBuilder.withBind(sourcePath, mp.containerPath());
+                    }
+                }
             }
 
             ContainerSpec spec = specBuilder.build();
@@ -232,12 +282,22 @@ public class EcsContainerManager {
         }
     }
 
-    private List<String> buildEnvVars(ContainerDefinition def) {
-        List<String> envVars = new ArrayList<>();
+    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override) {
+        // Task-def environment first, then override environment (override wins on key conflict).
+        Map<String, String> envMap = new LinkedHashMap<>();
         if (def.getEnvironment() != null) {
             for (var kv : def.getEnvironment()) {
-                envVars.add(kv.name() + "=" + kv.value());
+                envMap.put(kv.name(), kv.value());
             }
+        }
+        if (override != null && override.getEnvironment() != null) {
+            for (var kv : override.getEnvironment()) {
+                envMap.put(kv.name(), kv.value());
+            }
+        }
+        List<String> envVars = new ArrayList<>();
+        for (var entry : envMap.entrySet()) {
+            envVars.add(entry.getKey() + "=" + entry.getValue());
         }
         return envVars;
     }

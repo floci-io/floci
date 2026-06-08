@@ -277,6 +277,9 @@ public class Ec2Service {
             eni.setGroups(new ArrayList<>(sgIdentifiers));
             eni.setAttachmentId("eni-attach-" + randomHex(17));
             eni.setDeviceIndex(0);
+            if (inst.getLaunchTime() != null) {
+                eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+            }
             inst.getNetworkInterfaces().add(eni);
 
             // Root EBS volume

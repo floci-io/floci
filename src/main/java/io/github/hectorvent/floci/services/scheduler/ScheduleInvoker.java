@@ -60,7 +60,7 @@ public class ScheduleInvoker {
 
         if (arn.contains(":sqs:")) {
             String queueUrl = AwsArnUtils.arnToQueueUrl(arn, baseUrl);
-            sqsService.sendMessage(queueUrl, payload, 0);
+            sqsService.sendMessage(queueUrl, payload, 0, targetRegion);
             LOG.debugv("Scheduler delivered to SQS: {0}", arn);
         } else if (arn.contains(":lambda:") || arn.contains(":function:")) {
             String fnName = arn.substring(arn.lastIndexOf(':') + 1);

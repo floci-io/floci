@@ -7,6 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.23] - 2026-06-07
+
+### Added
+
+- **iam:** seed the standard EKS cluster and node-group managed policies ([#1216](https://github.com/floci-io/floci/pull/1216))
+- **appsync:** Phase 2 — schema registry, model fixes, CRUDL completion, and AWS scalars ([#1185](https://github.com/floci-io/floci/pull/1185))
+- **cloudwatch:** accept a log group ARN via `logGroupIdentifier` ([#1172](https://github.com/floci-io/floci/pull/1172))
+- **ecs:** honour task-definition volumes and container `mountPoints` ([#1171](https://github.com/floci-io/floci/pull/1171))
+- **ses:** per-configuration-set sending toggle (v1 + v2) ([#1193](https://github.com/floci-io/floci/pull/1193))
+- **glue:** support `DeleteDatabase` ([#1181](https://github.com/floci-io/floci/pull/1181))
+- **glue:** support user-defined functions ([#1187](https://github.com/floci-io/floci/pull/1187))
+
+### Fixed
+
+- **glue:** enforce table version checks ([#1184](https://github.com/floci-io/floci/pull/1184), [#1211](https://github.com/floci-io/floci/pull/1211))
+- **glue:** preserve view table fields ([#1182](https://github.com/floci-io/floci/pull/1182))
+- **dynamodb:** persist the SSE specification and return `SSEDescription` for encrypted tables ([#1191](https://github.com/floci-io/floci/pull/1191))
+- **dynamodb:** accept `AttributesToGet` with `Select=SPECIFIC_ATTRIBUTES` in `Query` ([#1190](https://github.com/floci-io/floci/pull/1190))
+- **dynamodb:** update the reserved keywords list ([#1176](https://github.com/floci-io/floci/pull/1176))
+- **ecs:** retain inactive services for Terraform draining and recreation with correct idempotency ([#1166](https://github.com/floci-io/floci/pull/1166))
+- **ec2:** include `AttachTime` in the describe-instances network interface response ([#1214](https://github.com/floci-io/floci/pull/1214))
+- **stepfunctions:** honor `Catch` on Lambda task failures ([#1196](https://github.com/floci-io/floci/pull/1196))
+- **cloudformation:** poll for `CREATE_COMPLETE` in the SAM changeset test ([#1199](https://github.com/floci-io/floci/pull/1199))
+- **sns:** align mobile push error codes, payload resolution, and Token rotation with AWS ([#1165](https://github.com/floci-io/floci/pull/1165))
+- **elbv2:** align `DeleteTargetGroup` with the AWS Query response ([#1194](https://github.com/floci-io/floci/pull/1194))
+- **cloudwatch:** tag rpc-v2-cbor timestamp lists so `GetMetricData` decodes ([#1162](https://github.com/floci-io/floci/pull/1162))
+
+### Documentation
+
+- **ses:** list the v1 `ConfigurationSetEventDestination` actions ([#1192](https://github.com/floci-io/floci/pull/1192))
+
+### Build
+
+- bump Quarkus to 3.36.0 and patch build dependencies ([#1197](https://github.com/floci-io/floci/pull/1197))
+
+## [1.5.22] - 2026-06-04
+
+### Added
+
+- **eks:** make real-mode clusters reachable from the host and authenticate `aws eks get-token` via a token webhook ([#1167](https://github.com/floci-io/floci/pull/1167))
+- **ecs:** honour RunTask `containerOverrides` — per-container `command` and `environment` ([#1151](https://github.com/floci-io/floci/pull/1151))
+- **ecs:** provision ECS resources via CloudFormation ([#1120](https://github.com/floci-io/floci/pull/1120))
+- **elbv2:** provision ELBv2 resources via CloudFormation ([#1121](https://github.com/floci-io/floci/pull/1121))
+- **cloudformation:** persist stacks across restart ([#1124](https://github.com/floci-io/floci/pull/1124))
+- **sns:** mock mobile push for iOS and Android platform endpoints ([#1115](https://github.com/floci-io/floci/pull/1115))
+- **kms:** `GenerateRandom` action ([#1036](https://github.com/floci-io/floci/pull/1036))
+- **appsync:** AWS AppSync management API (Phase 1) ([#1108](https://github.com/floci-io/floci/pull/1108))
+- **ses:** publish SES events to SNS configuration set destinations ([#1106](https://github.com/floci-io/floci/pull/1106))
+- **ses:** V1 `ConfigurationSetEventDestination` CRUD ([#1111](https://github.com/floci-io/floci/pull/1111))
+- **ses:** apply the suppression list during send, with a per-configuration-set `SuppressionOptions` override ([#1109](https://github.com/floci-io/floci/pull/1109))
+
+### Fixed
+
+- **eventbridge:** propagate the `PutEvents` call region and account through pattern matching and the delivered envelope ([#1125](https://github.com/floci-io/floci/pull/1125))
+- **cloudformation:** roll back failed stack creates ([#1123](https://github.com/floci-io/floci/pull/1123))
+- **apigatewayv2:** support the CloudFormation update path ([#1122](https://github.com/floci-io/floci/pull/1122))
+- **apigateway:** implement `EndpointConfiguration` for REST APIs ([#1116](https://github.com/floci-io/floci/pull/1116))
+- **athena:** align metadata behavior with AWS ([#1119](https://github.com/floci-io/floci/pull/1119))
+- **lambda:** support path-style ECR URIs for image functions ([#1135](https://github.com/floci-io/floci/pull/1135))
+- **elb:** return `TargetGroupNotFound` for missing target groups ([#1161](https://github.com/floci-io/floci/pull/1161))
+- **ecs:** preserve create-time resource tags ([#1139](https://github.com/floci-io/floci/pull/1139))
+- **ecr:** resolve the backing registry endpoint from the control plane ([#1113](https://github.com/floci-io/floci/pull/1113))
+- **docker:** retry transient registry failures during image pull ([#1117](https://github.com/floci-io/floci/pull/1117))
+- **dns:** resolve public hostnames from spawned containers ([#1168](https://github.com/floci-io/floci/pull/1168))
+- **s3:** handle empty object suffix ranges ([#1142](https://github.com/floci-io/floci/pull/1142))
+- **s3:** return an error on unsupported S3 Select expressions ([#1160](https://github.com/floci-io/floci/pull/1160))
+- **core:** use the request region consistently across service operations ([#1105](https://github.com/floci-io/floci/pull/1105))
+
+### Security
+
+- **s3:** enforce SSE-C customer keys on object reads, writes, copies, and multipart uploads ([#1143](https://github.com/floci-io/floci/pull/1143))
+
+### Documentation
+
+- **appsync:** add AppSync service documentation ([#1149](https://github.com/floci-io/floci/pull/1149))
+- add light/dark logo branding, mkdocs theming, and README badges ([#1150](https://github.com/floci-io/floci/pull/1150))
+
+### Build
+
+- bump `actions/checkout` from 4 to 6.0.2 ([#1159](https://github.com/floci-io/floci/pull/1159))
+- bump `aws-actions/configure-aws-credentials` from 4 to 6.1.2 ([#1158](https://github.com/floci-io/floci/pull/1158))
+- bump the actions-minor-patch group with 5 updates ([#1157](https://github.com/floci-io/floci/pull/1157))
+
 ## [1.5.21] - 2026-05-31
 
 ### Added
@@ -808,7 +891,9 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.20...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.22...HEAD
+[1.5.22]: https://github.com/floci-io/floci/compare/1.5.21...1.5.22
+[1.5.21]: https://github.com/floci-io/floci/compare/1.5.20...1.5.21
 [1.5.20]: https://github.com/floci-io/floci/compare/1.5.19...1.5.20
 [1.5.19]: https://github.com/floci-io/floci/compare/1.5.18...1.5.19
 [1.5.18]: https://github.com/floci-io/floci/compare/1.5.17...1.5.18

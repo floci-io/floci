@@ -177,7 +177,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**52 AWS services. Broad coverage. Free forever.**
+**53 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -189,7 +189,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · ELB v2 · Auto Scaling\nCodeDeploy · Backup · Bedrock Runtime · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nCodeDeploy · Backup · Bedrock Runtime · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -220,10 +220,10 @@ Floci supports local emulation for application services, data services, eventing
 |---|---|
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
-| API and identity | API Gateway REST, API Gateway v2, Cognito, ACM, Route53 |
+| API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
 | Graph database | Neptune |
-| Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract |
+| Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract, Transcribe |
 | Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
@@ -245,6 +245,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Lambda | Real Docker | Runtime environment, execution model, warm container pool, aliases, Function URLs |
 | API Gateway REST | In-process | Resources, methods, stages, Lambda proxy, MOCK integrations, AWS integrations |
 | API Gateway v2 | In-process | HTTP APIs, routes, integrations, JWT authorizers, stages |
+| AppSync | In-process | GraphQL API management API, schema registry, AWS scalars, domain names, channel namespaces |
 | IAM | In-process | Users, roles, groups, policies, instance profiles, access keys |
 | STS | In-process | AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
 | Cognito | In-process | User pools, app clients, auth flows, JWKS and OpenID well-known endpoints |
@@ -269,6 +270,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |
 | ACM | In-process | Certificate issuance and validation lifecycle |
 | ECR | In-process with real registry | Repositories, docker push / pull, image-backed Lambda functions |
+| Resource Groups Tagging API | In-process | GetResources, tag and untag resources, tag key and value discovery across services |
 | SES | In-process | Send email, raw email, identity verification, DKIM, templates |
 | SES v2 | In-process | REST JSON API, identities, DKIM, account sending, templates |
 | OpenSearch | Real Docker | Domain CRUD, tags, versions, instance types, upgrade stubs |
@@ -283,8 +285,10 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
+| Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
 | Textract | In-process stub | API-compatible stubs, dummy block data, async job simulation |
+| Transcribe | In-process stub | Transcription jobs and custom vocabularies; jobs complete immediately, no real audio processing |
 | Pricing | In-process with static snapshot | Product discovery, attributes, price list files, pagination |
 | Cost Explorer | In-process | Cost synthesized from Floci resource state and pricing snapshots |
 | Cost and Usage Reports | In-process with floci-duck sidecar | CUR 2.0 and FOCUS 1.2 columns, account-scoped storage, Parquet emission |

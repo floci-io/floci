@@ -62,7 +62,8 @@ class DynamoDbIntegrationTest {
             .statusCode(200)
             .body("TableDescription.TableName", equalTo("TestTable"))
             .body("TableDescription.TableStatus", equalTo("ACTIVE"))
-            .body("TableDescription.KeySchema.size()", equalTo(2));
+            .body("TableDescription.KeySchema.size()", equalTo(2))
+            .body("TableDescription.SSEDescription", nullValue());
     }
 
     @Test
@@ -83,6 +84,83 @@ class DynamoDbIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("ResourceInUseException"));
+    }
+
+    @Test
+    void createTableWithEnabledSseReturnsStableDescription() throws Exception {
+        Response createResponse = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.CreateTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "SseTable",
+                    "KeySchema": [{"AttributeName": "pk", "KeyType": "HASH"}],
+                    "AttributeDefinitions": [{"AttributeName": "pk", "AttributeType": "S"}],
+                    "BillingMode": "PAY_PER_REQUEST",
+                    "SSESpecification": {"Enabled": true}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("TableDescription.SSEDescription.Status", equalTo("ENABLED"))
+            .body("TableDescription.SSEDescription.SSEType", equalTo("KMS"))
+            .body("TableDescription.SSEDescription.KMSMasterKeyArn",
+                    startsWith("arn:aws:kms:us-east-1:000000000000:key/"))
+            .extract()
+            .response();
+
+        ObjectMapper mapper = new ObjectMapper();
+        JsonNode createSseDescription = mapper.readTree(createResponse.asString())
+                .path("TableDescription").path("SSEDescription");
+
+        Response firstDescribeResponse = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Table.SSEDescription.Status", equalTo("ENABLED"))
+            .body("Table.SSEDescription.SSEType", equalTo("KMS"))
+            .extract()
+            .response();
+
+        JsonNode firstDescribeSseDescription = mapper.readTree(firstDescribeResponse.asString())
+                .path("Table").path("SSEDescription");
+        assertEquals(createSseDescription, firstDescribeSseDescription);
+
+        Response secondDescribeResponse = given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DescribeTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract()
+            .response();
+
+        JsonNode secondDescribeSseDescription = mapper.readTree(secondDescribeResponse.asString())
+                .path("Table").path("SSEDescription");
+        assertEquals(firstDescribeSseDescription, secondDescribeSseDescription);
+
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "SseTable"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
@@ -291,6 +369,126 @@ class DynamoDbIntegrationTest {
             .statusCode(200)
             .body("Count", equalTo(3))
             .body("Items.size()", equalTo(3));
+    }
+
+    @Test
+    @Order(10)
+    void queryWithSelectSpecificAttributesAndAttributesToGet() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {
+                        ":pk": {"S": "user-1"}
+                    },
+                    "Select": "SPECIFIC_ATTRIBUTES",
+                    "AttributesToGet": ["pk", "sk"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Count", equalTo(3))
+            .body("Items[0].size()", equalTo(2))
+            .body("Items[0].pk.S", equalTo("user-1"))
+            .body("Items[0].sk.S", equalTo("order-001"))
+            .body("Items[0].name", nullValue())
+            .body("Items[0].age", nullValue())
+            .body("Items[0].total", nullValue())
+            .body("Items[1].size()", equalTo(2))
+            .body("Items[1].pk.S", equalTo("user-1"))
+            .body("Items[1].sk.S", equalTo("order-002"))
+            .body("Items[1].total", nullValue())
+            .body("Items[2].size()", equalTo(2))
+            .body("Items[2].pk.S", equalTo("user-1"))
+            .body("Items[2].sk.S", equalTo("profile"))
+            .body("Items[2].name", nullValue())
+            .body("Items[2].age", nullValue());
+    }
+
+    @Test
+    @Order(10)
+    void queryWithSelectSpecificAttributesAndProjectionExpression() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {
+                        ":pk": {"S": "user-1"}
+                    },
+                    "Select": "SPECIFIC_ATTRIBUTES",
+                    "ProjectionExpression": "pk, sk"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Count", equalTo(3))
+            .body("Items[0].size()", equalTo(2))
+            .body("Items[0].pk.S", equalTo("user-1"))
+            .body("Items[0].sk.S", equalTo("order-001"))
+            .body("Items[0].name", nullValue())
+            .body("Items[0].age", nullValue())
+            .body("Items[0].total", nullValue());
+    }
+
+    @Test
+    @Order(10)
+    void queryWithSelectSpecificAttributesRequiresProjectionParameters() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {
+                        ":pk": {"S": "user-1"}
+                    },
+                    "Select": "SPECIFIC_ATTRIBUTES"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided."));
+    }
+
+    @Test
+    @Order(10)
+    void queryWithProjectionExpressionAndAttributesToGetFails() {
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Query")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {
+                    "TableName": "TestTable",
+                    "KeyConditionExpression": "pk = :pk",
+                    "ExpressionAttributeValues": {
+                        ":pk": {"S": "user-1"}
+                    },
+                    "Select": "SPECIFIC_ATTRIBUTES",
+                    "ProjectionExpression": "pk, sk",
+                    "AttributesToGet": ["pk", "sk"]
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"))
+            .body("message", equalTo("Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}"));
     }
 
     @Test

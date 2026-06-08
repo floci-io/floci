@@ -17,6 +17,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import io.quarkus.test.junit.QuarkusTest;
 import static io.restassured.RestAssured.given;
 
+import static org.hamcrest.Matchers.matchesRegex;
+
 /**
  * Integration tests for EC2 via the EC2 Query Protocol (form-encoded POST, XML response).
  */
@@ -665,6 +667,31 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(82)
+    void describeInstancesHasNetworkInterfaceAttachTime() {
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.attachment.attachmentId",
+                    startsWith("eni-attach-"))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.attachment.attachTime",
+                    matchesRegex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(\\.\\d+)?Z$"))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.attachment.status",
+                    equalTo("attached"))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item"
+                    + ".networkInterfaceSet.item.attachment.deleteOnTermination",
+                    equalTo("true"));
+    }
+
+    @Test
+    @Order(83)
     void describeInstancesBlockDeviceMappingHasVolumeId() {
         given()
             .formParam("Action", "DescribeInstances")
@@ -685,7 +712,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(83)
+    @Order(84)
     void rootVolumeAppearsInDescribeVolumes() {
         // Extract the root volume ID from DescribeInstances
         String rootVolId = given()
@@ -711,7 +738,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(84)
+    @Order(85)
     void describeInstanceAttributeDisableApiStop() {
         given()
             .formParam("Action", "DescribeInstanceAttribute")
@@ -727,7 +754,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(85)
+    @Order(86)
     void describeInstanceAttributeDisableApiTermination() {
         given()
             .formParam("Action", "DescribeInstanceAttribute")
@@ -743,7 +770,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(86)
+    @Order(87)
     void describeInstancesByFilter() {
         given()
             .formParam("Action", "DescribeInstances")
@@ -759,7 +786,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(87)
+    @Order(88)
     void describeInstanceStatus() {
         given()
             .formParam("Action", "DescribeInstanceStatus")
@@ -774,7 +801,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(88)
+    @Order(89)
     void associateAddressToInstance() {
         associationId = given()
             .formParam("Action", "AssociateAddress")
@@ -790,7 +817,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(89)
+    @Order(90)
     void stopInstance() {
         given()
             .formParam("Action", "StopInstances")
@@ -805,7 +832,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(89)
+    @Order(90)
     void startInstance() {
         given()
             .formParam("Action", "StartInstances")
@@ -820,7 +847,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(89)
+    @Order(90)
     void rebootInstance() {
         given()
             .formParam("Action", "RebootInstances")

@@ -15,7 +15,7 @@ public class FunctionConfiguration {
     private String requestMappingTemplate;
     private String responseMappingTemplate;
     private String functionVersion;
-    private String arn;
+    private String functionArn;
     private String code;
 
     public String getFunctionId() { return functionId; }
@@ -39,8 +39,8 @@ public class FunctionConfiguration {
     public String getFunctionVersion() { return functionVersion; }
     public void setFunctionVersion(String functionVersion) { this.functionVersion = functionVersion; }
 
-    public String getArn() { return arn; }
-    public void setArn(String arn) { this.arn = arn; }
+    public String getFunctionArn() { return functionArn; }
+    public void setFunctionArn(String functionArn) { this.functionArn = functionArn; }
 
     public String getCode() { return code; }
     public void setCode(String code) { this.code = code; }

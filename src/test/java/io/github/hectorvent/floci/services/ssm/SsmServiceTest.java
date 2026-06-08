@@ -26,8 +26,9 @@ class SsmServiceTest {
 
     @Test
     void putAndGetParameter() {
-        ssmService.putParameter("/app/db/host", "localhost", "String", null, false);
-        Parameter param = ssmService.getParameter("/app/db/host");
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/db/host", "localhost", "String", null, false, region);
+        Parameter param = ssmService.getParameter("/app/db/host", region);
 
         assertEquals("/app/db/host", param.getName());
         assertEquals("localhost", param.getValue());
@@ -38,9 +39,10 @@ class SsmServiceTest {
 
     @Test
     void putParameterOverwrite() {
-        ssmService.putParameter("/app/key", "v1", "String", null, false);
-        ssmService.putParameter("/app/key", "v2", "String", null, true);
-        Parameter param = ssmService.getParameter("/app/key");
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+        Parameter param = ssmService.getParameter("/app/key", region);
 
         assertEquals("v2", param.getValue());
         assertEquals(2, param.getVersion());
@@ -48,78 +50,85 @@ class SsmServiceTest {
 
     @Test
     void putParameterWithoutOverwriteThrows() {
-        ssmService.putParameter("/app/key", "v1", "String", null, false);
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
         assertThrows(AwsException.class, () ->
-                ssmService.putParameter("/app/key", "v2", "String", null, false));
+                ssmService.putParameter("/app/key", "v2", "String", null, false, region));
     }
 
     @Test
     void getParameterNotFound() {
         AwsException ex = assertThrows(AwsException.class, () ->
-                ssmService.getParameter("/nonexistent"));
+                ssmService.getParameter("/nonexistent", "eu-west-1"));
         assertEquals("ParameterNotFound", ex.getErrorCode());
     }
 
     @Test
     void getParameters() {
-        ssmService.putParameter("/a", "1", "String", null, false);
-        ssmService.putParameter("/b", "2", "String", null, false);
-        ssmService.putParameter("/c", "3", "String", null, false);
+        String region = "eu-west-1";
+        ssmService.putParameter("/a", "1", "String", null, false, region);
+        ssmService.putParameter("/b", "2", "String", null, false, region);
+        ssmService.putParameter("/c", "3", "String", null, false, region);
 
-        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"));
+        List<Parameter> params = ssmService.getParameters(List.of("/a", "/c", "/missing"), region);
         assertEquals(2, params.size());
     }
 
     @Test
     void getParametersByPathRecursive() {
-        ssmService.putParameter("/app/db/host", "localhost", "String", null, false);
-        ssmService.putParameter("/app/db/port", "5432", "String", null, false);
-        ssmService.putParameter("/app/db/nested/deep", "value", "String", null, false);
-        ssmService.putParameter("/app/cache/host", "redis", "String", null, false);
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/db/host", "localhost", "String", null, false, region);
+        ssmService.putParameter("/app/db/port", "5432", "String", null, false, region);
+        ssmService.putParameter("/app/db/nested/deep", "value", "String", null, false, region);
+        ssmService.putParameter("/app/cache/host", "redis", "String", null, false, region);
 
-        List<Parameter> results = ssmService.getParametersByPath("/app/db", true);
+        List<Parameter> results = ssmService.getParametersByPath("/app/db", true, region);
         assertEquals(3, results.size());
     }
 
     @Test
     void getParametersByPathNonRecursive() {
-        ssmService.putParameter("/app/db/host", "localhost", "String", null, false);
-        ssmService.putParameter("/app/db/port", "5432", "String", null, false);
-        ssmService.putParameter("/app/db/nested/deep", "value", "String", null, false);
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/db/host", "localhost", "String", null, false, region);
+        ssmService.putParameter("/app/db/port", "5432", "String", null, false, region);
+        ssmService.putParameter("/app/db/nested/deep", "value", "String", null, false, region);
 
-        List<Parameter> results = ssmService.getParametersByPath("/app/db", false);
+        List<Parameter> results = ssmService.getParametersByPath("/app/db", false, region);
         assertEquals(2, results.size());
     }
 
     @Test
     void deleteParameter() {
-        ssmService.putParameter("/app/key", "value", "String", null, false);
-        ssmService.deleteParameter("/app/key");
-        assertThrows(AwsException.class, () -> ssmService.getParameter("/app/key"));
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "value", "String", null, false, region);
+        ssmService.deleteParameter("/app/key", region);
+        assertThrows(AwsException.class, () -> ssmService.getParameter("/app/key", region));
     }
 
     @Test
     void deleteParameterNotFoundThrows() {
-        assertThrows(AwsException.class, () -> ssmService.deleteParameter("/missing"));
+        assertThrows(AwsException.class, () -> ssmService.deleteParameter("/missing", "eu-west-1"));
     }
 
     @Test
     void deleteParameters() {
-        ssmService.putParameter("/a", "1", "String", null, false);
-        ssmService.putParameter("/b", "2", "String", null, false);
+        String region = "eu-west-1";
+        ssmService.putParameter("/a", "1", "String", null, false, region);
+        ssmService.putParameter("/b", "2", "String", null, false, region);
 
-        List<String> deleted = ssmService.deleteParameters(List.of("/a", "/missing"));
+        List<String> deleted = ssmService.deleteParameters(List.of("/a", "/missing"), region);
         assertEquals(1, deleted.size());
         assertEquals("/a", deleted.getFirst());
     }
 
     @Test
     void getParameterHistory() {
-        ssmService.putParameter("/app/key", "v1", "String", null, false);
-        ssmService.putParameter("/app/key", "v2", "String", null, true);
-        ssmService.putParameter("/app/key", "v3", "String", null, true);
+        String region = "eu-west-1";
+        ssmService.putParameter("/app/key", "v1", "String", null, false, region);
+        ssmService.putParameter("/app/key", "v2", "String", null, true, region);
+        ssmService.putParameter("/app/key", "v3", "String", null, true, region);
 
-        List<ParameterHistory> history = ssmService.getParameterHistory("/app/key");
+        List<ParameterHistory> history = ssmService.getParameterHistory("/app/key", region);
         assertEquals(3, history.size());
         assertEquals("v1", history.get(0).getValue());
         assertEquals("v3", history.get(2).getValue());
@@ -127,11 +136,12 @@ class SsmServiceTest {
 
     @Test
     void parameterHistoryIsTrimmedToMax() {
+        String region = "eu-west-1";
         for (int i = 1; i <= 7; i++) {
-            ssmService.putParameter("/app/key", "v" + i, "String", null, i == 1 ? false : true);
+            ssmService.putParameter("/app/key", "v" + i, "String", null, i == 1 ? false : true, region);
         }
 
-        List<ParameterHistory> history = ssmService.getParameterHistory("/app/key");
+        List<ParameterHistory> history = ssmService.getParameterHistory("/app/key", region);
         assertEquals(5, history.size());
         assertEquals("v3", history.get(0).getValue());
         assertEquals("v7", history.get(4).getValue());

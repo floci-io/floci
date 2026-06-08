@@ -189,6 +189,26 @@ public final class LambdaUtils {
         return createZip("index.js", code);
     }
 
+    /**
+     * ZIP containing a Node.js handler that resolves a public hostname via {@code dns.lookup}
+     * (the same getaddrinfo path used by {@code fetch}). Receives {@code {host}} in the event.
+     * Used to verify Floci's embedded DNS forwards public lookups from inside Lambda containers
+     * (regression for https://github.com/floci-io/floci/issues/1110).
+     */
+    public static byte[] publicDnsLookupZip() {
+        String code = """
+                const dns = require('dns').promises;
+                exports.handler = async (event) => {
+                    const host = (event && event.host) ? event.host : 'example.com';
+                    console.log('[public-dns] resolving', host);
+                    const res = await dns.lookup(host);
+                    console.log('[public-dns] resolved', host, '->', res.address);
+                    return { resolved: true, host, address: res.address };
+                };
+                """;
+        return createZip("index.js", code);
+    }
+
     private static byte[] createZip(String filename, String content) {
         try {
             ByteArrayOutputStream baos = new ByteArrayOutputStream();

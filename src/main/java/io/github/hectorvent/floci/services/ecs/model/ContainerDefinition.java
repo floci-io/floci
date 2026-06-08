@@ -17,6 +17,7 @@ public class ContainerDefinition {
     private List<KeyValuePair> environment;
     private List<String> command;
     private List<String> entryPoint;
+    private List<MountPoint> mountPoints;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -47,4 +48,7 @@ public class ContainerDefinition {
 
     public List<String> getEntryPoint() { return entryPoint; }
     public void setEntryPoint(List<String> entryPoint) { this.entryPoint = entryPoint; }
+
+    public List<MountPoint> getMountPoints() { return mountPoints; }
+    public void setMountPoints(List<MountPoint> mountPoints) { this.mountPoints = mountPoints; }
 }

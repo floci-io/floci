@@ -189,10 +189,6 @@ public class SqsService {
         }
     }
 
-    public Queue createQueue(String queueName, Map<String, String> attributes) {
-        return createQueue(queueName, attributes, null, regionResolver.getDefaultRegion());
-    }
-
     public Queue createQueue(String queueName, Map<String, String> attributes, String region) {
         return createQueue(queueName, attributes, null, region);
     }
@@ -263,10 +259,6 @@ public class SqsService {
         return queue;
     }
 
-    public void deleteQueue(String queueUrl) {
-        deleteQueue(queueUrl, regionResolver.getDefaultRegion());
-    }
-
     public void deleteQueue(String queueUrl, String region) {
         String storageKey = regionKey(region, queueUrl);
         if (queueStore.get(storageKey).isEmpty()) {
@@ -288,10 +280,6 @@ public class SqsService {
         LOG.infov("Deleted queue: {0}", queueUrl);
     }
 
-    public List<Queue> listQueues(String namePrefix) {
-        return listQueues(namePrefix, regionResolver.getDefaultRegion());
-    }
-
     public List<Queue> listQueues(String namePrefix, String region) {
         String prefix = region + "::";
         if (namePrefix == null || namePrefix.isEmpty()) {
@@ -307,10 +295,6 @@ public class SqsService {
         });
     }
 
-    public String getQueueUrl(String queueName) {
-        return getQueueUrl(queueName, regionResolver.getDefaultRegion());
-    }
-
     public String getQueueUrl(String queueName, String region) {
         String accountId = regionResolver.getAccountId();
         String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
@@ -320,10 +304,6 @@ public class SqsService {
                     "The specified queue does not exist for this wsdl version.", 400);
         }
         return queueUrl;
-    }
-
-    public Map<String, String> getQueueAttributes(String queueUrl, List<String> attributeNames) {
-        return getQueueAttributes(queueUrl, attributeNames, regionResolver.getDefaultRegion());
     }
 
     public Map<String, String> getQueueAttributes(String queueUrl, List<String> attributeNames, String region) {
@@ -354,18 +334,8 @@ public class SqsService {
         return filtered;
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds) {
-        return sendMessage(queueUrl, body, delaySeconds, null, null);
-    }
-
     public Message sendMessage(String queueUrl, String body, int delaySeconds, String region) {
         return sendMessage(queueUrl, body, delaySeconds, null, null, region);
-    }
-
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
-                               String messageGroupId, String messageDeduplicationId) {
-        return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, null,
-                regionResolver.getDefaultRegion());
     }
 
     public Message sendMessage(String queueUrl, String body, int delaySeconds,
@@ -607,11 +577,6 @@ public class SqsService {
         }
     }
 
-    public List<Message> receiveMessage(String queueUrl, int maxMessages, int visibilityTimeout, int waitTimeSeconds) {
-        return receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds,
-                regionResolver.getDefaultRegion());
-    }
-
     public List<Message> receiveMessage(String queueUrl, int maxMessages, int visibilityTimeout,
                                         int waitTimeSeconds, String region) {
         String storageKey = regionKey(region, queueUrl);
@@ -729,18 +694,10 @@ public class SqsService {
         }
     }
 
-    public List<Message> peekMessages(String queueUrl) {
-        return peekMessages(queueUrl, regionResolver.getDefaultRegion());
-    }
-
     public List<Message> peekMessages(String queueUrl, String region) {
         String storageKey = regionKey(region, queueUrl);
         ensureQueueExists(storageKey);
         return getOrCreateQueue(storageKey).peekAll();
-    }
-
-    public void deleteMessage(String queueUrl, String receiptHandle) {
-        deleteMessage(queueUrl, receiptHandle, regionResolver.getDefaultRegion());
     }
 
     public void deleteMessage(String queueUrl, String receiptHandle, String region) {
@@ -764,10 +721,6 @@ public class SqsService {
         }
     }
 
-    public void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout) {
-        changeMessageVisibility(queueUrl, receiptHandle, visibilityTimeout, regionResolver.getDefaultRegion());
-    }
-
     public void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout, String region) {
         String storageKey = regionKey(region, queueUrl);
         ensureQueueExists(storageKey);
@@ -777,10 +730,6 @@ public class SqsService {
             throw new AwsException("ReceiptHandleIsInvalid",
                     "The input receipt handle is not a valid receipt handle.", 400);
         }
-    }
-
-    public void purgeQueue(String queueUrl) {
-        purgeQueue(queueUrl, regionResolver.getDefaultRegion());
     }
 
     public void purgeQueue(String queueUrl, String region) {

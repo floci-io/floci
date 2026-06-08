@@ -39,6 +39,9 @@ public class TableDefinition {
     private boolean streamEnabled;
     private String streamArn;
     private String streamViewType;
+    private boolean sseEnabled;
+    private String sseType;
+    private String kmsMasterKeyArn;
     private List<KinesisStreamingDestination> kinesisStreamingDestinations;
 
     public TableDefinition() {
@@ -147,6 +150,15 @@ public class TableDefinition {
 
     public String getStreamViewType() { return streamViewType; }
     public void setStreamViewType(String streamViewType) { this.streamViewType = streamViewType; }
+
+    public boolean isSseEnabled() { return sseEnabled; }
+    public void setSseEnabled(boolean sseEnabled) { this.sseEnabled = sseEnabled; }
+
+    public String getSseType() { return sseType; }
+    public void setSseType(String sseType) { this.sseType = sseType; }
+
+    public String getKmsMasterKeyArn() { return kmsMasterKeyArn; }
+    public void setKmsMasterKeyArn(String kmsMasterKeyArn) { this.kmsMasterKeyArn = kmsMasterKeyArn; }
 
     public List<KinesisStreamingDestination> getKinesisStreamingDestinations() {
         return kinesisStreamingDestinations != null ? kinesisStreamingDestinations : new ArrayList<>();

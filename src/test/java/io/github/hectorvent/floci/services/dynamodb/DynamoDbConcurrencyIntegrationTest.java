@@ -63,11 +63,11 @@ class DynamoDbConcurrencyIntegrationTest {
                 null);
     }
 
-    private TableDefinition createCounterTable() {
+    private TableDefinition createCounterTable(String region) {
         return service.createTable("Counters",
                 List.of(new KeySchemaElement("pk", "HASH")),
                 List.of(new AttributeDefinition("pk", "S")),
-                5L, 5L);
+                5L, 5L, region);
     }
 
     private ObjectNode stringAttr(String value) {
@@ -124,7 +124,8 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void concurrent_updateItem_arithmetic_is_atomic() throws InterruptedException {
-        createCounterTable();
+        String region = "eu-west-1";
+        createCounterTable(region);
 
         String pk = "counter-1";
         ObjectNode key = pkKey(pk);
@@ -138,7 +139,7 @@ class DynamoDbConcurrencyIntegrationTest {
             DynamoDbService.UpdateResult result = service.updateItem(
                     "Counters", key, null,
                     "SET cnt = if_not_exists(cnt, :start) + :inc",
-                    null, exprValues, "ALL_NEW");
+                    null, exprValues, "ALL_NEW", region);
             JsonNode newItem = result.newItem();
             int value = Integer.parseInt(newItem.get("cnt").get("N").asText());
             observedValues.add(value);
@@ -146,7 +147,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
-        JsonNode stored = service.getItem("Counters", key);
+        JsonNode stored = service.getItem("Counters", key, region);
         assertNotNull(stored, "counter item must exist after updates");
         assertEquals(String.valueOf(OPS_PER_SCENARIO), stored.get("cnt").get("N").asText(),
                 "final counter must equal number of increments");
@@ -163,7 +164,8 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void concurrent_updateItem_ADD_action_is_atomic() throws InterruptedException {
-        createCounterTable();
+        String region = "eu-west-1";
+        createCounterTable(region);
 
         String pk = "counter-add";
         ObjectNode key = pkKey(pk);
@@ -173,11 +175,11 @@ class DynamoDbConcurrencyIntegrationTest {
         List<Throwable> errors = runConcurrently(OPS_PER_SCENARIO, () -> service.updateItem(
                 "Counters", key, null,
                 "ADD cnt :inc",
-                null, exprValues, "NONE"));
+                null, exprValues, "NONE", region));
 
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
-        JsonNode stored = service.getItem("Counters", key);
+        JsonNode stored = service.getItem("Counters", key, region);
         assertNotNull(stored);
         assertEquals(String.valueOf(OPS_PER_SCENARIO), stored.get("cnt").get("N").asText(),
                 "ADD :inc with N=1 run 50 times must yield 50");
@@ -185,7 +187,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void concurrent_putItem_with_attribute_not_exists_allows_exactly_one() throws InterruptedException {
-        createCounterTable();
+        createCounterTable("us-east-1");
 
         String pk = "unique-row";
         AtomicInteger successes = new AtomicInteger();
@@ -212,7 +214,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void concurrent_putItem_with_distinct_keys_all_succeed() throws InterruptedException {
-        createCounterTable();
+        createCounterTable("us-east-1");
 
         AtomicInteger idSource = new AtomicInteger();
 
@@ -226,14 +228,14 @@ class DynamoDbConcurrencyIntegrationTest {
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
         for (int i = 0; i < OPS_PER_SCENARIO; i++) {
-            JsonNode stored = service.getItem("Counters", pkKey("distinct-" + i));
+            JsonNode stored = service.getItem("Counters", pkKey("distinct-" + i), "us-east-1");
             assertNotNull(stored, "distinct-" + i + " should exist — proves per-item locking, not table-wide");
         }
     }
 
     @RepeatedTest(REPEATS)
     void concurrent_updateItem_and_putItem_on_same_key_is_linearisable() throws InterruptedException {
-        createCounterTable();
+        createCounterTable("us-east-1");
 
         String pk = "mixed";
         ObjectNode key = pkKey(pk);
@@ -249,7 +251,7 @@ class DynamoDbConcurrencyIntegrationTest {
             if (id % 2 == 0) {
                 service.updateItem("Counters", key, null,
                         "SET cnt = if_not_exists(cnt, :start) + :inc",
-                        null, updateExprValues, "NONE");
+                        null, updateExprValues, "NONE", "us-east-1");
             } else {
                 ObjectNode item = itemWithPk(pk);
                 item.set("writer", stringAttr("put-" + id));
@@ -259,7 +261,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
-        JsonNode stored = service.getItem("Counters", key);
+        JsonNode stored = service.getItem("Counters", key, "us-east-1");
         assertNotNull(stored, "item must still exist");
         // Must be a well-formed single record; no half-updated state.
         assertEquals("S", stored.get("pk").fieldNames().next());
@@ -272,7 +274,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void concurrent_deleteItem_with_condition_only_one_succeeds() throws InterruptedException {
-        createCounterTable();
+        createCounterTable("us-east-1");
 
         String pk = "to-delete";
         ObjectNode seed = itemWithPk(pk);
@@ -299,12 +301,12 @@ class DynamoDbConcurrencyIntegrationTest {
                 "exactly one conditional delete should succeed");
         assertEquals(OPS_PER_SCENARIO - 1, conditionalFailures.get(),
                 "the rest must raise ConditionalCheckFailedException");
-        assertNull(service.getItem("Counters", key), "item must be gone");
+        assertNull(service.getItem("Counters", key, "us-east-1"), "item must be gone");
     }
 
     @RepeatedTest(REPEATS)
     void concurrent_transactWriteItems_all_or_nothing() throws InterruptedException {
-        createCounterTable();
+        createCounterTable("us-east-1");
 
         String pkA = "txA";
         String pkB = "txB";
@@ -323,7 +325,7 @@ class DynamoDbConcurrencyIntegrationTest {
         // Each transaction updates both keys with a condition "version = :v0" and
         // sets version = :v1. Concurrent attempts must serialise: one wins, others cancel.
         List<Throwable> errors = runConcurrently(OPS_PER_SCENARIO, () -> {
-            JsonNode versionBefore = service.getItem("Counters", pkKey(pkA)).get("version");
+            JsonNode versionBefore = service.getItem("Counters", pkKey(pkA), "us-east-1").get("version");
             int currentVersion = Integer.parseInt(versionBefore.get("N").asText());
             int nextVersion = currentVersion + 1;
 
@@ -344,8 +346,8 @@ class DynamoDbConcurrencyIntegrationTest {
 
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
-        JsonNode finalA = service.getItem("Counters", pkKey(pkA));
-        JsonNode finalB = service.getItem("Counters", pkKey(pkB));
+        JsonNode finalA = service.getItem("Counters", pkKey(pkA), "us-east-1");
+        JsonNode finalB = service.getItem("Counters", pkKey(pkB), "us-east-1");
         int versionA = Integer.parseInt(finalA.get("version").get("N").asText());
         int versionB = Integer.parseInt(finalB.get("version").get("N").asText());
         assertEquals(versionA, versionB,
@@ -370,7 +372,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void concurrent_transactWriteItems_disjoint_commute() throws InterruptedException {
-        createCounterTable();
+        createCounterTable("us-east-1");
 
         // Seed 2 * OPS_PER_SCENARIO keys. Each transaction touches two disjoint keys.
         for (int i = 0; i < OPS_PER_SCENARIO * 2; i++) {
@@ -399,7 +401,7 @@ class DynamoDbConcurrencyIntegrationTest {
                 () -> "disjoint transactions must not deadlock or cancel: " + errors);
 
         for (int i = 0; i < OPS_PER_SCENARIO * 2; i++) {
-            JsonNode stored = service.getItem("Counters", pkKey("disjoint-" + i));
+            JsonNode stored = service.getItem("Counters", pkKey("disjoint-" + i), "us-east-1");
             assertEquals("1", stored.get("version").get("N").asText(),
                     "disjoint-" + i + " should be committed");
         }
@@ -407,7 +409,7 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @RepeatedTest(REPEATS)
     void concurrent_batchWriteItem_accumulates_without_lost_writes() throws InterruptedException {
-        createCounterTable();
+        createCounterTable("us-east-1");
 
         AtomicInteger idSource = new AtomicInteger();
         ConcurrentHashMap<String, Boolean> submittedIds = new ConcurrentHashMap<>();
@@ -433,14 +435,14 @@ class DynamoDbConcurrencyIntegrationTest {
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
         for (String itemId : submittedIds.keySet()) {
-            assertNotNull(service.getItem("Counters", pkKey(itemId)),
+            assertNotNull(service.getItem("Counters", pkKey(itemId), "us-east-1"),
                     "every batch-submitted item must land: " + itemId);
         }
     }
 
     @RepeatedTest(REPEATS)
     void concurrent_updateItem_preserves_stream_order() throws InterruptedException {
-        TableDefinition table = createCounterTable();
+        TableDefinition table = createCounterTable("us-east-1");
         StreamDescription sd = streamService.enableStream(
                 table.getTableName(), table.getTableArn(), "NEW_IMAGE", "us-east-1");
 
@@ -455,7 +457,7 @@ class DynamoDbConcurrencyIntegrationTest {
         List<Throwable> errors = runConcurrently(ops, () -> service.updateItem(
                 "Counters", key, null,
                 "SET cnt = if_not_exists(cnt, :start) + :inc",
-                null, exprValues, "NONE"));
+                null, exprValues, "NONE", "us-east-1"));
 
         assertTrue(errors.isEmpty(), () -> "unexpected errors: " + errors);
 
@@ -481,7 +483,8 @@ class DynamoDbConcurrencyIntegrationTest {
 
     @Test
     void baseline_single_threaded_still_works() {
-        createCounterTable();
+        String region = "eu-west-1";
+        createCounterTable(region);
 
         ObjectNode key = pkKey("single");
         ObjectNode exprValues = mapper.createObjectNode();
@@ -491,10 +494,10 @@ class DynamoDbConcurrencyIntegrationTest {
         for (int i = 1; i <= 10; i++) {
             service.updateItem("Counters", key, null,
                     "SET cnt = if_not_exists(cnt, :start) + :inc",
-                    null, exprValues, "ALL_NEW");
+                    null, exprValues, "ALL_NEW", region);
         }
 
-        JsonNode stored = service.getItem("Counters", key);
+        JsonNode stored = service.getItem("Counters", key, region);
         assertNotNull(stored);
         assertEquals("10", stored.get("cnt").get("N").asText());
     }

@@ -39,6 +39,8 @@ public class SesEventPublisher {
                         String source, String sourceArn, String sendingAccountId,
                         String subject, List<String> toAddresses, List<String> ccAddresses,
                         List<String> bccAddresses, List<String> envelopeDestinations,
+                        List<String> suppressionBounceRecipients,
+                        List<String> suppressionComplaintRecipients,
                         List<MessageTag> emailTags, List<MessageHeader> additionalHeaders,
                         Instant timestamp, String defaultRegion) {
         if (configurationSet == null || configurationSet.getEventDestinations().isEmpty()) {
@@ -47,6 +49,7 @@ public class SesEventPublisher {
         ObjectNode payload = SesEventPayload.build(objectMapper, eventType, messageId, source,
                 sourceArn, sendingAccountId, subject,
                 toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
+                suppressionBounceRecipients, suppressionComplaintRecipients,
                 configurationSet.getName(), emailTags, additionalHeaders, timestamp);
         String payloadJson = payload.toString();
         for (EventDestination ed : configurationSet.getEventDestinations()) {

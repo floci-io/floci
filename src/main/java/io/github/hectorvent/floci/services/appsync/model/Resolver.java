@@ -4,6 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonInclude;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.Map;
+
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
 @JsonInclude(JsonInclude.Include.NON_NULL)
@@ -18,6 +20,12 @@ public class Resolver {
     private ResolverKind kind;
     private String code;
     private ResolverRuntime runtime;
+    private String resolverArn;
+    private Map<String, Object> cachingConfig;
+    private Integer maxBatchSize;
+    private String metricsConfig;
+    private Map<String, Object> pipelineConfig;
+    private Map<String, Object> syncConfig;
 
     public String getApiId() { return apiId; }
     public void setApiId(String apiId) { this.apiId = apiId; }
@@ -48,6 +56,24 @@ public class Resolver {
 
     public ResolverRuntime getRuntime() { return runtime; }
     public void setRuntime(ResolverRuntime runtime) { this.runtime = runtime; }
+
+    public String getResolverArn() { return resolverArn; }
+    public void setResolverArn(String resolverArn) { this.resolverArn = resolverArn; }
+
+    public Map<String, Object> getCachingConfig() { return cachingConfig; }
+    public void setCachingConfig(Map<String, Object> cachingConfig) { this.cachingConfig = cachingConfig; }
+
+    public Integer getMaxBatchSize() { return maxBatchSize; }
+    public void setMaxBatchSize(Integer maxBatchSize) { this.maxBatchSize = maxBatchSize; }
+
+    public String getMetricsConfig() { return metricsConfig; }
+    public void setMetricsConfig(String metricsConfig) { this.metricsConfig = metricsConfig; }
+
+    public Map<String, Object> getPipelineConfig() { return pipelineConfig; }
+    public void setPipelineConfig(Map<String, Object> pipelineConfig) { this.pipelineConfig = pipelineConfig; }
+
+    public Map<String, Object> getSyncConfig() { return syncConfig; }
+    public void setSyncConfig(Map<String, Object> syncConfig) { this.syncConfig = syncConfig; }
 
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)

@@ -238,13 +238,16 @@ public class ElbV2Service {
         if (tgArns != null && !tgArns.isEmpty()) {
             Set<String> arnSet = new HashSet<>(tgArns);
             result = result.stream().filter(tg -> arnSet.contains(tg.getTargetGroupArn())).collect(Collectors.toList());
-            if (result.isEmpty()) {
+            if (result.size() != arnSet.size()) {
                 throw new AwsException("TargetGroupNotFound", "One or more target groups not found.", 400);
             }
         }
         if (names != null && !names.isEmpty()) {
             Set<String> nameSet = new HashSet<>(names);
             result = result.stream().filter(tg -> nameSet.contains(tg.getTargetGroupName())).collect(Collectors.toList());
+            if (result.size() != nameSet.size()) {
+                throw new AwsException("TargetGroupNotFound", "One or more target groups not found.", 400);
+            }
         }
         return result;
     }

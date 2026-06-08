@@ -405,6 +405,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_GLUE_ENABLED` | `true` | Enable the Glue service |
+| `FLOCI_SERVICES_APPSYNC_ENABLED` | `true` | Enable the AppSync service |
 | `FLOCI_SERVICES_BEDROCK_RUNTIME_ENABLED` | `true` | Enable the Bedrock Runtime service |
 | `FLOCI_SERVICES_TEXTRACT_ENABLED` | `true` | Enable the Textract service |
 | `FLOCI_SERVICES_TRANSFER_ENABLED` | `true` | Enable the Transfer Family service |

@@ -15,6 +15,8 @@ public class Table {
     private String databaseName;
     @JsonProperty("Description")
     private String description;
+    @JsonProperty("Owner")
+    private String owner;
     @JsonProperty("CreateTime")
     @JsonFormat(shape = JsonFormat.Shape.NUMBER)
     private Instant createTime;
@@ -30,6 +32,12 @@ public class Table {
     private StorageDescriptor storageDescriptor;
     @JsonProperty("TableType")
     private String tableType;
+    @JsonProperty("ViewOriginalText")
+    private String viewOriginalText;
+    @JsonProperty("ViewExpandedText")
+    private String viewExpandedText;
+    @JsonProperty("VersionId")
+    private String versionId;
     @JsonProperty("Parameters")
     private Map<String, String> parameters;
 
@@ -41,6 +49,8 @@ public class Table {
     public void setDatabaseName(String databaseName) { this.databaseName = databaseName; }
     public String getDescription() { return description; }
     public void setDescription(String description) { this.description = description; }
+    public String getOwner() { return owner; }
+    public void setOwner(String owner) { this.owner = owner; }
     public Instant getCreateTime() { return createTime; }
     public void setCreateTime(Instant createTime) { this.createTime = createTime; }
     public Instant getUpdateTime() { return updateTime; }
@@ -53,6 +63,12 @@ public class Table {
     public void setStorageDescriptor(StorageDescriptor storageDescriptor) { this.storageDescriptor = storageDescriptor; }
     public String getTableType() { return tableType; }
     public void setTableType(String tableType) { this.tableType = tableType; }
+    public String getViewOriginalText() { return viewOriginalText; }
+    public void setViewOriginalText(String viewOriginalText) { this.viewOriginalText = viewOriginalText; }
+    public String getViewExpandedText() { return viewExpandedText; }
+    public void setViewExpandedText(String viewExpandedText) { this.viewExpandedText = viewExpandedText; }
+    public String getVersionId() { return versionId; }
+    public void setVersionId(String versionId) { this.versionId = versionId; }
     public Map<String, String> getParameters() { return parameters; }
     public void setParameters(Map<String, String> parameters) { this.parameters = parameters; }
 }

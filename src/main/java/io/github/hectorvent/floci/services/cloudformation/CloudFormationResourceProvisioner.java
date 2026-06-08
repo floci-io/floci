@@ -1533,6 +1533,14 @@ public class CloudFormationResourceProvisioner {
         req.put("name", name);
         req.put("description", resolveOptional(props, "Description", engine));
 
+        if (props.has("EndpointConfiguration")) {
+            JsonNode epNode = props.get("EndpointConfiguration");
+            Map<String, Object> epReq = new HashMap<>();
+            epReq.put("types", resolveStringListOrEmpty(epNode, "Types", engine));
+            epReq.put("vpcEndpointIds", resolveStringListOrEmpty(epNode, "VpcEndpointIds", engine));
+            req.put("endpointConfiguration", epReq);
+        }
+
         var api = apiGatewayService.createRestApi(region, req);
         r.setPhysicalId(api.getId());
         r.getAttributes().put("RootResourceId", apiGatewayService.getResources(region, api.getId()).get(0).getId());

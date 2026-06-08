@@ -107,4 +107,58 @@ func TestCloudWatch(t *testing.T) {
 		assert.NotNil(t, dp.Average)
 		assert.Equal(t, 30.0, *dp.Average) // sum / sampleCount
 	})
+
+	t.Run("GetMetricData", func(t *testing.T) {
+		now := time.Now()
+		namespace := "GoTestGetMetricData"
+
+		_, err := svc.PutMetricData(ctx, &cloudwatch.PutMetricDataInput{
+			Namespace: aws.String(namespace),
+			MetricData: []cwtypes.MetricDatum{
+				{
+					MetricName: aws.String("RequestCount"),
+					Value:      aws.Float64(123),
+					Unit:       cwtypes.StandardUnitCount,
+					Timestamp:  aws.Time(now),
+				},
+			},
+		})
+		require.NoError(t, err)
+
+		// GetMetricData round-trips through the rpc-v2-cbor protocol. The response
+		// MetricDataResults[].Timestamps list must be encoded as CBOR tag(1)
+		// timestamps; otherwise the SDK fails to decode it (unexpected value type
+		// cbor.Uint), so this require.NoError is the core regression guard.
+		r, err := svc.GetMetricData(ctx, &cloudwatch.GetMetricDataInput{
+			StartTime: aws.Time(now.Add(-5 * time.Minute)),
+			EndTime:   aws.Time(now.Add(5 * time.Minute)),
+			MetricDataQueries: []cwtypes.MetricDataQuery{
+				{
+					Id: aws.String("m1"),
+					MetricStat: &cwtypes.MetricStat{
+						Metric: &cwtypes.Metric{
+							Namespace:  aws.String(namespace),
+							MetricName: aws.String("RequestCount"),
+						},
+						Period: aws.Int32(60),
+						Stat:   aws.String("Sum"),
+					},
+					ReturnData: aws.Bool(true),
+				},
+			},
+		})
+		require.NoError(t, err)
+		require.NotEmpty(t, r.MetricDataResults)
+
+		var result *cwtypes.MetricDataResult
+		for i := range r.MetricDataResults {
+			if r.MetricDataResults[i].Id != nil && *r.MetricDataResults[i].Id == "m1" {
+				result = &r.MetricDataResults[i]
+				break
+			}
+		}
+		require.NotNil(t, result, "expected a MetricDataResult with Id \"m1\" in the response")
+		assert.NotEmpty(t, result.Timestamps)
+		assert.NotEmpty(t, result.Values)
+	})
 }

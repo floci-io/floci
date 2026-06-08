@@ -7,6 +7,7 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  custom_dir: overrides
   logo: assets/floci-header.svg
   favicon: assets/floci.svg
   palette:
@@ -116,7 +117,16 @@ nav:
     - AWS Backup: services/backup.md
     - CloudFront: services/cloudfront.md
     - Route53: services/route53.md
+    - AWS Cloud Map: services/cloudmap.md
+    - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
+    - AWS Config: services/config.md
+    - Textract: services/textract.md
+    - Transcribe: services/transcribe.md
+    - Pricing: services/pricing.md
+    - Cost Explorer: services/ce.md
+    - Cost and Usage Reports: services/cur.md
+    - BCM Data Exports: services/bcm-data-exports.md
   - Testcontainers:
     - Overview: testcontainers/index.md
     - Java: testcontainers/java.md

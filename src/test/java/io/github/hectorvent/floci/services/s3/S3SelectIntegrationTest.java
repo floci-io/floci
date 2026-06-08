@@ -39,6 +39,32 @@ class S3SelectIntegrationTest {
                 .when().post("/" + key)
                 .then().statusCode(200);
     }
+    
+    private static io.restassured.response.ValidatableResponse selectExpectingStatus(
+            String bucket,
+            String key,
+            String expression,
+            String inputSerialization,
+            String outputSerialization,
+            int expectedStatus) {
+        String safeExpr = expression.replace("&", "&amp;").replace("<", "&lt;");
+        String requestXml = """
+                <SelectObjectContentRequest>
+                  <Expression>%s</Expression>
+                  <ExpressionType>SQL</ExpressionType>
+                  <InputSerialization>%s</InputSerialization>
+                  <OutputSerialization>%s</OutputSerialization>
+                </SelectObjectContentRequest>
+                """.formatted(safeExpr, inputSerialization, outputSerialization);
+
+        return given()
+                .header("Host", bucket + ".localhost")
+                .queryParam("select", "")
+                .queryParam("select-type", "2")
+                .body(requestXml)
+                .when().post("/" + key)
+                .then().statusCode(expectedStatus);
+    }
 
     private static final String CSV_OUT = "<CSV/>";
     private static final String JSON_OUT = "<JSON/>";
@@ -49,6 +75,21 @@ class S3SelectIntegrationTest {
 
     // ── Existing tests (preserved) ────────────────────────────────────────
 
+    @Test
+    void select_unsupportedCastExpressionReturnsError() {
+        String bucket = "sel-cast-unsupported";
+        createBucketAndPut(bucket, "d.csv", "Alice,30\nBob,25\nCharlie,35");
+
+        selectExpectingStatus(
+                bucket,
+                "d.csv",
+                "SELECT * FROM S3Object s WHERE CAST(s._2 AS INTEGER) > 25",
+                CSV_NONE,
+                CSV_OUT,
+                400
+        ).body(containsString("ExternalEvalException"));
+    }
+    
     @Test
     void select_withWhereClause() {
         String bucket = "select-bucket";
