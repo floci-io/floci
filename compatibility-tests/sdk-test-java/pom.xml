@@ -167,6 +167,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>servicediscovery</artifactId>
         </dependency>
+        <!-- CloudTrail client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudtrail</artifactId>
+        </dependency>
         <!-- Kinesis client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

@@ -4,6 +4,7 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
@@ -465,6 +466,14 @@ public final class TestFixtures {
                 // rewrite the custom endpoint host (data-<host>) and break resolution.
                 .overrideConfiguration(o -> o.putAdvancedOption(
                         SdkAdvancedClientOption.DISABLE_HOST_PREFIX_INJECTION, Boolean.TRUE))
+                .build();
+    }
+
+    public static CloudTrailClient cloudTrailClient() {
+        return CloudTrailClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
                 .build();
     }
 
