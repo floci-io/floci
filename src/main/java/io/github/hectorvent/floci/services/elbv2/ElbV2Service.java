@@ -67,7 +67,7 @@ public class ElbV2Service {
         String id = randomHex16();
         String arn = AwsArnUtils.Arn.of("elasticloadbalancing", region, regionResolver.getAccountId(), "loadbalancer/" + typePrefix + "/" + name + "/" + id).toString();
         String dnsName = name + "-" + id + ".elb.localhost";
-        String vpcId = resolveSubnetVpcId(region, subnets);
+        String vpcId = resolveSubnetVpcId(region, lbType, subnets);
 
         LoadBalancer lb = new LoadBalancer();
         lb.setLoadBalancerArn(arn);
@@ -170,7 +170,7 @@ public class ElbV2Service {
 
     public void setSubnets(String region, String arn, List<String> subnets) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
-        String vpcId = resolveSubnetVpcId(region, subnets);
+        String vpcId = resolveSubnetVpcId(region, lb.getType(), subnets);
         if (vpcId != null && lb.getVpcId() != null && !lb.getVpcId().equals(vpcId)) {
             throw new AwsException("InvalidConfigurationRequest",
                     "All subnets must belong to the load balancer VPC.", 400);
@@ -691,18 +691,14 @@ public class ElbV2Service {
     }
 
     private List<AvailabilityZone> resolveAvailabilityZones(String region, List<String> subnetIds) {
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            return new ArrayList<>();
+        }
+
+        Map<String, Subnet> subnetsById = resolveSubnetsById(region, subnetIds);
         List<AvailabilityZone> availabilityZones = new ArrayList<>();
         for (String subnetId : subnetIds) {
-            Subnet subnet;
-            try {
-                subnet = ec2Service.requireSubnet(region, subnetId);
-            } catch (AwsException e) {
-                if ("InvalidSubnetID.NotFound".equals(e.getErrorCode())) {
-                    throw new AwsException("SubnetNotFound",
-                            "Subnet '" + subnetId + "' not found", 400);
-                }
-                throw e;
-            }
+            Subnet subnet = subnetsById.get(subnetId);
             AvailabilityZone availabilityZone = new AvailabilityZone();
             availabilityZone.setSubnetId(subnet.getSubnetId());
             availabilityZone.setZoneName(subnet.getAvailabilityZone());
@@ -711,19 +707,27 @@ public class ElbV2Service {
         return availabilityZones;
     }
 
-    private String resolveSubnetVpcId(String region, List<String> subnetIds) {
+    private String resolveSubnetVpcId(String region, String lbType, List<String> subnetIds) {
         if (subnetIds == null || subnetIds.isEmpty()) {
             return null;
         }
 
-        List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
-        Map<String, Subnet> subnetsById = subnets.stream()
-                .collect(Collectors.toMap(Subnet::getSubnetId, subnet -> subnet, (left, right) -> left));
+        Map<String, Subnet> subnetsById = resolveSubnetsById(region, subnetIds);
 
-        for (String subnetId : subnetIds) {
-            if (!subnetsById.containsKey(subnetId)) {
-                throw new AwsException("SubnetNotFound",
-                        "The subnet ID '" + subnetId + "' does not exist", 400);
+        if ("application".equals(lbType)) {
+            if (subnetIds.size() < 2) {
+                throw new AwsException("InvalidConfigurationRequest",
+                        "Application Load Balancers must be attached to subnets in at least two Availability Zones.", 400);
+            }
+
+            long distinctAvailabilityZones = subnetIds.stream()
+                    .map(subnetsById::get)
+                    .map(Subnet::getAvailabilityZone)
+                    .distinct()
+                    .count();
+            if (distinctAvailabilityZones < 2) {
+                throw new AwsException("InvalidConfigurationRequest",
+                        "Application Load Balancers must be attached to subnets in at least two Availability Zones.", 400);
             }
         }
 
@@ -740,6 +744,19 @@ public class ElbV2Service {
         return vpcIds.iterator().next();
     }
 
+    private Map<String, Subnet> resolveSubnetsById(String region, List<String> subnetIds) {
+        List<Subnet> subnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
+        Map<String, Subnet> subnetsById = subnets.stream()
+                .collect(Collectors.toMap(Subnet::getSubnetId, subnet -> subnet, (left, right) -> left));
+
+        for (String subnetId : subnetIds) {
+            if (!subnetsById.containsKey(subnetId)) {
+                throw new AwsException("SubnetNotFound",
+                        "The subnet ID '" + subnetId + "' does not exist", 400);
+            }
+        }
+        return subnetsById;
+    }
     private TargetGroup requireTargetGroup(String region, String arn) {
         TargetGroup tg = targetGroups.getOrDefault(region, Map.of()).get(arn);
         if (tg == null) {
