@@ -139,6 +139,65 @@ class EksTest {
                 .isInstanceOf(ResourceInUseException.class);
     }
 
+    // ──────────────────────────── Managed node groups (#1137) ────────────────────────────
+
+    private static final String NODEGROUP = "sdk-ng";
+
+    @Test
+    @Order(10)
+    void createNodegroup() {
+        CreateNodegroupResponse response = eks.createNodegroup(CreateNodegroupRequest.builder()
+                .clusterName(clusterName)
+                .nodegroupName(NODEGROUP)
+                .subnets("subnet-abc")
+                .nodeRole("arn:aws:iam::000000000000:role/eks-node-role")
+                .scalingConfig(NodegroupScalingConfig.builder()
+                        .minSize(1).maxSize(3).desiredSize(2).build())
+                .build());
+
+        assertThat(response.nodegroup().nodegroupName()).isEqualTo(NODEGROUP);
+        assertThat(response.nodegroup().clusterName()).isEqualTo(clusterName);
+        assertThat(response.nodegroup().nodegroupArn())
+                .contains("nodegroup/" + clusterName + "/" + NODEGROUP);
+        assertThat(response.nodegroup().status())
+                .isIn(NodegroupStatus.CREATING, NodegroupStatus.ACTIVE);
+        assertThat(response.nodegroup().scalingConfig().desiredSize()).isEqualTo(2);
+    }
+
+    @Test
+    @Order(11)
+    void listNodegroups() {
+        ListNodegroupsResponse response = eks.listNodegroups(ListNodegroupsRequest.builder()
+                .clusterName(clusterName).build());
+        assertThat(response.nodegroups()).contains(NODEGROUP);
+    }
+
+    @Test
+    @Order(12)
+    void describeNodegroup() {
+        DescribeNodegroupResponse response = eks.describeNodegroup(DescribeNodegroupRequest.builder()
+                .clusterName(clusterName).nodegroupName(NODEGROUP).build());
+        assertThat(response.nodegroup().nodegroupName()).isEqualTo(NODEGROUP);
+        assertThat(response.nodegroup().subnets()).contains("subnet-abc");
+        assertThat(response.nodegroup().amiType()).isNotNull();
+    }
+
+    @Test
+    @Order(13)
+    void describeMissingNodegroupFails() {
+        assertThatThrownBy(() -> eks.describeNodegroup(DescribeNodegroupRequest.builder()
+                        .clusterName(clusterName).nodegroupName("no-such-ng").build()))
+                .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    @Order(14)
+    void deleteNodegroup() {
+        DeleteNodegroupResponse response = eks.deleteNodegroup(DeleteNodegroupRequest.builder()
+                .clusterName(clusterName).nodegroupName(NODEGROUP).build());
+        assertThat(response.nodegroup().status()).isEqualTo(NodegroupStatus.DELETING);
+    }
+
     @Test
     @Order(100)
     void deleteCluster() {
