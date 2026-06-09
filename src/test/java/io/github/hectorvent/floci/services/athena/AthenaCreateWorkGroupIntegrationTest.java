@@ -6,6 +6,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.equalTo;
 
 @QuarkusTest
@@ -64,6 +65,40 @@ class AthenaCreateWorkGroupIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("InvalidRequestException"))
             .body("message", equalTo("WorkGroup already exists"));
+    }
+
+    @Test
+    void listWorkGroupsIncludesCreatedWorkGroupAlongsidePrimary() {
+        given()
+            .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+            .contentType(CONTENT_TYPE)
+            .body("""
+                {
+                  "Name": "analytics-list",
+                  "Description": "analytics workgroup for reporting queries",
+                  "Configuration": {
+                    "ResultConfiguration": {
+                      "OutputLocation": "s3://test-bucket/athena-results/"
+                    }
+                  }
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AmazonAthena.ListWorkGroups")
+            .contentType(CONTENT_TYPE)
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("WorkGroups.size()", equalTo(2))
+            .body("WorkGroups.Name", contains("primary", "analytics-list"))
+            .body("WorkGroups.State", contains("ENABLED", "ENABLED"));
     }
 
     @Test

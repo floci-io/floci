@@ -68,7 +68,7 @@ public class AthenaJsonHandler {
                 String name = request.has("WorkGroup") ? request.get("WorkGroup").asText() : "primary";
                 yield Response.ok(Map.of("WorkGroup", athenaService.getWorkGroup(name))).build();
             }
-            case "ListWorkGroups" -> Response.ok(Map.of("WorkGroups", athenaService.listWorkGroups())).build();
+            case "ListWorkGroups" -> Response.ok(Map.of("WorkGroups", athenaService.listWorkGroups(region))).build();
             case "CreateWorkGroup" -> {
                 CreateWorkGroupRequest createRequest = mapper.treeToValue(request, CreateWorkGroupRequest.class);
                 athenaService.createWorkGroup(createRequest, region);

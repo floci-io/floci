@@ -166,8 +166,14 @@ public class AthenaService {
         );
     }
 
-    public List<Map<String, Object>> listWorkGroups() {
-        return List.of(Map.of("Name", DEFAULT_WORKGROUP, "State", "ENABLED"));
+    public List<Map<String, Object>> listWorkGroups(String region) {
+        List<Map<String, Object>> workGroups = new ArrayList<>();
+        workGroups.add(primaryWorkGroupSummary());
+        workGroups.addAll(workGroupStore.scan(k -> k.startsWith(region + ":")).stream()
+                .sorted(Comparator.comparing(WorkGroup::getName))
+                .map(this::toWorkGroupSummary)
+                .toList());
+        return workGroups;
     }
 
     public List<Map<String, Object>> listDataCatalogs() {
@@ -338,6 +344,30 @@ public class AthenaService {
         engineVersion.setSelectedEngineVersion(DEFAULT_ENGINE_VERSION);
         engineVersion.setEffectiveEngineVersion(DEFAULT_ENGINE_VERSION);
         return engineVersion;
+    }
+
+    private Map<String, Object> primaryWorkGroupSummary() {
+        return Map.of(
+                "Name", DEFAULT_WORKGROUP,
+                "State", "ENABLED",
+                "Configuration", Map.of(
+                        "EngineVersion", Map.of(
+                                "SelectedEngineVersion", DEFAULT_ENGINE_VERSION,
+                                "EffectiveEngineVersion", DEFAULT_ENGINE_VERSION
+                        ),
+                        "ResultConfiguration", Map.of("OutputLocation", "s3://" + DEFAULT_OUTPUT_BUCKET + "/results/"),
+                        "EnforceWorkGroupConfiguration", false,
+                        "PublishCloudWatchMetricsEnabled", false,
+                        "RequesterPaysEnabled", false
+                )
+        );
+    }
+
+    private Map<String, Object> toWorkGroupSummary(WorkGroup workGroup) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("Name", workGroup.getName());
+        result.put("State", workGroup.getState());
+        return result;
     }
 
     private List<WorkGroupTag> normalizeTags(List<WorkGroupTag> tags) {
