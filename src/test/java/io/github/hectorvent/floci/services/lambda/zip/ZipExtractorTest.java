@@ -29,19 +29,23 @@ class ZipExtractorTest {
     }
 
     @Test
-    void extractsBackslashEntriesAsNestedPaths(@TempDir Path target) throws IOException {
-        // PowerShell Compress-Archive writes '\' separators (issue #1198).
+    void extractsBackslashEntriesAsLiteralFilename(@TempDir Path target) throws IOException {
+        // PowerShell 5 Compress-Archive writes '\' separators (issue #1198).
+        // Real AWS Lambda does NOT normalize these — the entry extracts as a single
+        // literal-named file. Floci must match AWS, not silently fix broken packages.
         byte[] zip = zipWith("wwwroot\\_framework\\blazor.web.js", "// js");
 
         extractor.extractTo(zip, target);
 
-        // The fix: the file lands at a real nested path, not a single flat file.
+        // AWS-congruent: the backslashed entry lands as a literal filename, not nested.
+        Path flat = target.resolve("wwwroot\\_framework\\blazor.web.js");
+        assertTrue(Files.isRegularFile(flat),
+                "backslashed entry must extract as a literal filename (matching AWS Lambda)");
+        assertEquals("// js", Files.readString(flat));
+        // It must NOT create a nested path.
         Path nested = target.resolve("wwwroot").resolve("_framework").resolve("blazor.web.js");
-        assertTrue(Files.isRegularFile(nested), "nested path should exist after extraction");
-        assertEquals("// js", Files.readString(nested));
-        // And NOT as a literal file named with backslashes.
-        assertFalse(Files.exists(target.resolve("wwwroot\\_framework\\blazor.web.js")),
-                "backslashed flat file must not be created");
+        assertFalse(Files.exists(nested),
+                "backslashed entry must NOT create a nested path (AWS does not normalize)");
     }
 
     @Test
@@ -57,7 +61,8 @@ class ZipExtractorTest {
 
     @Test
     void rejectsBackslashTraversalEntries(@TempDir Path target) throws IOException {
-        // "..\..\evil" normalizes to "../../evil" and must be skipped, not written.
+        // "..\..\evil" contains ".." in the original entry name, so the traversal
+        // guard catches it even without normalization.
         byte[] zip = zipWith("..\\..\\evil.sh", "rm -rf");
 
         extractor.extractTo(zip, target);
