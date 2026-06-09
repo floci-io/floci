@@ -636,15 +636,8 @@ public class Ec2QueryHandler {
                 .start("DescribeVpcEndpointServicesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
                 .start("serviceNameSet")
-                .start("item").elem("serviceName", "com.amazonaws." + region + ".s3").end("item")
                 .end("serviceNameSet")
                 .start("serviceDetailSet")
-                .start("item")
-                .elem("serviceName", "com.amazonaws." + region + ".s3")
-                .elem("serviceType", "Gateway")
-                .start("serviceTypeSet").start("item").elem("serviceType", "Gateway").end("item").end("serviceTypeSet")
-                .start("availabilityZoneSet").end("availabilityZoneSet")
-                .end("item")
                 .end("serviceDetailSet")
                 .end("DescribeVpcEndpointServicesResponse");
         return xmlResponse(xml.build());
