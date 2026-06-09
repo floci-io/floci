@@ -910,7 +910,7 @@ public class IamQueryHandler {
             if (name == null) break;
             String value = params.getFirst("ContextEntries.member." + i + ".ContextKeyValues.member.1");
             if (value != null) {
-                context.put(name.toLowerCase(java.util.Locale.ROOT), value);
+                context.put(name, value);
             }
         }
         return context;

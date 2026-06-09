@@ -72,7 +72,7 @@ public class IamPolicyEvaluator {
      * @param resourcePolicies resource-based policy documents (Phase 2); may be null or empty
      * @param action        IAM action, e.g. "s3:GetObject"
      * @param resource      resource ARN, e.g. "arn:aws:s3:::my-bucket/key"
-     * @param conditionCtx  condition context key-value pairs (lowercase keys); may be null or empty
+     * @param conditionCtx  condition context key-value pairs; may be null or empty
      * @return {@link Decision#ALLOW} or {@link Decision#DENY}
      */
     public Decision evaluate(CallerContext caller,
@@ -80,7 +80,7 @@ public class IamPolicyEvaluator {
                              String action,
                              String resource,
                              Map<String, String> conditionCtx) {
-        Map<String, String> ctx = conditionCtx == null ? Map.of() : conditionCtx;
+        Map<String, String> ctx = normalizeConditionContext(conditionCtx);
 
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
         List<PolicyStatement> resourceStmts = resourcePolicies == null ? List.of() : parseAll(resourcePolicies);
@@ -139,7 +139,7 @@ public class IamPolicyEvaluator {
                                                       String action,
                                                       String resource,
                                                       Map<String, String> conditionCtx) {
-        Map<String, String> ctx = conditionCtx == null ? Map.of() : conditionCtx;
+        Map<String, String> ctx = normalizeConditionContext(conditionCtx);
         List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
         List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
                 ? null : parseAll(List.of(caller.sessionPolicyDocument()));
@@ -166,6 +166,18 @@ public class IamPolicyEvaluator {
     // -----------------------------------------------------------------------
     // Statement matching
     // -----------------------------------------------------------------------
+
+    private Map<String, String> normalizeConditionContext(Map<String, String> conditionCtx) {
+        if (conditionCtx == null || conditionCtx.isEmpty()) {
+            return Map.of();
+        }
+        return conditionCtx.entrySet().stream()
+                .filter(entry -> entry.getKey() != null && entry.getValue() != null)
+                .collect(java.util.stream.Collectors.toMap(
+                        entry -> entry.getKey().toLowerCase(java.util.Locale.ROOT),
+                        Map.Entry::getValue,
+                        (first, ignored) -> first));
+    }
 
     private boolean anyExplicitDeny(List<PolicyStatement> stmts, String action, String resource,
                                      Map<String, String> ctx) {
