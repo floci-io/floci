@@ -366,6 +366,7 @@ public class RdsService {
             instance.setIamDatabaseAuthenticationEnabled(iamEnabled);
         }
         if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
+            getDbSubnetGroup(dbSubnetGroupName);
             instance.setDbSubnetGroupName(dbSubnetGroupName);
         }
         instances.put(id, instance);

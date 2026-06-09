@@ -32,7 +32,7 @@ public class DbSubnetGroup {
     public String getVpcId() { return vpcId; }
     public void setVpcId(String vpcId) { this.vpcId = vpcId; }
 
-    public List<String> getSubnetIds() { return subnetIds; }
+    public List<String> getSubnetIds() { return List.copyOf(subnetIds); }
     public void setSubnetIds(List<String> subnetIds) {
         this.subnetIds = subnetIds != null ? new ArrayList<>(subnetIds) : new ArrayList<>();
     }

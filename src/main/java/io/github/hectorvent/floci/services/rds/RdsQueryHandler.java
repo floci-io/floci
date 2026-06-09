@@ -797,10 +797,22 @@ public class RdsQueryHandler {
         return params.keySet().stream()
                 .filter(key -> key.matches(java.util.regex.Pattern.quote(baseName)
                         + "(\\.member|\\.SubnetIdentifier)?\\.\\d+"))
-                .sorted()
+                .sorted(java.util.Comparator.comparingInt(RdsQueryHandler::numericSuffix))
                 .map(params::getFirst)
                 .filter(value -> value != null && !value.isBlank())
                 .toList();
+    }
+
+    private static int numericSuffix(String key) {
+        int dot = key.lastIndexOf('.');
+        if (dot < 0 || dot == key.length() - 1) {
+            return Integer.MAX_VALUE;
+        }
+        try {
+            return Integer.parseInt(key.substring(dot + 1));
+        } catch (NumberFormatException e) {
+            return Integer.MAX_VALUE;
+        }
     }
 
     private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {

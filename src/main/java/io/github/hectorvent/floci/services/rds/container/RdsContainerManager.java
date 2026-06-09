@@ -230,7 +230,7 @@ public class RdsContainerManager {
 
         CountDownLatch latch = new CountDownLatch(1);
         ByteArrayOutputStream output = new ByteArrayOutputStream();
-        lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+        Closeable callback = lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
                 if (frame.getPayload() != null) {
@@ -248,17 +248,22 @@ public class RdsContainerManager {
 
             @Override
             public void onError(Throwable t) {
+                LOG.warnv(t, "Container exec {0} failed", execId);
                 latch.countDown();
             }
         });
-        boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
-        if (!completed) {
-            return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
+        try {
+            boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
+            if (!completed) {
+                return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
+            }
+            Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
+            return new ContainerExecResult(
+                    exitCode != null ? exitCode : -1,
+                    output.toString(StandardCharsets.UTF_8));
+        } finally {
+            callback.close();
         }
-        Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
-        return new ContainerExecResult(
-                exitCode != null ? exitCode : -1,
-                output.toString(StandardCharsets.UTF_8));
     }
 
     record ContainerExecResult(long exitCode, String output) {}

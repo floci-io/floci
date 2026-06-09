@@ -210,6 +210,18 @@ class RdsServiceTest {
     }
 
     @Test
+    void modifyDbInstanceRejectsMissingDbSubnetGroup() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "original-password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyDbInstance("mydb", null, null, "missing-subnet-group"));
+
+        assertEquals("DBSubnetGroupNotFoundFault", exception.getErrorCode());
+    }
+
+    @Test
     void dbSubnetGroupRoundTrip() {
         DbSubnetGroup group = rdsService.createDbSubnetGroup(
                 "sample-db-subnets", "test", java.util.List.of("subnet-aaa", "subnet-bbb"));
