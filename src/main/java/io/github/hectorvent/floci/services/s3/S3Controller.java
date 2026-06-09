@@ -622,11 +622,8 @@ public class S3Controller {
 
     private Response fullObjectResponse(String bucket, String key, String versionId,
                                         S3Object obj, ResponseHeaderOverrides overrides) {
-        String streamBucket = bucket;
-        String streamKey = key;
-        String streamVersionId = versionId;
         StreamingOutput stream = output -> {
-            try (InputStream input = s3Service.openObjectStream(streamBucket, streamKey, streamVersionId)) {
+            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
                 input.transferTo(output);
             }
         };
@@ -712,7 +709,7 @@ public class S3Controller {
         while (remaining > 0) {
             int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
             if (count < 0) {
-                break;
+                throw new java.io.EOFException("Object stream ended before the requested range was fully written.");
             }
             output.write(buffer, 0, count);
             remaining -= count;

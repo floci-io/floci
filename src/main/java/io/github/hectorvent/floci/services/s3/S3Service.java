@@ -425,7 +425,10 @@ public class S3Service {
             byte[] data = versionId != null
                     ? memoryDataStore.get(versionedKey(bucketName, key, versionId))
                     : memoryDataStore.get(objectKey(bucketName, key));
-            return new ByteArrayInputStream(data != null ? data : new byte[0]);
+            if (data == null) {
+                throw new IllegalStateException("S3 object data is missing for " + bucketName + "/" + key);
+            }
+            return new ByteArrayInputStream(data);
         }
         try {
             Path path = versionId != null
