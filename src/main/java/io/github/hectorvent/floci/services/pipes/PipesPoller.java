@@ -19,6 +19,8 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.header.Header;
 import org.jboss.logging.Logger;
 
@@ -322,7 +324,7 @@ public class PipesPoller {
         }
     }
 
-    private void pollKafka(Pipe pipe, String region) {
+    void pollKafka(Pipe pipe, String region) {
         ConsumerRecords<byte[], byte[]> records = kafkaConsumerManager.poll(pipe);
         if (records.isEmpty()) {
             return;
@@ -332,8 +334,8 @@ public class PipesPoller {
         records.forEach(batch::add);
 
         LOG.infov("Pipe {0}: received {1} Kafka record(s)", pipe.getName(), batch.size());
-        List<ObjectNode> filterNodes = buildKafkaRecordNodes(batch, pipe, true);
-        List<ObjectNode> deliveryNodes = buildKafkaRecordNodes(batch, pipe, false);
+        List<ObjectNode> deliveryNodes = buildKafkaRecordNodes(batch, pipe);
+        List<ObjectNode> filterNodes = buildKafkaFilterNodes(deliveryNodes, batch);
         List<JsonNode> filtered = filterMatcher.applyFilterCriteria(new ArrayList<>(filterNodes), pipe.getSourceParameters());
         if (filtered.isEmpty()) {
             kafkaConsumerManager.commit(pipe);
@@ -357,6 +359,15 @@ public class PipesPoller {
             return;
         }
 
+        if (!isLambdaTarget(pipe)) {
+            int failed = deliverKafkaRecords(pipe, region, batch, deliveryRecordsByIdentity, filtered);
+            if (failed > 0) {
+                LOG.warnv("Pipe {0}: {1} Kafka record(s) not committed because delivery failed",
+                        pipe.getName(), failed);
+            }
+            return;
+        }
+
         int failed = deliverRecords(pipe, deliveryRecords, region);
         if (failed == 0) {
             kafkaConsumerManager.commit(pipe);
@@ -365,6 +376,44 @@ public class PipesPoller {
 
         LOG.warnv("Pipe {0}: {1} Kafka record(s) not committed because delivery failed",
                 pipe.getName(), failed);
+    }
+
+    private int deliverKafkaRecords(Pipe pipe,
+                                    String region,
+                                    List<ConsumerRecord<byte[], byte[]>> batch,
+                                    Map<String, JsonNode> deliveryRecordsByIdentity,
+                                    List<JsonNode> filtered) {
+        Set<String> matchedIdentities = new HashSet<>(filtered.size());
+        filtered.forEach(record -> matchedIdentities.add(kafkaRecordIdentity(record)));
+
+        Map<TopicPartition, OffsetAndMetadata> offsetsToCommit = new HashMap<>();
+        Set<TopicPartition> blockedPartitions = new HashSet<>();
+        int failed = 0;
+
+        for (ConsumerRecord<byte[], byte[]> record : batch) {
+            TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+            if (blockedPartitions.contains(partition)) {
+                continue;
+            }
+
+            String identity = kafkaRecordIdentity(record);
+            if (!matchedIdentities.contains(identity)) {
+                offsetsToCommit.put(partition, new OffsetAndMetadata(record.offset() + 1));
+                continue;
+            }
+
+            JsonNode deliveryRecord = deliveryRecordsByIdentity.get(identity);
+            if (deliveryRecord != null && invokeWithDlq(pipe, deliveryRecord.toString(), region)) {
+                offsetsToCommit.put(partition, new OffsetAndMetadata(record.offset() + 1));
+                continue;
+            }
+
+            blockedPartitions.add(partition);
+            failed++;
+        }
+
+        kafkaConsumerManager.commit(pipe, offsetsToCommit);
+        return failed;
     }
 
     private String initDynamoDbIterator(String streamArn) {
@@ -522,9 +571,7 @@ public class PipesPoller {
         return nodes;
     }
 
-    private List<ObjectNode> buildKafkaRecordNodes(List<ConsumerRecord<byte[], byte[]>> records,
-                                                   Pipe pipe,
-                                                   boolean decodePayloadFields) {
+    private List<ObjectNode> buildKafkaRecordNodes(List<ConsumerRecord<byte[], byte[]>> records, Pipe pipe) {
         List<ObjectNode> nodes = new ArrayList<>();
         String eventSource = pipe.getSource().contains(":kafka:") ? "aws:kafka" : "SelfManagedKafka";
         String bootstrapServers = kafkaConsumerManager.resolveBootstrapServers(pipe);
@@ -548,10 +595,6 @@ public class PipesPoller {
             node.put("timestampType", record.timestampType().name());
             node.put("key", base64(record.key()));
             node.put("value", base64(record.value()));
-            if (decodePayloadFields) {
-                applyDecodedKafkaField(node, "key", record.key());
-                applyDecodedKafkaField(node, "value", record.value());
-            }
 
             var headersNode = node.putArray("headers");
             for (Header header : record.headers()) {
@@ -565,6 +608,19 @@ public class PipesPoller {
                 }
                 headersNode.add(headerNode);
             }
+            nodes.add(node);
+        }
+        return nodes;
+    }
+
+    private List<ObjectNode> buildKafkaFilterNodes(List<ObjectNode> deliveryNodes,
+                                                   List<ConsumerRecord<byte[], byte[]>> records) {
+        List<ObjectNode> nodes = new ArrayList<>(deliveryNodes.size());
+        for (int i = 0; i < deliveryNodes.size(); i++) {
+            ObjectNode node = deliveryNodes.get(i).deepCopy();
+            ConsumerRecord<byte[], byte[]> record = records.get(i);
+            applyDecodedKafkaField(node, "key", record.key());
+            applyDecodedKafkaField(node, "value", record.value());
             nodes.add(node);
         }
         return nodes;
@@ -589,6 +645,10 @@ public class PipesPoller {
         return record.path("topic").asText() + ":"
                 + record.path("partition").asText() + ":"
                 + record.path("offset").asText();
+    }
+
+    private static String kafkaRecordIdentity(ConsumerRecord<byte[], byte[]> record) {
+        return record.topic() + ":" + record.partition() + ":" + record.offset();
     }
 
     private void applyDecodedKafkaField(ObjectNode node, String fieldName, byte[] value) {

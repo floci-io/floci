@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.sqs.SqsService;
 import io.vertx.core.Vertx;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
 import org.apache.kafka.common.TopicPartition;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -18,7 +19,6 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.List;
@@ -64,11 +64,11 @@ class PipesPollerTest {
         when(kafkaConsumerManager.poll(pipe)).thenReturn(records(record));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
 
-        invokePollKafka(pipe);
+        poller.pollKafka(pipe, "us-east-1");
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(targetInvoker).invoke(eq(pipe), payloadCaptor.capture(), eq("us-east-1"));
-        verify(kafkaConsumerManager).commit(pipe);
+        verify(kafkaConsumerManager).commit(eq(pipe), org.mockito.ArgumentMatchers.anyMap());
 
         JsonNode delivered = MAPPER.readTree(payloadCaptor.getValue());
         assertEquals("orders", delivered.path("topic").asText());
@@ -89,9 +89,30 @@ class PipesPollerTest {
         org.mockito.Mockito.doThrow(new RuntimeException("boom"))
                 .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
 
-        invokePollKafka(pipe);
+        poller.pollKafka(pipe, "us-east-1");
 
         verify(kafkaConsumerManager, never()).commit(pipe);
+    }
+
+    @Test
+    void pollKafka_commitsDeliveredPrefixWhenLaterRecordFails() throws Exception {
+        Pipe pipe = selfManagedKafkaPipe();
+        ConsumerRecord<byte[], byte[]> first = new ConsumerRecord<>(
+                "orders", 0, 0L, null, "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
+        ConsumerRecord<byte[], byte[]> second = new ConsumerRecord<>(
+                "orders", 0, 1L, null, "{\"status\":\"active\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
+
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(first, second));
+        when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
+        org.mockito.Mockito.doNothing()
+                .doThrow(new RuntimeException("boom"))
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.pollKafka(pipe, "us-east-1");
+
+        ArgumentCaptor<Map<TopicPartition, OffsetAndMetadata>> offsetsCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(kafkaConsumerManager).commit(eq(pipe), offsetsCaptor.capture());
+        assertEquals(1L, offsetsCaptor.getValue().get(new TopicPartition("orders", 0)).offset());
     }
 
     private Pipe selfManagedKafkaPipe() throws Exception {
@@ -115,14 +136,12 @@ class PipesPollerTest {
         return pipe;
     }
 
-    private void invokePollKafka(Pipe pipe) throws Exception {
-        Method method = PipesPoller.class.getDeclaredMethod("pollKafka", Pipe.class, String.class);
-        method.setAccessible(true);
-        method.invoke(poller, pipe, "us-east-1");
-    }
-
-    private ConsumerRecords<byte[], byte[]> records(ConsumerRecord<byte[], byte[]> record) {
-        TopicPartition topicPartition = new TopicPartition(record.topic(), record.partition());
-        return new ConsumerRecords<>(Map.of(topicPartition, List.of(record)));
+    private ConsumerRecords<byte[], byte[]> records(ConsumerRecord<byte[], byte[]>... records) {
+        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> byPartition = new java.util.LinkedHashMap<>();
+        for (ConsumerRecord<byte[], byte[]> record : records) {
+            TopicPartition topicPartition = new TopicPartition(record.topic(), record.partition());
+            byPartition.computeIfAbsent(topicPartition, ignored -> new java.util.ArrayList<>()).add(record);
+        }
+        return new ConsumerRecords<>(byPartition);
     }
 }

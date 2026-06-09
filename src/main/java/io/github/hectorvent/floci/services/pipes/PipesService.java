@@ -250,18 +250,18 @@ public class PipesService implements TagHandler {
             return;
         }
         if (source.startsWith("smk://")) {
-            requireKafkaParameters(sourceParameters, "SelfManagedKafkaParameters", "smk");
+            requireKafkaParameters(sourceParameters, "SelfManagedKafkaParameters");
             return;
         }
         if (source.contains(":kafka:")) {
-            requireKafkaParameters(sourceParameters, "ManagedStreamingKafkaParameters", "MSK");
+            requireKafkaParameters(sourceParameters, "ManagedStreamingKafkaParameters");
         }
     }
 
-    private void requireKafkaParameters(JsonNode sourceParameters, String parameterBlock, String sourceLabel) {
+    private void requireKafkaParameters(JsonNode sourceParameters, String parameterBlock) {
         if (sourceParameters == null || sourceParameters.path(parameterBlock).isMissingNode()) {
             throw new AwsException("ValidationException",
-                    sourceLabel + " pipe requires SourceParameters." + parameterBlock, 400);
+                    "SourceParameters." + parameterBlock + " is required", 400);
         }
         String topicName = sourceParameters.path(parameterBlock).path("TopicName").asText(null);
         if (topicName == null || topicName.isBlank()) {

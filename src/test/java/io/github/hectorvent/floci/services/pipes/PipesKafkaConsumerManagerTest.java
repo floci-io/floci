@@ -104,10 +104,28 @@ class PipesKafkaConsumerManagerTest {
                 }
                 """));
 
-        assertEquals("ManagedStreamingKafkaParameters.TopicName is required",
+        assertEquals("SourceParameters.ManagedStreamingKafkaParameters.TopicName is required",
                 assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
                         () -> manager.resolveTopicName(managed)).getMessage());
-        assertEquals("SelfManagedKafkaParameters.TopicName is required",
+        assertEquals("SourceParameters.SelfManagedKafkaParameters.TopicName is required",
+                assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                        () -> manager.resolveTopicName(selfManaged)).getMessage());
+    }
+
+    @Test
+    void resolveTopicNameReportsMissingParameterBlock() {
+        Pipe managed = new Pipe();
+        managed.setSource("arn:aws:kafka:us-east-1:000000000000:cluster/demo/uuid");
+        managed.setSourceParameters(MAPPER.createObjectNode());
+
+        Pipe selfManaged = new Pipe();
+        selfManaged.setSource("smk://localhost:9092");
+        selfManaged.setSourceParameters(MAPPER.createObjectNode());
+
+        assertEquals("SourceParameters.ManagedStreamingKafkaParameters is required",
+                assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
+                        () -> manager.resolveTopicName(managed)).getMessage());
+        assertEquals("SourceParameters.SelfManagedKafkaParameters is required",
                 assertThrows(io.github.hectorvent.floci.core.common.AwsException.class,
                         () -> manager.resolveTopicName(selfManaged)).getMessage());
     }

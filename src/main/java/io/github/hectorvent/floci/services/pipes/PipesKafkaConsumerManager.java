@@ -11,12 +11,15 @@ import jakarta.inject.Inject;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.clients.consumer.OffsetAndMetadata;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.jboss.logging.Logger;
 
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -65,6 +68,22 @@ public class PipesKafkaConsumerManager {
         }
     }
 
+    public void commit(Pipe pipe, Map<TopicPartition, OffsetAndMetadata> offsets) {
+        if (offsets.isEmpty()) {
+            return;
+        }
+        KafkaConsumer<byte[], byte[]> consumer = consumers.get(pipe.getArn());
+        if (consumer == null) {
+            return;
+        }
+        try {
+            consumer.commitSync(offsets);
+        } catch (RuntimeException e) {
+            close(pipe);
+            throw e;
+        }
+    }
+
     public void close(Pipe pipe) {
         KafkaConsumer<byte[], byte[]> consumer = consumers.remove(pipe.getArn());
         if (consumer != null) {
@@ -97,7 +116,8 @@ public class PipesKafkaConsumerManager {
         JsonNode params = kafkaParameters(pipe);
         String topic = params.path("TopicName").asText(null);
         if (topic == null || topic.isBlank()) {
-            throw new AwsException("ValidationException", topicRequiredMessage(pipe), 400);
+            throw new AwsException("ValidationException",
+                    "SourceParameters." + parameterBlockName(pipe) + ".TopicName is required", 400);
         }
         return topic;
     }
@@ -134,13 +154,12 @@ public class PipesKafkaConsumerManager {
         if (sourceParameters == null) {
             throw new AwsException("ValidationException", "Kafka pipe SourceParameters are required", 400);
         }
-        if (isManagedSource(pipe)) {
-            return sourceParameters.path("ManagedStreamingKafkaParameters");
+        JsonNode parameters = sourceParameters.path(parameterBlockName(pipe));
+        if (parameters.isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "SourceParameters." + parameterBlockName(pipe) + " is required", 400);
         }
-        if (isSelfManagedSource(pipe)) {
-            return sourceParameters.path("SelfManagedKafkaParameters");
-        }
-        throw new AwsException("ValidationException", "Unsupported Kafka source: " + pipe.getSource(), 400);
+        return parameters;
     }
 
     private String resolveOffsetReset(JsonNode params) {
@@ -168,10 +187,14 @@ public class PipesKafkaConsumerManager {
         return pipe.getSource().startsWith("smk://");
     }
 
-    private static String topicRequiredMessage(Pipe pipe) {
-        return isManagedSource(pipe)
-                ? "ManagedStreamingKafkaParameters.TopicName is required"
-                : "SelfManagedKafkaParameters.TopicName is required";
+    private static String parameterBlockName(Pipe pipe) {
+        if (isManagedSource(pipe)) {
+            return "ManagedStreamingKafkaParameters";
+        }
+        if (isSelfManagedSource(pipe)) {
+            return "SelfManagedKafkaParameters";
+        }
+        throw new AwsException("ValidationException", "Unsupported Kafka source: " + pipe.getSource(), 400);
     }
 
     private void closeQuietly(KafkaConsumer<byte[], byte[]> consumer) {
