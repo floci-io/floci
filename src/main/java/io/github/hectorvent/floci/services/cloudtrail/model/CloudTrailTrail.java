@@ -113,6 +113,6 @@ public class CloudTrailTrail {
     }
 
     public void setTags(Map<String, String> tags) {
-        this.tags = tags == null ? new HashMap<>() : tags;
+        this.tags = tags == null ? new HashMap<>() : new HashMap<>(tags);
     }
 }

@@ -10,9 +10,9 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.time.Instant;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Predicate;
 
 @ApplicationScoped
 public class CloudTrailService {
@@ -47,7 +47,7 @@ public class CloudTrailService {
         trail.setHomeRegion(region);
         trail.setCreated(now);
         trail.setUpdated(now);
-        trail.setTags(new HashMap<>(tags));
+        trail.setTags(tags == null ? Map.of() : tags);
         trailStore.put(key(region, name), trail);
         return trail;
     }
@@ -117,7 +117,10 @@ public class CloudTrailService {
         if (sameRegion.isPresent()) {
             return sameRegion;
         }
-        return trailStore.scan(ignored -> true).stream()
+        Predicate<String> candidateKey = nameOrArn.startsWith("arn:")
+                ? ignored -> true
+                : key -> key.endsWith(":" + name);
+        return trailStore.scan(candidateKey).stream()
                 .filter(trail -> name.equals(trail.getName()) || nameOrArn.equals(trail.getTrailArn()))
                 .findFirst();
     }
