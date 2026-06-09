@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.pipes;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -412,7 +413,9 @@ public class PipesPoller {
             failed++;
         }
 
-        kafkaConsumerManager.commit(pipe, offsetsToCommit);
+        if (!offsetsToCommit.isEmpty()) {
+            kafkaConsumerManager.commit(pipe, offsetsToCommit);
+        }
         return failed;
     }
 
@@ -585,11 +588,7 @@ public class PipesPoller {
             }
             node.put("eventSourceKey", record.topic() + "-" + record.partition());
             node.put("topic", record.topic());
-            if (pipe.getSource().contains(":kafka:")) {
-                node.put("partition", Integer.toString(record.partition()));
-            } else {
-                node.put("partition", record.partition());
-            }
+            node.put("partition", record.partition());
             node.put("offset", record.offset());
             node.put("timestamp", record.timestamp());
             node.put("timestampType", record.timestampType().name());
@@ -659,7 +658,8 @@ public class PipesPoller {
         try {
             JsonNode parsed = objectMapper.readTree(decoded);
             node.set(fieldName, parsed);
-        } catch (Exception ignored) {
+        } catch (JsonProcessingException e) {
+            LOG.debugv("Kafka {0} is not valid JSON: {1}", fieldName, e.getOriginalMessage());
             node.put(fieldName, decoded);
         }
     }

@@ -127,6 +127,10 @@ public class PipesKafkaConsumerManager {
         return params.path("BatchSize").asInt(defaultBatchSize);
     }
 
+    String resolveConsumerGroupId(Pipe pipe) {
+        return resolveConsumerGroupId(pipe, kafkaParameters(pipe));
+    }
+
     private KafkaConsumer<byte[], byte[]> createConsumer(Pipe pipe) {
         String bootstrapServers = resolveBootstrapServers(pipe);
         String topicName = resolveTopicName(pipe);

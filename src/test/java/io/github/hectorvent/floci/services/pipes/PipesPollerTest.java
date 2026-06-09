@@ -26,9 +26,11 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -68,10 +70,11 @@ class PipesPollerTest {
 
         ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
         verify(targetInvoker).invoke(eq(pipe), payloadCaptor.capture(), eq("us-east-1"));
-        verify(kafkaConsumerManager).commit(eq(pipe), org.mockito.ArgumentMatchers.anyMap());
+        verify(kafkaConsumerManager).commit(eq(pipe), anyMap());
 
         JsonNode delivered = MAPPER.readTree(payloadCaptor.getValue());
         assertEquals("orders", delivered.path("topic").asText());
+        assertTrue(delivered.path("partition").isInt());
         assertEquals("broker-1:9092", delivered.path("bootstrapServers").asText());
         assertEquals(Base64.getEncoder().encodeToString(key), delivered.path("key").asText());
         assertEquals(Base64.getEncoder().encodeToString(value), delivered.path("value").asText());
@@ -92,6 +95,7 @@ class PipesPollerTest {
         poller.pollKafka(pipe, "us-east-1");
 
         verify(kafkaConsumerManager, never()).commit(pipe);
+        verify(kafkaConsumerManager, never()).commit(eq(pipe), anyMap());
     }
 
     @Test

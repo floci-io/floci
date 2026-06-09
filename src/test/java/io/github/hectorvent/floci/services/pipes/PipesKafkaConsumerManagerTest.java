@@ -8,8 +8,6 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
-import java.lang.reflect.Method;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.when;
@@ -155,19 +153,12 @@ class PipesKafkaConsumerManagerTest {
                 }
                 """));
 
-        assertEquals("custom-group", invokeResolveConsumerGroupId(configured));
+        assertEquals("custom-group", manager.resolveConsumerGroupId(configured));
 
-        String fallbackGroupId = invokeResolveConsumerGroupId(fallback);
-        assertEquals(fallbackGroupId, invokeResolveConsumerGroupId(fallback));
+        String fallbackGroupId = manager.resolveConsumerGroupId(fallback);
+        assertEquals(fallbackGroupId, manager.resolveConsumerGroupId(fallback));
         org.junit.jupiter.api.Assertions.assertTrue(
                 fallbackGroupId.startsWith("floci-pipes-orders-pipe-"),
                 "Expected generated consumer group id prefix, got: " + fallbackGroupId);
-    }
-
-    private String invokeResolveConsumerGroupId(Pipe pipe) throws Exception {
-        Method method = PipesKafkaConsumerManager.class
-                .getDeclaredMethod("resolveConsumerGroupId", Pipe.class, com.fasterxml.jackson.databind.JsonNode.class);
-        method.setAccessible(true);
-        return (String) method.invoke(manager, pipe, pipe.getSourceParameters().elements().next());
     }
 }
