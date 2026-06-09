@@ -3,7 +3,6 @@ package io.github.hectorvent.floci.services.appsync.graphql.util;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
-import java.nio.charset.StandardCharsets;
 import java.util.*;
 
 public class DynamoDbUtil {
@@ -150,10 +149,6 @@ public class DynamoDbUtil {
 
     public String toBinarySetJson(List<String> value) {
         return toJson(toBinarySet(value));
-    }
-
-    private String base64Encode(String value) {
-        return Base64.getEncoder().encodeToString(value.getBytes(StandardCharsets.UTF_8));
     }
 
     private String toJson(Map<String, Object> map) {
