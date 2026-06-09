@@ -165,6 +165,25 @@ class ElbV2ServiceTest {
                 .get(rule.getRuleArn()).containsKey("env"));
     }
 
+    @Test
+    void initializeStorageStartsPersistedListenersWithoutTargetGroups() {
+        SharedStorageFactory storageFactory = new SharedStorageFactory();
+        ElbV2Service first = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
+        String lbArn = first.createLoadBalancer(
+                REGION, "listener-only-lb", "internal", "application", "ipv4",
+                List.of("subnet-a"), List.of("sg-a"), Map.of()).getLoadBalancerArn();
+        String listenerArn = first.createListener(
+                REGION, lbArn, "HTTP", 8080, null, List.of(),
+                List.of(), List.of(), Map.of()).getListenerArn();
+
+        ElbV2DataPlane reloadedDataPlane = mock(ElbV2DataPlane.class);
+        serviceWithStorage(storageFactory, reloadedDataPlane, mock(ElbV2HealthChecker.class));
+
+        ArgumentCaptor<Listener> listenerCaptor = ArgumentCaptor.captor();
+        verify(reloadedDataPlane).startListener(listenerCaptor.capture(), eq(REGION), anyList());
+        assertEquals(listenerArn, listenerCaptor.getValue().getListenerArn());
+    }
+
     private String createTargetGroup(String name) {
         return service.createTargetGroup(
                 REGION, name, "HTTP", "HTTP1", 9999, "vpc-a", "instance",

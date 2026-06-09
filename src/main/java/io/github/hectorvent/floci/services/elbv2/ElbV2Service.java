@@ -68,12 +68,32 @@ public class ElbV2Service {
                 new TypeReference<Map<String, Map<String, Rule>>>() {});
         this.tags = storageBacked("elbv2-tags.json",
                 new TypeReference<Map<String, Map<String, String>>>() {});
+        normalizeRegionMaps(loadBalancers);
+        normalizeRegionMaps(targetGroups);
+        normalizeRegionMaps(listeners);
+        normalizeRegionMaps(rules);
+        normalizeRegionMaps(tags);
         rebuildIndexes();
     }
 
     private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference)
     {
         return new StorageBackedMap<>(storageFactory.create("elbv2", fileName, typeReference));
+    }
+
+    private <V> void normalizeRegionMaps(Map<String, Map<String, V>> resources) {
+        for (Map.Entry<String, Map<String, V>> entry : new ArrayList<>(resources.entrySet())) {
+            if (!(entry.getValue() instanceof ConcurrentHashMap)) {
+                resources.put(entry.getKey(), new ConcurrentHashMap<>(entry.getValue()));
+            }
+        }
+    }
+
+    private <V> void persistRegion(Map<String, Map<String, V>> resources, String region) {
+        Map<String, V> regionResources = resources.get(region);
+        if (regionResources != null) {
+            resources.put(region, regionResources);
+        }
     }
 
     private void rebuildIndexes()
@@ -95,7 +115,6 @@ public class ElbV2Service {
             }
         }
         for (Map.Entry<String, Map<String, TargetGroup>> regionEntry : targetGroups.entrySet()) {
-            String region = regionEntry.getKey();
             for (TargetGroup targetGroup : regionEntry.getValue().values()) {
                 tgToLbs.computeIfAbsent(targetGroup.getTargetGroupArn(), k -> ConcurrentHashMap.newKeySet())
                         .addAll(targetGroup.getLoadBalancerArns());
@@ -106,7 +125,10 @@ public class ElbV2Service {
                     }
                 }
             }
-            for (Listener listener : listeners.getOrDefault(region, Map.of()).values()) {
+        }
+        for (Map.Entry<String, Map<String, Listener>> regionEntry : listeners.entrySet()) {
+            String region = regionEntry.getKey();
+            for (Listener listener : regionEntry.getValue().values()) {
                 if (dataPlane != null) {
                     dataPlane.startListener(listener, region, getListenerRules(region, listener.getListenerArn()));
                 }
@@ -222,7 +244,7 @@ public class ElbV2Service {
     public void modifyLoadBalancerAttributes(String region, String arn, Map<String, String> newAttrs) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
         lb.getAttributes().putAll(newAttrs);
-        loadBalancers.put(region, loadBalancers.getOrDefault(region, Map.of()));
+        persistRegion(loadBalancers, region);
     }
 
     /** Capacity reservation status for a load balancer. All fields are {@code null} when no
@@ -240,7 +262,7 @@ public class ElbV2Service {
     public void setSecurityGroups(String region, String arn, List<String> sgIds) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
         lb.setSecurityGroups(new ArrayList<>(sgIds));
-        loadBalancers.put(region, loadBalancers.getOrDefault(region, Map.of()));
+        persistRegion(loadBalancers, region);
     }
 
     public void setSubnets(String region, String arn, List<String> subnets) {
@@ -254,13 +276,13 @@ public class ElbV2Service {
         if (vpcId != null) {
             lb.setVpcId(vpcId);
         }
-        loadBalancers.put(region, loadBalancers.getOrDefault(region, Map.of()));
+        persistRegion(loadBalancers, region);
     }
 
     public void setIpAddressType(String region, String arn, String ipAddressType) {
         LoadBalancer lb = requireLoadBalancer(region, arn);
         lb.setIpAddressType(ipAddressType);
-        loadBalancers.put(region, loadBalancers.getOrDefault(region, Map.of()));
+        persistRegion(loadBalancers, region);
     }
 
     // ── Target Groups ─────────────────────────────────────────────────────────
@@ -356,7 +378,7 @@ public class ElbV2Service {
         }
         healthChecker.stopMonitoring(arn);
         targetGroups.getOrDefault(region, Map.of()).remove(arn);
-        targetGroups.put(region, targetGroups.getOrDefault(region, Map.of()));
+        persistRegion(targetGroups, region);
         tgToLbs.remove(arn);
         tags.remove(arn);
     }
@@ -376,7 +398,7 @@ public class ElbV2Service {
         if (healthyThreshold != null)    tg.setHealthyThresholdCount(healthyThreshold);
         if (unhealthyThreshold != null)  tg.setUnhealthyThresholdCount(unhealthyThreshold);
         if (matcher != null)             tg.setMatcher(matcher);
-        targetGroups.put(region, targetGroups.getOrDefault(region, Map.of()));
+        persistRegion(targetGroups, region);
     }
 
     public Map<String, String> describeTargetGroupAttributes(String region, String arn) {
@@ -387,7 +409,7 @@ public class ElbV2Service {
     public void modifyTargetGroupAttributes(String region, String arn, Map<String, String> newAttrs) {
         TargetGroup tg = requireTargetGroup(region, arn);
         tg.getAttributes().putAll(newAttrs);
-        targetGroups.put(region, targetGroups.getOrDefault(region, Map.of()));
+        persistRegion(targetGroups, region);
     }
 
     // ── Listeners ─────────────────────────────────────────────────────────────
@@ -471,7 +493,7 @@ public class ElbV2Service {
     public void modifyListenerAttributes(String region, String arn, Map<String, String> newAttrs) {
         Listener listener = requireListener(region, arn);
         listener.getAttributes().putAll(newAttrs);
-        listeners.put(region, listeners.getOrDefault(region, Map.of()));
+        persistRegion(listeners, region);
     }
 
     public void deleteListener(String region, String listenerArn) {
@@ -531,8 +553,8 @@ public class ElbV2Service {
             unlinkUnreferencedTargetGroups(region, listener.getLoadBalancerArn());
             recompileRules = true;
         }
-        listeners.put(region, listeners.getOrDefault(region, Map.of()));
-        rules.put(region, rules.getOrDefault(region, Map.of()));
+        persistRegion(listeners, region);
+        persistRegion(rules, region);
         if (restartDataPlane) {
             dataPlane.restartListener(requireListener(region, listenerArn), region, getListenerRules(region, listenerArn));
         } else if (recompileRules) {
@@ -641,7 +663,7 @@ public class ElbV2Service {
         String listenerArn = rule.getListenerArn();
         if (conditions != null) rule.setConditions(new ArrayList<>(conditions));
         if (actions != null)    rule.setActions(new ArrayList<>(actions));
-        rules.put(region, rules.getOrDefault(region, Map.of()));
+        persistRegion(rules, region);
         dataPlane.recompileRules(listenerArn, getListenerRules(region, listenerArn));
         return rule;
     }
@@ -699,7 +721,7 @@ public class ElbV2Service {
             existing.removeIf(e -> e.getId().equals(t.getId()) && Objects.equals(e.getPort(), t.getPort()));
             existing.add(t);
         }
-        targetGroups.put(region, targetGroups.getOrDefault(region, Map.of()));
+        persistRegion(targetGroups, region);
         healthChecker.addTargets(tgArn, targets, tg);
     }
 
@@ -708,7 +730,7 @@ public class ElbV2Service {
         for (TargetDescription t : targets) {
             tg.getTargets().removeIf(e -> e.getId().equals(t.getId()) && Objects.equals(e.getPort(), t.getPort()));
         }
-        targetGroups.put(region, targetGroups.getOrDefault(region, Map.of()));
+        persistRegion(targetGroups, region);
         healthChecker.removeTargets(tgArn, targets, tg);
     }
 
@@ -778,13 +800,13 @@ public class ElbV2Service {
                 listener.getCertificates().add(certArn);
             }
         }
-        listeners.put(region, listeners.getOrDefault(region, Map.of()));
+        persistRegion(listeners, region);
     }
 
     public void removeListenerCertificates(String region, String listenerArn, List<String> certArns) {
         Listener listener = requireListener(region, listenerArn);
         listener.getCertificates().removeAll(certArns);
-        listeners.put(region, listeners.getOrDefault(region, Map.of()));
+        persistRegion(listeners, region);
     }
 
     public List<String> describeListenerCertificates(String region, String listenerArn) {
