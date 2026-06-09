@@ -29,6 +29,10 @@ class IamIntegrationTest {
             "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\","
             + "\"Action\":\"s3:GetObject\",\"Resource\":\"*\"}]}";
 
+    private static final String EXPLICIT_DENY_POLICY_DOCUMENT =
+            "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Deny\","
+            + "\"Action\":\"ec2:RunInstances\",\"Resource\":\"*\"}]}";
+
     private static String createdPolicyArn;
 
     // =========================================================================
@@ -276,6 +280,20 @@ class IamIntegrationTest {
             .extract()
             .path("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
 
+        String denyPolicyArn = given()
+            .formParam("Action", "CreatePolicy")
+            .formParam("PolicyName", "SimulateExplicitDenyPolicy")
+            .formParam("Path", "/")
+            .formParam("PolicyDocument", EXPLICIT_DENY_POLICY_DOCUMENT)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract()
+            .path("CreatePolicyResponse.CreatePolicyResult.Policy.Arn");
+
         given()
             .formParam("Action", "AttachUserPolicy")
             .formParam("UserName", "simulate-user")
@@ -288,10 +306,22 @@ class IamIntegrationTest {
             .statusCode(200);
 
         given()
+            .formParam("Action", "AttachUserPolicy")
+            .formParam("UserName", "simulate-user")
+            .formParam("PolicyArn", denyPolicyArn)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
             .formParam("Action", "SimulatePrincipalPolicy")
             .formParam("PolicySourceArn", "arn:aws:iam::000000000000:user/simulate-user")
             .formParam("ActionNames.member.1", "s3:GetObject")
             .formParam("ActionNames.member.2", "ec2:RunInstances")
+            .formParam("ActionNames.member.3", "ssm:GetParameter")
             .formParam("ResourceArns.member.1", "*")
             .header("Authorization",
                     "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
@@ -303,6 +333,8 @@ class IamIntegrationTest {
             .body("SimulatePrincipalPolicyResponse.SimulatePrincipalPolicyResult.EvaluationResults.member.find { it.EvalActionName == 's3:GetObject' }.EvalDecision",
                     equalTo("allowed"))
             .body("SimulatePrincipalPolicyResponse.SimulatePrincipalPolicyResult.EvaluationResults.member.find { it.EvalActionName == 'ec2:RunInstances' }.EvalDecision",
+                    equalTo("explicitDeny"))
+            .body("SimulatePrincipalPolicyResponse.SimulatePrincipalPolicyResult.EvaluationResults.member.find { it.EvalActionName == 'ssm:GetParameter' }.EvalDecision",
                     equalTo("implicitDeny"));
     }
 

@@ -733,11 +733,12 @@ public class IamQueryHandler {
         XmlBuilder results = new XmlBuilder().start("EvaluationResults");
         for (String actionName : actionNames) {
             for (String resourceArn : resourceArns) {
-                IamPolicyEvaluator.Decision decision = policyEvaluator.evaluate(caller, null, actionName, resourceArn, context);
+                IamPolicyEvaluator.SimulationDecision decision =
+                        policyEvaluator.simulatePrincipalPolicy(caller, actionName, resourceArn, context);
                 results.start("member")
                         .elem("EvalActionName", actionName)
                         .elem("EvalResourceName", resourceArn)
-                        .elem("EvalDecision", decision == IamPolicyEvaluator.Decision.ALLOW ? "allowed" : "implicitDeny")
+                        .elem("EvalDecision", decision.awsValue())
                         .start("MatchedStatements").end("MatchedStatements")
                         .start("MissingContextValues").end("MissingContextValues")
                         .end("member");

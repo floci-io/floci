@@ -40,6 +40,22 @@ public class IamPolicyEvaluator {
 
     public enum Decision { ALLOW, DENY }
 
+    public enum SimulationDecision {
+        ALLOWED("allowed"),
+        EXPLICIT_DENY("explicitDeny"),
+        IMPLICIT_DENY("implicitDeny");
+
+        private final String awsValue;
+
+        SimulationDecision(String awsValue) {
+            this.awsValue = awsValue;
+        }
+
+        public String awsValue() {
+            return awsValue;
+        }
+    }
+
     private static final Logger LOG = Logger.getLogger(IamPolicyEvaluator.class);
 
     private final ObjectMapper objectMapper;
@@ -117,6 +133,34 @@ public class IamPolicyEvaluator {
                                           String resource,
                                           Map<String, String> conditionCtx) {
         return evaluate(CallerContext.of(policyDocuments), null, action, resource, conditionCtx);
+    }
+
+    public SimulationDecision simulatePrincipalPolicy(CallerContext caller,
+                                                      String action,
+                                                      String resource,
+                                                      Map<String, String> conditionCtx) {
+        Map<String, String> ctx = conditionCtx == null ? Map.of() : conditionCtx;
+        List<PolicyStatement> identityStmts = parseAll(caller.identityPolicies());
+        List<PolicyStatement> sessionStmts = caller.sessionPolicyDocument() == null
+                ? null : parseAll(List.of(caller.sessionPolicyDocument()));
+        List<PolicyStatement> boundaryStmts = caller.boundaryPolicyDocument() == null
+                ? null : parseAll(List.of(caller.boundaryPolicyDocument()));
+
+        if (anyExplicitDeny(identityStmts, action, resource, ctx)
+                || (sessionStmts != null && anyExplicitDeny(sessionStmts, action, resource, ctx))
+                || (boundaryStmts != null && anyExplicitDeny(boundaryStmts, action, resource, ctx))) {
+            return SimulationDecision.EXPLICIT_DENY;
+        }
+        if (!anyExplicitAllow(identityStmts, action, resource, ctx)) {
+            return SimulationDecision.IMPLICIT_DENY;
+        }
+        if (sessionStmts != null && !anyExplicitAllow(sessionStmts, action, resource, ctx)) {
+            return SimulationDecision.IMPLICIT_DENY;
+        }
+        if (boundaryStmts != null && !anyExplicitAllow(boundaryStmts, action, resource, ctx)) {
+            return SimulationDecision.IMPLICIT_DENY;
+        }
+        return SimulationDecision.ALLOWED;
     }
 
     // -----------------------------------------------------------------------

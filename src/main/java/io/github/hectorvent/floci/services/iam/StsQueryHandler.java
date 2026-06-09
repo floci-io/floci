@@ -99,7 +99,7 @@ public class StsQueryHandler {
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
         String authorization = headers == null ? null : headers.getHeaderString("Authorization");
-        String accessKeyId = accountResolver.extractAccessKeyId(authorization);
+        String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
         String arn = iamService.resolveCallerArn(accessKeyId)
                 .orElse(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         String result = new XmlBuilder()
