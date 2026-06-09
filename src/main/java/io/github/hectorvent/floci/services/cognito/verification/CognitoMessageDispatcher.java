@@ -16,9 +16,11 @@ import java.util.Map;
  */
 public final class CognitoMessageDispatcher {
 
+    // Defaults match AWS Cognito's out-of-the-box verification messages (used only when the
+    // user pool configures no VerificationMessageTemplate).
     private static final String DEFAULT_EMAIL_SUBJECT = "Your verification code";
-    private static final String DEFAULT_EMAIL_BODY = "Your code is {####}";
-    private static final String DEFAULT_SMS_BODY = "Your code is {####}";
+    private static final String DEFAULT_EMAIL_BODY = "Your verification code is {####}.";
+    private static final String DEFAULT_SMS_BODY = "Your verification code is {####}.";
     private static final String DEFAULT_FROM = "no-reply@verificationemail.com";
     private static final String DEFAULT_REGION = "us-east-1";
     private static final String CODE_PLACEHOLDER = "{####}";
@@ -51,11 +53,14 @@ public final class CognitoMessageDispatcher {
                     List.of(), List.of(), List.of(),
                     subject,
                     body,
-                    null,
+                    null,          // bodyHtml
+                    null,          // configurationSetName
+                    List.of(),     // emailTags
+                    List.of(),     // additionalHeaders
                     DEFAULT_REGION
                 );
             } else if ("SMS".equalsIgnoreCase(medium) && phone != null) {
-                String body = renderTemplate(stringOr(template.get(smsTemplateKey(purpose)), DEFAULT_SMS_BODY), code);
+                String body = renderTemplate(stringOr(resolveSmsTemplate(pool, template, purpose), DEFAULT_SMS_BODY), code);
                 sns.publish(
                     null, null,
                     phone,
@@ -69,24 +74,36 @@ public final class CognitoMessageDispatcher {
     }
 
     /**
-     * Cognito uses different template keys per purpose. For email there's only
-     * {@code EmailMessage} today; we keep this method as a single hook so future
-     * Cognito additions (e.g. {@code EmailMessageByLink}) plug in cleanly.
+     * Email template key. Returns the code-based {@code EmailMessage} ({@code {####}}).
+     * TODO: honor the pool's {@code DefaultEmailOption}: when set to {@code CONFIRM_WITH_LINK},
+     * AWS uses {@code EmailMessageByLink}/{@code EmailSubjectByLink} ({@code {##Verify Email##}})
+     * instead of the code template. Code-only is sufficient for the current foundation scope.
      */
     private String emailTemplateKey(VerificationCode.Purpose purpose) {
         return "EmailMessage";
     }
 
     /**
-     * For SMS, Cognito uses {@code SmsAuthenticationMessage} when sending an MFA
-     * challenge code, and {@code SmsMessage} for signup/verification codes.
+     * Resolves the raw SMS template from the correct AWS source for the purpose.
+     * {@code SmsAuthenticationMessage} (MFA) is a top-level UserPool attribute, NOT part of
+     * the VerificationMessageTemplate. For verification/signup codes, the template's
+     * {@code SmsMessage} takes precedence over the legacy top-level SmsVerificationMessage.
      */
-    private String smsTemplateKey(VerificationCode.Purpose purpose) {
-        return purpose == VerificationCode.Purpose.SMS_MFA
-                ? "SmsAuthenticationMessage"
-                : "SmsMessage";
+    private String resolveSmsTemplate(UserPool pool, Map<String, Object> template,
+                                      VerificationCode.Purpose purpose) {
+        if (purpose == VerificationCode.Purpose.SMS_MFA) {
+            return pool.getSmsAuthenticationMessage();
+        }
+        Object sms = template.get("SmsMessage");
+        if (sms != null && !sms.toString().isEmpty()) {
+            return sms.toString();
+        }
+        return pool.getSmsVerificationMessage();
     }
 
+    // TODO: when no medium is explicitly requested, the choice should come from the pool's
+    // AutoVerifiedAttributes config. In AWS's "SMS if phone available, otherwise email" mode,
+    // Cognito prefers the phone number when both contacts are present; this fallback prefers email.
     private List<String> resolveDeliveryMediums(List<String> requested, String email, String phone) {
         if (requested != null && !requested.isEmpty()) return requested;
         if (email != null) return List.of("EMAIL");

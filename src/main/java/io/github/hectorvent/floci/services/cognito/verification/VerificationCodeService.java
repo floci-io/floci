@@ -27,9 +27,17 @@ import java.util.Optional;
  * {@link #RATE_LIMIT_WINDOW} throws {@link VerificationCodeException.Kind#RATE_LIMIT}.
  * Attempts: after {@link #MAX_ATTEMPTS} failed {@code consume} calls the code
  * is invalidated.
+ *
+ * <p>The {@code ttl} is caller-supplied (per AWS the sign-up confirmation code is valid
+ * 24h; the forgot-password code expires sooner, ~1h) — wiring layers must pass the right
+ * value per purpose. {@link #RATE_LIMIT_WINDOW} (30s) and {@link #MAX_ATTEMPTS} (5) are
+ * emulation heuristics: AWS throttles resends and invalidates after repeated failures, but
+ * does not publish the exact thresholds.
  */
 public final class VerificationCodeService {
 
+    // Emulation heuristics (not AWS-documented constants): AWS throttles resend frequency and
+    // invalidates a code after repeated wrong attempts, but the exact values are not published.
     private static final Duration RATE_LIMIT_WINDOW = Duration.ofSeconds(30);
     private static final int MAX_ATTEMPTS = 5;
     private static final int SALT_BYTES = 16;

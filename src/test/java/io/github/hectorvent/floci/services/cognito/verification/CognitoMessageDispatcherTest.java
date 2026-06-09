@@ -49,7 +49,7 @@ class CognitoMessageDispatcherTest {
             eq(List.of()), eq(List.of()), eq(List.of()),
             eq("Verify your account"),
             eq("Hi! Your code is 123456."),
-            isNull(),
+            isNull(), isNull(), eq(List.of()), eq(List.of()),
             eq("us-east-1"));
         verifyNoInteractions(sns);
     }
@@ -75,10 +75,10 @@ class CognitoMessageDispatcherTest {
 
     @Test
     void dispatch_smsMfaFlow_usesSmsAuthenticationMessageTemplate() {
-        UserPool pool = pool(Map.of(
-            "SmsMessage", "Signup: {####}",
-            "SmsAuthenticationMessage", "MFA: {####}"
-        ));
+        // SmsAuthenticationMessage is a top-level UserPool attribute, not part of
+        // VerificationMessageTemplate (which only holds SmsMessage for verification codes).
+        UserPool pool = pool(Map.of("SmsMessage", "Signup: {####}"));
+        pool.setSmsAuthenticationMessage("MFA: {####}");
         CognitoUser user = user("alice@example.com", "+5215551234567");
 
         dispatcher.dispatch(pool, user, VerificationCode.Purpose.SMS_MFA,
@@ -104,8 +104,8 @@ class CognitoMessageDispatcherTest {
             anyString(), eq(List.of("alice@example.com")),
             eq(List.of()), eq(List.of()), eq(List.of()),
             eq("Your verification code"),
-            eq("Your code is 111222"),
-            isNull(), eq("us-east-1"));
+            eq("Your verification code is 111222."),
+            isNull(), isNull(), eq(List.of()), eq(List.of()), eq("us-east-1"));
     }
 
     @Test
@@ -121,7 +121,7 @@ class CognitoMessageDispatcherTest {
             eq(List.of()), eq(List.of()), eq(List.of()),
             anyString(),
             eq("Welcome, please verify.\nCode: 999000"),
-            isNull(), eq("us-east-1"));
+            isNull(), isNull(), eq(List.of()), eq(List.of()), eq("us-east-1"));
     }
 
     @Test
@@ -133,7 +133,7 @@ class CognitoMessageDispatcherTest {
             "444555", List.of());
 
         verify(ses).sendEmail(anyString(), eq(List.of("alice@example.com")),
-            any(), any(), any(), anyString(), anyString(), isNull(), anyString());
+            any(), any(), any(), anyString(), anyString(), isNull(), isNull(), any(), any(), anyString());
         verifyNoInteractions(sns);
     }
 
