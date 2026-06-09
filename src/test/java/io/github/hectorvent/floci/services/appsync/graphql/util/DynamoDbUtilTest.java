@@ -308,13 +308,15 @@ class DynamoDbUtilTest {
     @Test
     void toMapValues() {
         Map<String, Object> result = dynamoDb.toMapValues(Map.of("k", "v"));
-        assertThat(result, hasKey("M"));
+        assertThat(result, hasKey("k"));
+        assertThat((Map<?, ?>) result.get("k"), hasEntry("S", "v"));
     }
 
     @Test
     void toMapValuesJson() {
         String result = dynamoDb.toMapValuesJson(Map.of("k", "v"));
-        assertThat(result, containsString("\"M\""));
+        assertThat(result, containsString("k"));
+        assertThat(result, containsString("\"S\""));
     }
 
     @Test

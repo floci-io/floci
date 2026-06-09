@@ -9,7 +9,12 @@ import java.time.temporal.ChronoField;
 
 public class TimeUtil {
 
-    private static final DateTimeFormatter ISO_FORMATTER = DateTimeFormatter.ISO_INSTANT;
+    private static final DateTimeFormatter ISO_FORMATTER = new DateTimeFormatterBuilder()
+            .appendPattern("yyyy-MM-dd'T'HH:mm:ss")
+            .appendFraction(ChronoField.MILLI_OF_SECOND, 3, 3, true)
+            .appendOffsetId()
+            .toFormatter()
+            .withZone(ZoneOffset.UTC);
 
     public String nowISO8601() {
         return ISO_FORMATTER.format(Instant.now());

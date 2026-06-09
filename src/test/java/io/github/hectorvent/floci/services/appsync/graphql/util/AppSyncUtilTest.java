@@ -392,7 +392,7 @@ class AppSyncUtilTest {
 
     @Test
     void typeOf_null() {
-        assertThat(util.typeOf(null), is("null"));
+        assertThat(util.typeOf(null), is("Null"));
     }
 
     @Test
@@ -401,8 +401,10 @@ class AppSyncUtilTest {
     }
 
     @Test
-    void typeOf_integer() {
-        assertThat(util.typeOf(42), is("Integer"));
+    void typeOf_number() {
+        assertThat(util.typeOf(42), is("Number"));
+        assertThat(util.typeOf(3.14), is("Number"));
+        assertThat(util.typeOf(123L), is("Number"));
     }
 
     @Test
@@ -418,6 +420,11 @@ class AppSyncUtilTest {
     @Test
     void typeOf_map() {
         assertThat(util.typeOf(Map.of()), is("Map"));
+    }
+
+    @Test
+    void typeOf_unknown() {
+        assertThat(util.typeOf(new Object()), is("Object"));
     }
 
     @Test
@@ -457,7 +464,7 @@ class AppSyncUtilTest {
     void unauthorized() {
         VtlErrorSignal ex = assertThrows(VtlErrorSignal.class, util::unauthorized);
         assertThat(ex.getMessage(), is("Not Authorized"));
-        assertThat(ex.getErrorType(), is("UnauthorizedException"));
+        assertThat(ex.getErrorType(), is("Unauthorized"));
     }
 
     @Test

@@ -81,37 +81,51 @@ class StrUtilTest {
     }
 
     @Test
-    void normalize_basic() {
-        assertThat(str.normalize("hello   world", " "), is("hello world"));
+    void normalize_nfc() {
+        // e + combining acute accent → precomposed é
+        String input = "e\u0301";
+        assertThat(str.normalize(input, "nfc"), is("\u00e9"));
     }
 
     @Test
-    void normalize_tabs() {
-        assertThat(str.normalize("hello\tworld", " "), is("hello world"));
+    void normalize_nfd() {
+        // precomposed é → e + combining acute accent
+        String input = "\u00e9";
+        assertThat(str.normalize(input, "nfd"), is("e\u0301"));
     }
 
     @Test
-    void normalize_mixed() {
-        assertThat(str.normalize("hello \t\n world", " "), is("hello world"));
+    void normalize_nfkc() {
+        // fullwidth Latin small letter e → normal e
+        String input = "\uff45";
+        assertThat(str.normalize(input, "nfkc"), is("e"));
     }
 
     @Test
-    void normalize_customReplacement() {
-        assertThat(str.normalize("hello   world", "-"), is("hello-world"));
+    void normalize_nfkd() {
+        // fullwidth Latin small letter e → normal e
+        String input = "\uff45";
+        assertThat(str.normalize(input, "nfkd"), is("e"));
+    }
+
+    @Test
+    void normalize_caseInsensitive() {
+        String input = "e\u0301";
+        assertThat(str.normalize(input, "NFC"), is("\u00e9"));
     }
 
     @Test
     void normalize_null() {
-        assertThat(str.normalize(null, " "), is(""));
+        assertThat(str.normalize(null, "nfc"), is(""));
     }
 
     @Test
-    void normalize_nullReplacement() {
-        assertThat(str.normalize("hello   world", null), is("hello world"));
+    void normalize_nullForm() {
+        assertThat(str.normalize("hello", null), is("hello"));
     }
 
     @Test
-    void normalize_noWhitespace() {
-        assertThat(str.normalize("hello", " "), is("hello"));
+    void normalize_alreadyNormalized() {
+        assertThat(str.normalize("hello", "nfc"), is("hello"));
     }
 }

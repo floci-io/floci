@@ -65,7 +65,7 @@ public class DynamoDbUtil {
     }
 
     public Map<String, Object> toBinary(String value) {
-        return Collections.singletonMap("B", base64Encode(value));
+        return Collections.singletonMap("B", value);
     }
 
     public String toBinaryJson(String value) {
@@ -113,7 +113,11 @@ public class DynamoDbUtil {
     }
 
     public Map<String, Object> toMapValues(Map<String, Object> value) {
-        return toMap(value);
+        Map<String, Object> converted = new LinkedHashMap<>(value.size());
+        for (Map.Entry<String, Object> entry : value.entrySet()) {
+            converted.put(entry.getKey(), toDynamoDB(entry.getValue()));
+        }
+        return converted;
     }
 
     public String toMapValuesJson(Map<String, Object> value) {
@@ -141,11 +145,7 @@ public class DynamoDbUtil {
     }
 
     public Map<String, Object> toBinarySet(List<String> value) {
-        List<String> encoded = new ArrayList<>(value.size());
-        for (String s : value) {
-            encoded.add(base64Encode(s));
-        }
-        return Collections.singletonMap("BS", encoded);
+        return Collections.singletonMap("BS", new ArrayList<>(value));
     }
 
     public String toBinarySetJson(List<String> value) {

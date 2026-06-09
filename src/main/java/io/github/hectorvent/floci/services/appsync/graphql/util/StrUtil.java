@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.appsync.graphql.util;
 
+import java.text.Normalizer;
+
 public class StrUtil {
 
     public String toUpper(String s) {
@@ -17,9 +19,9 @@ public class StrUtil {
         return s.replace(target, replacement);
     }
 
-    public String normalize(String s, String replacement) {
+    public String normalize(String s, String form) {
         if (s == null) return "";
-        if (replacement == null) replacement = " ";
-        return s.replaceAll("\\s+", replacement);
+        if (form == null) form = "nfc";
+        return Normalizer.normalize(s, Normalizer.Form.valueOf(form.toUpperCase()));
     }
 }

@@ -113,13 +113,13 @@ class TimeUtilTest {
     void epochMilliSecondsToISO8601_valid() {
         Instant instant = Instant.parse("2024-01-15T12:00:00Z");
         String result = time.epochMilliSecondsToISO8601(instant.toEpochMilli());
-        assertThat(result, is("2024-01-15T12:00:00Z"));
+        assertThat(result, is("2024-01-15T12:00:00.000Z"));
     }
 
     @Test
     void epochMilliSecondsToISO8601_epoch0() {
         String result = time.epochMilliSecondsToISO8601(0L);
-        assertThat(result, is("1970-01-01T00:00:00Z"));
+        assertThat(result, is("1970-01-01T00:00:00.000Z"));
     }
 
     @Test

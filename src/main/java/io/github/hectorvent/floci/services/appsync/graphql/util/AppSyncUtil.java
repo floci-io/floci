@@ -167,16 +167,13 @@ public class AppSyncUtil {
     }
 
     public String typeOf(Object value) {
-        if (value == null) return "null";
+        if (value == null) return "Null";
         if (value instanceof String) return "String";
         if (value instanceof Boolean) return "Boolean";
-        if (value instanceof Integer) return "Integer";
-        if (value instanceof Long) return "Long";
-        if (value instanceof Double) return "Double";
-        if (value instanceof Float) return "Float";
+        if (value instanceof Number) return "Number";
         if (value instanceof List<?>) return "List";
         if (value instanceof Map<?, ?>) return "Map";
-        return value.getClass().getSimpleName();
+        return "Object";
     }
 
     public String authType() {
@@ -217,7 +214,7 @@ public class AppSyncUtil {
     }
 
     public void unauthorized() {
-        throw new VtlErrorSignal("Not Authorized", "UnauthorizedException", null, null);
+        throw new VtlErrorSignal("Not Authorized", "Unauthorized", null, null);
     }
 
     public void validate(boolean condition, String message) {
