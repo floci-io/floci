@@ -649,7 +649,7 @@ public class Ec2Service {
             getRequiredRouteTable(region, routeTableId);
         }
         for (String subnetId : subnetIds) {
-            getRequiredSubnet(region, subnetId);
+            requireSubnet(region, subnetId);
         }
         for (String securityGroupId : securityGroupIds) {
             getRequiredSecurityGroup(region, securityGroupId);
@@ -1530,7 +1530,7 @@ public class Ec2Service {
     public NatGateway createNatGateway(String region, String subnetId, String allocationId,
                                        String connectivityType, List<Tag> natGatewayTags) {
         ensureDefaultResources(region);
-        Subnet subnet = getRequiredSubnet(region, subnetId);
+        Subnet subnet = requireSubnet(region, subnetId);
         if (allocationId != null && !allocationId.isBlank()) {
             getRequiredAddress(region, allocationId);
         }
