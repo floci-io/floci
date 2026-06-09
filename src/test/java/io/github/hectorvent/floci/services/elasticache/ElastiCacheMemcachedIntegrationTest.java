@@ -30,6 +30,7 @@ class ElastiCacheMemcachedIntegrationTest {
     private static final String CLUSTER_ID = "it-memcached-cluster";
     private static final int SOCKET_TIMEOUT_MS = 10_000;
 
+    private static String clusterHost;
     private static int clusterPort;
 
     @BeforeAll
@@ -51,7 +52,7 @@ class ElastiCacheMemcachedIntegrationTest {
     @Test
     @Order(1)
     void createCacheCluster() {
-        clusterPort =
+        var response =
                 given()
                     .formParam("Action", "CreateCacheCluster")
                     .formParam("CacheClusterId", CLUSTER_ID)
@@ -68,8 +69,12 @@ class ElastiCacheMemcachedIntegrationTest {
                     .body("CreateCacheClusterResponse.CreateCacheClusterResult.CacheCluster.ConfigurationEndpoint.Address", notNullValue())
                     .body("CreateCacheClusterResponse.CreateCacheClusterResult.CacheCluster.ConfigurationEndpoint.Port", notNullValue())
                 .extract()
-                    .xmlPath()
-                    .getInt("CreateCacheClusterResponse.CreateCacheClusterResult.CacheCluster.ConfigurationEndpoint.Port");
+                    .xmlPath();
+
+        clusterHost = response.getString(
+                "CreateCacheClusterResponse.CreateCacheClusterResult.CacheCluster.ConfigurationEndpoint.Address");
+        clusterPort = response.getInt(
+                "CreateCacheClusterResponse.CreateCacheClusterResult.CacheCluster.ConfigurationEndpoint.Port");
     }
 
     @Test
@@ -106,7 +111,7 @@ class ElastiCacheMemcachedIntegrationTest {
     @Test
     @Order(4)
     void memcachedAcceptsSetAndGet() throws Exception {
-        try (Socket socket = new Socket("localhost", clusterPort)) {
+        try (Socket socket = new Socket(clusterHost, clusterPort)) {
             socket.setSoTimeout(SOCKET_TIMEOUT_MS);
             OutputStream out = socket.getOutputStream();
             InputStream in = socket.getInputStream();
@@ -128,7 +133,7 @@ class ElastiCacheMemcachedIntegrationTest {
     @Test
     @Order(5)
     void versionCommandResponds() throws Exception {
-        try (Socket socket = new Socket("localhost", clusterPort)) {
+        try (Socket socket = new Socket(clusterHost, clusterPort)) {
             socket.setSoTimeout(SOCKET_TIMEOUT_MS);
             socket.getOutputStream().write("version\r\n".getBytes(StandardCharsets.UTF_8));
             socket.getOutputStream().flush();

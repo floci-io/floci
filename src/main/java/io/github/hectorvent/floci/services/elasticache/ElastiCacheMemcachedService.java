@@ -51,7 +51,7 @@ public class ElastiCacheMemcachedService {
 
         ElastiCacheContainerHandle handle = containerManager.start(clusterId, image);
 
-        String endpointHost = config.hostname().orElse("localhost");
+        String endpointHost = resolveEndpointHost(handle);
         Endpoint endpoint = new Endpoint(endpointHost, handle.getPort());
 
         CacheCluster cluster = new CacheCluster(
@@ -97,5 +97,9 @@ public class ElastiCacheMemcachedService {
         clusters.delete(clusterId);
         LOG.infov("Memcached cluster {0} deleted", clusterId);
         return cluster;
+    }
+
+    private String resolveEndpointHost(ElastiCacheContainerHandle handle) {
+        return config.hostname().orElse(handle.getHost());
     }
 }
