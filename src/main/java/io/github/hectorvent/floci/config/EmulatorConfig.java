@@ -592,11 +592,6 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
-    interface CloudTrailServiceConfig {
-        @WithDefault("true")
-        boolean enabled();
-    }
-
     interface LightsailServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -606,7 +601,6 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
     }
-
     interface S3VectorsServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -645,6 +639,17 @@ public interface EmulatorConfig {
     interface ConfigServiceConfig {
         @WithDefault("true")
         boolean enabled();
+    }
+
+    interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        /** How often the writer flushes pending records into the destination
+         *  bucket. Real AWS delivers data events with ~5-minute lag; the
+         *  default here is 60s so dev/CI feedback loops stay fast. */
+        @WithDefault("60")
+        int flushIntervalSeconds();
     }
 
     interface AutoScalingServiceConfig {
