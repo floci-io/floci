@@ -589,10 +589,11 @@ class SamTransformIntegrationTest {
                 return;
             }
             try {
-                Thread.sleep(25);
+                Thread.sleep(100);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                break;
+                throw new AssertionError("Interrupted while waiting for stack " + stackName
+                        + " to reach " + expected, e);
             }
         }
         assertThat(body, containsString(expected));
