@@ -1,6 +1,6 @@
 # Services Overview
 
-Floci emulates 53 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
+Floci emulates 54 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
 
 This page is the canonical reference for supported service and operation counts. Some services expose separate control-plane and data-plane rows below. Other docs (and the README) should link here rather than duplicating the table.
 
@@ -34,6 +34,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [CloudWatch Metrics](cloudwatch.md#metrics) | `POST /` with `Action=` or JSON 1.1 | Query / JSON | 11 |
 | [ElastiCache](elasticache.md) | `POST /` with `Action=` param + TCP proxy | Query + RESP | 8 |
 | [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 14 |
+| [RDS Data API](rds-data.md) | `/Execute`, `/BeginTransaction`, `/CommitTransaction`, `/RollbackTransaction` | REST JSON | 4 |
 | [MSK](msk.md) | `/v1/clusters/...`, `/api/v2/clusters/...` + Redpanda broker | REST JSON + Kafka | 8 |
 | [Athena](athena.md) | `POST /` + `X-Amz-Target: AmazonAthena.*` | JSON 1.1 | 4 |
 | [Glue](glue.md) | `POST /` + `X-Amz-Target: AWSGlue.*` | JSON 1.1 | 38 |
@@ -69,7 +70,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [BCM Data Exports](bcm-data-exports.md) | `POST /` + `X-Amz-Target: AWSBillingAndCostManagementDataExports.*` | JSON 1.1 | 7 |
 | [Transfer Family](transfer.md) | `POST /` + `X-Amz-Target: TransferService.*` | JSON 1.1 | 17 |
 
-**Lambda, ElastiCache, RDS, MSK, ECS, EKS, and OpenSearch** spin up real Docker containers and support IAM authentication and SigV4 request signing, the same auth flow as production AWS.
+**Lambda, ElastiCache, RDS, MSK, ECS, EKS, and OpenSearch** spin up real Docker containers and support IAM authentication and SigV4 request signing, the same auth flow as production AWS. **RDS Data API** executes SQL against the local RDS containers through AWS-compatible REST JSON routes.
 
 **ECR** runs a shared `registry:2` container so the stock `docker` client can push and pull image bytes against repositories returned by the AWS-shaped control plane. **EKS** (real mode) starts a k3s container per cluster and exposes the Kubernetes API server on a host port. **OpenSearch** (real mode) starts an `opensearchproject/opensearch` container per domain and exposes the data-plane REST API on a host port.
 

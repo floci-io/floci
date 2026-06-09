@@ -156,6 +156,25 @@ class ServiceEnablementIntegrationTest {
             .body("message", equalTo("Service es is not enabled."));
     }
 
+    @Test
+    void signedRdsDataExecuteRequestsReturnJsonWhenServiceDisabled() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", authorization("rds-data"))
+            .body("""
+                {"resourceArn":"arn:aws:rds:us-east-1:000000000000:cluster:db","secretArn":"arn","database":"app","sql":"select 1"}
+                """)
+        .when()
+            .post("/Execute")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "ServiceNotAvailableException")
+            .header("x-amzn-query-error", "ServiceNotAvailableException;Sender")
+            .body("__type", equalTo("ServiceNotAvailableException"))
+            .body("message", equalTo("Service rds-data is not enabled."));
+    }
+
     private static JsonNode cborBody(byte[] body) throws Exception {
         return CBOR_MAPPER.readTree(body);
     }
@@ -174,6 +193,7 @@ class ServiceEnablementIntegrationTest {
                     "floci.services.ecs.enabled", "false",
                     "floci.services.lambda.enabled", "false",
                     "floci.services.opensearch.enabled", "false",
+                    "floci.services.rds-data.enabled", "false",
                     "floci.services.sqs.enabled", "false"
             );
         }

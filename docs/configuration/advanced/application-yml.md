@@ -156,6 +156,10 @@ floci:
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
 
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 900
+
     eventbridge:
       enabled: true
 
@@ -259,6 +263,8 @@ All keys in this table are declared on `EmulatorConfig` and accept environment v
 | `FLOCI_SERVICES_SQS_CLEAR_FIFO_DEDUPLICATION_CACHE_ON_PURGE` | `false` | When `true`, `PurgeQueue` clears the FIFO 5-minute deduplication cache for the target queue and matching SNS FIFO topic dedup entries |
 | `FLOCI_SERVICES_S3_DEFAULT_PRESIGN_EXPIRY_SECONDS` | `3600`           | Pre-signed URL expiry                                         |
 | `FLOCI_SERVICES_DOCKER_NETWORK`                    | *(unset)*        | Shared Docker network for Lambda, RDS, ElastiCache containers |
+| `FLOCI_SERVICES_RDS_DATA_ENABLED`                  | `true`           | Enable the RDS Data API service                               |
+| `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS`  | `900`            | Time before leaked RDS Data API transactions expire           |
 | `FLOCI_SERVICES_ECS_MOCK`                          | `false`          | Skip Docker; tasks go straight to RUNNING (useful for CI)     |
 | `FLOCI_SERVICES_ECS_DOCKER_NETWORK`                | *(unset)*        | Docker network for ECS task containers                        |
 | `FLOCI_SERVICES_ECS_DEFAULT_MEMORY_MB`             | `512`            | Default memory (MB) when task definition omits it             |

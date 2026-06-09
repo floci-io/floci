@@ -6,6 +6,8 @@
 
 Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies TCP connections to them, including IAM authentication support.
 
+RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
+
 ## Supported Management Actions
 
 | Action | Description |

@@ -1,6 +1,6 @@
 # sdk-test-go
 
-Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the **AWS SDK for Go v2 (1.41.4)**.
+Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the **AWS SDK for Go v2 (1.41.4)**, plus AWS SDK for Go v1 coverage where AWS still exposes older client packages.
 
 ## Services Covered
 
@@ -20,6 +20,7 @@ Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the *
 | `kms`              | Keys, aliases, encrypt/decrypt, data keys, sign/verify  |
 | `kinesis`          | Streams, shards, PutRecord/GetRecords                   |
 | `cloudwatch`       | PutMetricData, ListMetrics, GetMetricStatistics, alarms |
+| `rds-data-v1`      | RDS Data API execute statements, transactions, result fields |
 
 ## Requirements
 

@@ -44,6 +44,15 @@ class ServiceCatalogRoutingIntegrationTest {
     }
 
     @Test
+    void rdsDataResolvesAsRestJsonByCredentialScope() {
+        ServiceDescriptor descriptor = catalog.byCredentialScope("rds-data").orElseThrow();
+
+        assertEquals("rds-data", descriptor.externalKey());
+        assertEquals(ServiceProtocol.REST_JSON, descriptor.defaultProtocol());
+        assertTrue(descriptor.supportsProtocol(ServiceProtocol.REST_JSON));
+    }
+
+    @Test
     void unknownTargetsRemainUnresolved() {
         assertTrue(catalog.matchTarget("UnknownService.DoThing").isEmpty());
     }
