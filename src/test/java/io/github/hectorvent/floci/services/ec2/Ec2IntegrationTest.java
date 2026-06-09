@@ -220,7 +220,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(17)
     void describeInstanceTypes() {
         given()
             .formParam("Action", "DescribeInstanceTypes")
@@ -234,11 +234,12 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(18)
     void describeInstanceTypeOfferings() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
             .formParam("LocationType", "availability-zone")
+            .formParam("InstanceType.1", "m5.large")
             .formParam("Filter.1.Name", "instance-type")
             .formParam("Filter.1.Value.1", "m5.large")
             .header("Authorization", AUTH_HEADER)
@@ -247,6 +248,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(3))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].instanceType",
                     equalTo("m5.large"))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].location",
@@ -254,7 +256,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(19)
     void describeArmInstanceTypeOfferingByRegion() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -574,7 +576,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(42)
+    @Order(39)
     void importKeyPair() {
         given()
             .formParam("Action", "ImportKeyPair")
@@ -587,6 +589,23 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("ImportKeyPairResponse.keyName", equalTo("imported-key"))
             .body("ImportKeyPairResponse.keyPairId", startsWith("key-"));
+    }
+
+    @Test
+    @Order(42)
+    void createLaunchTemplateRejectsMalformedUserData() {
+        given()
+            .formParam("Action", "CreateLaunchTemplate")
+            .formParam("LaunchTemplateName", "bad-user-data-template")
+            .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchTemplateData.InstanceType", "t3.micro")
+            .formParam("LaunchTemplateData.UserData", "not-valid-base64")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
     }
 
     @Test
@@ -683,6 +702,22 @@ class Ec2IntegrationTest {
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
                     equalTo("#!/bin/sh\necho launch-template-version\n"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplateVersions")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("Versions.1", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.versionNumber",
+                    equalTo("1"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.defaultVersion",
+                    equalTo("true"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
+                    equalTo("t3.micro"));
     }
 
     @Test

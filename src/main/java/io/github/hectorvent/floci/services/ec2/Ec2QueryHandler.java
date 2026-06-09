@@ -1403,7 +1403,8 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.InstanceType"),
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
-                decodeUserData(p.getFirst("LaunchTemplateData.UserData")));
+                decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                p.getFirst("SourceVersion"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1431,11 +1432,11 @@ public class Ec2QueryHandler {
     private Response handleDescribeLaunchTemplateVersions(MultivaluedMap<String, String> p, String region) {
         String id = p.getFirst("LaunchTemplateId");
         String name = p.getFirst("LaunchTemplateName");
-        List<LaunchTemplate> launchTemplates = service.describeLaunchTemplates(
+        List<LaunchTemplate> launchTemplates = service.describeLaunchTemplateVersions(
                 region,
-                id != null && !id.isBlank() ? List.of(id) : List.of(),
-                name != null && !name.isBlank() ? List.of(name) : List.of(),
-                Map.of());
+                id,
+                name,
+                getList(p, "Versions"));
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeLaunchTemplateVersionsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1904,7 +1905,12 @@ public class Ec2QueryHandler {
         if (userDataEncoded == null || userDataEncoded.isBlank()) {
             return null;
         }
-        byte[] decoded = Base64.getDecoder().decode(userDataEncoded);
+        byte[] decoded;
+        try {
+            decoded = Base64.getDecoder().decode(userDataEncoded);
+        } catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidParameterValue", "UserData is not valid base64 content.", 400);
+        }
         if (decoded.length >= 2 && (decoded[0] & 0xff) == 0x1f && (decoded[1] & 0xff) == 0x8b) {
             try (GZIPInputStream gzip = new GZIPInputStream(new ByteArrayInputStream(decoded))) {
                 decoded = gzip.readAllBytes();

@@ -35,7 +35,7 @@ metadata.
 | `ami-alpine` | | `public.ecr.aws/docker/library/alpine:latest` |
 | `ami-0abcdef1234567893` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
 
-Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to `public.ecr.aws/amazonlinux/amazonlinux:2023`.
+Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to the catalog `defaultDockerImage` (`public.ecr.aws/amazonlinux/amazonlinux:2023` by default).
 
 ## SSH Key Injection
 

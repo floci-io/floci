@@ -9,6 +9,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -41,6 +42,7 @@ import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
@@ -1050,33 +1052,60 @@ public class Ec2Service {
             launchTemplate.setTags(new ArrayList<>(launchTemplateTags));
             tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
         }
+        launchTemplate.getVersions().put("1", dataFrom(launchTemplate));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
                                                       String imageId, String instanceType, String keyName,
-                                                      List<String> securityGroupIds, String userData) {
+                                                      List<String> securityGroupIds, String userData,
+                                                      String sourceVersion) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
         int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
+        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate,
+                resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber())));
         launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
         if (imageId != null && !imageId.isBlank()) {
-            launchTemplate.setImageId(imageId);
+            data.setImageId(imageId);
         }
         if (instanceType != null && !instanceType.isBlank()) {
-            launchTemplate.setInstanceType(instanceType);
+            data.setInstanceType(instanceType);
         }
         if (keyName != null && !keyName.isBlank()) {
-            launchTemplate.setKeyName(keyName);
+            data.setKeyName(keyName);
         }
         if (userData != null && !userData.isBlank()) {
-            launchTemplate.setUserData(userData);
+            data.setUserData(userData);
         }
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
-            launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+            data.setSecurityGroupIds(securityGroupIds);
         }
+        launchTemplate.getVersions().put(String.valueOf(latestVersion), data);
+        applyData(launchTemplate, data);
         return launchTemplate;
+    }
+
+    public List<LaunchTemplate> describeLaunchTemplateVersions(String region, String id, String name,
+                                                               List<String> requestedVersions) {
+        List<LaunchTemplate> templates = describeLaunchTemplates(
+                region,
+                id != null && !id.isBlank() ? List.of(id) : List.of(),
+                name != null && !name.isBlank() ? List.of(name) : List.of(),
+                Map.of());
+        List<LaunchTemplate> versions = new ArrayList<>();
+        for (LaunchTemplate launchTemplate : templates) {
+            List<String> effectiveVersions = requestedVersions == null || requestedVersions.isEmpty()
+                    ? List.of(launchTemplate.getLatestVersionNumber())
+                    : requestedVersions;
+            for (String requestedVersion : effectiveVersions) {
+                String resolvedVersion = resolveLaunchTemplateVersion(
+                        launchTemplate, requestedVersion, launchTemplate.getLatestVersionNumber());
+                versions.add(copyForVersion(launchTemplate, resolvedVersion));
+            }
+        }
+        return versions;
     }
 
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion) {
@@ -1142,6 +1171,62 @@ public class Ec2Service {
             throw new AwsException("InvalidLaunchTemplateVersion.Malformed",
                     "The specified launch template version is not valid.", 400);
         }
+    }
+
+    private String resolveLaunchTemplateVersion(LaunchTemplate launchTemplate, String requestedVersion,
+                                                String defaultWhenMissing) {
+        if (launchTemplate.getVersions().isEmpty()) {
+            launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(), dataFrom(launchTemplate));
+        }
+        String candidate = requestedVersion == null || requestedVersion.isBlank() ? defaultWhenMissing : requestedVersion;
+        String resolved = switch (candidate) {
+            case "$Latest" -> launchTemplate.getLatestVersionNumber();
+            case "$Default" -> launchTemplate.getDefaultVersionNumber();
+            default -> candidate;
+        };
+        int requested = parseLaunchTemplateVersion(resolved);
+        int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
+        if (requested < 1 || requested > latest || !launchTemplate.getVersions().containsKey(resolved)) {
+            throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
+                    "The specified launch template version does not exist.", 400);
+        }
+        return resolved;
+    }
+
+    private LaunchTemplateData versionData(LaunchTemplate launchTemplate, String version) {
+        return launchTemplate.getVersions().get(version);
+    }
+
+    private LaunchTemplateData dataFrom(LaunchTemplate launchTemplate) {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId(launchTemplate.getImageId());
+        data.setInstanceType(launchTemplate.getInstanceType());
+        data.setKeyName(launchTemplate.getKeyName());
+        data.setUserData(launchTemplate.getUserData());
+        data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
+        return data;
+    }
+
+    private void applyData(LaunchTemplate launchTemplate, LaunchTemplateData data) {
+        launchTemplate.setImageId(data.getImageId());
+        launchTemplate.setInstanceType(data.getInstanceType());
+        launchTemplate.setKeyName(data.getKeyName());
+        launchTemplate.setUserData(data.getUserData());
+        launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
+    }
+
+    private LaunchTemplate copyForVersion(LaunchTemplate source, String versionNumber) {
+        LaunchTemplate copy = new LaunchTemplate();
+        copy.setLaunchTemplateId(source.getLaunchTemplateId());
+        copy.setLaunchTemplateName(source.getLaunchTemplateName());
+        copy.setDefaultVersionNumber(source.getDefaultVersionNumber());
+        copy.setLatestVersionNumber(versionNumber);
+        copy.setCreateTime(source.getCreateTime());
+        copy.setCreatedBy(source.getCreatedBy());
+        copy.setRegion(source.getRegion());
+        copy.setTags(source.getTags());
+        applyData(copy, versionData(source, versionNumber));
+        return copy;
     }
 
     private boolean matchesImageFilters(Ec2ImageCatalog.CatalogImage image, Map<String, List<String>> filters) {
@@ -1630,9 +1715,10 @@ public class Ec2Service {
     public List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
                                                                    String locationType,
                                                                    Map<String, List<String>> filters) {
-        List<String> effectiveTypeNames = new ArrayList<>(instanceTypeNames);
+        List<String> effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(instanceTypeNames));
         if (filters != null && filters.containsKey("instance-type")) {
             effectiveTypeNames.addAll(filters.get("instance-type"));
+            effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(effectiveTypeNames));
         }
         String effectiveLocationType = locationType != null && !locationType.isBlank()
                 ? locationType

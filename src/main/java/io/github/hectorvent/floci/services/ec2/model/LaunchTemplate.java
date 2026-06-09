@@ -5,7 +5,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -24,6 +26,7 @@ public class LaunchTemplate {
     private String userData;
     private List<String> securityGroupIds = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
+    private Map<String, LaunchTemplateData> versions = new LinkedHashMap<>();
 
     public LaunchTemplate() {}
 
@@ -65,4 +68,9 @@ public class LaunchTemplate {
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
+
+    public Map<String, LaunchTemplateData> getVersions() { return versions; }
+    public void setVersions(Map<String, LaunchTemplateData> versions) {
+        this.versions = versions != null ? new LinkedHashMap<>(versions) : new LinkedHashMap<>();
+    }
 }
