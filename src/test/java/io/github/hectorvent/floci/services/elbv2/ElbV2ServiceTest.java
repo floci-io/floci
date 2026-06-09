@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
@@ -32,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.clearInvocations;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -47,6 +50,9 @@ class ElbV2ServiceTest {
     @Mock
     ElbV2HealthChecker healthChecker;
 
+    @Mock
+    Ec2Service ec2Service;
+
     private ElbV2Service service;
 
     @BeforeEach
@@ -55,6 +61,8 @@ class ElbV2ServiceTest {
         service.dataPlane = dataPlane;
         service.healthChecker = healthChecker;
         service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.ec2Service = ec2Service;
+        stubSubnet(ec2Service, "subnet-a", REGION + "a");
     }
 
     @Test
@@ -209,13 +217,33 @@ class ElbV2ServiceTest {
     private static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
                                                    ElbV2DataPlane dataPlane,
                                                    ElbV2HealthChecker healthChecker) {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        stubSubnet(ec2Service, "subnet-a", REGION + "a");
+        return serviceWithStorage(storageFactory, dataPlane, healthChecker, ec2Service);
+    }
+
+    private static ElbV2Service serviceWithStorage(StorageFactory storageFactory,
+                                                   ElbV2DataPlane dataPlane,
+                                                   ElbV2HealthChecker healthChecker,
+                                                   Ec2Service ec2Service) {
         ElbV2Service service = new ElbV2Service();
         service.dataPlane = dataPlane;
         service.healthChecker = healthChecker;
         service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.ec2Service = ec2Service;
         service.storageFactory = storageFactory;
         service.initializeStorage();
         return service;
+    }
+
+    private static void stubSubnet(Ec2Service ec2Service, String subnetId, String availabilityZone) {
+        Subnet subnet = new Subnet();
+        subnet.setSubnetId(subnetId);
+        subnet.setAvailabilityZone(availabilityZone);
+        subnet.setVpcId("vpc-a");
+        lenient().when(ec2Service.requireSubnet(REGION, subnetId)).thenReturn(subnet);
+        lenient().when(ec2Service.describeSubnets(eq(REGION), eq(List.of(subnetId)), eq(Map.of())))
+                .thenReturn(List.of(subnet));
     }
 
     private static final class SharedStorageFactory extends StorageFactory {

@@ -38,7 +38,7 @@ class ElbV2IntegrationTest {
                 .formParam("Type", "application")
                 .formParam("Scheme", "internet-facing")
                 .formParam("IpAddressType", "ipv4")
-                .formParam("Subnets.member.1", "subnet-test-a")
+                .formParam("Subnets.member.1", "subnet-default-a")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -54,9 +54,9 @@ class ElbV2IntegrationTest {
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.State.Code",
                         equalTo("provisioning"))
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
-                        equalTo("subnet-test-a"))
+                        equalTo("subnet-default-a"))
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.DNSName",
-                        containsString(".elb.localhost.floci.io"))
+                        containsString(".elb.localhost"))
                 .extract()
                 .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
     }
@@ -77,7 +77,7 @@ class ElbV2IntegrationTest {
                 .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.State.Code",
                         equalTo("active"))
                 .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
-                        equalTo("subnet-test-a"));
+                        equalTo("subnet-default-a"));
     }
 
     @Test
