@@ -360,23 +360,78 @@ public class PipesPoller {
             return;
         }
 
-        if (!isLambdaTarget(pipe)) {
-            int failed = deliverKafkaRecords(pipe, region, batch, deliveryRecordsByIdentity, filtered);
-            if (failed > 0) {
-                LOG.warnv("Pipe {0}: {1} Kafka record(s) not committed because delivery failed",
-                        pipe.getName(), failed);
-            }
-            return;
-        }
-
-        int failed = deliverRecords(pipe, deliveryRecords, region);
+        int failed = isLambdaTarget(pipe)
+                ? deliverKafkaLambdaRecords(pipe, region, batch, deliveryRecordsByIdentity, filtered)
+                : deliverKafkaRecords(pipe, region, batch, deliveryRecordsByIdentity, filtered);
         if (failed == 0) {
-            kafkaConsumerManager.commit(pipe);
             return;
         }
 
         LOG.warnv("Pipe {0}: {1} Kafka record(s) not committed because delivery failed",
                 pipe.getName(), failed);
+    }
+
+    private int deliverKafkaLambdaRecords(Pipe pipe,
+                                          String region,
+                                          List<ConsumerRecord<byte[], byte[]>> batch,
+                                          Map<String, JsonNode> deliveryRecordsByIdentity,
+                                          List<JsonNode> filtered) {
+        Set<String> matchedIdentities = new HashSet<>(filtered.size());
+        filtered.forEach(record -> matchedIdentities.add(kafkaRecordIdentity(record)));
+
+        Map<TopicPartition, OffsetAndMetadata> offsetsToCommit = new HashMap<>();
+        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> recordsByPartition = groupKafkaRecordsByPartition(batch);
+        int failed = 0;
+
+        for (Map.Entry<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> entry : recordsByPartition.entrySet()) {
+            failed += deliverKafkaLambdaPartition(pipe, region, entry.getKey(), entry.getValue(),
+                    deliveryRecordsByIdentity, matchedIdentities, offsetsToCommit);
+        }
+
+        if (!offsetsToCommit.isEmpty()) {
+            kafkaConsumerManager.commit(pipe, offsetsToCommit);
+        }
+        return failed;
+    }
+
+    private int deliverKafkaLambdaPartition(Pipe pipe,
+                                            String region,
+                                            TopicPartition partition,
+                                            List<ConsumerRecord<byte[], byte[]>> partitionRecords,
+                                            Map<String, JsonNode> deliveryRecordsByIdentity,
+                                            Set<String> matchedIdentities,
+                                            Map<TopicPartition, OffsetAndMetadata> offsetsToCommit) {
+        List<JsonNode> pendingBatch = new ArrayList<>();
+        long pendingOffset = -1L;
+
+        for (ConsumerRecord<byte[], byte[]> record : partitionRecords) {
+            String identity = kafkaRecordIdentity(record);
+            if (!matchedIdentities.contains(identity)) {
+                if (!pendingBatch.isEmpty()) {
+                    if (!invokeWithDlq(pipe, wrapRecords(pendingBatch), region)) {
+                        return pendingBatch.size();
+                    }
+                    offsetsToCommit.put(partition, new OffsetAndMetadata(pendingOffset));
+                    pendingBatch.clear();
+                }
+                offsetsToCommit.put(partition, new OffsetAndMetadata(record.offset() + 1));
+                continue;
+            }
+
+            JsonNode deliveryRecord = deliveryRecordsByIdentity.get(identity);
+            if (deliveryRecord != null) {
+                pendingBatch.add(deliveryRecord);
+                pendingOffset = record.offset() + 1;
+            }
+        }
+
+        if (!pendingBatch.isEmpty()) {
+            if (!invokeWithDlq(pipe, wrapRecords(pendingBatch), region)) {
+                return pendingBatch.size();
+            }
+            offsetsToCommit.put(partition, new OffsetAndMetadata(pendingOffset));
+        }
+        return 0;
     }
 
     private int deliverKafkaRecords(Pipe pipe,
@@ -592,18 +647,17 @@ public class PipesPoller {
             node.put("offset", record.offset());
             node.put("timestamp", record.timestamp());
             node.put("timestampType", record.timestampType().name());
-            node.put("key", base64(record.key()));
-            node.put("value", base64(record.value()));
+            putKafkaBinaryField(node, "key", record.key());
+            putKafkaBinaryField(node, "value", record.value());
 
             var headersNode = node.putArray("headers");
             for (Header header : record.headers()) {
                 ObjectNode headerNode = objectMapper.createObjectNode();
-                var valueNode = headerNode.putArray(header.key());
                 byte[] headerValue = header.value();
-                if (headerValue != null) {
-                    for (byte b : headerValue) {
-                        valueNode.add(Byte.toUnsignedInt(b));
-                    }
+                if (headerValue == null) {
+                    headerNode.putNull(header.key());
+                } else {
+                    headerNode.put(header.key(), base64(headerValue));
                 }
                 headersNode.add(headerNode);
             }
@@ -637,7 +691,7 @@ public class PipesPoller {
     }
 
     private static String base64(byte[] value) {
-        return value == null ? "" : Base64.getEncoder().encodeToString(value);
+        return Base64.getEncoder().encodeToString(value);
     }
 
     private static String kafkaRecordIdentity(JsonNode record) {
@@ -652,6 +706,7 @@ public class PipesPoller {
 
     private void applyDecodedKafkaField(ObjectNode node, String fieldName, byte[] value) {
         if (value == null) {
+            node.putNull(fieldName);
             return;
         }
         String decoded = new String(value, StandardCharsets.UTF_8);
@@ -662,6 +717,24 @@ public class PipesPoller {
             LOG.debugv("Kafka {0} is not valid JSON: {1}", fieldName, e.getOriginalMessage());
             node.put(fieldName, decoded);
         }
+    }
+
+    private void putKafkaBinaryField(ObjectNode node, String fieldName, byte[] value) {
+        if (value == null) {
+            node.putNull(fieldName);
+            return;
+        }
+        node.put(fieldName, base64(value));
+    }
+
+    private Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> groupKafkaRecordsByPartition(
+            List<ConsumerRecord<byte[], byte[]>> records) {
+        Map<TopicPartition, List<ConsumerRecord<byte[], byte[]>>> recordsByPartition = new HashMap<>();
+        for (ConsumerRecord<byte[], byte[]> record : records) {
+            TopicPartition partition = new TopicPartition(record.topic(), record.partition());
+            recordsByPartition.computeIfAbsent(partition, ignored -> new ArrayList<>()).add(record);
+        }
+        return recordsByPartition;
     }
 
     private static String pipeKey(Pipe pipe) {

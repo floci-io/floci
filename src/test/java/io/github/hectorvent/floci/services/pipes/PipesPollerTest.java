@@ -25,6 +25,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -62,6 +63,7 @@ class PipesPollerTest {
         byte[] key = "customer-123".getBytes(StandardCharsets.UTF_8);
         byte[] value = "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8);
         ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>("orders", 0, 42L, key, value);
+        record.headers().add("traceId", "abc123".getBytes(StandardCharsets.UTF_8));
 
         when(kafkaConsumerManager.poll(pipe)).thenReturn(records(record));
         when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
@@ -78,6 +80,8 @@ class PipesPollerTest {
         assertEquals("broker-1:9092", delivered.path("bootstrapServers").asText());
         assertEquals(Base64.getEncoder().encodeToString(key), delivered.path("key").asText());
         assertEquals(Base64.getEncoder().encodeToString(value), delivered.path("value").asText());
+        assertEquals(Base64.getEncoder().encodeToString("abc123".getBytes(StandardCharsets.UTF_8)),
+                delivered.path("headers").get(0).path("traceId").asText());
         assertTrue(delivered.path("value").isTextual());
     }
 
@@ -119,6 +123,46 @@ class PipesPollerTest {
         assertEquals(1L, offsetsCaptor.getValue().get(new TopicPartition("orders", 0)).offset());
     }
 
+    @Test
+    void pollKafka_representsNullKeyAndValueAsJsonNull() throws Exception {
+        Pipe pipe = nullableSelfManagedKafkaPipe();
+        ConsumerRecord<byte[], byte[]> record = new ConsumerRecord<>("orders", 0, 3L, null, null);
+
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(record));
+        when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
+
+        poller.pollKafka(pipe, "us-east-1");
+
+        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
+        verify(targetInvoker).invoke(eq(pipe), payloadCaptor.capture(), eq("us-east-1"));
+        JsonNode delivered = MAPPER.readTree(payloadCaptor.getValue());
+        assertTrue(delivered.path("key").isNull());
+        assertTrue(delivered.path("value").isNull());
+    }
+
+    @Test
+    void pollKafka_lambdaCommitsSuccessfulPrefixBeforeLaterFailure() throws Exception {
+        Pipe pipe = lambdaSelfManagedKafkaPipe();
+        ConsumerRecord<byte[], byte[]> first = new ConsumerRecord<>(
+                "orders", 0, 0L, null, "{\"status\":\"active\",\"id\":\"order-1\"}".getBytes(StandardCharsets.UTF_8));
+        ConsumerRecord<byte[], byte[]> skipped = new ConsumerRecord<>(
+                "orders", 0, 1L, null, "{\"status\":\"inactive\",\"id\":\"order-2\"}".getBytes(StandardCharsets.UTF_8));
+        ConsumerRecord<byte[], byte[]> failing = new ConsumerRecord<>(
+                "orders", 0, 2L, null, "{\"status\":\"active\",\"id\":\"order-3\"}".getBytes(StandardCharsets.UTF_8));
+
+        when(kafkaConsumerManager.poll(pipe)).thenReturn(records(first, skipped, failing));
+        when(kafkaConsumerManager.resolveBootstrapServers(pipe)).thenReturn("broker-1:9092");
+        org.mockito.Mockito.doNothing()
+                .doThrow(new RuntimeException("boom"))
+                .when(targetInvoker).invoke(eq(pipe), anyString(), eq("us-east-1"));
+
+        poller.pollKafka(pipe, "us-east-1");
+
+        ArgumentCaptor<Map<TopicPartition, OffsetAndMetadata>> offsetsCaptor = ArgumentCaptor.forClass(Map.class);
+        verify(kafkaConsumerManager).commit(eq(pipe), offsetsCaptor.capture());
+        assertEquals(2L, offsetsCaptor.getValue().get(new TopicPartition("orders", 0)).offset());
+    }
+
     private Pipe selfManagedKafkaPipe() throws Exception {
         Pipe pipe = new Pipe();
         pipe.setName("orders-pipe");
@@ -137,6 +181,33 @@ class PipesPollerTest {
                   }
                 }
                 """));
+        return pipe;
+    }
+
+    private Pipe nullableSelfManagedKafkaPipe() throws Exception {
+        Pipe pipe = new Pipe();
+        pipe.setName("nullable-orders-pipe");
+        pipe.setArn("arn:aws:pipes:us-east-1:000000000000:pipe/nullable-orders-pipe");
+        pipe.setSource("smk://broker-1:9092");
+        pipe.setTarget("arn:aws:sqs:us-east-1:000000000000:orders-target");
+        pipe.setSourceParameters(MAPPER.readTree("""
+                {
+                  "SelfManagedKafkaParameters": {
+                    "TopicName": "orders"
+                  },
+                  "FilterCriteria": {
+                    "Filters": [
+                      {"Pattern": "{\\\"key\\\": [{\\\"exists\\\": false}]}"}
+                    ]
+                  }
+                }
+                """));
+        return pipe;
+    }
+
+    private Pipe lambdaSelfManagedKafkaPipe() throws Exception {
+        Pipe pipe = selfManagedKafkaPipe();
+        pipe.setTarget("arn:aws:lambda:us-east-1:000000000000:function:orders-target");
         return pipe;
     }
 
