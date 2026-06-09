@@ -181,7 +181,7 @@ public class AppSyncUtil {
     }
 
     public void error(String message) {
-        throw new VtlErrorSignal(message, "UnknownError", null, null);
+        throw new VtlErrorSignal(message, "Unknown", null, null);
     }
 
     public void error(String message, String errorType) {
@@ -218,7 +218,7 @@ public class AppSyncUtil {
     }
 
     public void validate(boolean condition, String message) {
-        validate(condition, message, "UnknownError");
+        validate(condition, message, "Unknown");
     }
 
     public void validate(boolean condition, String message, String errorType) {

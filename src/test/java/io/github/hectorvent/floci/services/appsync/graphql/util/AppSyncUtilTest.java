@@ -431,7 +431,7 @@ class AppSyncUtilTest {
     void error_singleArg() {
         VtlErrorSignal ex = assertThrows(VtlErrorSignal.class, () -> util.error("msg"));
         assertThat(ex.getMessage(), is("msg"));
-        assertThat(ex.getErrorType(), is("UnknownError"));
+        assertThat(ex.getErrorType(), is("Unknown"));
         assertThat(ex.getData(), is(nullValue()));
         assertThat(ex.getErrorInfo(), is(nullValue()));
     }
@@ -476,7 +476,7 @@ class AppSyncUtilTest {
     void validate_false() {
         VtlErrorSignal ex = assertThrows(VtlErrorSignal.class, () -> util.validate(false, "msg"));
         assertThat(ex.getMessage(), is("msg"));
-        assertThat(ex.getErrorType(), is("UnknownError"));
+        assertThat(ex.getErrorType(), is("Unknown"));
     }
 
     @Test
