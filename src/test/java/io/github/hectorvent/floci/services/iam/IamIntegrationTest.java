@@ -158,7 +158,7 @@ class IamIntegrationTest {
     // The standard EKS managed policies the EKS console/SDK and the
     // terraform-aws-modules/eks module attach to cluster and node roles (#1092).
     @ParameterizedTest
-    @Order(6)
+    @Order(15)
     @ValueSource(strings = {
             "arn:aws:iam::aws:policy/AmazonEKSClusterPolicy",
             "arn:aws:iam::aws:policy/AmazonEKSServicePolicy",
@@ -182,7 +182,7 @@ class IamIntegrationTest {
     }
 
     @Test
-    @Order(6)
+    @Order(16)
     void getSsmManagedInstanceCorePolicy() {
         given()
             .formParam("Action", "GetPolicy")
