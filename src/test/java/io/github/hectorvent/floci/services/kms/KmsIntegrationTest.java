@@ -359,7 +359,9 @@ class KmsIntegrationTest {
         given()
                 .header("X-Amz-Target", "TrentService.DisableKey")
                 .contentType(KMS_CONTENT_TYPE)
-                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
                 .when()
                 .post("/")
                 .then()
@@ -368,13 +370,41 @@ class KmsIntegrationTest {
         given()
                 .header("X-Amz-Target", "TrentService.DescribeKey")
                 .contentType(KMS_CONTENT_TYPE)
-                .body("{\"KeyId\":\"" + keyId + "\"}")
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
                 .when()
                 .post("/")
                 .then()
                 .statusCode(200)
                 .body("KeyMetadata.Enabled", equalTo(false))
                 .body("KeyMetadata.KeyState", equalTo("Disabled"));
+    }
+
+    @Test
+    void updateKeyDescriptionRequiresDescription() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"missing-description-update\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateKeyDescription")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 
     @Test

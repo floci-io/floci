@@ -480,9 +480,17 @@ public class KmsJsonHandler {
     private Response handleUpdateKeyDescription(JsonNode request, String region) {
         service.updateKeyDescription(
                 request.path("KeyId").asText(),
-                request.path("Description").asText(null),
+                requiredText(request, "Description"),
                 region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private String requiredText(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        if (value.isMissingNode() || value.isNull()) {
+            throw new AwsException("ValidationException", field + " is required", 400);
+        }
+        return value.asText();
     }
 
     private Response handleGetKeyRotationStatus(JsonNode request, String region) {
