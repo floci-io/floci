@@ -65,8 +65,8 @@ class RdsDataFieldMapperTest {
         assertEquals("2021-03-04", localDateField.get("stringValue").asText());
         assertEquals("12:34:56", timeField.get("stringValue").asText());
         assertEquals("05:06:07.891", localTimeField.get("stringValue").asText());
-        assertEquals(42L, integerDecimalField.get("longValue").asLong());
-        assertEquals(42.25d, fractionalDecimalField.get("doubleValue").asDouble());
+        assertEquals("42", integerDecimalField.get("stringValue").asText());
+        assertEquals("42.25", fractionalDecimalField.get("stringValue").asText());
     }
 
     @Test

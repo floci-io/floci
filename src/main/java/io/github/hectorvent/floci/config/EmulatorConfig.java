@@ -538,7 +538,7 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
-        @WithDefault("900")
+        @WithDefault("180")
         long transactionTtlSeconds();
     }
 

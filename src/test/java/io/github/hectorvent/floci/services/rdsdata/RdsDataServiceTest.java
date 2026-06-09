@@ -21,12 +21,14 @@ import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class RdsDataServiceTest {
 
     private static final String RESOURCE_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:test";
+    private static final String SECRET_ARN = "arn:aws:secretsmanager:us-east-1:000000000000:secret:local/rds-data";
     private static final String REGION = "us-east-1";
 
     private final ObjectMapper objectMapper = new ObjectMapper();
@@ -74,14 +76,16 @@ class RdsDataServiceTest {
         ObjectNode insertCommitted = harness.request("insert into data_api_items(id, title, score) values ('commit', 'Commit', 1)");
         insertCommitted.put("transactionId", committedTx);
         harness.service.executeStatement(insertCommitted, REGION);
-        harness.service.commitTransaction(harness.transactionRequest(committedTx));
+        ObjectNode commitResponse = harness.service.commitTransaction(harness.transactionRequest(committedTx));
+        assertEquals("Transaction Committed", commitResponse.get("transactionStatus").asText());
         assertEquals(1L, harness.countById("commit"));
 
         String rolledBackTx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
         ObjectNode insertRolledBack = harness.request("insert into data_api_items(id, title, score) values ('rollback', 'Rollback', 1)");
         insertRolledBack.put("transactionId", rolledBackTx);
         harness.service.executeStatement(insertRolledBack, REGION);
-        harness.service.rollbackTransaction(harness.transactionRequest(rolledBackTx));
+        ObjectNode rollbackResponse = harness.service.rollbackTransaction(harness.transactionRequest(rolledBackTx));
+        assertEquals("Rollback Complete", rollbackResponse.get("transactionStatus").asText());
         assertEquals(0L, harness.countById("rollback"));
 
         ObjectNode unknownTxRequest = harness.request("select 1");
@@ -109,9 +113,65 @@ class RdsDataServiceTest {
     }
 
     @Test
+    void validatesRequiredAwsFieldsForDataApiRequests() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode executeMissingSecret = harness.request("select 1");
+        executeMissingSecret.remove("secretArn");
+        AwsException missingExecuteSecret = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(executeMissingSecret, REGION));
+        assertEquals("BadRequestException", missingExecuteSecret.getErrorCode());
+        assertEquals("secretArn is required.", missingExecuteSecret.getMessage());
+
+        ObjectNode beginMissingSecret = harness.beginRequest();
+        beginMissingSecret.remove("secretArn");
+        AwsException missingBeginSecret = assertThrows(AwsException.class,
+                () -> harness.service.beginTransaction(beginMissingSecret, REGION));
+        assertEquals("BadRequestException", missingBeginSecret.getErrorCode());
+        assertEquals("secretArn is required.", missingBeginSecret.getMessage());
+
+        String tx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
+        ObjectNode commitMissingResource = harness.transactionRequest(tx);
+        commitMissingResource.remove("resourceArn");
+        AwsException missingCommitResource = assertThrows(AwsException.class,
+                () -> harness.service.commitTransaction(commitMissingResource));
+        assertEquals("BadRequestException", missingCommitResource.getErrorCode());
+        assertEquals("resourceArn is required.", missingCommitResource.getMessage());
+
+        ObjectNode rollbackMismatchedResource = harness.transactionRequest(tx);
+        rollbackMismatchedResource.put("resourceArn", RESOURCE_ARN + "-other");
+        AwsException rollbackMismatch = assertThrows(AwsException.class,
+                () -> harness.service.rollbackTransaction(rollbackMismatchedResource));
+        assertEquals("BadRequestException", rollbackMismatch.getErrorCode());
+
+        harness.service.rollbackTransaction(harness.transactionRequest(tx));
+    }
+
+    @Test
+    void rollsBackExpiredTransactionsDuringCleanup() throws Exception {
+        TestHarness harness = new TestHarness(Duration.ofMillis(200));
+        harness.createTables();
+
+        String tx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
+        ObjectNode insert = harness.request("insert into data_api_items(id, title, score) values ('expired', 'Expired', 1)");
+        insert.put("transactionId", tx);
+        harness.service.executeStatement(insert, REGION);
+        Thread.sleep(250);
+
+        ObjectNode nextTxRequest = harness.request("select 1");
+        nextTxRequest.put("transactionId", tx);
+        AwsException expired = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(nextTxRequest, REGION));
+
+        assertEquals("TransactionNotFoundException", expired.getErrorCode());
+        assertEquals(0L, harness.countById("expired"));
+    }
+
+    @Test
     void closesConnectionWhenTransactionSetupFails() {
         RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
-        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        SecretsManagerService secrets = fallbackSecrets();
         RdsDataResourceResolver.DatabaseTarget target = target();
         when(resolver.resolve(RESOURCE_ARN)).thenReturn(target);
         AtomicBoolean closed = new AtomicBoolean(false);
@@ -135,8 +195,17 @@ class RdsDataServiceTest {
     private ObjectNode beginRequest() {
         ObjectNode request = objectMapper.createObjectNode();
         request.put("resourceArn", RESOURCE_ARN);
+        request.put("secretArn", SECRET_ARN);
         request.put("database", "app");
         return request;
+    }
+
+    private static SecretsManagerService fallbackSecrets() {
+        SecretsManagerService secrets = mock(SecretsManagerService.class);
+        when(secrets.getSecretValue(any(), any(), any(), any()))
+                .thenThrow(new AwsException("ResourceNotFoundException",
+                        "Secrets Manager can't find the specified secret.", 400));
+        return secrets;
     }
 
     private static RdsDataResourceResolver.DatabaseTarget target() {
@@ -178,8 +247,12 @@ class RdsDataServiceTest {
         private final RdsDataService service;
 
         private TestHarness() {
+            this(Duration.ofSeconds(60));
+        }
+
+        private TestHarness(Duration transactionTtl) {
             RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
-            SecretsManagerService secrets = mock(SecretsManagerService.class);
+            SecretsManagerService secrets = fallbackSecrets();
             RdsDataResourceResolver.DatabaseTarget target = target();
             when(resolver.resolve(RESOURCE_ARN)).thenReturn(target);
             RdsDataConnectionFactory connectionFactory = new RdsDataConnectionFactory() {
@@ -191,7 +264,7 @@ class RdsDataServiceTest {
                     return DriverManager.getConnection(jdbcUrl, "sa", "");
                 }
             };
-            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory, Duration.ofSeconds(60));
+            service = new RdsDataService(resolver, secrets, objectMapper, connectionFactory, transactionTtl);
         }
 
         private void createTables() throws SQLException {
@@ -219,12 +292,15 @@ class RdsDataServiceTest {
         private ObjectNode beginRequest() {
             ObjectNode request = objectMapper.createObjectNode();
             request.put("resourceArn", RESOURCE_ARN);
+            request.put("secretArn", SECRET_ARN);
             request.put("database", "app");
             return request;
         }
 
         private ObjectNode transactionRequest(String transactionId) {
             ObjectNode request = objectMapper.createObjectNode();
+            request.put("resourceArn", RESOURCE_ARN);
+            request.put("secretArn", SECRET_ARN);
             request.put("transactionId", transactionId);
             return request;
         }

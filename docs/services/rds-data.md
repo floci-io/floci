@@ -25,23 +25,24 @@ For the upstream API shape, see the AWS RDS Data API documentation:
 | `CommitTransaction` | `POST /CommitTransaction` | Commit an open transaction |
 | `RollbackTransaction` | `POST /RollbackTransaction` | Roll back an open transaction |
 
-`BatchExecuteStatement` is recognized at `POST /BatchExecute` and returns an AWS-style `BadRequestException` because batch execution is not implemented yet.
+`BatchExecuteStatement` is recognized at `POST /BatchExecute` and returns an AWS-style `BadRequestException` because batch execution is not implemented yet. The deprecated `ExecuteSql` operation is also recognized at `POST /ExecuteSql` and returns an AWS-style `BadRequestException`.
 
 ## Compatibility Notes
 
-- `resourceArn` must identify an existing local RDS cluster or instance.
+- `resourceArn` and `secretArn` are required on Data API requests. `resourceArn` must identify an existing local RDS cluster or instance.
 - MySQL and MariaDB resources are supported. PostgreSQL Data API execution is not implemented yet.
 - SQL is sent directly to the local database engine through JDBC. `SqlParameter` binding is not implemented yet; send raw SQL strings.
 - Result records include Data API field variants such as `stringValue`, `longValue`, `blobValue`, `booleanValue`, `doubleValue`, and `isNull`.
 - SQL errors are returned as `DatabaseErrorException` so AWS SDK callers can handle database failures with normal AWS error decoding.
 - If `secretArn` points to a local Secrets Manager secret with JSON credentials (`username` or `user`, plus `password`), those credentials are used. If the secret is missing or cannot be parsed, Floci falls back to the resolved RDS resource's master credentials for local development convenience.
+- `formattedRecords` and `generatedFields` are not implemented yet.
 
 ## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_RDS_DATA_ENABLED` | `true` | Enable or disable the RDS Data API service |
-| `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `900` | Time before leaked Data API transactions expire |
+| `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `180` | Idle timeout, in seconds, before leaked Data API transactions expire |
 
 The RDS Data API also requires the RDS service itself to be enabled because it resolves `resourceArn` values to local RDS containers.
 

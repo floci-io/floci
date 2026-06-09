@@ -71,6 +71,7 @@ public class IamActionRegistry {
 
         // ── RDS Data API ───────────────────────────────────────────────────────
         rule("rds-data", "POST", "^/Execute/?$",              "rds-data:ExecuteStatement"),
+        rule("rds-data", "POST", "^/ExecuteSql/?$",           "rds-data:ExecuteSql"),
         rule("rds-data", "POST", "^/BatchExecute/?$",         "rds-data:BatchExecuteStatement"),
         rule("rds-data", "POST", "^/BeginTransaction/?$",     "rds-data:BeginTransaction"),
         rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),

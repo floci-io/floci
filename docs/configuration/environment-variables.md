@@ -323,7 +323,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | `FLOCI_SERVICES_RDS_DEFAULT_MARIADB_IMAGE` | `mariadb:11` | Default MariaDB Docker image |
 | `FLOCI_SERVICES_RDS_DOCKER_NETWORK` | _(none)_ | Docker network for RDS containers (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
 | `FLOCI_SERVICES_RDS_DATA_ENABLED` | `true` | Enable the RDS Data API service. Requires `FLOCI_SERVICES_RDS_ENABLED=true` |
-| `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `900` | Time before leaked RDS Data API transactions expire |
+| `FLOCI_SERVICES_RDS_DATA_TRANSACTION_TTL_SECONDS` | `180` | Idle timeout, in seconds, before leaked RDS Data API transactions expire |
 
 ### OpenSearch
 

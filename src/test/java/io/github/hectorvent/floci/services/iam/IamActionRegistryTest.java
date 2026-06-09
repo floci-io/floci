@@ -99,6 +99,10 @@ class IamActionRegistryTest {
     void resolvesRdsDataRestJsonRoutes() {
         assertEquals("rds-data:ExecuteStatement", registry.resolve("rds-data",
                 mockCtx("POST", "/Execute", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertEquals("rds-data:ExecuteSql", registry.resolve("rds-data",
+                mockCtx("POST", "/ExecuteSql", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
+        assertEquals("rds-data:BatchExecuteStatement", registry.resolve("rds-data",
+                mockCtx("POST", "/BatchExecute", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
         assertEquals("rds-data:BeginTransaction", registry.resolve("rds-data",
                 mockCtx("POST", "/BeginTransaction", new MultivaluedHashMap<>(), MediaType.APPLICATION_JSON_TYPE, "{}")));
         assertEquals("rds-data:CommitTransaction", registry.resolve("rds-data",

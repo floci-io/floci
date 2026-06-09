@@ -59,7 +59,11 @@ class RdsDataControllerIntegrationTest {
         given()
             .contentType("application/json")
             .body("""
-                {"transactionId": "missing-tx"}
+                {
+                  "resourceArn": "arn:aws:rds:us-east-1:000000000000:cluster:missing",
+                  "secretArn": "arn:aws:secretsmanager:us-east-1:000000000000:secret:missing",
+                  "transactionId": "missing-tx"
+                }
                 """)
         .when()
             .post("/CommitTransaction")
@@ -78,6 +82,21 @@ class RdsDataControllerIntegrationTest {
             .body("{}")
         .when()
             .post("/BatchExecute")
+        .then()
+            .statusCode(400)
+            .contentType("application/json")
+            .header("X-Amzn-Errortype", "BadRequestException")
+            .header("x-amzn-query-error", "BadRequestException;Sender")
+            .body("__type", equalTo("BadRequestException"));
+    }
+
+    @Test
+    void executeSqlReturnsJsonUnsupportedError() {
+        given()
+            .contentType("application/json")
+            .body("{}")
+        .when()
+            .post("/ExecuteSql")
         .then()
             .statusCode(400)
             .contentType("application/json")

@@ -61,6 +61,8 @@ public class RdsDataService {
         rejectSqlParameters(request);
 
         String sql = requiredText(request, "sql");
+        String resourceArn = requiredText(request, "resourceArn");
+        requiredText(request, "secretArn");
         String transactionId = textOrNull(request, "transactionId");
         boolean includeMetadata = request.path("includeResultMetadata").asBoolean(false);
 
@@ -74,7 +76,7 @@ public class RdsDataService {
                 }
             }
 
-            RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(requiredText(request, "resourceArn"));
+            RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
             Credentials credentials = credentials(request, target, region);
             String database = databaseName(request, target);
             try (Connection connection = connectionFactory.open(target, credentials.username(), credentials.password(), database)) {
@@ -87,7 +89,9 @@ public class RdsDataService {
 
     public ObjectNode beginTransaction(JsonNode request, String region) {
         cleanupExpiredTransactions();
-        RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(requiredText(request, "resourceArn"));
+        String resourceArn = requiredText(request, "resourceArn");
+        requiredText(request, "secretArn");
+        RdsDataResourceResolver.DatabaseTarget target = resourceResolver.resolve(resourceArn);
         Credentials credentials = credentials(request, target, region);
         String database = databaseName(request, target);
 
@@ -111,13 +115,21 @@ public class RdsDataService {
 
     public ObjectNode commitTransaction(JsonNode request) {
         String transactionId = requiredText(request, "transactionId");
-        TransactionContext tx = removeTransaction(transactionId);
-        try {
-            tx.connection.commit();
-        } catch (SQLException e) {
-            throw databaseError(e);
-        } finally {
-            closeQuietly(tx.connection);
+        String resourceArn = requiredText(request, "resourceArn");
+        requiredText(request, "secretArn");
+        TransactionContext tx = transaction(transactionId);
+        synchronized (tx) {
+            validateTransactionResource(tx, resourceArn);
+            if (!transactions.remove(transactionId, tx)) {
+                throw transactionNotFound(transactionId);
+            }
+            try {
+                tx.connection.commit();
+            } catch (SQLException e) {
+                throw databaseError(e);
+            } finally {
+                closeQuietly(tx.connection);
+            }
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.put("transactionStatus", "Transaction Committed");
@@ -126,16 +138,24 @@ public class RdsDataService {
 
     public ObjectNode rollbackTransaction(JsonNode request) {
         String transactionId = requiredText(request, "transactionId");
-        TransactionContext tx = removeTransaction(transactionId);
-        try {
-            tx.connection.rollback();
-        } catch (SQLException e) {
-            throw databaseError(e);
-        } finally {
-            closeQuietly(tx.connection);
+        String resourceArn = requiredText(request, "resourceArn");
+        requiredText(request, "secretArn");
+        TransactionContext tx = transaction(transactionId);
+        synchronized (tx) {
+            validateTransactionResource(tx, resourceArn);
+            if (!transactions.remove(transactionId, tx)) {
+                throw transactionNotFound(transactionId);
+            }
+            try {
+                tx.connection.rollback();
+            } catch (SQLException e) {
+                throw databaseError(e);
+            } finally {
+                closeQuietly(tx.connection);
+            }
         }
         ObjectNode response = objectMapper.createObjectNode();
-        response.put("transactionStatus", "Transaction Rolled Back");
+        response.put("transactionStatus", "Rollback Complete");
         return response;
     }
 
@@ -241,41 +261,50 @@ public class RdsDataService {
         cleanupExpiredTransactions();
         TransactionContext tx = transactions.get(transactionId);
         if (tx == null) {
-            throw new AwsException("TransactionNotFoundException",
-                    "Transaction " + transactionId + " was not found.", 404);
+            throw transactionNotFound(transactionId);
         }
         return tx;
     }
 
-    private TransactionContext removeTransaction(String transactionId) {
-        cleanupExpiredTransactions();
-        TransactionContext tx = transactions.remove(transactionId);
-        if (tx == null) {
-            throw new AwsException("TransactionNotFoundException",
-                    "Transaction " + transactionId + " was not found.", 404);
-        }
-        return tx;
+    private static AwsException transactionNotFound(String transactionId) {
+        return new AwsException("TransactionNotFoundException",
+                "Transaction " + transactionId + " was not found.", 404);
     }
 
     private void cleanupExpiredTransactions() {
         Instant now = Instant.now();
         transactions.forEach((id, tx) -> {
-            if (tx.expiresAt.isBefore(now) && transactions.remove(id, tx)) {
-                closeQuietly(tx.connection);
+            if (tx.expiresAt.isBefore(now)) {
+                synchronized (tx) {
+                    if (tx.expiresAt.isBefore(now) && transactions.remove(id, tx)) {
+                        rollbackQuietly(tx.connection);
+                        closeQuietly(tx.connection);
+                    }
+                }
             }
         });
     }
 
     private static void validateTransactionIdentity(TransactionContext tx, JsonNode request) {
-        String resourceArn = textOrNull(request, "resourceArn");
-        if (resourceArn != null && !resourceArn.isBlank() && !resourceArn.equals(tx.resourceArn)) {
-            throw new AwsException("BadRequestException",
-                    "resourceArn does not match the active transaction resource.", 400);
-        }
+        validateTransactionResource(tx, requiredText(request, "resourceArn"));
         String database = textOrNull(request, "database");
         if (database != null && !database.isBlank() && !database.equals(tx.database)) {
             throw new AwsException("BadRequestException",
                     "database does not match the active transaction database.", 400);
+        }
+    }
+
+    private static void validateTransactionResource(TransactionContext tx, String resourceArn) {
+        if (!resourceArn.equals(tx.resourceArn)) {
+            throw new AwsException("BadRequestException",
+                    "resourceArn does not match the active transaction resource.", 400);
+        }
+    }
+
+    private static void rollbackQuietly(Connection connection) {
+        try {
+            connection.rollback();
+        } catch (SQLException ignored) {
         }
     }
 

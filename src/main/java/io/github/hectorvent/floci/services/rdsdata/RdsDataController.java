@@ -41,6 +41,13 @@ public class RdsDataController {
     }
 
     @POST
+    @Path("/ExecuteSql")
+    public Response executeSql() {
+        return error(400, "BadRequestException",
+                "ExecuteSql is not supported by this local RDS Data API implementation.");
+    }
+
+    @POST
     @Path("/BeginTransaction")
     public Response beginTransaction(@Context HttpHeaders headers, String body) {
         return handle(headers, body, (request, region) -> Response.ok(service.beginTransaction(request, region)).build());

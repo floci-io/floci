@@ -4,7 +4,6 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 import java.math.BigDecimal;
-import java.math.BigInteger;
 import java.sql.Blob;
 import java.sql.Date;
 import java.sql.SQLException;
@@ -118,20 +117,8 @@ final class RdsDataFieldMapper {
     }
 
     private static void mapDecimal(ObjectNode field, Object value) {
-        if (value instanceof BigInteger integer) {
-            field.put("longValue", integer.longValue());
-            return;
-        }
         if (value instanceof BigDecimal decimal) {
-            try {
-                field.put("longValue", decimal.longValueExact());
-            } catch (ArithmeticException ignored) {
-                field.put("doubleValue", decimal.doubleValue());
-            }
-            return;
-        }
-        if (value instanceof Number number) {
-            field.put("doubleValue", number.doubleValue());
+            field.put("stringValue", decimal.toPlainString());
             return;
         }
         field.put("stringValue", value.toString());

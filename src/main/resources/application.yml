@@ -184,7 +184,7 @@ floci:
       default-mariadb-image: "mariadb:11"
     rds-data:
       enabled: true
-      transaction-ttl-seconds: 900
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182

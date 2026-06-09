@@ -162,6 +162,17 @@ func TestRdsDataApiGoSdkV1(t *testing.T) {
 	assert.Equal(t, "count", awsV1.StringValue(countOut.ColumnMetadata[0].Name))
 	assert.Equal(t, int64(1), awsV1.Int64Value(countOut.Records[0][0].LongValue))
 
+	_, err = dataSvc.BatchExecuteStatement(&rdsdataservice.BatchExecuteStatementInput{
+		ResourceArn: awsV1.String(resourceArn),
+		SecretArn:   awsV1.String(secretArn),
+		Database:    awsV1.String(database),
+		Sql:         awsV1.String("insert into data_api_items (id, title, score) values ('batch-1', 'batch', 1)"),
+	})
+	require.Error(t, err)
+	var batchErr awserr.Error
+	require.ErrorAs(t, err, &batchErr)
+	assert.Equal(t, "BadRequestException", batchErr.Code())
+
 	_, err = dataSvc.ExecuteStatement(&rdsdataservice.ExecuteStatementInput{
 		ResourceArn: awsV1.String(resourceArn),
 		SecretArn:   awsV1.String(secretArn),
