@@ -46,7 +46,7 @@ public final class CognitoMessageDispatcher {
         for (String medium : mediums) {
             if ("EMAIL".equalsIgnoreCase(medium) && email != null) {
                 String subject = stringOr(template.get("EmailSubject"), DEFAULT_EMAIL_SUBJECT);
-                String body = renderTemplate(stringOr(template.get(emailTemplateKey(purpose)), DEFAULT_EMAIL_BODY), code);
+                String body = renderTemplate(stringOr(template.get(emailTemplateKey()), DEFAULT_EMAIL_BODY), code);
                 ses.sendEmail(
                     DEFAULT_FROM,
                     List.of(email),
@@ -79,7 +79,7 @@ public final class CognitoMessageDispatcher {
      * AWS uses {@code EmailMessageByLink}/{@code EmailSubjectByLink} ({@code {##Verify Email##}})
      * instead of the code template. Code-only is sufficient for the current foundation scope.
      */
-    private String emailTemplateKey(VerificationCode.Purpose purpose) {
+    private String emailTemplateKey() {
         return "EmailMessage";
     }
 

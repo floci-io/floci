@@ -53,7 +53,6 @@ async function capture(name, fn) {
     request = r.request;
     response = r.response;
   } catch (e) {
-    const ctorRequest = e.$response?.body ? null : null;
     error = {
       name: e.name,
       message: e.message,
