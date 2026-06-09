@@ -17,8 +17,12 @@ import io.vertx.core.Vertx;
 import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.consumer.ConsumerRecords;
+import org.apache.kafka.common.header.Header;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
@@ -41,6 +45,7 @@ public class PipesPoller {
     private final SqsService sqsService;
     private final KinesisService kinesisService;
     private final DynamoDbStreamService dynamoDbStreamService;
+    private final PipesKafkaConsumerManager kafkaConsumerManager;
     private final PipesTargetInvoker targetInvoker;
     private final PipesFilterMatcher filterMatcher;
     private final ObjectMapper objectMapper;
@@ -60,6 +65,7 @@ public class PipesPoller {
                        SqsService sqsService,
                        KinesisService kinesisService,
                        DynamoDbStreamService dynamoDbStreamService,
+                       PipesKafkaConsumerManager kafkaConsumerManager,
                        PipesTargetInvoker targetInvoker,
                        PipesFilterMatcher filterMatcher,
                        ObjectMapper objectMapper,
@@ -68,6 +74,7 @@ public class PipesPoller {
         this.sqsService = sqsService;
         this.kinesisService = kinesisService;
         this.dynamoDbStreamService = dynamoDbStreamService;
+        this.kafkaConsumerManager = kafkaConsumerManager;
         this.targetInvoker = targetInvoker;
         this.filterMatcher = filterMatcher;
         this.objectMapper = objectMapper;
@@ -99,6 +106,7 @@ public class PipesPoller {
             vertx.cancelTimer(timerId);
             kinesisIterators.remove(pipeKey);
             dynamoDbIterators.remove(pipeKey);
+            kafkaConsumerManager.close(pipe);
             LOG.infov("Pipe {0}: stopped polling", pipe.getName());
         }
     }
@@ -125,6 +133,8 @@ public class PipesPoller {
                     pollKinesis(pipe, region);
                 } else if (sourceArn.contains(":dynamodb:")) {
                     pollDynamoDbStreams(pipe, region);
+                } else if (isKafkaSource(sourceArn)) {
+                    pollKafka(pipe, region);
                 } else {
                     LOG.warnv("Pipe {0}: unsupported source type: {1}", pipe.getName(), sourceArn);
                 }
@@ -312,6 +322,51 @@ public class PipesPoller {
         }
     }
 
+    private void pollKafka(Pipe pipe, String region) {
+        ConsumerRecords<byte[], byte[]> records = kafkaConsumerManager.poll(pipe);
+        if (records.isEmpty()) {
+            return;
+        }
+
+        List<ConsumerRecord<byte[], byte[]>> batch = new ArrayList<>(records.count());
+        records.forEach(batch::add);
+
+        LOG.infov("Pipe {0}: received {1} Kafka record(s)", pipe.getName(), batch.size());
+        List<ObjectNode> filterNodes = buildKafkaRecordNodes(batch, pipe, true);
+        List<ObjectNode> deliveryNodes = buildKafkaRecordNodes(batch, pipe, false);
+        List<JsonNode> filtered = filterMatcher.applyFilterCriteria(new ArrayList<>(filterNodes), pipe.getSourceParameters());
+        if (filtered.isEmpty()) {
+            kafkaConsumerManager.commit(pipe);
+            return;
+        }
+
+        Map<String, JsonNode> deliveryRecordsByIdentity = new HashMap<>();
+        for (JsonNode record : deliveryNodes) {
+            deliveryRecordsByIdentity.put(kafkaRecordIdentity(record), record);
+        }
+
+        List<JsonNode> deliveryRecords = new ArrayList<>(filtered.size());
+        for (JsonNode record : filtered) {
+            JsonNode deliveryRecord = deliveryRecordsByIdentity.get(kafkaRecordIdentity(record));
+            if (deliveryRecord != null) {
+                deliveryRecords.add(deliveryRecord);
+            }
+        }
+        if (deliveryRecords.isEmpty()) {
+            kafkaConsumerManager.commit(pipe);
+            return;
+        }
+
+        int failed = deliverRecords(pipe, deliveryRecords, region);
+        if (failed == 0) {
+            kafkaConsumerManager.commit(pipe);
+            return;
+        }
+
+        LOG.warnv("Pipe {0}: {1} Kafka record(s) not committed because delivery failed",
+                pipe.getName(), failed);
+    }
+
     private String initDynamoDbIterator(String streamArn) {
         try {
             return dynamoDbStreamService.getShardIterator(
@@ -467,11 +522,86 @@ public class PipesPoller {
         return nodes;
     }
 
+    private List<ObjectNode> buildKafkaRecordNodes(List<ConsumerRecord<byte[], byte[]>> records,
+                                                   Pipe pipe,
+                                                   boolean decodePayloadFields) {
+        List<ObjectNode> nodes = new ArrayList<>();
+        String eventSource = pipe.getSource().contains(":kafka:") ? "aws:kafka" : "SelfManagedKafka";
+        String bootstrapServers = kafkaConsumerManager.resolveBootstrapServers(pipe);
+        for (ConsumerRecord<byte[], byte[]> record : records) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("eventSource", eventSource);
+            if (pipe.getSource().contains(":kafka:")) {
+                node.put("eventSourceArn", pipe.getSource());
+            } else {
+                node.put("bootstrapServers", bootstrapServers);
+            }
+            node.put("eventSourceKey", record.topic() + "-" + record.partition());
+            node.put("topic", record.topic());
+            if (pipe.getSource().contains(":kafka:")) {
+                node.put("partition", Integer.toString(record.partition()));
+            } else {
+                node.put("partition", record.partition());
+            }
+            node.put("offset", record.offset());
+            node.put("timestamp", record.timestamp());
+            node.put("timestampType", record.timestampType().name());
+            node.put("key", base64(record.key()));
+            node.put("value", base64(record.value()));
+            if (decodePayloadFields) {
+                applyDecodedKafkaField(node, "key", record.key());
+                applyDecodedKafkaField(node, "value", record.value());
+            }
+
+            var headersNode = node.putArray("headers");
+            for (Header header : record.headers()) {
+                ObjectNode headerNode = objectMapper.createObjectNode();
+                var valueNode = headerNode.putArray(header.key());
+                byte[] headerValue = header.value();
+                if (headerValue != null) {
+                    for (byte b : headerValue) {
+                        valueNode.add(Byte.toUnsignedInt(b));
+                    }
+                }
+                headersNode.add(headerNode);
+            }
+            nodes.add(node);
+        }
+        return nodes;
+    }
+
     // ──────────────────────────── Utilities ────────────────────────────
 
     private static boolean isLambdaTarget(Pipe pipe) {
         String targetArn = pipe.getTarget();
         return targetArn.contains(":lambda:") || targetArn.contains(":function:");
+    }
+
+    private static boolean isKafkaSource(String sourceArn) {
+        return sourceArn.startsWith("smk://") || sourceArn.contains(":kafka:");
+    }
+
+    private static String base64(byte[] value) {
+        return value == null ? "" : Base64.getEncoder().encodeToString(value);
+    }
+
+    private static String kafkaRecordIdentity(JsonNode record) {
+        return record.path("topic").asText() + ":"
+                + record.path("partition").asText() + ":"
+                + record.path("offset").asText();
+    }
+
+    private void applyDecodedKafkaField(ObjectNode node, String fieldName, byte[] value) {
+        if (value == null) {
+            return;
+        }
+        String decoded = new String(value, StandardCharsets.UTF_8);
+        try {
+            JsonNode parsed = objectMapper.readTree(decoded);
+            node.set(fieldName, parsed);
+        } catch (Exception ignored) {
+            node.put(fieldName, decoded);
+        }
     }
 
     private static String pipeKey(Pipe pipe) {

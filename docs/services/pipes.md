@@ -81,7 +81,7 @@ Floci emulates EventBridge Pipes with the following supported source and target 
 - Amazon SQS queues
 - Amazon Kinesis streams
 - Amazon DynamoDB streams
-- Kafka topics (MSK)
+- Kafka topics (MSK and self-managed via `smk://`)
 
 **Targets:**
 - Lambda functions
