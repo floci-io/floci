@@ -277,6 +277,11 @@ public class SqsService {
         if (dedupStore != null) {
             dedupStore.delete(storageKey);
         }
+        // Wake parked ReceiveMessage long polls so they observe the deletion
+        // and finish, instead of staying registered against this queue URL.
+        // Left alone they would survive a delete + recreate under the same URL
+        // and consume deliveries that belong to the new queue's consumers.
+        notifyReceivers(storageKey);
         LOG.infov("Deleted queue: {0}", queueUrl);
     }
 
@@ -591,8 +596,20 @@ public class SqsService {
         long start = System.currentTimeMillis();
         long maxWait = waitTimeSeconds * 1000L;
         Object lock = queueLocks.computeIfAbsent(storageKey, k -> new Object());
+        // The queue incarnation this call polls against. DeleteQueue removes it
+        // from messagesByQueue (and CreateQueue registers a fresh instance), so
+        // an identity change tells a parked long poll that its queue is gone.
+        GuardedMessageQueue polledQueue = getOrCreateQueue(storageKey);
 
         while (true) {
+            if (messagesByQueue.get(storageKey) != polledQueue) {
+                // The queue was deleted mid-poll (and possibly recreated under
+                // the same URL). Finish empty-handed: a receive opened against
+                // the deleted incarnation must not consume deliveries — nor
+                // burn ApproximateReceiveCount / redrive budget — that belong
+                // to the new queue's consumers.
+                return Collections.emptyList();
+            }
             List<Message> result = doReceiveMessage(storageKey, maxMessages, visibilityTimeout, region);
             if (!result.isEmpty() || maxWait <= 0) {
                 if (!result.isEmpty() && LOG.isTraceEnabled()) {
