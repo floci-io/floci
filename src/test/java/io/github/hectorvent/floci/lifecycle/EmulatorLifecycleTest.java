@@ -32,7 +32,12 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -259,5 +264,84 @@ class EmulatorLifecycleTest {
         verify(elastiCacheContainerManager).stopAll();
         verify(rdsContainerManager).stopAll();
         verify(storageFactory).shutdownAll();
+    }
+
+    // --- LocalStack-parity "Ready." log line ---
+
+    /** Collects the messages EmulatorLifecycle logs while {@code action} runs. */
+    private List<String> lifecycleLogMessages(Runnable action) {
+        java.util.logging.Logger logger =
+                java.util.logging.Logger.getLogger(EmulatorLifecycle.class.getName());
+        List<String> messages = new CopyOnWriteArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord logRecord) {
+                messages.add(logRecord.getMessage());
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        try {
+            action.run();
+        } finally {
+            logger.removeHandler(handler);
+        }
+        return messages;
+    }
+
+    @Test
+    @DisplayName("Should emit the LocalStack-parity \"Ready.\" line after the banner by default")
+    void shouldEmitParityReadyLineByDefault() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        List<String> messages =
+                lifecycleLogMessages(() -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+
+        assertEquals(1, messages.stream().filter("Ready."::equals).count(),
+                "Exactly one parity \"Ready.\" line must be emitted");
+        int banner = messages.indexOf("=== AWS Local Emulator Ready ===");
+        assertTrue(banner >= 0, "The Floci ready banner must still be emitted");
+        assertTrue(messages.indexOf("Ready.") > banner,
+                "The parity line must follow the banner");
+    }
+
+    @Test
+    @DisplayName("Should not emit the parity \"Ready.\" line when LOCALSTACK_PARITY=false")
+    void shouldNotEmitParityReadyLineWhenParityDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+        emulatorLifecycle.localstackParity = "false";
+
+        List<String> messages =
+                lifecycleLogMessages(() -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+
+        assertFalse(messages.contains("Ready."),
+                "No parity line may be emitted when parity is disabled");
+        assertTrue(messages.contains("=== AWS Local Emulator Ready ==="),
+                "The Floci ready banner must still be emitted");
+    }
+
+    @Test
+    @DisplayName("Should emit the parity \"Ready.\" line on the deferred onHttpStart ready path too")
+    void shouldEmitParityReadyLineOnHttpStartPath() throws IOException, InterruptedException {
+        when(tlsConfig.enabled()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        List<String> messages = lifecycleLogMessages(() ->
+                emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566))));
+
+        assertEquals(1, messages.stream().filter("Ready."::equals).count(),
+                "Exactly one parity \"Ready.\" line must be emitted on the hook path");
     }
 }

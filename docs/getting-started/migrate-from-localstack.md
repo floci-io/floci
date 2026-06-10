@@ -23,6 +23,8 @@ services:
 
 Explicitly set Floci variables always win — the translation only fills in values that haven't been set. To disable the translation entirely, set `LOCALSTACK_PARITY=false`.
 
+Unless parity is disabled, the startup log also ends with a LocalStack-style `Ready.` line (in addition to Floci's own banner), so tooling that watches the container log for LocalStack's readiness message — such as the default wait strategy of Testcontainers' `LocalStackContainer` — works without a custom wait.
+
 ## Step-by-step migration
 
 ### 1 — Change the image
