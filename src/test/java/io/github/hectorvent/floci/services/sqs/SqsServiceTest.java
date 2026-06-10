@@ -225,6 +225,56 @@ class SqsServiceTest {
         assertNotNull(attrs.get("QueueArn"));
         assertNotNull(attrs.get("CreatedTimestamp"));
         assertEquals("1", attrs.get("ApproximateNumberOfMessages"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesDelayed"),
+                "The Delayed counter must always be present, \"0\" when nothing is delayed");
+    }
+
+    @Test
+    void getQueueAttributesReportsDelayedMessages() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delayed-attr-queue", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 1, region);
+
+        Map<String, String> whileDelayed =
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("0", whileDelayed.get("ApproximateNumberOfMessages"));
+        assertEquals("0", whileDelayed.get("ApproximateNumberOfMessagesNotVisible"),
+                "A delayed message is not in flight");
+        assertEquals("1", whileDelayed.get("ApproximateNumberOfMessagesDelayed"));
+
+        try { Thread.sleep(1100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        Map<String, String> afterDelay =
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("1", afterDelay.get("ApproximateNumberOfMessages"));
+        assertEquals("0", afterDelay.get("ApproximateNumberOfMessagesDelayed"),
+                "The Delayed counter must drop back to 0 once the message becomes visible");
+    }
+
+    @Test
+    void getQueueAttributesReportsInFlightSeparatelyFromDelayed() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("inflight-attr-queue", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        assertEquals(1, sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).size());
+
+        Map<String, String> attrs =
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("0", attrs.get("ApproximateNumberOfMessages"));
+        assertEquals("1", attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesDelayed"),
+                "An in-flight (received) message must not count as delayed");
+    }
+
+    @Test
+    void getQueueAttributesReturnsDelayedWhenExplicitlyRequested() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("explicit-delayed-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("ApproximateNumberOfMessagesDelayed"), region);
+        assertEquals(Map.of("ApproximateNumberOfMessagesDelayed", "0"), attrs);
     }
 
     // --- FIFO Queue Tests ---

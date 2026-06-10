@@ -224,7 +224,10 @@ class SqsIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<Attribute>"))
-            .body(containsString("QueueArn"));
+            .body(containsString("QueueArn"))
+            .body(containsString("ApproximateNumberOfMessages"))
+            .body(containsString("ApproximateNumberOfMessagesNotVisible"))
+            .body(containsString("ApproximateNumberOfMessagesDelayed"));
     }
 
     @Test

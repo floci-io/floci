@@ -203,18 +203,32 @@ class GuardedMessageQueue {
         }
     }
 
-    record MessageCounts(long visible, long inFlight) {
+    record MessageCounts(long visible, long inFlight, long delayed) {
     }
 
+    /**
+     * Splits the queue contents the way AWS SQS reports them in
+     * GetQueueAttributes: visible (ApproximateNumberOfMessages), in flight
+     * (ApproximateNumberOfMessagesNotVisible) and delayed
+     * (ApproximateNumberOfMessagesDelayed). A message that is not visible and
+     * was never claimed — no receipt handle — can only be waiting out its
+     * DelaySeconds, so it counts as delayed rather than in flight.
+     */
     MessageCounts messageCounts() {
         try (var _ = hold()) {
             long visible = 0;
             long inFlight = 0;
+            long delayed = 0;
             for (Message m : messages) {
-                if (m.isVisible()) visible++;
-                else inFlight++;
+                if (m.isVisible()) {
+                    visible++;
+                } else if (m.getReceiptHandle() == null) {
+                    delayed++;
+                } else {
+                    inFlight++;
+                }
             }
-            return new MessageCounts(visible, inFlight);
+            return new MessageCounts(visible, inFlight, delayed);
         }
     }
 

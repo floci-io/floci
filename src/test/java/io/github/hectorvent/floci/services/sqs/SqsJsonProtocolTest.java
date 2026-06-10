@@ -70,7 +70,10 @@ class SqsJsonProtocolTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("Attributes.QueueArn", notNullValue());
+            .body("Attributes.QueueArn", notNullValue())
+            .body("Attributes.ApproximateNumberOfMessages", notNullValue())
+            .body("Attributes.ApproximateNumberOfMessagesNotVisible", notNullValue())
+            .body("Attributes.ApproximateNumberOfMessagesDelayed", notNullValue());
     }
 
     // --- Queue-URL-path JSON 1.0 (POST /{accountId}/{queueName}) ---
