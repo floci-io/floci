@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -62,13 +63,66 @@ public class SecretsManagerJsonHandler {
                     .build();
         }
 
-        List<String> secretIdList = new ArrayList<>();
-        if (request.has("SecretIdList")) {
-            request.path("SecretIdList").forEach(id -> secretIdList.add(id.asText()));
+        if (request.has("SecretIdList") && request.has("Filters")) {
+            return Response.status(400)
+                    .entity(new AwsErrorResponse("InvalidParameterException", "You cannot specify both SecretIdList and Filters."))
+                    .build();
         }
 
-        // Filters are not fully implemented yet, but for now we only support SecretIdList
-        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(secretIdList, region);
+        List<SecretsManagerService.BatchSecretValue> values;
+        String nextToken = null;
+
+        if (request.has("SecretIdList")) {
+            List<String> secretIdList = new ArrayList<>();
+            request.path("SecretIdList").forEach(id -> secretIdList.add(id.asText()));
+            try {
+                values = service.batchGetSecretValue(secretIdList, region);
+            } catch (AwsException e) {
+                return Response.status(e.getHttpStatus())
+                        .entity(new AwsErrorResponse(e.jsonType(), e.getMessage()))
+                        .build();
+            }
+        } else {
+            List<SecretsManagerService.Filter> filters = new ArrayList<>();
+            JsonNode filtersNode = request.path("Filters");
+            if (filtersNode.isArray()) {
+                for (JsonNode f : filtersNode) {
+                    String key = f.path("Key").asText();
+                    List<String> filterValues = new ArrayList<>();
+                    f.path("Values").forEach(v -> filterValues.add(v.asText()));
+                    filters.add(new SecretsManagerService.Filter(key, filterValues));
+                }
+            }
+            List<SecretsManagerService.BatchSecretValue> allFilteredValues = service.batchGetSecretValueByFilters(filters, region);
+
+            int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt() : 20;
+            if (maxResults < 1 || maxResults > 20) {
+                return Response.status(400)
+                        .entity(new AwsErrorResponse("ValidationException", "MaxResults must be between 1 and 20."))
+                        .build();
+            }
+
+            int startIndex = 0;
+            if (request.has("NextToken")) {
+                try {
+                    startIndex = Integer.parseInt(request.path("NextToken").asText());
+                } catch (NumberFormatException e) {
+                    return Response.status(400)
+                            .entity(new AwsErrorResponse("InvalidNextTokenException", "The NextToken value is invalid."))
+                            .build();
+                }
+            }
+
+            if (startIndex < 0 || startIndex > allFilteredValues.size()) {
+                values = List.of();
+            } else {
+                int endIndex = Math.min(startIndex + maxResults, allFilteredValues.size());
+                values = allFilteredValues.subList(startIndex, endIndex);
+                if (endIndex < allFilteredValues.size()) {
+                    nextToken = String.valueOf(endIndex);
+                }
+            }
+        }
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode secretValues = objectMapper.createArrayNode();
@@ -94,6 +148,10 @@ public class SecretsManagerJsonHandler {
             secretValues.add(node);
         }
         response.set("SecretValues", secretValues);
+        if (nextToken != null) {
+            response.put("NextToken", nextToken);
+        }
+        response.set("Errors", objectMapper.createArrayNode());
         return Response.ok(response).build();
     }
 
@@ -242,7 +300,20 @@ public class SecretsManagerJsonHandler {
     }
 
     private Response handleListSecrets(JsonNode request, String region) {
-        List<Secret> secrets = service.listSecrets(region);
+        List<SecretsManagerService.Filter> filters = new ArrayList<>();
+        if (request.has("Filters")) {
+            JsonNode filtersNode = request.path("Filters");
+            if (filtersNode.isArray()) {
+                for (JsonNode f : filtersNode) {
+                    String key = f.path("Key").asText();
+                    List<String> filterValues = new ArrayList<>();
+                    f.path("Values").forEach(v -> filterValues.add(v.asText()));
+                    filters.add(new SecretsManagerService.Filter(key, filterValues));
+                }
+            }
+        }
+
+        List<Secret> secrets = service.listSecrets(region, filters);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode secretList = objectMapper.createArrayNode();
