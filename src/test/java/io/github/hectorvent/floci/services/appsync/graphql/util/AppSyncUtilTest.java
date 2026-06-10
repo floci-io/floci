@@ -476,7 +476,7 @@ class AppSyncUtilTest {
     void validate_false() {
         VtlErrorSignal ex = assertThrows(VtlErrorSignal.class, () -> util.validate(false, "msg"));
         assertThat(ex.getMessage(), is("msg"));
-        assertThat(ex.getErrorType(), is("Unknown"));
+        assertThat(ex.getErrorType(), is("CustomTemplateException"));
     }
 
     @Test
