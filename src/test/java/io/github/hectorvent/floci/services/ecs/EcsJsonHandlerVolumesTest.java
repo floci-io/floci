@@ -39,7 +39,7 @@ class EcsJsonHandlerVolumesTest {
         objectMapper = new ObjectMapper();
         service = mock(EcsService.class);
         // Echo the parsed container definitions (arg index 1) back inside a task definition.
-        when(service.registerTaskDefinition(anyString(), any(), any(), any(), any(), any(), any(), any(), anyString()))
+        when(service.registerTaskDefinition(anyString(), any(), any(), any(), any(), any(), any(), any(), any(), anyString()))
                 .thenAnswer(inv -> {
                     TaskDefinition td = new TaskDefinition();
                     td.setFamily(inv.getArgument(0));
