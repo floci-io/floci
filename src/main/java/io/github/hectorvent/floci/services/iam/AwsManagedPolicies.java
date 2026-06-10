@@ -29,6 +29,9 @@ final class AwsManagedPolicies {
                 "Provides full access to AWS services and resources, but does not allow management of Users and groups."),
         new ManagedPolicyDef("ReadOnlyAccess", "/",
                 "Provides read-only access to AWS services and resources."),
+        new ManagedPolicyDef("SecurityAudit", "/",
+                "The security audit template grants access to read security configuration metadata. "
+                + "It is useful for software that audits the configuration of an AWS account."),
         new ManagedPolicyDef("IAMFullAccess", "/",
                 "Provides full access to IAM."),
         new ManagedPolicyDef("AmazonS3FullAccess", "/",

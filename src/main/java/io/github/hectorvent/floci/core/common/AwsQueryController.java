@@ -161,7 +161,10 @@ public class AwsQueryController {
             "DescribeIamInstanceProfileAssociations",
             "DescribeAvailabilityZones", "DescribeRegions", "DescribeAccountAttributes",
             "DescribeInstanceTypes",
-            "DescribeNetworkInterfaces"
+            "DescribeNetworkInterfaces",
+            "CreateFlowLogs", "DescribeFlowLogs", "DeleteFlowLogs",
+            "CreateVpcEndpoint", "DescribeVpcEndpoints", "DescribeVpcEndpointConnections",
+            "DeleteVpcEndpoints"
     );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;

@@ -79,6 +79,11 @@ public class Ec2Service {
     private final Map<String, Address> addresses = new ConcurrentHashMap<>();
     private final Map<String, Instance> instances = new ConcurrentHashMap<>();
     private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
+    private final Map<String, io.github.hectorvent.floci.services.ec2.model.VpcEndpoint> vpcEndpoints =
+            new ConcurrentHashMap<>();
+    // VPC-endpoint ENIs (interface endpoints get a private-IP ENI per subnet).
+    // Kept separate from instance ENIs so describeNetworkInterfaces can include them.
+    private final Map<String, NetworkInterface> endpointEnis = new ConcurrentHashMap<>();
     // resourceId → List<Tag>
     private final Map<String, List<Tag>> tags = new ConcurrentHashMap<>();
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -1270,13 +1275,32 @@ public class Ec2Service {
         return zones;
     }
 
+    /** Default set of regions reported by {@code DescribeRegions}. */
+    private static final List<String> DEFAULT_REGIONS = List.of(
+            "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+            "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1",
+            "ap-northeast-1", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2",
+            "ap-south-1", "sa-east-1", "ca-central-1");
+
     public List<String> describeRegions() {
-        return List.of(
-                "us-east-1", "us-east-2", "us-west-1", "us-west-2",
-                "eu-west-1", "eu-west-2", "eu-west-3", "eu-central-1",
-                "ap-northeast-1", "ap-northeast-2", "ap-southeast-1", "ap-southeast-2",
-                "ap-south-1", "sa-east-1", "ca-central-1"
-        );
+        // Optional opt-in override: FLOCI_EC2_REGIONS (comma-separated) restricts
+        // the reported regions. This is useful when a client enumerates regions and
+        // sweeps each one, and you want to scope that sweep to a known subset. When
+        // unset, the full default region list is returned (unchanged behavior).
+        String configured = System.getenv("FLOCI_EC2_REGIONS");
+        if (configured != null && !configured.isBlank()) {
+            List<String> regions = new ArrayList<>();
+            for (String r : configured.split(",")) {
+                String t = r.trim();
+                if (!t.isEmpty()) {
+                    regions.add(t);
+                }
+            }
+            if (!regions.isEmpty()) {
+                return regions;
+            }
+        }
+        return DEFAULT_REGIONS;
     }
 
     public Map<String, String> describeAccountAttributes(String region) {
@@ -1553,6 +1577,131 @@ public class Ec2Service {
         }
     }
 
+    // ─── VPC Endpoints ──────────────────────────────────────────────────────────
+
+    /**
+     * Create a VPC endpoint. For an Interface endpoint this also creates one
+     * ENI per subnet with a private IP, so traffic to the service (e.g. S3) is
+     * captured in VPC flow logs as a private-IP conversation to the endpoint ENI.
+     */
+    public io.github.hectorvent.floci.services.ec2.model.VpcEndpoint createVpcEndpoint(
+            String region, String serviceName, String vpcId, String endpointType,
+            List<String> subnetIds, List<String> securityGroupIds, List<String> routeTableIds) {
+        ensureDefaultResources(region);
+        io.github.hectorvent.floci.services.ec2.model.VpcEndpoint ep =
+                new io.github.hectorvent.floci.services.ec2.model.VpcEndpoint();
+        String vpceId = "vpce-" + randomHex(17);
+        ep.setVpcEndpointId(vpceId);
+        ep.setServiceName(serviceName);
+        ep.setVpcId(vpcId);
+        ep.setVpcEndpointType(endpointType != null ? endpointType : "Interface");
+        ep.setOwnerId(accountId);
+        ep.setRegion(region);
+        if (subnetIds != null) {
+            ep.getSubnetIds().addAll(subnetIds);
+        }
+        if (routeTableIds != null) {
+            ep.getRouteTableIds().addAll(routeTableIds);
+        }
+        if (securityGroupIds != null) {
+            for (String sg : securityGroupIds) {
+                GroupIdentifier g = new GroupIdentifier();
+                g.setGroupId(sg);
+                ep.getGroups().add(g);
+            }
+        }
+        // Private DNS name for the service (informational).
+        if (serviceName != null) {
+            ep.getDnsNames().add(vpceId + "." + serviceName + ".vpce.amazonaws.com");
+        }
+
+        // Interface endpoints get one ENI per subnet with a private IP, mirroring
+        // how AWS PrivateLink interface endpoints expose the service in the VPC.
+        if ("Interface".equalsIgnoreCase(ep.getVpcEndpointType())) {
+            List<String> targetSubnets = (subnetIds == null || subnetIds.isEmpty())
+                    ? List.of() : subnetIds;
+            for (String subnetId : targetSubnets) {
+                String eniId = "eni-" + randomHex(17);
+                String privateIp = assignPrivateIp(region, subnetId);
+                Subnet subnet = subnets.get(key(region, subnetId));
+                String az = subnet != null ? subnet.getAvailabilityZone() : region + "a";
+
+                NetworkInterface ni = new NetworkInterface();
+                ni.setNetworkInterfaceId(eniId);
+                ni.setSubnetId(subnetId);
+                ni.setVpcId(vpcId);
+                ni.setOwnerId(accountId);
+                ni.setAvailabilityZone(az);
+                ni.setInterfaceType("vpc_endpoint");
+                // cloudsync requires this exact description shape to link the ENI
+                // back to its endpoint (regex: "VPC Endpoint Interface (vpce-\\w+)").
+                ni.setDescription("VPC Endpoint Interface " + vpceId);
+                ni.setPrivateIpAddress(privateIp);
+                ni.setStatus("in-use");
+                if (securityGroupIds != null) {
+                    for (String sg : securityGroupIds) {
+                        GroupIdentifier g = new GroupIdentifier();
+                        g.setGroupId(sg);
+                        ni.getGroups().add(g);
+                    }
+                }
+                NetworkInterfacePrivateIpAddress primary = new NetworkInterfacePrivateIpAddress();
+                primary.setPrivateIpAddress(privateIp);
+                primary.setPrimary(true);
+                ni.getPrivateIpAddresses().add(primary);
+
+                endpointEnis.put(key(region, eniId), ni);
+                ep.getNetworkInterfaceIds().add(eniId);
+            }
+        }
+
+        vpcEndpoints.put(key(region, vpceId), ep);
+        return ep;
+    }
+
+    public List<io.github.hectorvent.floci.services.ec2.model.VpcEndpoint> describeVpcEndpoints(
+            String region, List<String> ids, Map<String, List<String>> filters) {
+        return vpcEndpoints.values().stream()
+                .filter(e -> region.equals(e.getRegion()))
+                .filter(e -> ids == null || ids.isEmpty() || ids.contains(e.getVpcEndpointId()))
+                .collect(Collectors.toList());
+    }
+
+    /**
+     * Delete the given VPC endpoints and any interface-endpoint ENIs they own.
+     * Returns the ids that were actually removed.
+     */
+    public List<String> deleteVpcEndpoints(String region, List<String> ids) {
+        List<String> deleted = new ArrayList<>();
+        if (ids == null) {
+            return deleted;
+        }
+        for (String id : ids) {
+            io.github.hectorvent.floci.services.ec2.model.VpcEndpoint ep =
+                    vpcEndpoints.remove(key(region, id));
+            if (ep == null) {
+                continue;
+            }
+            for (String eniId : ep.getNetworkInterfaceIds()) {
+                endpointEnis.remove(key(region, eniId));
+            }
+            deleted.add(id);
+        }
+        return deleted;
+    }
+
+    /** Endpoint ENIs (interface endpoints), included in describeNetworkInterfaces. */
+    public List<NetworkInterface> endpointNetworkInterfaces(String region) {
+        List<NetworkInterface> out = new ArrayList<>();
+        String prefix = region + "::";
+        for (Map.Entry<String, NetworkInterface> e : endpointEnis.entrySet()) {
+            if (e.getKey().startsWith(prefix)) {
+                out.add(e.getValue());
+            }
+        }
+        return out;
+    }
+
     // ─── Network Interfaces ─────────────────────────────────────────────────────
 
     public NetworkInterfaceListResult describeNetworkInterfaces(String region, List<String> networkInterfaceIds,
@@ -1648,6 +1797,22 @@ public class Ec2Service {
 
                 result.add(ni);
             }
+        }
+
+        // Include VPC-endpoint ENIs (interface endpoints). These are standalone
+        // ENIs (not attached to an instance) with the endpoint's private IP, and
+        // carry interfaceType=vpc_endpoint + a "VPC Endpoint Interface vpce-..."
+        // description so cloudsync links them to the endpoint.
+        for (NetworkInterface eni : endpointNetworkInterfaces(region)) {
+            if (!networkInterfaceIds.isEmpty()
+                    && !networkInterfaceIds.contains(eni.getNetworkInterfaceId())) {
+                continue;
+            }
+            if (!matchesFilters(eni, filters, region)) {
+                continue;
+            }
+            foundIds.add(eni.getNetworkInterfaceId());
+            result.add(eni);
         }
 
         // Phase 6: validate requested IDs exist
