@@ -1080,13 +1080,13 @@ public class SesController {
 
         result.set("DkimAttributes", buildDkimAttributes(identity));
 
-        ObjectNode mailFromAttributes = result.putObject("MailFromAttributes");
         String mailFromDomain = identity.getMailFromDomain();
-        mailFromAttributes.put("MailFromDomain", mailFromDomain == null ? "" : mailFromDomain);
-        mailFromAttributes.put("MailFromDomainStatus",
-                mailFromDomain == null ? "NOT_STARTED" : toV2Status(identity.getMailFromDomainStatus()));
-        mailFromAttributes.put("BehaviorOnMxFailure",
-                v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
+        if (mailFromDomain != null && !mailFromDomain.isEmpty()) {
+            ObjectNode mailFromAttributes = result.putObject("MailFromAttributes");
+            mailFromAttributes.put("MailFromDomain", mailFromDomain);
+            mailFromAttributes.put("MailFromDomainStatus", toV2Status(identity.getMailFromDomainStatus()));
+            mailFromAttributes.put("BehaviorOnMxFailure", v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
+        }
 
         result.putObject("Policies");
         ArrayNode tags = result.putArray("Tags");
