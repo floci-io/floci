@@ -805,7 +805,11 @@ public class IamService {
     // =========================================================================
 
     public Optional<String> findSecretKey(String accessKeyId) {
-        return accessKeys.get(accessKeyId).map(AccessKey::getSecretAccessKey);
+        Optional<String> fromAccessKey = accessKeys.get(accessKeyId).map(AccessKey::getSecretAccessKey);
+        if (fromAccessKey.isPresent()) {
+            return fromAccessKey;
+        }
+        return sessions.get(accessKeyId).map(SessionCredential::getSecretAccessKey);
     }
 
     // =========================================================================
@@ -826,6 +830,16 @@ public class IamService {
                                 String sessionPolicyDocument) {
         sessions.put(sessionAccessKeyId,
                 new SessionCredential(sessionAccessKeyId, roleArn, expiration, sessionPolicyDocument));
+    }
+
+    /**
+     * Stores an assumed-role session including the temporary secret access key so that
+     * {@link #findSecretKey(String)} can resolve it for RDS/ElastiCache IAM token validation.
+     */
+    public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
+                                java.time.Instant expiration, String sessionPolicyDocument) {
+        sessions.put(sessionAccessKeyId,
+                new SessionCredential(sessionAccessKeyId, secretAccessKey, roleArn, expiration, sessionPolicyDocument));
     }
 
     /**
