@@ -1864,10 +1864,11 @@ public class CloudFormationResourceProvisioner {
         String memory = resolveOptional(props, "Memory", engine);
         String taskRoleArn = resolveOptional(props, "TaskRoleArn", engine);
         String executionRoleArn = resolveOptional(props, "ExecutionRoleArn", engine);
+        List<String> requiresCompatibilities = resolveStringListOrEmpty(props, "RequiresCompatibilities", engine);
 
         // Task definitions are immutable; each CFN update registers a fresh revision.
         TaskDefinition td = ecsService.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, region);
+                taskRoleArn, executionRoleArn, requiresCompatibilities, region);
 
         r.setPhysicalId(td.getTaskDefinitionArn());
         r.getAttributes().put("TaskDefinitionArn", td.getTaskDefinitionArn());

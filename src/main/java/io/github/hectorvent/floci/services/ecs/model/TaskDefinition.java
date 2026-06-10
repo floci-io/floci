@@ -20,6 +20,7 @@ public class TaskDefinition {
     private String executionRoleArn;
     private List<ContainerDefinition> containerDefinitions;
     private List<Volume> volumes;
+    private List<String> requiresCompatibilities;
     private Map<String, String> tags = new HashMap<>();
 
     public String getTaskDefinitionArn() { return taskDefinitionArn; }
@@ -56,6 +57,9 @@ public class TaskDefinition {
 
     public List<Volume> getVolumes() { return volumes; }
     public void setVolumes(List<Volume> volumes) { this.volumes = volumes; }
+
+    public List<String> getRequiresCompatibilities() { return requiresCompatibilities; }
+    public void setRequiresCompatibilities(List<String> requiresCompatibilities) { this.requiresCompatibilities = requiresCompatibilities; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

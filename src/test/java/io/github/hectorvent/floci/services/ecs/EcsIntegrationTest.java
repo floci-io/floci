@@ -192,6 +192,7 @@ class EcsIntegrationTest {
             .body("taskDefinition.taskDefinitionArn", containsString(TASK_DEF_FAMILY))
             .body("taskDefinition.containerDefinitions", hasSize(1))
             .body("taskDefinition.containerDefinitions[0].name", equalTo("app"))
+            .body("taskDefinition.requiresCompatibilities", hasItem("FARGATE"))
         .extract()
             .path("taskDefinition.taskDefinitionArn");
 
@@ -210,6 +211,88 @@ class EcsIntegrationTest {
 
     @Test
     @Order(11)
+    void registerTaskDefinitionWithFargateButBridgeModeShouldFail() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-fargate-bridge",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "bridge",
+                    "cpu": "256",
+                    "memory": "512",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("Fargate requires task definition to have network mode awsvpc."));
+    }
+
+    @Test
+    @Order(12)
+    void registerTaskDefinitionWithFargateButMissingResourcesShouldFail() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-fargate-resources",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "awsvpc",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("Fargate requires task definition to have cpu and memory reservation."));
+    }
+
+    @Test
+    @Order(13)
+    void registerTaskDefinitionWithFargateButInvalidSizesShouldFail() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-fargate-sizes",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "awsvpc",
+                    "cpu": "256",
+                    "memory": "1000",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("Fargate requires item to be to be a valid size. Task CPU or memory value is invalid."));
+    }
+
+    @Test
+    @Order(14)
     void describeTaskDefinition() {
         ecs("DescribeTaskDefinition")
             .body("""
@@ -225,7 +308,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(15)
     void listTaskDefinitions() {
         ecs("ListTaskDefinitions")
             .body("{}")
@@ -237,7 +320,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(16)
     void listTaskDefinitionFamilies() {
         ecs("ListTaskDefinitionFamilies")
             .body("{}")
