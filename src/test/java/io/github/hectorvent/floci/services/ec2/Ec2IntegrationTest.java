@@ -4,6 +4,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
+import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
@@ -39,6 +40,8 @@ class Ec2IntegrationTest {
     private static String routeTableId;
     private static String rtbAssocId;
     private static String allocationId;
+    private static String natGatewayAllocationId;
+    private static String natGatewayId;
     private static String associationId;
     private static String volumeId;
     private static String rootVolumeId;
@@ -661,6 +664,125 @@ class Ec2IntegrationTest {
     }
 
     // =========================================================================
+    // NAT Gateways
+    // =========================================================================
+
+    @Test
+    @Order(72)
+    void allocateAddressForNatGateway() {
+        natGatewayAllocationId = given()
+            .formParam("Action", "AllocateAddress")
+            .formParam("Domain", "vpc")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("AllocateAddressResponse.allocationId", startsWith("eipalloc-"))
+            .body("AllocateAddressResponse.publicIp", notNullValue())
+            .extract().path("AllocateAddressResponse.allocationId");
+    }
+
+    @Test
+    @Order(73)
+    void createNatGateway() {
+        natGatewayId = given()
+            .formParam("Action", "CreateNatGateway")
+            .formParam("SubnetId", subnetId)
+            .formParam("AllocationId", natGatewayAllocationId)
+            .formParam("ClientToken", "nat-client-token-1")
+            .formParam("TagSpecification.1.ResourceType", "natgateway")
+            .formParam("TagSpecification.1.Tag.1.Key", "Name")
+            .formParam("TagSpecification.1.Tag.1.Value", "test-nat-gateway")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateNatGatewayResponse.clientToken", equalTo("nat-client-token-1"))
+            .body("CreateNatGatewayResponse.natGateway.natGatewayId", startsWith("nat-"))
+            .body("CreateNatGatewayResponse.natGateway.subnetId", equalTo(subnetId))
+            .body("CreateNatGatewayResponse.natGateway.state", equalTo("available"))
+            .body("CreateNatGatewayResponse.natGateway.connectivityType", equalTo("public"))
+            .body("CreateNatGatewayResponse.natGateway.natGatewayAddressSet.item.allocationId",
+                    equalTo(natGatewayAllocationId))
+            .body("CreateNatGatewayResponse.natGateway.natGatewayAddressSet.item.networkInterfaceId",
+                    startsWith("eni-"))
+            .extract().path("CreateNatGatewayResponse.natGateway.natGatewayId");
+    }
+
+    @Test
+    @Order(74)
+    void describeNatGatewaysById() {
+        given()
+            .formParam("Action", "DescribeNatGateways")
+            .formParam("NatGatewayId.1", natGatewayId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.natGatewayId", equalTo(natGatewayId))
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.subnetId", equalTo(subnetId))
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.connectivityType", equalTo("public"));
+    }
+
+    @Test
+    @Order(75)
+    void createPublicNatGatewayWithoutAllocationIdReturnsError() {
+        given()
+            .formParam("Action", "CreateNatGateway")
+            .formParam("SubnetId", subnetId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("MissingParameter"));
+    }
+
+    @Test
+    @Order(76)
+    void describeNatGatewaysMultipagePagination() {
+        for (int i = 0; i < 6; i++) {
+            given()
+                .formParam("Action", "CreateNatGateway")
+                .formParam("SubnetId", subnetId)
+                .formParam("ConnectivityType", "private")
+                .header("Authorization", AUTH_HEADER)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("CreateNatGatewayResponse.natGateway.natGatewayId", startsWith("nat-"))
+                .body("CreateNatGatewayResponse.natGateway.connectivityType", equalTo("private"));
+        }
+
+        String nextToken = given()
+            .formParam("Action", "DescribeNatGateways")
+            .formParam("MaxResults", "5")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.size()", equalTo(5))
+            .body("DescribeNatGatewaysResponse.nextToken", notNullValue())
+            .extract().path("DescribeNatGatewaysResponse.nextToken");
+
+        given()
+            .formParam("Action", "DescribeNatGateways")
+            .formParam("MaxResults", "5")
+            .formParam("NextToken", nextToken)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNatGatewaysResponse.natGatewaySet.item.size()", greaterThanOrEqualTo(1));
+    }
+
+    // =========================================================================
     // Instances
     // =========================================================================
 
@@ -995,8 +1117,8 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"))
-            .body("DescribeTagsResponse.tagSet.item.value", equalTo("test-instance"));
+            .body("DescribeTagsResponse.tagSet.item.key", hasItem("Name"))
+            .body("DescribeTagsResponse.tagSet.item.value", hasItem("test-instance"));
     }
 
     @Test
@@ -1027,7 +1149,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"));
+            .body("DescribeTagsResponse.tagSet.item.key", hasItem("Name"));
     }
 
     @Test
