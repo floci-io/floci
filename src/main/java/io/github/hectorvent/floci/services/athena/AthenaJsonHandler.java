@@ -91,7 +91,7 @@ public class AthenaJsonHandler {
             }
             case "DeleteWorkGroup" -> {
                 String wg = request.path("WorkGroup").asText(null);
-                if (wg == null || wg.isBlank()) {
+                if (wg == null || !wg.matches("[a-zA-Z0-9._-]{1,128}")) {
                     throw new AwsException("InvalidRequestException", "WorkGroup is required.", 400);
                 }
                 if ("primary".equals(wg)) {
