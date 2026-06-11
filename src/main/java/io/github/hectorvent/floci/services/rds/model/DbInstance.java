@@ -23,6 +23,10 @@ public class DbInstance {
     private String parameterGroupName;
     private String dbSubnetGroupName;
     private String dbClusterIdentifier;
+    private String vpcId;
+    private String availabilityZone;
+    private boolean multiAz;
+    private Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
     private String dbiResourceId;
     private String dbInstanceArn;
     private String masterUserSecretArn;
@@ -108,6 +112,22 @@ public class DbInstance {
 
     public String getDbClusterIdentifier() { return dbClusterIdentifier; }
     public void setDbClusterIdentifier(String dbClusterIdentifier) { this.dbClusterIdentifier = dbClusterIdentifier; }
+
+    public String getVpcId() { return vpcId; }
+    public void setVpcId(String vpcId) { this.vpcId = vpcId; }
+
+    public String getAvailabilityZone() { return availabilityZone; }
+    public void setAvailabilityZone(String availabilityZone) { this.availabilityZone = availabilityZone; }
+
+    public boolean isMultiAz() { return multiAz; }
+    public void setMultiAz(boolean multiAz) { this.multiAz = multiAz; }
+
+    public Map<String, String> getSubnetAvailabilityZones() { return subnetAvailabilityZones; }
+    public void setSubnetAvailabilityZones(Map<String, String> subnetAvailabilityZones) {
+        this.subnetAvailabilityZones = subnetAvailabilityZones != null
+                ? new LinkedHashMap<>(subnetAvailabilityZones)
+                : new LinkedHashMap<>();
+    }
 
     public String getDbiResourceId() { return dbiResourceId; }
     public void setDbiResourceId(String dbiResourceId) { this.dbiResourceId = dbiResourceId; }
