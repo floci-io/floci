@@ -167,4 +167,28 @@ class SesIdentityAttributesTest {
                 .extracting(e -> ((AwsServiceException) e).statusCode())
                 .isEqualTo(400);
     }
+
+    @Test
+    @Order(12)
+    void v2GetMailFromAttributes_notConfigured() {
+        String testDomain = "not-configured-" + TestFixtures.uniqueName() + ".example.com";
+        try {
+            sesV2.createEmailIdentity(CreateEmailIdentityRequest.builder()
+                    .emailIdentity(testDomain).build());
+
+            GetEmailIdentityResponse response = sesV2.getEmailIdentity(GetEmailIdentityRequest.builder()
+                    .emailIdentity(testDomain).build());
+
+            assertThat(response.mailFromAttributes()).isNotNull();
+            assertThat(response.mailFromAttributes().behaviorOnMxFailureAsString())
+                    .isEqualTo("USE_DEFAULT_VALUE");
+            assertThat(response.mailFromAttributes().mailFromDomain()).isNull();
+            assertThat(response.mailFromAttributes().mailFromDomainStatus()).isNull();
+        } finally {
+            try {
+                sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
+                        .emailIdentity(testDomain).build());
+            } catch (Exception ignored) {}
+        }
+    }
 }

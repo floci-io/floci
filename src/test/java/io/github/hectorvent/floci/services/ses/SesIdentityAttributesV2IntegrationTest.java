@@ -41,7 +41,9 @@ class SesIdentityAttributesV2IntegrationTest {
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
             .statusCode(200)
-            .body("MailFromAttributes", equalTo(null));
+            .body("MailFromAttributes.BehaviorOnMxFailure", equalTo("USE_DEFAULT_VALUE"))
+            .body("MailFromAttributes.MailFromDomain", equalTo(null))
+            .body("MailFromAttributes.MailFromDomainStatus", equalTo(null));
     }
 
     @Test
@@ -96,7 +98,9 @@ class SesIdentityAttributesV2IntegrationTest {
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
             .statusCode(200)
-            .body("MailFromAttributes", equalTo(null));
+            .body("MailFromAttributes.BehaviorOnMxFailure", equalTo("USE_DEFAULT_VALUE"))
+            .body("MailFromAttributes.MailFromDomain", equalTo(null))
+            .body("MailFromAttributes.MailFromDomainStatus", equalTo(null));
     }
 
     @Test

@@ -474,7 +474,9 @@ public class SesService {
                         "Identity <" + identityValue + "> does not exist.", 400));
         identity.setMailFromDomain(clearing ? null : mailFromDomain);
         identity.setMailFromDomainStatus(clearing ? "Pending" : "Success");
-        if (normalizedBehavior != null) {
+        if (clearing) {
+            identity.setBehaviorOnMxFailure("UseDefaultValue");
+        } else if (normalizedBehavior != null) {
             identity.setBehaviorOnMxFailure(normalizedBehavior);
         }
         identityStore.put(key, identity);
