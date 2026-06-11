@@ -117,7 +117,8 @@ public class EcsContainerManager {
                 boolean publishToHost = !containerDetector.isRunningInContainer();
                 for (PortMapping pm : def.getPortMappings()) {
                     if (publishToHost) {
-                        specBuilder.withDynamicPort(pm.containerPort());
+                        int hostPort = pm.hostPort() > 0 ? pm.hostPort() : pm.containerPort();
+                        specBuilder.withPortBinding(hostPort, pm.containerPort());
                     } else {
                         specBuilder.withExposedPort(pm.containerPort());
                     }
