@@ -53,7 +53,7 @@ class RedpandaManagerTest {
     }
 
     private static MskCluster newCluster() {
-        return new MskCluster("arn:aws:kafka:us-east-1:000000000000:cluster/test-cluster/abc", "test-cluster");
+        return new MskCluster("arn:aws:kafka:us-east-1:000000000000:cluster/test-cluster/abc", "test-cluster", "3.6.0");
     }
 
     private int startFakeAdminServer() throws Exception {
