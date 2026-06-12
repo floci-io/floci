@@ -3,8 +3,11 @@ package tests
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net"
 	"strings"
 	"testing"
+	"time"
 
 	"floci-sdk-test-go/internal/testutil"
 
@@ -224,6 +227,23 @@ func TestIoT(t *testing.T) {
 		_, err = dataSvc.DeleteThingShadow(ctx, &iotdataplane.DeleteThingShadowInput{ThingName: aws.String(thingName)})
 		require.NoError(t, err)
 	})
+
+	t.Run("MqttConnectPublishSubscribe", func(t *testing.T) {
+		topic := "devices/go-iot-mqtt/events"
+		payload := []byte("go-mqtt")
+
+		subscriber := mqttConnect(t, "go-iot-mqtt-sub")
+		defer subscriber.Close()
+		mqttSubscribe(t, subscriber, topic)
+
+		publisher := mqttConnect(t, "go-iot-mqtt-pub")
+		mqttPublish(t, publisher, topic, payload)
+		publisher.Close()
+
+		receivedTopic, receivedPayload := mqttReadPublish(t, subscriber)
+		assert.Equal(t, topic, receivedTopic)
+		assert.Equal(t, payload, receivedPayload)
+	})
 }
 
 func tagsByKey(tags []iottypes.Tag) map[string]string {
@@ -232,4 +252,96 @@ func tagsByKey(tags []iottypes.Tag) map[string]string {
 		result[aws.ToString(tag.Key)] = aws.ToString(tag.Value)
 	}
 	return result
+}
+
+func mqttConnect(t *testing.T, clientID string) net.Conn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", "floci:1883", 5*time.Second)
+	require.NoError(t, err)
+	require.NoError(t, conn.SetDeadline(time.Now().Add(5*time.Second)))
+	body := append(mqttUTF8("MQTT"), []byte{4, 2, 0, 60}...)
+	body = append(body, mqttUTF8(clientID)...)
+	_, err = conn.Write(append([]byte{0x10}, append(mqttRemainingLength(len(body)), body...)...))
+	require.NoError(t, err)
+	packet := mqttReadPacket(t, conn)
+	require.Equal(t, []byte{0x20, 0x02, 0x00, 0x00}, packet)
+	return conn
+}
+
+func mqttSubscribe(t *testing.T, conn net.Conn, topic string) {
+	t.Helper()
+	body := append([]byte{0, 1}, mqttUTF8(topic)...)
+	body = append(body, 0)
+	_, err := conn.Write(append([]byte{0x82}, append(mqttRemainingLength(len(body)), body...)...))
+	require.NoError(t, err)
+	require.Equal(t, []byte{0x90, 0x03, 0x00, 0x01, 0x00}, mqttReadPacket(t, conn))
+}
+
+func mqttPublish(t *testing.T, conn net.Conn, topic string, payload []byte) {
+	t.Helper()
+	body := append(mqttUTF8(topic), payload...)
+	_, err := conn.Write(append([]byte{0x30}, append(mqttRemainingLength(len(body)), body...)...))
+	require.NoError(t, err)
+}
+
+func mqttReadPublish(t *testing.T, conn net.Conn) (string, []byte) {
+	t.Helper()
+	packet := mqttReadPacket(t, conn)
+	require.Equal(t, byte(0x30), packet[0]&0xf0)
+	index := 1
+	for packet[index]&0x80 != 0 {
+		index++
+	}
+	index++
+	topicLength := int(packet[index])<<8 | int(packet[index+1])
+	index += 2
+	topic := string(packet[index : index+topicLength])
+	index += topicLength
+	return topic, packet[index:]
+}
+
+func mqttReadPacket(t *testing.T, conn net.Conn) []byte {
+	t.Helper()
+	fixed := make([]byte, 1)
+	_, err := io.ReadFull(conn, fixed)
+	require.NoError(t, err)
+	packet := append([]byte{}, fixed...)
+	remaining := 0
+	multiplier := 1
+	for {
+		encoded := make([]byte, 1)
+		_, err = io.ReadFull(conn, encoded)
+		require.NoError(t, err)
+		packet = append(packet, encoded[0])
+		remaining += int(encoded[0]&127) * multiplier
+		multiplier *= 128
+		if encoded[0]&128 == 0 {
+			break
+		}
+	}
+	body := make([]byte, remaining)
+	_, err = io.ReadFull(conn, body)
+	require.NoError(t, err)
+	return append(packet, body...)
+}
+
+func mqttUTF8(value string) []byte {
+	bytes := []byte(value)
+	return append([]byte{byte(len(bytes) >> 8), byte(len(bytes))}, bytes...)
+}
+
+func mqttRemainingLength(length int) []byte {
+	var encoded []byte
+	value := length
+	for {
+		digit := byte(value % 128)
+		value /= 128
+		if value > 0 {
+			digit |= 128
+		}
+		encoded = append(encoded, digit)
+		if value == 0 {
+			return encoded
+		}
+	}
 }

@@ -236,5 +236,10 @@ floci:
       enabled: true
     iot:
       enabled: true
+      mqtt:
+        enabled: true
+        auto-start: false
+        host: 127.0.0.1
+        port: 1883
     iotdata:
       enabled: true

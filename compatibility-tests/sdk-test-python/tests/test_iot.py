@@ -1,5 +1,7 @@
 from botocore.exceptions import ClientError
 import json
+import socket
+import struct
 
 
 def test_describe_endpoint(iot_client):
@@ -155,3 +157,88 @@ def test_iot_data_shadows_and_publish(iot_data_client, unique_name):
     iot_data_client.publish(topic=f"devices/{thing_name}/events", payload=b"payload")
     iot_data_client.delete_thing_shadow(thingName=thing_name, shadowName="settings")
     iot_data_client.delete_thing_shadow(thingName=thing_name)
+
+
+def test_mqtt_connect_publish_subscribe(unique_name):
+    topic = f"devices/{unique_name}/mqtt"
+    payload = b"python-mqtt"
+
+    with mqtt_connect(f"{unique_name}-sub") as subscriber:
+        mqtt_subscribe(subscriber, topic)
+        with mqtt_connect(f"{unique_name}-pub") as publisher:
+            mqtt_publish(publisher, topic, payload)
+        received_topic, received_payload = mqtt_read_publish(subscriber)
+
+    assert received_topic == topic
+    assert received_payload == payload
+
+
+def mqtt_connect(client_id):
+    client = socket.create_connection(("floci", 1883), timeout=5)
+    client.settimeout(5)
+    body = mqtt_utf8("MQTT") + bytes([4, 2, 0, 60]) + mqtt_utf8(client_id)
+    client.sendall(bytes([0x10]) + mqtt_remaining_length(len(body)) + body)
+    assert mqtt_read_packet(client) == b"\x20\x02\x00\x00"
+    return client
+
+
+def mqtt_subscribe(client, topic):
+    body = b"\x00\x01" + mqtt_utf8(topic) + b"\x00"
+    client.sendall(bytes([0x82]) + mqtt_remaining_length(len(body)) + body)
+    assert mqtt_read_packet(client) == b"\x90\x03\x00\x01\x00"
+
+
+def mqtt_publish(client, topic, payload):
+    body = mqtt_utf8(topic) + payload
+    client.sendall(bytes([0x30]) + mqtt_remaining_length(len(body)) + body)
+
+
+def mqtt_read_publish(client):
+    packet = mqtt_read_packet(client)
+    assert packet[0] & 0xF0 == 0x30
+    index = 1
+    while packet[index] & 0x80:
+        index += 1
+    index += 1
+    topic_length = struct.unpack("!H", packet[index:index + 2])[0]
+    index += 2
+    topic = packet[index:index + topic_length].decode()
+    index += topic_length
+    return topic, packet[index:]
+
+
+def mqtt_read_packet(client):
+    first = client.recv(1)
+    assert first
+    remaining = 0
+    multiplier = 1
+    encoded_bytes = bytearray()
+    while True:
+        encoded = client.recv(1)
+        assert encoded
+        encoded_bytes.extend(encoded)
+        remaining += (encoded[0] & 127) * multiplier
+        multiplier *= 128
+        if encoded[0] & 128 == 0:
+            break
+    body = client.recv(remaining)
+    assert len(body) == remaining
+    return first + bytes(encoded_bytes) + body
+
+
+def mqtt_utf8(value):
+    encoded = value.encode()
+    return struct.pack("!H", len(encoded)) + encoded
+
+
+def mqtt_remaining_length(length):
+    encoded = bytearray()
+    value = length
+    while True:
+        byte = value % 128
+        value //= 128
+        if value:
+            byte |= 128
+        encoded.append(byte)
+        if not value:
+            return bytes(encoded)

@@ -37,6 +37,14 @@ import software.amazon.awssdk.services.iotdataplane.model.ListNamedShadowsForThi
 import software.amazon.awssdk.services.iotdataplane.model.PublishRequest;
 import software.amazon.awssdk.services.iotdataplane.model.UpdateThingShadowRequest;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.InetSocketAddress;
+import java.net.Socket;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -240,5 +248,129 @@ class IotTest {
                 .build());
         iotData.deleteThingShadow(DeleteThingShadowRequest.builder().thingName(thingName).shadowName("settings").build());
         iotData.deleteThingShadow(DeleteThingShadowRequest.builder().thingName(thingName).build());
+    }
+
+    @Test
+    void mqttConnectPublishSubscribe() throws Exception {
+        String topic = "devices/java-iot-mqtt/events";
+        byte[] payload = "java-mqtt".getBytes(StandardCharsets.UTF_8);
+
+        try (Socket subscriber = mqttConnect("java-iot-mqtt-sub")) {
+            mqttSubscribe(subscriber, topic);
+            try (Socket publisher = mqttConnect("java-iot-mqtt-pub")) {
+                mqttPublish(publisher, topic, payload);
+            }
+
+            MqttPublish received = mqttReadPublish(subscriber.getInputStream());
+            assertThat(received.topic()).isEqualTo(topic);
+            assertThat(received.payload()).isEqualTo(payload);
+        }
+    }
+
+    private Socket mqttConnect(String clientId) throws IOException {
+        Socket socket = new Socket();
+        socket.connect(new InetSocketAddress("floci", 1883), 5_000);
+        socket.setSoTimeout(5_000);
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        mqttUtf8(body, "MQTT");
+        body.write(0x04);
+        body.write(0x02);
+        body.write(0x00);
+        body.write(0x3c);
+        mqttUtf8(body, clientId);
+        socket.getOutputStream().write(mqttPacket(0x10, body.toByteArray()));
+        assertThat(mqttReadPacket(socket.getInputStream())).containsExactly(0x20, 0x02, 0x00, 0x00);
+        return socket;
+    }
+
+    private void mqttSubscribe(Socket socket, String topic) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        body.write(0x00);
+        body.write(0x01);
+        mqttUtf8(body, topic);
+        body.write(0x00);
+        socket.getOutputStream().write(mqttPacket(0x82, body.toByteArray()));
+        assertThat(mqttReadPacket(socket.getInputStream())).containsExactly(0x90, 0x03, 0x00, 0x01, 0x00);
+    }
+
+    private void mqttPublish(Socket socket, String topic, byte[] payload) throws IOException {
+        ByteArrayOutputStream body = new ByteArrayOutputStream();
+        mqttUtf8(body, topic);
+        body.write(payload);
+        socket.getOutputStream().write(mqttPacket(0x30, body.toByteArray()));
+    }
+
+    private MqttPublish mqttReadPublish(InputStream input) throws IOException {
+        byte[] packet = mqttReadPacket(input);
+        assertThat(packet[0] & 0xf0).isEqualTo(0x30);
+        int index = 1;
+        while ((packet[index] & 0x80) != 0) {
+            index++;
+        }
+        index++;
+        int topicLength = ((packet[index] & 0xff) << 8) | (packet[index + 1] & 0xff);
+        index += 2;
+        String topic = new String(packet, index, topicLength, StandardCharsets.UTF_8);
+        index += topicLength;
+        return new MqttPublish(topic, Arrays.copyOfRange(packet, index, packet.length));
+    }
+
+    private byte[] mqttPacket(int type, byte[] body) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        out.write(type);
+        mqttRemainingLength(out, body.length);
+        out.write(body);
+        return out.toByteArray();
+    }
+
+    private byte[] mqttReadPacket(InputStream input) throws IOException {
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        int first = input.read();
+        if (first < 0) {
+            throw new IOException("No MQTT packet received");
+        }
+        out.write(first);
+
+        int multiplier = 1;
+        int remainingLength = 0;
+        int encoded;
+        do {
+            encoded = input.read();
+            if (encoded < 0) {
+                throw new IOException("Incomplete MQTT remaining length");
+            }
+            out.write(encoded);
+            remainingLength += (encoded & 127) * multiplier;
+            multiplier *= 128;
+        } while ((encoded & 128) != 0);
+
+        byte[] body = input.readNBytes(remainingLength);
+        if (body.length != remainingLength) {
+            throw new IOException("Incomplete MQTT packet body");
+        }
+        out.write(body);
+        return out.toByteArray();
+    }
+
+    private void mqttUtf8(OutputStream out, String value) throws IOException {
+        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
+        out.write((bytes.length >>> 8) & 0xff);
+        out.write(bytes.length & 0xff);
+        out.write(bytes);
+    }
+
+    private void mqttRemainingLength(OutputStream out, int length) throws IOException {
+        int value = length;
+        do {
+            int encoded = value % 128;
+            value /= 128;
+            if (value > 0) {
+                encoded |= 128;
+            }
+            out.write(encoded);
+        } while (value > 0);
+    }
+
+    private record MqttPublish(String topic, byte[] payload) {
     }
 }

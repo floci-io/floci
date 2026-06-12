@@ -43,16 +43,23 @@ public class IotService {
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
+    private final IotPublishEventRecorder publishEventRecorder;
+    private final IotMqttBrokerService mqttBrokerService;
 
     @Inject
-    public IotService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver, ObjectMapper objectMapper) {
+    public IotService(StorageFactory storageFactory,
+                      EmulatorConfig config,
+                      RegionResolver regionResolver,
+                      ObjectMapper objectMapper,
+                      IotPublishEventRecorder publishEventRecorder,
+                      IotMqttBrokerService mqttBrokerService) {
         this(storageFactory.create("iot", "iot-things.json", new TypeReference<Map<String, Thing>>() {}),
                 storageFactory.create("iot", "iot-certificates.json", new TypeReference<Map<String, IotCertificate>>() {}),
                 storageFactory.create("iot", "iot-policies.json", new TypeReference<Map<String, IotPolicy>>() {}),
                 storageFactory.create("iot", "iot-policy-attachments.json", new TypeReference<Map<String, Set<String>>>() {}),
                 storageFactory.create("iot", "iot-thing-principals.json", new TypeReference<Map<String, Set<String>>>() {}),
                 storageFactory.create("iot", "iot-shadows.json", new TypeReference<Map<String, IotShadow>>() {}),
-                config, regionResolver, objectMapper);
+                config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService);
     }
 
     IotService(StorageBackend<String, Thing> thingStore,
@@ -63,7 +70,9 @@ public class IotService {
                StorageBackend<String, IotShadow> shadowStore,
                EmulatorConfig config,
                RegionResolver regionResolver,
-               ObjectMapper objectMapper) {
+               ObjectMapper objectMapper,
+               IotPublishEventRecorder publishEventRecorder,
+               IotMqttBrokerService mqttBrokerService) {
         this.thingStore = thingStore;
         this.certificateStore = certificateStore;
         this.policyStore = policyStore;
@@ -73,6 +82,8 @@ public class IotService {
         this.config = config;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
+        this.publishEventRecorder = publishEventRecorder;
+        this.mqttBrokerService = mqttBrokerService;
     }
 
     public String describeEndpoint(String endpointType) {
@@ -80,11 +91,13 @@ public class IotService {
         if (!DEFAULT_ENDPOINT_TYPE.equals(effectiveType)) {
             throw new AwsException("InvalidRequestException", "Unsupported endpoint type: " + effectiveType, 400);
         }
+        startMqttIfEnabled();
         URI baseUri = URI.create(config.effectiveBaseUrl());
         return baseUri.getAuthority();
     }
 
     public Thing createThing(String thingName, Map<String, String> attributes, String region) {
+        startMqttIfEnabled();
         validateThingName(thingName);
         String key = thingKey(region, thingName);
         if (thingStore.get(key).isPresent()) {
@@ -153,6 +166,7 @@ public class IotService {
     }
 
     public IotCertificate createKeysAndCertificate(boolean setAsActive, String region) {
+        startMqttIfEnabled();
         String id = UUID.randomUUID().toString().replace("-", "") + UUID.randomUUID().toString().replace("-", "");
         IotCertificate certificate = new IotCertificate();
         certificate.setCertificateId(id);
@@ -185,6 +199,7 @@ public class IotService {
     }
 
     public IotPolicy createPolicy(String policyName, String policyDocument, String region) {
+        startMqttIfEnabled();
         IotPolicy policy = new IotPolicy();
         policy.setPolicyName(policyName);
         policy.setPolicyArn(regionResolver.buildArn("iot", region, "policy/" + policyName));
@@ -284,7 +299,7 @@ public class IotService {
     }
 
     public void publish(String topic, byte[] payload) {
-        // REST Publish is accepted for later MQTT/rules bridging; no public sink exists yet.
+        publishEventRecorder.record(topic, payload);
     }
 
     private void validateThingName(String thingName) {
@@ -295,6 +310,10 @@ public class IotService {
 
     private String thingKey(String region, String thingName) {
         return "thing:" + region + ":" + thingName;
+    }
+
+    private void startMqttIfEnabled() {
+        mqttBrokerService.startIfEnabled();
     }
 
     private String certificateKey(String region, String certificateId) { return "cert:" + region + ":" + certificateId; }
