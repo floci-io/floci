@@ -321,6 +321,7 @@ public class SqsService {
         var counts = getOrCreateQueue(storageKey).messageCounts();
         attrs.put("ApproximateNumberOfMessages", String.valueOf(counts.visible()));
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
+        attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
 
         if (attributeNames == null || attributeNames.contains("All")) {
             return attrs;
@@ -839,8 +840,8 @@ public class SqsService {
         }
 
         var srcQueueInitial = getOrCreateQueue(srcKey);
-        long toMove = srcQueueInitial.messageCounts().visible()
-                + srcQueueInitial.messageCounts().inFlight();
+        var srcCounts = srcQueueInitial.messageCounts();
+        long toMove = srcCounts.visible() + srcCounts.inFlight() + srcCounts.delayed();
 
         String taskHandle = "task-" + UUID.randomUUID();
         moveTasksByHandle.put(taskHandle, new MoveTask(

@@ -225,6 +225,25 @@ class SqsServiceTest {
         assertNotNull(attrs.get("QueueArn"));
         assertNotNull(attrs.get("CreatedTimestamp"));
         assertEquals("1", attrs.get("ApproximateNumberOfMessages"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesDelayed"));
+    }
+
+    @Test
+    void getQueueAttributesCountsDelayedMessagesSeparately() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delayed-queue", null, region);
+
+        sqsService.sendMessage(queue.getQueueUrl(), "delayed", 30, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("0", attrs.get("ApproximateNumberOfMessages"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertEquals("1", attrs.get("ApproximateNumberOfMessagesDelayed"));
+
+        Map<String, String> explicit = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("ApproximateNumberOfMessagesDelayed"), region);
+        assertEquals(Map.of("ApproximateNumberOfMessagesDelayed", "1"), explicit);
     }
 
     // --- FIFO Queue Tests ---

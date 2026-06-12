@@ -203,18 +203,25 @@ class GuardedMessageQueue {
         }
     }
 
-    record MessageCounts(long visible, long inFlight) {
+    record MessageCounts(long visible, long inFlight, long delayed) {
     }
 
     MessageCounts messageCounts() {
         try (var _ = hold()) {
             long visible = 0;
             long inFlight = 0;
+            long delayed = 0;
             for (Message m : messages) {
-                if (m.isVisible()) visible++;
-                else inFlight++;
+                if (m.isVisible()) {
+                    visible++;
+                } else if (m.getReceiptHandle() == null) {
+                    // Invisible but never claimed: waiting out its DelaySeconds
+                    delayed++;
+                } else {
+                    inFlight++;
+                }
             }
-            return new MessageCounts(visible, inFlight);
+            return new MessageCounts(visible, inFlight, delayed);
         }
     }
 

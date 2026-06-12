@@ -156,12 +156,34 @@ class GuardedMessageQueueTest {
         var counts = queue.messageCounts();
         assertEquals(3, counts.visible());
         assertEquals(0, counts.inFlight());
+        assertEquals(0, counts.delayed());
 
         queue.claimVisibleMessages(2, 30, false, -1, null);
 
         var afterClaim = queue.messageCounts();
         assertEquals(1, afterClaim.visible());
         assertEquals(2, afterClaim.inFlight());
+        assertEquals(0, afterClaim.delayed());
+    }
+
+    @Test
+    void messageCountsReportsDelayedSeparatelyFromInFlight() {
+        Message delayed = new Message("delayed");
+        delayed.setVisibleAt(java.time.Instant.now().plusSeconds(30));
+        queue.addMessage(delayed);
+        queue.addMessage(new Message("visible"));
+
+        var counts = queue.messageCounts();
+        assertEquals(1, counts.visible());
+        assertEquals(0, counts.inFlight());
+        assertEquals(1, counts.delayed());
+
+        queue.claimVisibleMessages(1, 30, false, -1, null);
+
+        var afterClaim = queue.messageCounts();
+        assertEquals(0, afterClaim.visible());
+        assertEquals(1, afterClaim.inFlight());
+        assertEquals(1, afterClaim.delayed());
     }
 
     // --- FIFO ---
