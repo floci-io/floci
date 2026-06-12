@@ -22,12 +22,17 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doReturn;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class RdsDataServiceTest {
 
     private static final String RESOURCE_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:test";
+    private static final String FALLBACK_RESOURCE_ARN = "arn:aws:rds:us-west-2:111111111111:cluster:test";
+    private static final String OTHER_RESOURCE_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:other";
+    private static final String UNKNOWN_RESOURCE_ARN = "arn:aws:rds:us-east-1:000000000000:cluster:missing";
     private static final String SECRET_ARN = "arn:aws:secretsmanager:us-east-1:000000000000:secret:local/rds-data";
     private static final String REGION = "us-east-1";
 
@@ -97,19 +102,66 @@ class RdsDataServiceTest {
         String mismatchTx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
         ObjectNode mismatchedResource = harness.request("select 1");
         mismatchedResource.put("transactionId", mismatchTx);
-        mismatchedResource.put("resourceArn", RESOURCE_ARN + "-other");
+        mismatchedResource.put("resourceArn", OTHER_RESOURCE_ARN);
         AwsException resourceMismatch = assertThrows(AwsException.class,
                 () -> harness.service.executeStatement(mismatchedResource, REGION));
-        assertEquals("BadRequestException", resourceMismatch.getErrorCode());
+        assertEquals("TransactionNotFoundException", resourceMismatch.getErrorCode());
+
+        ObjectNode unresolvableResource = harness.request("select 1");
+        unresolvableResource.put("transactionId", mismatchTx);
+        unresolvableResource.put("resourceArn", UNKNOWN_RESOURCE_ARN);
+        AwsException unresolvableResourceMismatch = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(unresolvableResource, REGION));
+        assertEquals("TransactionNotFoundException", unresolvableResourceMismatch.getErrorCode());
 
         ObjectNode mismatchedDatabase = harness.request("select 1");
         mismatchedDatabase.put("transactionId", mismatchTx);
         mismatchedDatabase.put("database", "other");
         AwsException databaseMismatch = assertThrows(AwsException.class,
                 () -> harness.service.executeStatement(mismatchedDatabase, REGION));
-        assertEquals("BadRequestException", databaseMismatch.getErrorCode());
+        assertEquals("TransactionNotFoundException", databaseMismatch.getErrorCode());
 
         harness.service.rollbackTransaction(harness.transactionRequest(mismatchTx));
+    }
+
+    @Test
+    void normalizesFallbackResourceArnForTransactionIdentity() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        String tx = harness.service.beginTransaction(harness.beginRequest(FALLBACK_RESOURCE_ARN), REGION)
+                .get("transactionId").asText();
+        ObjectNode insert = harness.request(FALLBACK_RESOURCE_ARN,
+                "insert into data_api_items(id, title, score) values ('fallback', 'Fallback', 1)");
+        insert.put("transactionId", tx);
+        harness.service.executeStatement(insert, REGION);
+
+        ObjectNode commitResponse = harness.service.commitTransaction(harness.transactionRequest(FALLBACK_RESOURCE_ARN, tx));
+
+        assertEquals("Transaction Committed", commitResponse.get("transactionStatus").asText());
+        assertEquals(1L, harness.countById("fallback"));
+    }
+
+    @Test
+    void commitsWithOriginalTransactionArnAfterResourceLookupFails() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        String tx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
+        ObjectNode insert = harness.request("""
+                insert into data_api_items(id, title, score)
+                values ('deleted-resource', 'Deleted', 1)
+                """);
+        insert.put("transactionId", tx);
+        harness.service.executeStatement(insert, REGION);
+        doThrow(new AwsException("BadRequestException", "resource is gone", 400))
+                .when(harness.resolver).resolve(RESOURCE_ARN);
+
+        ObjectNode commitResponse = harness.service.commitTransaction(harness.transactionRequest(tx));
+
+        assertEquals("Transaction Committed", commitResponse.get("transactionStatus").asText());
+        doReturn(harness.target).when(harness.resolver).resolve(RESOURCE_ARN);
+        assertEquals(1L, harness.countById("deleted-resource"));
     }
 
     @Test
@@ -140,24 +192,50 @@ class RdsDataServiceTest {
         assertEquals("resourceArn is required.", missingCommitResource.getMessage());
 
         ObjectNode rollbackMismatchedResource = harness.transactionRequest(tx);
-        rollbackMismatchedResource.put("resourceArn", RESOURCE_ARN + "-other");
+        rollbackMismatchedResource.put("resourceArn", OTHER_RESOURCE_ARN);
         AwsException rollbackMismatch = assertThrows(AwsException.class,
                 () -> harness.service.rollbackTransaction(rollbackMismatchedResource));
-        assertEquals("BadRequestException", rollbackMismatch.getErrorCode());
+        assertEquals("TransactionNotFoundException", rollbackMismatch.getErrorCode());
 
         harness.service.rollbackTransaction(harness.transactionRequest(tx));
     }
 
     @Test
+    void rejectsUnsupportedExecuteOptions() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        ObjectNode formattedRecords = harness.request("select 1");
+        formattedRecords.put("formatRecordsAs", "JSON");
+        AwsException formattedRecordsError = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(formattedRecords, REGION));
+        assertEquals("BadRequestException", formattedRecordsError.getErrorCode());
+
+        ObjectNode malformedParameters = harness.request("select 1");
+        malformedParameters.set("parameters", objectMapper.createObjectNode());
+        AwsException malformedParametersError = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(malformedParameters, REGION));
+        assertEquals("BadRequestException", malformedParametersError.getErrorCode());
+
+        ObjectNode resultSetOptions = harness.request("select 1");
+        ObjectNode options = objectMapper.createObjectNode();
+        options.put("decimalReturnType", "STRING");
+        resultSetOptions.set("resultSetOptions", options);
+        AwsException resultSetOptionsError = assertThrows(AwsException.class,
+                () -> harness.service.executeStatement(resultSetOptions, REGION));
+        assertEquals("BadRequestException", resultSetOptionsError.getErrorCode());
+    }
+
+    @Test
     void rollsBackExpiredTransactionsDuringCleanup() throws Exception {
-        TestHarness harness = new TestHarness(Duration.ofMillis(200));
+        TestHarness harness = new TestHarness(Duration.ofMillis(50));
         harness.createTables();
 
         String tx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
         ObjectNode insert = harness.request("insert into data_api_items(id, title, score) values ('expired', 'Expired', 1)");
         insert.put("transactionId", tx);
         harness.service.executeStatement(insert, REGION);
-        Thread.sleep(250);
+        Thread.sleep(500);
 
         ObjectNode nextTxRequest = harness.request("select 1");
         nextTxRequest.put("transactionId", tx);
@@ -166,6 +244,21 @@ class RdsDataServiceTest {
 
         assertEquals("TransactionNotFoundException", expired.getErrorCode());
         assertEquals(0L, harness.countById("expired"));
+    }
+
+    @Test
+    void shutdownRollsBackOpenTransactions() throws Exception {
+        TestHarness harness = new TestHarness();
+        harness.createTables();
+
+        String tx = harness.service.beginTransaction(harness.beginRequest(), REGION).get("transactionId").asText();
+        ObjectNode insert = harness.request("insert into data_api_items(id, title, score) values ('shutdown', 'Shutdown', 1)");
+        insert.put("transactionId", tx);
+        harness.service.executeStatement(insert, REGION);
+
+        harness.service.shutdown();
+
+        assertEquals(0L, harness.countById("shutdown"));
     }
 
     @Test
@@ -209,7 +302,11 @@ class RdsDataServiceTest {
     }
 
     private static RdsDataResourceResolver.DatabaseTarget target() {
-        return new RdsDataResourceResolver.DatabaseTarget(RESOURCE_ARN, DatabaseEngine.MYSQL,
+        return target(RESOURCE_ARN);
+    }
+
+    private static RdsDataResourceResolver.DatabaseTarget target(String resourceArn) {
+        return new RdsDataResourceResolver.DatabaseTarget(resourceArn, DatabaseEngine.MYSQL,
                 "127.0.0.1", 3306, "sa", "", "app");
     }
 
@@ -244,6 +341,8 @@ class RdsDataServiceTest {
     private final class TestHarness {
         private final String jdbcUrl = "jdbc:h2:mem:rdsdata_" + UUID.randomUUID()
                 + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1";
+        private final RdsDataResourceResolver resolver;
+        private final RdsDataResourceResolver.DatabaseTarget target;
         private final RdsDataService service;
 
         private TestHarness() {
@@ -251,10 +350,14 @@ class RdsDataServiceTest {
         }
 
         private TestHarness(Duration transactionTtl) {
-            RdsDataResourceResolver resolver = mock(RdsDataResourceResolver.class);
+            resolver = mock(RdsDataResourceResolver.class);
             SecretsManagerService secrets = fallbackSecrets();
-            RdsDataResourceResolver.DatabaseTarget target = target();
+            target = target();
             when(resolver.resolve(RESOURCE_ARN)).thenReturn(target);
+            when(resolver.resolve(FALLBACK_RESOURCE_ARN)).thenReturn(target);
+            when(resolver.resolve(OTHER_RESOURCE_ARN)).thenReturn(target(OTHER_RESOURCE_ARN));
+            when(resolver.resolve(UNKNOWN_RESOURCE_ARN))
+                    .thenThrow(new AwsException("BadRequestException", "resource is missing", 400));
             RdsDataConnectionFactory connectionFactory = new RdsDataConnectionFactory() {
                 @Override
                 Connection open(RdsDataResourceResolver.DatabaseTarget target,
@@ -284,22 +387,34 @@ class RdsDataServiceTest {
         }
 
         private ObjectNode request(String sql) {
-            ObjectNode request = beginRequest();
+            return request(RESOURCE_ARN, sql);
+        }
+
+        private ObjectNode request(String resourceArn, String sql) {
+            ObjectNode request = beginRequest(resourceArn);
             request.put("sql", sql);
             return request;
         }
 
         private ObjectNode beginRequest() {
+            return beginRequest(RESOURCE_ARN);
+        }
+
+        private ObjectNode beginRequest(String resourceArn) {
             ObjectNode request = objectMapper.createObjectNode();
-            request.put("resourceArn", RESOURCE_ARN);
+            request.put("resourceArn", resourceArn);
             request.put("secretArn", SECRET_ARN);
             request.put("database", "app");
             return request;
         }
 
         private ObjectNode transactionRequest(String transactionId) {
+            return transactionRequest(RESOURCE_ARN, transactionId);
+        }
+
+        private ObjectNode transactionRequest(String resourceArn, String transactionId) {
             ObjectNode request = objectMapper.createObjectNode();
-            request.put("resourceArn", RESOURCE_ARN);
+            request.put("resourceArn", resourceArn);
             request.put("secretArn", SECRET_ARN);
             request.put("transactionId", transactionId);
             return request;

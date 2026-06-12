@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -22,6 +24,9 @@ import java.time.Instant;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 @ApplicationScoped
 public class RdsDataService {
@@ -34,6 +39,7 @@ public class RdsDataService {
     private final RdsDataConnectionFactory connectionFactory;
     private final Duration transactionTtl;
     private final ConcurrentMap<String, TransactionContext> transactions = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService transactionCleanupExecutor;
 
     @Inject
     public RdsDataService(RdsDataResourceResolver resourceResolver,
@@ -55,10 +61,35 @@ public class RdsDataService {
         this.objectMapper = objectMapper;
         this.connectionFactory = connectionFactory;
         this.transactionTtl = transactionTtl;
+        this.transactionCleanupExecutor = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "rds-data-transaction-cleanup");
+            thread.setDaemon(true);
+            return thread;
+        });
+    }
+
+    @PostConstruct
+    void startTransactionCleanup() {
+        long intervalSeconds = Math.max(1, Math.min(60, transactionTtl.toSeconds()));
+        transactionCleanupExecutor.scheduleAtFixedRate(this::cleanupExpiredTransactionsSafely,
+                intervalSeconds, intervalSeconds, TimeUnit.SECONDS);
+    }
+
+    @PreDestroy
+    void shutdown() {
+        transactionCleanupExecutor.shutdownNow();
+        transactions.forEach((id, tx) -> {
+            synchronized (tx) {
+                if (transactions.remove(id, tx)) {
+                    rollbackQuietly(tx.connection);
+                    closeQuietly(tx.connection);
+                }
+            }
+        });
     }
 
     public ObjectNode executeStatement(JsonNode request, String region) {
-        rejectSqlParameters(request);
+        rejectUnsupportedOptions(request);
 
         String sql = requiredText(request, "sql");
         String resourceArn = requiredText(request, "resourceArn");
@@ -70,6 +101,7 @@ public class RdsDataService {
             if (transactionId != null && !transactionId.isBlank()) {
                 TransactionContext tx = transaction(transactionId);
                 synchronized (tx) {
+                    requireActiveTransaction(transactionId, tx);
                     validateTransactionIdentity(tx, request);
                     tx.refresh(transactionTtl);
                     return executeOnConnection(tx.connection, sql, includeMetadata);
@@ -119,6 +151,7 @@ public class RdsDataService {
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
+            requireActiveTransaction(transactionId, tx);
             validateTransactionResource(tx, resourceArn);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
@@ -142,6 +175,7 @@ public class RdsDataService {
         requiredText(request, "secretArn");
         TransactionContext tx = transaction(transactionId);
         synchronized (tx) {
+            requireActiveTransaction(transactionId, tx);
             validateTransactionResource(tx, resourceArn);
             if (!transactions.remove(transactionId, tx)) {
                 throw transactionNotFound(transactionId);
@@ -271,6 +305,12 @@ public class RdsDataService {
                 "Transaction " + transactionId + " was not found.", 404);
     }
 
+    private void requireActiveTransaction(String transactionId, TransactionContext tx) {
+        if (transactions.get(transactionId) != tx) {
+            throw transactionNotFound(transactionId);
+        }
+    }
+
     private void cleanupExpiredTransactions() {
         Instant now = Instant.now();
         transactions.forEach((id, tx) -> {
@@ -285,19 +325,34 @@ public class RdsDataService {
         });
     }
 
-    private static void validateTransactionIdentity(TransactionContext tx, JsonNode request) {
-        validateTransactionResource(tx, requiredText(request, "resourceArn"));
-        String database = textOrNull(request, "database");
-        if (database != null && !database.isBlank() && !database.equals(tx.database)) {
-            throw new AwsException("BadRequestException",
-                    "database does not match the active transaction database.", 400);
+    private void cleanupExpiredTransactionsSafely() {
+        try {
+            cleanupExpiredTransactions();
+        } catch (Exception e) {
+            LOG.warn("Failed to clean up expired RDS Data API transactions", e);
         }
     }
 
-    private static void validateTransactionResource(TransactionContext tx, String resourceArn) {
-        if (!resourceArn.equals(tx.resourceArn)) {
-            throw new AwsException("BadRequestException",
-                    "resourceArn does not match the active transaction resource.", 400);
+    private void validateTransactionIdentity(TransactionContext tx, JsonNode request) {
+        validateTransactionResource(tx, requiredText(request, "resourceArn"));
+        String database = textOrNull(request, "database");
+        if (database != null && !database.isBlank() && !database.equals(tx.database)) {
+            throw transactionNotFound(tx.id);
+        }
+    }
+
+    private void validateTransactionResource(TransactionContext tx, String resourceArn) {
+        if (resourceArn.equals(tx.resourceArn)) {
+            return;
+        }
+        RdsDataResourceResolver.DatabaseTarget target;
+        try {
+            target = resourceResolver.resolve(resourceArn);
+        } catch (AwsException e) {
+            throw transactionNotFound(tx.id);
+        }
+        if (target == null || !target.arn().equals(tx.resourceArn)) {
+            throw transactionNotFound(tx.id);
         }
     }
 
@@ -315,11 +370,35 @@ public class RdsDataService {
         }
     }
 
+    private static void rejectUnsupportedOptions(JsonNode request) {
+        rejectSqlParameters(request);
+        rejectFormattedRecords(request);
+        rejectResultSetOptions(request);
+    }
+
     private static void rejectSqlParameters(JsonNode request) {
         JsonNode parameters = request.get("parameters");
-        if (parameters != null && parameters.isArray() && !parameters.isEmpty()) {
+        if (parameters != null && (!parameters.isArray() || !parameters.isEmpty())) {
             throw new AwsException("BadRequestException",
                     "SqlParameter binding is not supported by this local RDS Data API implementation.", 400);
+        }
+    }
+
+    private static void rejectFormattedRecords(JsonNode request) {
+        String formatRecordsAs = textOrNull(request, "formatRecordsAs");
+        if (formatRecordsAs != null && !formatRecordsAs.isBlank()
+                && !"NONE".equalsIgnoreCase(formatRecordsAs)) {
+            throw new AwsException("BadRequestException",
+                    "formattedRecords is not supported by this local RDS Data API implementation.", 400);
+        }
+    }
+
+    private static void rejectResultSetOptions(JsonNode request) {
+        JsonNode resultSetOptions = request.get("resultSetOptions");
+        if (resultSetOptions != null && !resultSetOptions.isNull()
+                && (!resultSetOptions.isObject() || !resultSetOptions.isEmpty())) {
+            throw new AwsException("BadRequestException",
+                    "resultSetOptions is not supported by this local RDS Data API implementation.", 400);
         }
     }
 

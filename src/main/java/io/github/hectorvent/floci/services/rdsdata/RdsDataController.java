@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.rdsdata;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
@@ -80,6 +81,8 @@ public class RdsDataController {
             return handler.handle(request, regionResolver.resolveRegion(headers));
         } catch (AwsException e) {
             return error(e.getHttpStatus(), e.getErrorCode(), e.getMessage());
+        } catch (JsonProcessingException e) {
+            return error(400, "BadRequestException", "Malformed JSON request body.");
         } catch (Exception e) {
             LOG.error("Error processing RDS Data API request", e);
             return error(500, "InternalFailure", e.getMessage());
