@@ -815,7 +815,6 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
-    @SuppressWarnings("unchecked")
     private static Map<String, String> environmentVariables(Object value) {
         if (!(value instanceof Map<?, ?> envBlock)) {
             return Map.of();

@@ -81,7 +81,6 @@ public class CloudFormationService {
                 "cloudformation", "cloudformation-exports.json", new TypeReference<Map<String, String>>() {}));
     }
 
-    @SuppressWarnings("unchecked")
     private static <V> AccountAwareStorageBackend<V> asAccountAware(StorageBackend<String, V> backend) {
         return (AccountAwareStorageBackend<V>) backend;
     }

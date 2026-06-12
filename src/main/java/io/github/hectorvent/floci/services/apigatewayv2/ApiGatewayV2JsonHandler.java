@@ -699,7 +699,6 @@ public class ApiGatewayV2JsonHandler {
      * field lookups work regardless of whether the request arrived via the
      * REST path (lowerCamelCase body) or JSON 1.1 path (PascalCase body).
      */
-    @SuppressWarnings("unchecked")
     private Map<String, Object> toLowerCamelCase(Map<String, Object> map) {
         Map<String, Object> result = new LinkedHashMap<>();
         for (Map.Entry<String, Object> entry : map.entrySet()) {

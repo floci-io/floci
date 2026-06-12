@@ -585,7 +585,6 @@ public class CodeDeployService {
 
     // ---- Deployment state machine ----
 
-    @SuppressWarnings("unchecked")
     // ---- On-Premises Instances ----
 
     public OnPremisesInstance registerOnPremisesInstance(String region, String instanceName,
@@ -656,7 +655,6 @@ public class CodeDeployService {
 
     // ---- Server Platform Deployment ----
 
-    @SuppressWarnings("unchecked")
     private String createServerDeployment(String region, String appName, String groupName,
                                           DeploymentGroup group, String configName,
                                           Map<String, Object> revision, String description) {
@@ -810,7 +808,6 @@ public class CodeDeployService {
         return true;
     }
 
-    @SuppressWarnings("unchecked")
     private boolean executeHookStepsOnInstance(String region, String instanceId,
                                                List<Map<String, Object>> hookSteps,
                                                Map<String, Object> event) throws InterruptedException {
@@ -910,7 +907,6 @@ public class CodeDeployService {
         return info;
     }
 
-    @SuppressWarnings("unchecked")
     private List<String> resolveServerTargets(String region, DeploymentGroup group) {
         List<String> instanceIds = new ArrayList<>();
 

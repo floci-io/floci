@@ -267,7 +267,6 @@ public class CodeBuildJsonHandler {
         return Response.ok(Map.of("build", build)).build();
     }
 
-    @SuppressWarnings("unchecked")
     private <T> List<T> parseList(JsonNode req, String field, Class<T> type) throws Exception {
         if (!req.has(field) || req.get(field).isNull()) {
             return null;
