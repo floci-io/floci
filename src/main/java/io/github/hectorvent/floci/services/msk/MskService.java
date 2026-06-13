@@ -17,10 +17,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -29,6 +27,7 @@ import java.util.concurrent.TimeUnit;
 public class MskService {
 
     private static final Logger LOG = Logger.getLogger(MskService.class);
+    private static final String DEFAULT_KAFKA_VERSION = "3.6.0";
     private final StorageBackend<String, MskCluster> storage;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
@@ -60,6 +59,10 @@ public class MskService {
     }
 
     public MskCluster createCluster(String clusterName) {
+        return createCluster(clusterName, DEFAULT_KAFKA_VERSION);
+    }
+
+    public MskCluster createCluster(String clusterName, String kafkaVersion) {
         if (storage.scan(k -> true).stream().anyMatch(c -> c.getClusterName().equals(clusterName))) {
             throw new AwsException("ConflictException", "Cluster already exists: " + clusterName, 409);
         }
@@ -67,10 +70,11 @@ public class MskService {
         String accountId = regionResolver.getAccountId();
         String clusterArn = AwsArnUtils.Arn.of("kafka", config.defaultRegion(), accountId, "cluster/" + clusterName + "/" + java.util.UUID.randomUUID()).toString();
 
-        MskCluster cluster = new MskCluster(clusterArn, clusterName);
+        String resolvedKafkaVersion = (kafkaVersion == null || kafkaVersion.isBlank()) ? DEFAULT_KAFKA_VERSION : kafkaVersion;
+        MskCluster cluster = new MskCluster(clusterArn, clusterName, resolvedKafkaVersion);
         cluster.setAccountId(accountId);
         cluster.setVolumeId(String.format("%06x", new SecureRandom().nextInt(0xFFFFFF)));
-        
+
         if (config.services().msk().mock()) {
             cluster.setState(ClusterState.ACTIVE);
             cluster.setBootstrapBrokers("localhost:9092");

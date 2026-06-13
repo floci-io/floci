@@ -5127,7 +5127,7 @@ class CloudFormationIntegrationTest {
                     "Name": "cfn-tg",
                     "Protocol": "HTTP",
                     "Port": 80,
-                    "VpcId": "vpc-00000001",
+                    "VpcId": "vpc-default",
                     "TargetType": "ip",
                     "HealthCheckPath": "/health",
                     "Matcher": { "HttpCode": "200-299" }

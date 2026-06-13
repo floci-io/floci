@@ -1,19 +1,15 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.dynamodb.model.AttributeDefinition;
 import io.github.hectorvent.floci.services.dynamodb.model.KeySchemaElement;
 import io.github.hectorvent.floci.services.dynamodb.model.StreamDescription;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.databind.node.ObjectNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.util.Arrays;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -34,8 +30,8 @@ class DynamoDbStreamServiceTest {
     }
 
     private TableDefinition createTestTableWithStream() {
-        var tableDef = new TableDefinition("TestTable", 
-                List.of(new KeySchemaElement("userId", "HASH")),
+        var tableDef = new TableDefinition("TestTable",
+                        List.of(new KeySchemaElement("userId", "HASH")),
                 List.of(new AttributeDefinition("userId", "S")),
                 "us-east-1", "000000000000");
         tableDef.setStreamEnabled(true);

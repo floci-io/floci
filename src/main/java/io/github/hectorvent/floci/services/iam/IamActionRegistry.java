@@ -69,6 +69,14 @@ public class IamActionRegistry {
         // ── DynamoDB (JSON 1.1, action from X-Amz-Target handled separately) ──
         // Handled via Query-style action extraction in the filter
 
+        // ── RDS Data API ───────────────────────────────────────────────────────
+        rule("rds-data", "POST", "^/Execute/?$",              "rds-data:ExecuteStatement"),
+        rule("rds-data", "POST", "^/ExecuteSql/?$",           "rds-data:ExecuteSql"),
+        rule("rds-data", "POST", "^/BatchExecute/?$",         "rds-data:BatchExecuteStatement"),
+        rule("rds-data", "POST", "^/BeginTransaction/?$",     "rds-data:BeginTransaction"),
+        rule("rds-data", "POST", "^/CommitTransaction/?$",    "rds-data:CommitTransaction"),
+        rule("rds-data", "POST", "^/RollbackTransaction/?$",  "rds-data:RollbackTransaction"),
+
         // ── API Gateway ────────────────────────────────────────────────────────
         rule("apigateway", "GET",    ".*/account$",                       "apigateway:GET"),
         rule("apigateway", "PATCH",  ".*/account$",                       "apigateway:PATCH"),

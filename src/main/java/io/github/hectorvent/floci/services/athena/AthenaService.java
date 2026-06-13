@@ -149,21 +149,19 @@ public class AthenaService {
         return workGroup;
     }
 
-    public Map<String, Object> getWorkGroup(String name) {
-        return Map.of(
-                "Name", name == null || name.isBlank() ? DEFAULT_WORKGROUP : name,
-                "State", "ENABLED",
-                "Configuration", Map.of(
-                        "EngineVersion", Map.of(
-                                "SelectedEngineVersion", DEFAULT_ENGINE_VERSION,
-                                "EffectiveEngineVersion", DEFAULT_ENGINE_VERSION
-                        ),
-                        "ResultConfiguration", Map.of("OutputLocation", "s3://" + DEFAULT_OUTPUT_BUCKET + "/results/"),
-                        "EnforceWorkGroupConfiguration", false,
-                        "PublishCloudWatchMetricsEnabled", false,
-                        "RequesterPaysEnabled", false
-                )
-        );
+    public Map<String, Object> getWorkGroup(String name, String region) {
+        String resolved = name == null || name.isBlank() ? DEFAULT_WORKGROUP : name;
+        if (DEFAULT_WORKGROUP.equals(resolved)) {
+            return primaryWorkGroupSummary();
+        }
+        WorkGroup workGroup = workGroupStore.get(workGroupKey(region, resolved))
+                .orElseThrow(() -> new AwsException("InvalidRequestException",
+                        "WorkGroup " + resolved + " is not found.", 400));
+        return toWorkGroupDetail(workGroup);
+    }
+
+    public void deleteWorkGroup(String name, String region) {
+        workGroupStore.delete(workGroupKey(region, name));
     }
 
     public List<Map<String, Object>> listWorkGroups(String region) {
@@ -361,6 +359,22 @@ public class AthenaService {
                         "RequesterPaysEnabled", false
                 )
         );
+    }
+
+    private Map<String, Object> toWorkGroupDetail(WorkGroup workGroup) {
+        Map<String, Object> detail = new LinkedHashMap<>();
+        detail.put("Name", workGroup.getName());
+        detail.put("State", workGroup.getState());
+        if (workGroup.getDescription() != null) {
+            detail.put("Description", workGroup.getDescription());
+        }
+        if (workGroup.getCreationTime() != null) {
+            detail.put("CreationTime", workGroup.getCreationTime());
+        }
+        if (workGroup.getConfiguration() != null) {
+            detail.put("Configuration", workGroup.getConfiguration());
+        }
+        return detail;
     }
 
     private Map<String, Object> toWorkGroupSummary(WorkGroup workGroup) {

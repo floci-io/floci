@@ -16,6 +16,7 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 | `StopQueryExecution` | Cancels a running query |
 | `CreateWorkGroup` | Creates a new workgroup |
 | `GetWorkGroup` | Returns information about a workgroup |
+| `DeleteWorkGroup` | Deletes a workgroup |
 | `ListWorkGroups` | Lists all workgroups |
 
 ## How it works

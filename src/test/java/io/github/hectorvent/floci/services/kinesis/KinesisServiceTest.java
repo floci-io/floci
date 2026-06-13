@@ -90,7 +90,6 @@ class KinesisServiceTest {
                 "TRIM_HORIZON", null, REGION);
         Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
 
-        @SuppressWarnings("unchecked")
         var records = (List<?>) result.get("Records");
         assertEquals(1, records.size());
     }
@@ -104,7 +103,6 @@ class KinesisServiceTest {
         String iterator = kinesisService.getShardIterator("my-stream", shardId, "LATEST", null, REGION);
         Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
 
-        @SuppressWarnings("unchecked")
         var records = (List<?>) result.get("Records");
         assertTrue(records.isEmpty());
         assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
@@ -132,7 +130,6 @@ class KinesisServiceTest {
 
         Map<String, Object> result = kinesisService.getRecords(iterator, 10, REGION);
 
-        @SuppressWarnings("unchecked")
         var records = (List<?>) result.get("Records");
         assertEquals(2, records.size());
         assertEquals(0L, ((Number) result.get("MillisBehindLatest")).longValue());
@@ -157,7 +154,6 @@ class KinesisServiceTest {
 
         Map<String, Object> result = kinesisService.getRecords(iterator, 2, REGION);
 
-        @SuppressWarnings("unchecked")
         var returned = (List<?>) result.get("Records");
         assertEquals(2, returned.size());
         // Last returned = records[1] at +1500ms, tip = records[2] at +4000ms, delta = 2500ms

@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -30,6 +31,15 @@ class SesIdentityAttributesV2IntegrationTest {
             .post("/v2/email/identities")
         .then()
             .statusCode(200);
+
+        // Verify MailFromAttributes is omitted by default
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2-attrs.floci.test")
+        .then()
+            .statusCode(200)
+            .body("MailFromAttributes", nullValue());
     }
 
     @Test
@@ -84,8 +94,7 @@ class SesIdentityAttributesV2IntegrationTest {
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
             .statusCode(200)
-            .body("MailFromAttributes.MailFromDomain", equalTo(""))
-            .body("MailFromAttributes.MailFromDomainStatus", equalTo("NOT_STARTED"));
+            .body("MailFromAttributes", nullValue());
     }
 
     @Test

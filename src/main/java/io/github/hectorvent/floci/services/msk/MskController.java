@@ -23,16 +23,20 @@ public class MskController {
     @Path("/v1/clusters")
     public Response createCluster(Map<String, Object> request) {
         String clusterName = (String) request.get("clusterName");
-        MskCluster cluster = mskService.createCluster(clusterName);
+        String kafkaVersion = (String) request.get("kafkaVersion");
+        MskCluster cluster = mskService.createCluster(clusterName, kafkaVersion);
         return Response.ok(Map.of("clusterArn", cluster.getClusterArn(), "clusterName", cluster.getClusterName(), "state", cluster.getState())).build();
     }
 
     @POST
     @Path("/api/v2/clusters")
+    @SuppressWarnings("unchecked")
     public Response createClusterV2(Map<String, Object> request) {
         // Simple mapping to V1 for now
         String clusterName = (String) request.get("clusterName");
-        MskCluster cluster = mskService.createCluster(clusterName);
+        Map<String, Object> provisioned = (Map<String, Object>) request.get("provisioned");
+        String kafkaVersion = provisioned != null ? (String) provisioned.get("kafkaVersion") : null;
+        MskCluster cluster = mskService.createCluster(clusterName, kafkaVersion);
         return Response.ok(Map.of("clusterArn", cluster.getClusterArn(), "clusterName", cluster.getClusterName(), "state", cluster.getState())).build();
     }
 

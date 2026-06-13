@@ -29,6 +29,7 @@ import java.util.Objects;
 public class GlueJsonHandler {
 
     private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
+    private static final TypeReference<List<Map<String, Object>>> MAP_LIST = new TypeReference<>() {};
 
     private final GlueService glueService;
     private final GlueSchemaRegistryService schemaRegistryService;
@@ -112,6 +113,8 @@ public class GlueJsonHandler {
                 List<String> tableNames = mapper.convertValue(request.get("TablesToDelete"), STRING_LIST);
                 yield Response.ok(Map.of("Errors", glueService.batchDeleteTables(dbName, tableNames))).build();
             }
+            case "UpdateColumnStatisticsForTable" -> handleUpdateColumnStatisticsForTable(request);
+            case "GetColumnStatisticsForTable" -> handleGetColumnStatisticsForTable(request);
             case "CreatePartition" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
@@ -154,6 +157,27 @@ public class GlueJsonHandler {
             case "GetTags" -> handleGetTags(request);
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    private Response handleUpdateColumnStatisticsForTable(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<Map<String, Object>> columnStatistics =
+                mapper.convertValue(request.get("ColumnStatisticsList"), MAP_LIST);
+        glueService.updateColumnStatisticsForTable(dbName, tableName, columnStatistics);
+        return Response.ok(Map.of("Errors", List.of())).build();
+    }
+
+    private Response handleGetColumnStatisticsForTable(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> columnNames = mapper.convertValue(request.get("ColumnNames"), STRING_LIST);
+        GlueService.ColumnStatisticsResult result =
+                glueService.getColumnStatisticsForTable(dbName, tableName, columnNames);
+        return Response.ok(Map.of(
+                "ColumnStatisticsList", result.columnStatisticsList(),
+                "Errors", result.errors()))
+                .build();
     }
 
     private Response handleCreateUserDefinedFunction(JsonNode request) throws Exception {

@@ -71,6 +71,25 @@ create_table() {
         --table-input "$(table_input "$name" "$description")" >/dev/null
 }
 
+column_statistics_input() {
+    jq -n '[
+        {
+            ColumnName: "id",
+            ColumnType: "int",
+            AnalyzedTime: "2026-06-08T00:00:00Z",
+            StatisticsData: {
+                Type: "LONG",
+                LongColumnStatisticsData: {
+                    MinimumValue: 1,
+                    MaximumValue: 10,
+                    NumberOfNulls: 0,
+                    NumberOfDistinctValues: 10
+                }
+            }
+        }
+    ]'
+}
+
 function_input() {
     local owner="$1"
     jq -n \
@@ -182,6 +201,28 @@ function_input() {
     [ "$current_description" = "updated" ]
     [ "$archived_version" = "0" ]
     [ "$archived_description" = "created" ]
+
+    run aws_cmd glue update-column-statistics-for-table \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --column-statistics-list "$(column_statistics_input)"
+    assert_success
+
+    run aws_cmd glue get-column-statistics-for-table \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --column-names id missing
+    assert_success
+    column_name=$(json_get "$output" '.ColumnStatisticsList[0].ColumnName')
+    statistics_type=$(json_get "$output" '.ColumnStatisticsList[0].StatisticsData.Type')
+    minimum_value=$(json_get "$output" '.ColumnStatisticsList[0].StatisticsData.LongColumnStatisticsData.MinimumValue')
+    missing_column_name=$(json_get "$output" '.Errors[0].ColumnName')
+    error_code=$(json_get "$output" '.Errors[0].Error.ErrorCode')
+    [ "$column_name" = "id" ]
+    [ "$statistics_type" = "LONG" ]
+    [ "$minimum_value" = "1" ]
+    [ "$missing_column_name" = "missing" ]
+    [ "$error_code" = "EntityNotFoundException" ]
 
     run aws_cmd glue create-partition \
         --database-name "$DB_NAME" \

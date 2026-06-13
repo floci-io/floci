@@ -10,7 +10,6 @@ import io.github.hectorvent.floci.services.appsync.graphql.scalars.AppSyncScalar
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
-import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;

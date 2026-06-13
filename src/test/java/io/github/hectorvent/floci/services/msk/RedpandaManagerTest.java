@@ -49,14 +49,22 @@ class RedpandaManagerTest {
 
     private static final int KAFKA_PORT = 9092;
 
-    @Mock ContainerLifecycleManager lifecycleManager;
-    @Mock ContainerLogStreamer logStreamer;
-    @Mock ContainerDetector containerDetector;
-    @Mock RegionResolver regionResolver;
-    @Mock PortAllocator portAllocator;
-    @Mock EmulatorConfig config;
-    @Mock DockerHostResolver dockerHostResolver;
-    @Mock EmbeddedDnsServer embeddedDnsServer;
+    @Mock
+    private ContainerLifecycleManager lifecycleManager;
+    @Mock
+    private ContainerLogStreamer logStreamer;
+    @Mock
+    private ContainerDetector containerDetector;
+    @Mock
+    private RegionResolver regionResolver;
+    @Mock
+    private PortAllocator portAllocator;
+    @Mock
+    private EmulatorConfig config;
+    @Mock
+    private DockerHostResolver dockerHostResolver;
+    @Mock
+    private EmbeddedDnsServer embeddedDnsServer;
 
     @TempDir
     Path tempDir;
@@ -102,7 +110,7 @@ class RedpandaManagerTest {
     }
 
     private MskCluster newCluster() {
-        MskCluster cluster = new MskCluster("arn:aws:kafka:us-east-1:000000000000:cluster/test-cluster/abc", "test-cluster");
+        MskCluster cluster = new MskCluster("arn:aws:kafka:us-east-1:000000000000:cluster/test-cluster/abc", "test-cluster", "3.6.0");
         cluster.setVolumeId("abc123");
         return cluster;
     }

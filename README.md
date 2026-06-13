@@ -177,7 +177,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**53 AWS services. Broad coverage. Free forever.**
+**54 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -222,8 +222,8 @@ Floci supports local emulation for application services, data services, eventing
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
-| Graph database | Neptune |
 | Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract, Transcribe |
+| Databases | RDS, RDS Data API, Neptune |
 | Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
@@ -261,6 +261,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | CloudWatch Metrics | In-process | Custom metrics, statistics, alarms |
 | ElastiCache | Real Docker | Redis / Valkey protocol, IAM auth, SigV4 validation |
 | RDS | Real Docker | PostgreSQL, MySQL, MariaDB, IAM auth, JDBC-compatible engines |
+| RDS Data API | REST JSON over real RDS containers | Raw SQL execution and transactions for local MySQL / MariaDB RDS resources |
 | Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server; RDS-shaped control plane; Gremlin WebSocket on port 8182 with SigV4 proxy |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
@@ -658,14 +659,14 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 | `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 899 |
 | `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 366 |
 | `sdk-test-python` | Python 3 | boto3 | 272 |
-| `sdk-test-go` | Go | AWS SDK for Go v2 | 144 |
+| `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 145 |
 | `sdk-test-awscli` | Bash | AWS CLI v2 | 152 |
 | `sdk-test-rust` | Rust | AWS SDK for Rust | 90 |
 | `compat-terraform` | Terraform | v1.10+ | 14 |
 | `compat-opentofu` | OpenTofu | v1.9+ | 14 |
 | `compat-cdk` | AWS CDK | v2+ | 17 |
 
-**1,968 automated compatibility tests across 6 SDKs and 3 IaC tools.**
+**1,969 automated compatibility tests across 6 SDKs and 3 IaC tools.**
 
 ## Migrating from LocalStack
 

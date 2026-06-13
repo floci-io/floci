@@ -165,7 +165,6 @@ public class AppSyncService {
         if (request.containsKey("openIDConnectConfig")) existing.setOpenIDConnectConfig((Map<String, Object>) request.get("openIDConnectConfig"));
         if (request.containsKey("userPoolConfig")) existing.setUserPoolConfig((Map<String, Object>) request.get("userPoolConfig"));
         if (request.containsKey("dns")) {
-            @SuppressWarnings("unchecked")
             Map<String, String> dns = (Map<String, String>) request.get("dns");
             existing.setDns(dns);
         }
@@ -431,7 +430,6 @@ public class AppSyncService {
         return paginate(functionStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
-    @SuppressWarnings("unchecked")
     public FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
         FunctionConfiguration existing = getFunction(apiId, functionId);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));

@@ -12,6 +12,9 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.mock;
@@ -225,6 +228,56 @@ class SqsServiceTest {
         assertNotNull(attrs.get("QueueArn"));
         assertNotNull(attrs.get("CreatedTimestamp"));
         assertEquals("1", attrs.get("ApproximateNumberOfMessages"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesDelayed"),
+                "The Delayed counter must always be present, \"0\" when nothing is delayed");
+    }
+
+    @Test
+    void getQueueAttributesReportsDelayedMessages() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("delayed-attr-queue", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 1, region);
+
+        Map<String, String> whileDelayed =
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("0", whileDelayed.get("ApproximateNumberOfMessages"));
+        assertEquals("0", whileDelayed.get("ApproximateNumberOfMessagesNotVisible"),
+                "A delayed message is not in flight");
+        assertEquals("1", whileDelayed.get("ApproximateNumberOfMessagesDelayed"));
+
+        try { Thread.sleep(1100); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+
+        Map<String, String> afterDelay =
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("1", afterDelay.get("ApproximateNumberOfMessages"));
+        assertEquals("0", afterDelay.get("ApproximateNumberOfMessagesDelayed"),
+                "The Delayed counter must drop back to 0 once the message becomes visible");
+    }
+
+    @Test
+    void getQueueAttributesReportsInFlightSeparatelyFromDelayed() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("inflight-attr-queue", null, region);
+        sqsService.sendMessage(queue.getQueueUrl(), "msg", 0, region);
+        assertEquals(1, sqsService.receiveMessage(queue.getQueueUrl(), 1, 30, 0, region).size());
+
+        Map<String, String> attrs =
+                sqsService.getQueueAttributes(queue.getQueueUrl(), List.of("All"), region);
+        assertEquals("0", attrs.get("ApproximateNumberOfMessages"));
+        assertEquals("1", attrs.get("ApproximateNumberOfMessagesNotVisible"));
+        assertEquals("0", attrs.get("ApproximateNumberOfMessagesDelayed"),
+                "An in-flight (received) message must not count as delayed");
+    }
+
+    @Test
+    void getQueueAttributesReturnsDelayedWhenExplicitlyRequested() {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("explicit-delayed-queue", null, region);
+
+        Map<String, String> attrs = sqsService.getQueueAttributes(queue.getQueueUrl(),
+                List.of("ApproximateNumberOfMessagesDelayed"), region);
+        assertEquals(Map.of("ApproximateNumberOfMessagesDelayed", "0"), attrs);
     }
 
     // --- FIFO Queue Tests ---
@@ -894,5 +947,70 @@ class SqsServiceTest {
         sqsService.createQueue("attrs-bare", Map.of("VisibilityTimeout", "45"), region);
         Map<String, String> attrs = sqsService.getQueueAttributes("attrs-bare", List.of("VisibilityTimeout"), region);
         assertEquals("45", attrs.get("VisibilityTimeout"));
+    }
+
+    // --- DeleteQueue releases in-flight ReceiveMessage long polls ---
+
+    @Test
+    void deleteQueueReleasesParkedLongPoll() throws InterruptedException {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("longpoll-release-queue", null, region);
+        String queueUrl = queue.getQueueUrl();
+
+        final var pollerEntered = new CountDownLatch(1);
+        final var staleResult = new AtomicReference<List<Message>>();
+        Thread stalePoller = new Thread(() -> {
+            pollerEntered.countDown();
+            staleResult.set(sqsService.receiveMessage(queueUrl, 1, 30, 8, region));
+        });
+        stalePoller.start();
+        assertTrue(pollerEntered.await(5, TimeUnit.SECONDS));
+        Thread.sleep(300); // let the poller park inside its long-poll wait
+
+        sqsService.deleteQueue(queueUrl, region);
+        stalePoller.join(2000);
+
+        assertFalse(stalePoller.isAlive(),
+                "DeleteQueue must release a parked long poll promptly, not leave it to wait out its full WaitTimeSeconds");
+        assertTrue(staleResult.get().isEmpty(),
+                "A long poll released by DeleteQueue must complete without messages");
+    }
+
+    @Test
+    void staleLongPollMustNotConsumeMessagesFromARecreatedQueue() throws InterruptedException {
+        String region = "eu-west-1";
+        Queue queue = sqsService.createQueue("recreate-longpoll-queue", null, region);
+        String queueUrl = queue.getQueueUrl();
+
+        // A long poll opened before the delete, e.g. a listener generation
+        // that is being torn down while its queue is recreated.
+        final var pollerEntered = new CountDownLatch(1);
+        final var staleResult = new AtomicReference<List<Message>>();
+        Thread stalePoller = new Thread(() -> {
+            pollerEntered.countDown();
+            staleResult.set(sqsService.receiveMessage(queueUrl, 1, 30, 8, region));
+        });
+        stalePoller.start();
+        assertTrue(pollerEntered.await(5, TimeUnit.SECONDS));
+        Thread.sleep(300); // let the poller park inside its long-poll wait
+
+        sqsService.deleteQueue(queueUrl, region);
+        Queue recreated = sqsService.createQueue("recreate-longpoll-queue", null, region);
+        sqsService.sendMessage(recreated.getQueueUrl(), "for-the-new-queue", 0, region);
+        // Give a surviving stale poll every chance to (incorrectly) grab the
+        // message before the legitimate receive arrives.
+        Thread.sleep(200);
+
+        List<Message> fresh = sqsService.receiveMessage(recreated.getQueueUrl(), 1, 30, 1, region);
+        stalePoller.join(9000);
+        assertFalse(stalePoller.isAlive());
+
+        assertEquals(1, fresh.size(),
+                "A receive opened after the recreate must get the new queue's message");
+        assertEquals("for-the-new-queue", fresh.get(0).getBody());
+        assertEquals(1, fresh.get(0).getReceiveCount(),
+                "The delivery to the live receiver must be the first receive (ApproximateReceiveCount = 1)");
+        assertTrue(staleResult.get().isEmpty(),
+                "The pre-delete long poll must not consume the recreated queue's delivery");
     }
 }

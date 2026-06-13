@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.appsync.graphql;
 
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public enum AppSyncDirective {
     AWS_API_KEY("aws_api_key", "directive @aws_api_key on OBJECT | FIELD_DEFINITION"),

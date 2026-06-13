@@ -19,11 +19,12 @@ quarkus:
     delay-enabled: true
   native:
     resources:
-      # The Pricing service reads its bundled snapshot at runtime via
+      # The Pricing service reads its bundled snapshot, and EC2 reads its image
+      # catalog (ec2/image-catalog.yaml), at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
-      # cannot detect dynamically-built paths, so the tree is registered
+      # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**
+      includes: pricing-snapshots/**,ec2/*.yaml
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -184,6 +185,9 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182

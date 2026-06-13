@@ -547,7 +547,6 @@ public class SsmCommandService {
         };
     }
 
-    @SuppressWarnings("unchecked")
     private Map<String, List<String>> parseParameters(JsonNode parametersNode) {
         if (parametersNode == null || parametersNode.isNull() || !parametersNode.isObject()) {
             return Map.of();

@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.anyOf;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -375,8 +374,7 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .body("DescribeRouteTablesResponse.routeTableSet.item.vpcId", equalTo(vpcId))
-            .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item.main",
-                anyOf(equalTo(true), equalTo("true")));
+            .body(containsString("<main>true</main>"));
     }
 
     @Test

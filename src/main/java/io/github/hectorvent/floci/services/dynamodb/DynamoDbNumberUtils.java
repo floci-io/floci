@@ -7,8 +7,6 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
-import java.util.Iterator;
-import java.util.Map;
 
 /**
  * DynamoDB number validation and normalization.

@@ -13,7 +13,6 @@ public final class IamServiceTestHelper {
     private IamServiceTestHelper() {
     }
 
-    @SuppressWarnings("unchecked")
     public static IamService iamServiceWithAccessKey(String accessKeyId, String secretAccessKey) {
         try {
             Constructor<IamService> constructor = IamService.class.getDeclaredConstructor(

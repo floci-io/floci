@@ -680,7 +680,6 @@ class CognitoServiceTest {
     // =========================================================================
 
     @Test
-    @SuppressWarnings("unchecked")
     void adminSetUserPasswordPermanentFalseChangesPassword() {
         UserPool pool = createPoolAndUser(); // alice has permanent "Perm1234!"
         UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
@@ -1097,7 +1096,6 @@ class CognitoServiceTest {
         String session2 = (String) retryResult.get("Session");
 
         // Eventually correct answer issues tokens
-        @SuppressWarnings("unchecked")
         Map<String, Object> tokenResult = service.respondToAuthChallenge(
                 client.getClientId(), "CUSTOM_CHALLENGE", session2,
                 Map.of("USERNAME", "alice", "ANSWER", "secret-otp"));

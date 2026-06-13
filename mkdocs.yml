@@ -92,6 +92,7 @@ nav:
     - STS: services/sts.md
     - ElastiCache: services/elasticache.md
     - RDS: services/rds.md
+    - RDS Data API: services/rds-data.md
     - MSK (Kafka): services/msk.md
     - Glue: services/glue.md
     - Neptune: services/neptune.md
