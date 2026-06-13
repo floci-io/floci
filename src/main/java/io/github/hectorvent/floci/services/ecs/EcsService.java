@@ -206,13 +206,16 @@ public class EcsService {
                                                   Map<String, String> tags, String region) {
         if (requiresCompatibilities != null && requiresCompatibilities.contains("FARGATE")) {
             if (networkMode != NetworkMode.awsvpc) {
-                throw new AwsException("ClientException", "Fargate requires task definition to have network mode awsvpc.", 400);
+                throw new AwsException("ClientException", "Fargate only supports network mode 'awsvpc'.", 400);
             }
-            if (cpu == null || memory == null) {
-                throw new AwsException("ClientException", "Fargate requires task definition to have cpu and memory reservation.", 400);
+            if (cpu == null) {
+                throw new AwsException("ClientException", "Fargate requires that 'cpu' be defined at the task level.", 400);
+            }
+            if (memory == null) {
+                throw new AwsException("ClientException", "Fargate requires that 'memory' be defined at the task level.", 400);
             }
             if (!isValidFargateCpuMemory(cpu, memory)) {
-                throw new AwsException("ClientException", "Fargate requires item to be to be a valid size. Task CPU or memory value is invalid.", 400);
+                throw new AwsException("ClientException", "No Fargate configuration exists for given values.", 400);
             }
         }
         int revision = latestRevisions.merge(family, 1, Integer::sum);
@@ -226,8 +229,15 @@ public class EcsService {
         td.setMemory(memory);
         td.setTaskRoleArn(taskRoleArn);
         td.setExecutionRoleArn(executionRoleArn);
-        td.setRequiresCompatibilities(requiresCompatibilities);
         td.setContainerDefinitions(containerDefs != null ? containerDefs : List.of());
+        td.setRequiresCompatibilities(requiresCompatibilities);
+
+        if (requiresCompatibilities != null && !requiresCompatibilities.isEmpty()) {
+            td.setCompatibilities(new java.util.ArrayList<>(requiresCompatibilities));
+        } else {
+            td.setCompatibilities(java.util.List.of("EC2"));
+        }
+
         td.setTaskDefinitionArn(regionResolver.buildArn("ecs", region,
                 "task-definition/" + family + ":" + revision));
         if (tags != null && !tags.isEmpty()) {

@@ -928,6 +928,11 @@ public class EcsJsonHandler {
             td.getRequiresCompatibilities().forEach(arr::add);
             n.set("requiresCompatibilities", arr);
         }
+        if (td.getCompatibilities() != null && !td.getCompatibilities().isEmpty()) {
+            ArrayNode arr = objectMapper.createArrayNode();
+            td.getCompatibilities().forEach(arr::add);
+            n.set("compatibilities", arr);
+        }
 
         ArrayNode containers = objectMapper.createArrayNode();
         if (td.getContainerDefinitions() != null) {
