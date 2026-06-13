@@ -348,6 +348,7 @@ final class CognitoAuthFlowHandler {
                 "SALT", user.getSrpSalt(),
                 "SRP_B", bPublicHex,
                 "SECRET_BLOCK", secretBlockBase64,
+                "USERNAME", user.getUsername(),
                 "USER_ID_FOR_SRP", user.getUsername()
         ));
         return result;
