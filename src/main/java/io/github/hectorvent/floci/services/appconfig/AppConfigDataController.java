@@ -1,7 +1,6 @@
 package io.github.hectorvent.floci.services.appconfig;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataService.ConfigurationData;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -44,9 +43,6 @@ public class AppConfigDataController {
     @GET
     @Path(AppConfigConfigurationRouteFilter.INTERNAL_PATH)
     public Response getLatestConfiguration(@QueryParam("configuration_token") String token) {
-        if (token == null || token.isBlank()) {
-            throw new AwsException("BadRequestException", "configuration_token is required", 400);
-        }
         ConfigurationData data = service.getLatestConfiguration(token);
         return Response.ok(data.content())
                 .header("Content-Type", data.contentType())
