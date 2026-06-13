@@ -98,7 +98,7 @@ public class SecretsManagerJsonHandler {
             int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt() : 20;
             if (maxResults < 1 || maxResults > 20) {
                 return Response.status(400)
-                        .entity(new AwsErrorResponse("ValidationException", "MaxResults must be between 1 and 20."))
+                        .entity(new AwsErrorResponse("InvalidParameterException", "MaxResults must be between 1 and 20."))
                         .build();
             }
 

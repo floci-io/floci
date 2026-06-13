@@ -327,6 +327,7 @@ public class SecretsManagerService {
             case "tag-key" -> secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.key() != null && t.key().startsWith(targetVal));
             case "tag-value" -> secret.getTags() != null && secret.getTags().stream().anyMatch(t -> t.value() != null && t.value().startsWith(targetVal));
             case "primary-region" -> region != null && region.startsWith(targetVal);
+            // owning-service is a valid Filter.Key enum value but is currently deferred (always returning false)
             case "owning-service" -> false;
             case "all" -> {
                 String lowerVal = targetVal.toLowerCase();
