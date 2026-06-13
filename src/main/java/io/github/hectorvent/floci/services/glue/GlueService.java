@@ -221,6 +221,7 @@ public class GlueService {
     }
 
     public void deleteTable(String databaseName, String tableName) {
+        getTable(databaseName, tableName);
         String key = tableKey(databaseName, tableName);
         tableStore.delete(key);
         tableVersionStore.keys().stream()

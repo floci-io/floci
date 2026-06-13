@@ -368,6 +368,15 @@ class GlueServiceTest {
     }
 
     @Test
+    void deleteTableForMissingTableThrows() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.deleteTable("db1", "missing_table"));
+
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("db1.missing_table"));
+    }
+
+    @Test
     void updateTableWithCurrentVersionIdSucceedsAndIncrementsVersionId() {
         Table table = new Table();
         table.setName("plain");

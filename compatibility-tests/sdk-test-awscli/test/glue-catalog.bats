@@ -246,6 +246,12 @@ function_input() {
         --database-name "$DB_NAME" \
         --name "$TABLE_NAME"
     assert_failure
+
+    run aws_cmd glue delete-table \
+        --database-name "$DB_NAME" \
+        --name "$TABLE_NAME"
+    assert_failure
+    [[ "$output" == *"EntityNotFoundException"* ]]
 }
 
 @test "Glue catalog: batch delete table" {

@@ -226,6 +226,11 @@ class GlueCatalogTest {
                 .name(TABLE_NAME)
                 .build()))
                 .isInstanceOf(EntityNotFoundException.class);
+        assertThatThrownBy(() -> glue.deleteTable(DeleteTableRequest.builder()
+                .databaseName(DATABASE_NAME)
+                .name(TABLE_NAME)
+                .build()))
+                .isInstanceOf(EntityNotFoundException.class);
 
         glue.deleteDatabase(DeleteDatabaseRequest.builder()
                 .name(DATABASE_NAME)
