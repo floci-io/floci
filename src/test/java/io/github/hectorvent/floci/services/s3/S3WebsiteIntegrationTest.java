@@ -74,19 +74,30 @@ class S3WebsiteIntegrationTest {
 
     @Test
     @Order(5)
-    void indexRedirectionNotWorkingYetWithoutIndexFile() {
-        // Access root - should return XML list because index.html is missing
+    void uploadErrorFile() {
         given()
+            .contentType("text/html")
+            .body("<html><body>Custom Error</body></html>")
         .when()
-            .get("/" + BUCKET)
+            .put("/" + BUCKET + "/error.html")
         .then()
-            .statusCode(200)
-            .contentType("application/xml")
-            .body(containsString("<ListBucketResult"));
+            .statusCode(200);
     }
 
     @Test
     @Order(6)
+    void missingIndexServesErrorDocument() {
+        given()
+        .when()
+            .get("/" + BUCKET)
+        .then()
+            .statusCode(404)
+            .contentType("text/html")
+            .body(equalTo("<html><body>Custom Error</body></html>"));
+    }
+
+    @Test
+    @Order(7)
     void uploadIndexFile() {
         given()
             .contentType("text/html")
@@ -98,9 +109,8 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void indexRedirectionWorks() {
-        // Access root - should now return index.html content
         given()
         .when()
             .get("/" + BUCKET)
@@ -111,7 +121,19 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(8)
+    @Order(9)
+    void missingKeyServesErrorDocument() {
+        given()
+        .when()
+            .get("/" + BUCKET + "/missing-page")
+        .then()
+            .statusCode(404)
+            .contentType("text/html")
+            .body(equalTo("<html><body>Custom Error</body></html>"));
+    }
+
+    @Test
+    @Order(10)
     void deleteWebsiteConfiguration() {
         given()
             .queryParam("website", "")
@@ -120,7 +142,6 @@ class S3WebsiteIntegrationTest {
         .then()
             .statusCode(204);
 
-        // Verify it's gone
         given()
             .queryParam("website", "")
         .when()
@@ -130,9 +151,10 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(11)
     void cleanup() {
         given().delete("/" + BUCKET + "/index.html");
+        given().delete("/" + BUCKET + "/error.html");
         given().delete("/" + BUCKET);
     }
 }
