@@ -13,6 +13,7 @@ import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
 import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
 import software.amazon.awssdk.services.emr.EmrClient;
+import software.amazon.awssdk.services.wafv2.Wafv2Client;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
@@ -489,6 +490,14 @@ public final class TestFixtures {
 
     public static EmrClient emrClient() {
         return EmrClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static Wafv2Client wafv2Client() {
+        return Wafv2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

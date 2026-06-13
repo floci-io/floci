@@ -325,6 +325,7 @@ public interface EmulatorConfig {
         EventBridgeServiceConfig eventbridge();
         CloudMapServiceConfig cloudmap();
         EmrServiceConfig emr();
+        WafV2ServiceConfig wafv2();
         SchedulerServiceConfig scheduler();
         CloudWatchLogsServiceConfig cloudwatchlogs();
         CloudWatchMetricsServiceConfig cloudwatchmetrics();
@@ -586,6 +587,11 @@ public interface EmulatorConfig {
         /** Delay before a cluster reaches WAITING; 0 = advance synchronously. */
         @WithDefault("0")
         int clusterStartupDelaySeconds();
+    }
+
+    interface WafV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface SchedulerServiceConfig {

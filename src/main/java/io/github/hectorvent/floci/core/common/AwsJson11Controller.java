@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapHandler;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.emr.EmrHandler;
+import io.github.hectorvent.floci.services.wafv2.WafV2Handler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
@@ -59,6 +60,7 @@ public class AwsJson11Controller {
     private final EventBridgeHandler eventBridgeHandler;
     private final CloudMapHandler cloudMapHandler;
     private final EmrHandler emrHandler;
+    private final WafV2Handler wafV2Handler;
     private final CloudWatchLogsHandler cloudWatchLogsHandler;
     private final SecretsManagerJsonHandler secretsManagerJsonHandler;
     private final KinesisJsonHandler kinesisJsonHandler;
@@ -91,6 +93,7 @@ public class AwsJson11Controller {
                                SsmJsonHandler ssmJsonHandler, EventBridgeHandler eventBridgeHandler,
                                CloudMapHandler cloudMapHandler,
                                EmrHandler emrHandler,
+                               WafV2Handler wafV2Handler,
                                CloudWatchLogsHandler cloudWatchLogsHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
                                KinesisJsonHandler kinesisJsonHandler,
@@ -120,6 +123,7 @@ public class AwsJson11Controller {
         this.eventBridgeHandler = eventBridgeHandler;
         this.cloudMapHandler = cloudMapHandler;
         this.emrHandler = emrHandler;
+        this.wafV2Handler = wafV2Handler;
         this.cloudWatchLogsHandler = cloudWatchLogsHandler;
         this.secretsManagerJsonHandler = secretsManagerJsonHandler;
         this.kinesisJsonHandler = kinesisJsonHandler;
@@ -177,6 +181,7 @@ public class AwsJson11Controller {
                 case "events" -> eventBridgeHandler.handle(action, request, region);
                 case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
                 case "elasticmapreduce" -> emrHandler.handle(action, request, region);
+                case "wafv2" -> wafV2Handler.handle(action, request, region);
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);

@@ -114,6 +114,8 @@ floci:
       enabled: true
     emr:
       enabled: true
+    wafv2:
+      enabled: true
     scheduler:
       enabled: true
     cloudwatchlogs:
