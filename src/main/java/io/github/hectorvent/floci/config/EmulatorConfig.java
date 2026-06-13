@@ -368,6 +368,7 @@ public interface EmulatorConfig {
         CloudTrailServiceConfig cloudtrail();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
+        UiServiceConfig ui();
     }
 
     interface CloudTrailServiceConfig {
@@ -846,6 +847,26 @@ public interface EmulatorConfig {
          */
         @WithDefault("synchronous")
         String emitMode();
+    }
+
+    interface UiServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("floci/floci-ui:latest")
+        String image();
+
+        @WithDefault("floci-ui")
+        String containerName();
+
+        /** Single fixed host port the UI is published on (single-instance service). */
+        @WithDefault("8080")
+        int port();
+
+        @WithDefault("false")
+        boolean keepRunningOnShutdown();
+
+        Optional<String> dockerNetwork();
     }
 
     interface EcrServiceConfig {

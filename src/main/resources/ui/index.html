@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Floci — local AWS emulator</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 50% -10%, #1b2a4a 0%, #0b1020 60%, #070a14 100%);
+      color: #e6ebf5;
+    }
+    .card {
+      width: min(620px, 92vw); padding: 40px 44px; border-radius: 18px;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 30px 80px rgba(0,0,0,0.45); backdrop-filter: blur(8px);
+    }
+    .logo { font-size: 30px; font-weight: 700; letter-spacing: -0.02em; margin: 0 0 6px; }
+    .logo span { color: #5b9dff; }
+    .tag { margin: 0 0 26px; color: #9aa6bd; font-size: 15px; }
+    p { line-height: 1.6; color: #c4cde0; font-size: 15px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 18px; margin: 22px 0 28px; }
+    .grid div { font-size: 13px; color: #9aa6bd; }
+    .grid b { color: #e6ebf5; font-weight: 600; }
+    code { background: rgba(255,255,255,0.07); padding: 2px 7px; border-radius: 6px; font-size: 13px; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 9px; text-decoration: none;
+      background: linear-gradient(180deg, #4f8dff, #2f6fe0); color: #fff; font-weight: 600; font-size: 15px;
+      padding: 13px 22px; border-radius: 11px; border: 1px solid rgba(255,255,255,0.18);
+      transition: transform .08s ease, box-shadow .15s ease; box-shadow: 0 8px 24px rgba(47,111,224,0.35);
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 12px 30px rgba(47,111,224,0.5); }
+    .foot { margin-top: 22px; font-size: 12px; color: #6f7b93; }
+    .foot a { color: #8fb4ff; text-decoration: none; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <h1 class="logo">Floci<span>.</span></h1>
+    <p class="tag">A local AWS emulator speaking real AWS wire protocols.</p>
+    <p>You've reached the Floci endpoint. Point your AWS SDK or CLI here with
+       <code>--endpoint-url http://localhost:4566</code> and it behaves like AWS.</p>
+    <div class="grid">
+      <div><b>Endpoint</b><br>http://localhost:4566</div>
+      <div><b>Region</b><br>us-east-1 (default)</div>
+      <div><b>Account</b><br>000000000000</div>
+      <div><b>Health</b><br><code>/_floci/health</code></div>
+    </div>
+    <a class="btn" href="/_floci/ui">
+      Open Floci UI &rarr;
+    </a>
+    <p class="foot">The UI launches on demand as a sidecar container the first time you open it.
+       &nbsp;·&nbsp; <a href="/_floci/health">health</a> · <a href="/_floci/info">info</a></p>
+  </main>
+</body>
+</html>

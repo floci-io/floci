@@ -23,7 +23,7 @@ quarkus:
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect dynamically-built paths, so the tree is registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**
+      includes: pricing-snapshots/**,ui/*.html
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -267,6 +267,12 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname
+    ui:
+      enabled: true
+      image: "floci/floci-ui:latest"
+      container-name: floci-ui
+      port: 8080
+      keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
     eks:
