@@ -4,9 +4,13 @@ import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import software.amazon.awssdk.services.ec2.Ec2Client;
+import software.amazon.awssdk.services.ec2.model.DescribeSubnetsResponse;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
+
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -15,11 +19,21 @@ class RdsControlPlaneTest {
 
     private static RdsClient rds;
     private static String subnetGroupName;
+    private static List<String> subnetIds;
 
     @BeforeAll
     static void setup() {
         rds = TestFixtures.rdsClient();
         subnetGroupName = TestFixtures.uniqueName("rds-subnets");
+        try (Ec2Client ec2 = TestFixtures.ec2Client()) {
+            DescribeSubnetsResponse response = ec2.describeSubnets();
+            subnetIds = response.subnets().stream()
+                    .map(subnet -> subnet.subnetId())
+                    .sorted()
+                    .limit(2)
+                    .toList();
+        }
+        assertThat(subnetIds).hasSizeGreaterThanOrEqualTo(2);
     }
 
     @AfterAll
@@ -38,11 +52,11 @@ class RdsControlPlaneTest {
         CreateDbSubnetGroupResponse createResponse = rds.createDBSubnetGroup(b -> b
                 .dbSubnetGroupName(subnetGroupName)
                 .dbSubnetGroupDescription("SDK subnet group shape")
-                .subnetIds("subnet-a", "subnet-b"));
+                .subnetIds(subnetIds));
 
         assertThat(createResponse.dbSubnetGroup().subnets())
                 .extracting("subnetIdentifier")
-                .containsExactly("subnet-a", "subnet-b");
+                .containsExactlyElementsOf(subnetIds);
 
         DescribeDbSubnetGroupsResponse describeResponse = rds.describeDBSubnetGroups(b -> b
                 .dbSubnetGroupName(subnetGroupName));
@@ -50,6 +64,6 @@ class RdsControlPlaneTest {
         assertThat(describeResponse.dbSubnetGroups()).hasSize(1);
         assertThat(describeResponse.dbSubnetGroups().get(0).subnets())
                 .extracting("subnetIdentifier")
-                .containsExactly("subnet-a", "subnet-b");
+                .containsExactlyElementsOf(subnetIds);
     }
 }

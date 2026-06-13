@@ -12,6 +12,7 @@ public class DbSubnetGroup {
 
     private String dbSubnetGroupName;
     private String description;
+    private String dbSubnetGroupArn;
     private String vpcId;
     private String subnetGroupStatus = "Complete";
     private List<String> subnetIds = new ArrayList<>();
@@ -40,6 +41,8 @@ public class DbSubnetGroup {
 
     public String getDbSubnetGroupDescription() { return description; }
     public void setDbSubnetGroupDescription(String description) { this.description = description; }
+    public String getDbSubnetGroupArn() { return dbSubnetGroupArn; }
+    public void setDbSubnetGroupArn(String dbSubnetGroupArn) { this.dbSubnetGroupArn = dbSubnetGroupArn; }
 
     public String getVpcId() { return vpcId; }
     public void setVpcId(String vpcId) { this.vpcId = vpcId; }

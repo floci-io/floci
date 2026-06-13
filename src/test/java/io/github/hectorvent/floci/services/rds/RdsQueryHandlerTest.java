@@ -38,6 +38,7 @@ class RdsQueryHandlerTest {
         when(config.services()).thenReturn(servicesConfig);
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(config.defaultAvailabilityZone()).thenReturn("us-east-1a");
+        when(service.resolveDbSubnetGroupView(nullable(String.class))).thenReturn(defaultSubnetGroup());
         handler = new RdsQueryHandler(service, config);
     }
 
@@ -91,6 +92,22 @@ class RdsQueryHandlerTest {
         handler.handle("DescribeDBInstances", p);
 
         verify(service).listDbInstances("direct-id");
+    }
+
+    @Test
+    void describeDbInstances_dbSubnetGroupUsesSubnetTag() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setDbSubnetGroupName("custom-group");
+        when(service.resolveDbSubnetGroupView("custom-group")).thenReturn(customSubnetGroup());
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<Subnets><Subnet>") || body.contains("<Subnets>\n<Subnet>"));
+        assertFalse(body.contains("<Subnets><member>"), "Did not expect <member> elements inside DBSubnetGroup.Subnets");
+        assertTrue(body.contains("<SubnetIdentifier>subnet-a</SubnetIdentifier>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-b</SubnetIdentifier>"));
     }
 
     // ──────────────────────────── DBClusters XML tag ────────────────────────────
@@ -337,6 +354,7 @@ class RdsQueryHandlerTest {
         String body = (String) response.getEntity();
         assertTrue(body.contains("<AvailabilityZone>ap-northeast-1a</AvailabilityZone>"));
         assertTrue(body.contains("<DBSubnetGroupName>default</DBSubnetGroupName>"));
+        assertTrue(body.contains("<DBSubnetGroupArn>arn:aws:rds:us-east-1:123456789012:subgrp:default</DBSubnetGroupArn>"));
         assertTrue(body.contains("<MultiAZ>true</MultiAZ>"));
     }
 
@@ -486,6 +504,15 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void createDbSubnetGroup_requiresNameWithMissingParameter() {
+        Response response = handler.handle("CreateDBSubnetGroup", params());
+
+        assertEquals(400, response.getStatus());
+        assertTrue(((String) response.getEntity()).contains("MissingParameter"));
+        assertTrue(((String) response.getEntity()).contains("DBSubnetGroupName"));
+    }
+
+    @Test
     void createDbClusterParameterGroup_passesArgumentsToService() {
         DbClusterParameterGroup group = new DbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc");
         when(service.createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc")).thenReturn(group);
@@ -556,6 +583,7 @@ class RdsQueryHandlerTest {
         DbSubnetGroup group = new DbSubnetGroup();
         group.setDbSubnetGroupName("my-subnet-group");
         group.setDescription("test subnet group");
+        group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group");
         group.setVpcId("vpc-12345678");
         group.setSubnetIds(List.of("subnet-a", "subnet-b"));
         group.setSubnetAvailabilityZones(Map.of("subnet-a", "us-east-1a", "subnet-b", "us-east-1b"));
@@ -573,6 +601,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, response.getStatus());
         String body = (String) response.getEntity();
         assertTrue(body.contains("<DBSubnetGroupName>my-subnet-group</DBSubnetGroupName>"));
+        assertTrue(body.contains("<DBSubnetGroupArn>arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group</DBSubnetGroupArn>"));
         assertTrue(body.contains("<SubnetIdentifier>subnet-a</SubnetIdentifier>"));
         assertTrue(body.contains("<SubnetIdentifier>subnet-b</SubnetIdentifier>"));
     }
@@ -581,6 +610,7 @@ class RdsQueryHandlerTest {
     void describeDbSubnetGroups_shouldBeSupported() {
         DbSubnetGroup group = new DbSubnetGroup();
         group.setDbSubnetGroupName("default");
+        group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
         when(service.listDbSubnetGroups(null)).thenReturn(List.of(group));
 
         Response response = handler.handle("DescribeDBSubnetGroups", params());
@@ -588,6 +618,7 @@ class RdsQueryHandlerTest {
         assertEquals(200, response.getStatus());
         String body = (String) response.getEntity();
         assertTrue(body.contains("<DBSubnetGroups>"));
+        assertTrue(body.contains("<DBSubnetGroupArn>arn:aws:rds:us-east-1:123456789012:subgrp:default</DBSubnetGroupArn>"));
     }
 
     // ──────────────────────────── Helpers ────────────────────────────
@@ -606,6 +637,28 @@ class RdsQueryHandlerTest {
         i.setDbInstanceClass("db.t3.micro");
         i.setAllocatedStorage(20);
         return i;
+    }
+
+    private static DbSubnetGroup defaultSubnetGroup() {
+        DbSubnetGroup group = new DbSubnetGroup();
+        group.setDbSubnetGroupName("default");
+        group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:default");
+        group.setVpcId("vpc-default");
+        group.setSubnetGroupStatus("Complete");
+        group.setSubnetIds(List.of("subnet-default-a", "subnet-default-b"));
+        group.setSubnetAvailabilityZones(Map.of("subnet-default-a", "us-east-1a", "subnet-default-b", "us-east-1b"));
+        return group;
+    }
+
+    private static DbSubnetGroup customSubnetGroup() {
+        DbSubnetGroup group = new DbSubnetGroup();
+        group.setDbSubnetGroupName("custom-group");
+        group.setDbSubnetGroupArn("arn:aws:rds:us-east-1:123456789012:subgrp:custom-group");
+        group.setVpcId("vpc-12345678");
+        group.setSubnetGroupStatus("Complete");
+        group.setSubnetIds(List.of("subnet-a", "subnet-b"));
+        group.setSubnetAvailabilityZones(Map.of("subnet-a", "us-east-1a", "subnet-b", "us-east-1b"));
+        return group;
     }
 
     private static DbCluster makeCluster(String id) {

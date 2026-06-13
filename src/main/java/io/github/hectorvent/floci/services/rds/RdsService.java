@@ -277,7 +277,6 @@ public class RdsService {
         instance.setAvailabilityZone(placement.availabilityZone());
         instance.setMultiAz(placement.multiAz());
         instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
-        instance.setTags(tags);
 
         String region = regionResolver.getDefaultRegion();
         instance.setDbiResourceId("db-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
@@ -607,14 +606,14 @@ public class RdsService {
 
     public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds) {
         if (name == null || name.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "DBSubnetGroupName is required.", 400);
+            throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
         }
         if (subnetGroups.get(name).isPresent() || "default".equalsIgnoreCase(name)) {
-            throw new AwsException("DBSubnetGroupAlreadyExistsFault",
+            throw new AwsException("DBSubnetGroupAlreadyExists",
                     "DB subnet group " + name + " already exists.", 400);
         }
         if (subnetIds == null || subnetIds.isEmpty()) {
-            throw new AwsException("InvalidParameterValue", "SubnetIds are required.", 400);
+            throw new AwsException("MissingParameter", "The request must contain the parameter SubnetIds.", 400);
         }
 
         DbSubnetGroup group = buildSubnetGroup(name, description, subnetIds);
@@ -633,6 +632,16 @@ public class RdsService {
         }
         groups.addAll(subnetGroups.scan(k -> true));
         return groups;
+    }
+
+    public DbSubnetGroup resolveDbSubnetGroupView(String name) {
+        String effectiveName = (name == null || name.isBlank()) ? "default" : name;
+        if ("default".equalsIgnoreCase(effectiveName)) {
+            return buildDefaultSubnetGroup();
+        }
+        return subnetGroups.get(effectiveName).orElseThrow(() ->
+                new AwsException("DBSubnetGroupNotFoundFault",
+                        "DB subnet group " + effectiveName + " not found.", 404));
     }
 
     // ── Parameter Groups ──────────────────────────────────────────────────────
@@ -1044,6 +1053,7 @@ public class RdsService {
         }
 
         DbSubnetGroup group = new DbSubnetGroup(name, description, vpcId, subnetIds, subnetAvailabilityZones);
+        group.setDbSubnetGroupArn(regionResolver.buildArn("rds", region, "subgrp:" + name));
         group.setSubnetGroupStatus("Complete");
         return group;
     }
