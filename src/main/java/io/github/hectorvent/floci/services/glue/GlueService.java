@@ -22,14 +22,18 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.regex.PatternSyntaxException;
 
@@ -43,12 +47,19 @@ public class GlueService {
     static final String COLUMN_TYPE = "ColumnType";
     static final String ANALYZED_TIME = "AnalyzedTime";
     static final String STATISTICS_DATA = "StatisticsData";
+    private static final Pattern COMPARISON_EXPRESSION = Pattern.compile(
+            "\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*(=|<>|<=|>=|<|>)\\s*('?[^']*'?|[^\\s]+)\\s*",
+            Pattern.CASE_INSENSITIVE);
+    private static final Pattern IN_EXPRESSION = Pattern.compile(
+            "\\s*([A-Za-z_][A-Za-z0-9_]*)\\s+in\\s*\\((.*)\\)\\s*",
+            Pattern.CASE_INSENSITIVE);
 
     private final StorageBackend<String, Database> databaseStore;
     private final StorageBackend<String, Table> tableStore;
     private final StorageBackend<String, Table> tableVersionStore;
     private final StorageBackend<String, Map<String, Object>> columnStatisticsStore;
     private final StorageBackend<String, Partition> partitionStore;
+    private final StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore;
     private final StorageBackend<String, UserDefinedFunction> functionStore;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final RegionResolver regionResolver;
@@ -64,6 +75,8 @@ public class GlueService {
         this.tableVersionStore = storageFactory.create("glue", "table_versions.json", new TypeReference<>() {});
         this.columnStatisticsStore = storageFactory.create("glue", "column_statistics.json", new TypeReference<>() {});
         this.partitionStore = storageFactory.create("glue", "partitions.json", new TypeReference<>() {});
+        this.partitionColumnStatisticsStore = storageFactory.create(
+                "glue", "partition_column_statistics.json", new TypeReference<>() {});
         this.functionStore = storageFactory.create("glue", "functions.json", new TypeReference<>() {});
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
@@ -75,6 +88,7 @@ public class GlueService {
                 StorageBackend<String, Table> tableVersionStore,
                 StorageBackend<String, Map<String, Object>> columnStatisticsStore,
                 StorageBackend<String, Partition> partitionStore,
+                StorageBackend<String, Map<String, Object>> partitionColumnStatisticsStore,
                 StorageBackend<String, UserDefinedFunction> functionStore,
                 GlueSchemaRegistryService schemaRegistryService,
                 RegionResolver regionResolver,
@@ -84,6 +98,7 @@ public class GlueService {
         this.tableVersionStore = tableVersionStore;
         this.columnStatisticsStore = columnStatisticsStore;
         this.partitionStore = partitionStore;
+        this.partitionColumnStatisticsStore = partitionColumnStatisticsStore;
         this.functionStore = functionStore;
         this.schemaRegistryService = schemaRegistryService;
         this.regionResolver = regionResolver;
@@ -229,9 +244,12 @@ public class GlueService {
         columnStatisticsStore.keys().stream()
                 .filter(statisticsKey -> statisticsKey.startsWith(key + ":"))
                 .forEach(columnStatisticsStore::delete);
-        partitionStore.scan(k -> k.startsWith(key + ":")).forEach(p -> {
-            partitionStore.delete(key + ":" + String.join(",", p.getValues()));
-        });
+        partitionStore.keys().stream()
+                .filter(partitionKey -> partitionKey.startsWith(key + ":"))
+                .forEach(partitionStore::delete);
+        partitionColumnStatisticsStore.keys().stream()
+                .filter(statisticsKey -> statisticsKey.startsWith(key + ":"))
+                .forEach(partitionColumnStatisticsStore::delete);
         LOG.infov("Deleted Glue Table: {0}.{1}", databaseName, tableName);
     }
 
@@ -292,15 +310,140 @@ public class GlueService {
 
     public void createPartition(String databaseName, String tableName, Partition partition) {
         Table table = getTable(databaseName, tableName);
-        String key = tableKey(databaseName, tableName) + ":" + String.join(",", partition.getValues());
+        String key = partitionKey(databaseName, tableName, partition.getValues());
         partition.setDatabaseName(table.getDatabaseName());
         partition.setTableName(table.getName());
+        if (partition.getCreationTime() == null) {
+            partition.setCreationTime(Instant.now());
+        }
         partitionStore.put(key, partition);
     }
 
+    public List<BatchCreatePartitionError> batchCreatePartitions(
+            String databaseName,
+            String tableName,
+            List<Partition> partitions) {
+        getTable(databaseName, tableName);
+        List<BatchCreatePartitionError> errors = new ArrayList<>();
+        for (Partition partition : partitions) {
+            String key = partitionKey(databaseName, tableName, partition.getValues());
+            if (partitionStore.get(key).isPresent()) {
+                errors.add(new BatchCreatePartitionError(
+                        partition.getValues(),
+                        new ErrorDetail("AlreadyExistsException", "Partition already exists.")));
+                continue;
+            }
+            createPartition(databaseName, tableName, partition);
+        }
+        return errors;
+    }
+
     public List<Partition> getPartitions(String databaseName, String tableName) {
+        return getPartitions(databaseName, tableName, null);
+    }
+
+    public Partition getPartition(String databaseName, String tableName, List<String> partitionValues) {
+        getTable(databaseName, tableName);
+        return partitionStore.get(partitionKey(databaseName, tableName, partitionValues))
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Cannot find partition.", 400));
+    }
+
+    public List<Partition> batchGetPartitions(String databaseName, String tableName, List<List<String>> partitionValues) {
+        getTable(databaseName, tableName);
+        List<Partition> partitions = new ArrayList<>();
+        for (List<String> values : partitionValues) {
+            partitionStore.get(partitionKey(databaseName, tableName, values)).ifPresent(partitions::add);
+        }
+        return partitions;
+    }
+
+    public List<BatchUpdatePartitionError> batchUpdatePartitions(
+            String databaseName,
+            String tableName,
+            List<BatchUpdatePartitionEntry> entries) {
+        Table table = getTable(databaseName, tableName);
+        List<BatchUpdatePartitionError> errors = new ArrayList<>();
+        for (BatchUpdatePartitionEntry entry : entries) {
+            String key = partitionKey(databaseName, tableName, entry.partitionValueList());
+            Optional<Partition> existing = partitionStore.get(key);
+            if (existing.isEmpty()) {
+                errors.add(new BatchUpdatePartitionError(
+                        entry.partitionValueList(),
+                        new ErrorDetail(
+                                "EntityNotFoundException",
+                                "Partition [" + String.join(", ", entry.partitionValueList()) + "] not found")));
+                continue;
+            }
+
+            putUpdatedPartition(table, key, existing.get(), entry.partitionInput());
+        }
+        return errors;
+    }
+
+    public List<Partition> getPartitions(String databaseName, String tableName, String expression) {
+        Table table = getTable(databaseName, tableName);
         String prefix = tableKey(databaseName, tableName) + ":";
-        return partitionStore.scan(k -> k.startsWith(prefix));
+        return partitionStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(partition -> matchesPartitionExpression(table, partition, expression))
+                .toList();
+    }
+
+    public void deletePartition(String databaseName, String tableName, List<String> partitionValues) {
+        getPartition(databaseName, tableName, partitionValues);
+        String key = partitionKey(databaseName, tableName, partitionValues);
+        partitionStore.delete(key);
+        partitionColumnStatisticsStore.keys().stream()
+                .filter(statisticsKey -> statisticsKey.startsWith(key + ":"))
+                .forEach(partitionColumnStatisticsStore::delete);
+    }
+
+    public void updatePartition(String databaseName, String tableName, List<String> partitionValues, Partition partition) {
+        Table table = getTable(databaseName, tableName);
+        String key = partitionKey(databaseName, tableName, partitionValues);
+        Partition existing = partitionStore.get(key)
+                .orElseThrow(() -> new AwsException("EntityNotFoundException", "Partition not found.", 400));
+        putUpdatedPartition(table, key, existing, partition);
+    }
+
+    public void updateColumnStatisticsForPartition(
+            String databaseName,
+            String tableName,
+            List<String> partitionValues,
+            List<Map<String, Object>> columnStatistics) {
+        getPartition(databaseName, tableName, partitionValues);
+        for (Map<String, Object> statistics : columnStatistics) {
+            String columnNameString = requireColumnStatisticsString(statistics, COLUMN_NAME);
+            requireColumnStatisticsString(statistics, COLUMN_TYPE);
+            requireColumnStatisticsField(statistics, ANALYZED_TIME);
+            requireColumnStatisticsField(statistics, STATISTICS_DATA);
+            partitionColumnStatisticsStore.put(
+                    partitionColumnStatisticsKey(databaseName, tableName, partitionValues, columnNameString),
+                    new LinkedHashMap<>(statistics));
+        }
+    }
+
+    public ColumnStatisticsResult getColumnStatisticsForPartition(
+            String databaseName,
+            String tableName,
+            List<String> partitionValues,
+            List<String> columnNames) {
+        getPartition(databaseName, tableName, partitionValues);
+        List<Map<String, Object>> columnStatistics = new ArrayList<>();
+        List<ColumnError> errors = new ArrayList<>();
+        for (String columnName : columnNames) {
+            partitionColumnStatisticsStore.get(partitionColumnStatisticsKey(databaseName, tableName, partitionValues, columnName))
+                    .ifPresentOrElse(columnStatistics::add, () -> errors.add(columnStatisticsNotFoundError(columnName)));
+        }
+        return new ColumnStatisticsResult(columnStatistics, errors);
+    }
+
+    public void deleteColumnStatisticsForPartition(
+            String databaseName,
+            String tableName,
+            List<String> partitionValues,
+            String columnName) {
+        getPartition(databaseName, tableName, partitionValues);
+        partitionColumnStatisticsStore.delete(partitionColumnStatisticsKey(databaseName, tableName, partitionValues, columnName));
     }
 
     public void createUserDefinedFunction(String databaseName, UserDefinedFunction function) {
@@ -429,6 +572,35 @@ public class GlueService {
         return tableKey(databaseName, tableName) + ":" + normalizeName(columnName);
     }
 
+    private static String partitionKey(String databaseName, String tableName, List<String> partitionValues) {
+        return tableKey(databaseName, tableName) + ":" + String.join(":", partitionValues.stream()
+                .map(GlueService::encodePartitionValue)
+                .toList());
+    }
+
+    private static String encodePartitionValue(String value) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static String partitionColumnStatisticsKey(
+            String databaseName,
+            String tableName,
+            List<String> partitionValues,
+            String columnName) {
+        return partitionKey(databaseName, tableName, partitionValues) + ":" + normalizeName(columnName);
+    }
+
+    private void putUpdatedPartition(Table table, String key, Partition existing, Partition partition) {
+        partition.setDatabaseName(table.getDatabaseName());
+        partition.setTableName(table.getName());
+        partition.setCreationTime(existing.getCreationTime());
+        String updatedKey = partitionKey(table.getDatabaseName(), table.getName(), partition.getValues());
+        if (!key.equals(updatedKey)) {
+            partitionStore.delete(key);
+        }
+        partitionStore.put(updatedKey, partition);
+    }
+
     private static String requireColumnStatisticsString(Map<String, Object> statistics, String field) {
         Object value = requireColumnStatisticsField(statistics, field);
         if (!(value instanceof String stringValue) || stringValue.isBlank()) {
@@ -447,6 +619,198 @@ public class GlueService {
 
     private static String normalizeName(String name) {
         return name.toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean matchesPartitionExpression(Table table, Partition partition, String expression) {
+        if (expression == null || expression.isBlank()) {
+            return true;
+        }
+        return matchesExpression(table, partition, expression);
+    }
+
+    private static boolean matchesExpression(Table table, Partition partition, String expression) {
+        String stripped = stripParentheses(expression.trim());
+        List<String> disjuncts = splitTopLevel(stripped, "OR");
+        if (disjuncts.size() > 1) {
+            return disjuncts.stream().anyMatch(disjunct -> matchesExpression(table, partition, disjunct));
+        }
+        List<String> conjuncts = splitTopLevel(stripped, "AND");
+        if (conjuncts.size() > 1) {
+            return conjuncts.stream().allMatch(conjunct -> matchesExpression(table, partition, conjunct));
+        }
+        return matchesPredicate(table, partition, stripped);
+    }
+
+    private static boolean matchesPredicate(Table table, Partition partition, String expression) {
+        Matcher inMatcher = IN_EXPRESSION.matcher(expression);
+        if (inMatcher.matches()) {
+            String partitionValue = partitionValue(table, partition, inMatcher.group(1));
+            if (partitionValue == null) {
+                return false;
+            }
+            return splitValues(inMatcher.group(2)).stream()
+                    .map(GlueService::unquote)
+                    .anyMatch(partitionValue::equals);
+        }
+        Matcher comparisonMatcher = COMPARISON_EXPRESSION.matcher(expression);
+        if (comparisonMatcher.matches()) {
+            String partitionValue = partitionValue(table, partition, comparisonMatcher.group(1));
+            if (partitionValue == null) {
+                return false;
+            }
+            return compare(partitionValue, comparisonMatcher.group(2), unquote(comparisonMatcher.group(3)));
+        }
+        throw new AwsException("InvalidInputException", "Unsupported partition expression: " + expression, 400);
+    }
+
+    private static String partitionValue(Table table, Partition partition, String partitionKeyName) {
+        int index = partitionKeyIndex(table, partitionKeyName);
+        if (index < 0 || partition.getValues() == null || partition.getValues().size() <= index) {
+            return null;
+        }
+        return partition.getValues().get(index);
+    }
+
+    private static boolean compare(String actual, String operator, String expected) {
+        int comparison = compareValues(actual, expected);
+        return switch (operator) {
+            case "=" -> comparison == 0;
+            case "<>" -> comparison != 0;
+            case "<" -> comparison < 0;
+            case "<=" -> comparison <= 0;
+            case ">" -> comparison > 0;
+            case ">=" -> comparison >= 0;
+            default -> true;
+        };
+    }
+
+    private static int compareValues(String left, String right) {
+        try {
+            return new BigDecimal(left).compareTo(new BigDecimal(right));
+        }
+        catch (NumberFormatException e) {
+            return left.compareTo(right);
+        }
+    }
+
+    private static String stripParentheses(String expression) {
+        String stripped = expression;
+        while (stripped.startsWith("(") && stripped.endsWith(")") && matchingOuterParentheses(stripped)) {
+            stripped = stripped.substring(1, stripped.length() - 1).trim();
+        }
+        return stripped;
+    }
+
+    private static boolean matchingOuterParentheses(String expression) {
+        int depth = 0;
+        boolean quoted = false;
+        for (int index = 0; index < expression.length(); index++) {
+            char current = expression.charAt(index);
+            if (current == '\'') {
+                quoted = !quoted;
+            }
+            if (quoted) {
+                continue;
+            }
+            if (current == '(') {
+                depth++;
+            }
+            else if (current == ')') {
+                depth--;
+                if (depth == 0 && index < expression.length() - 1) {
+                    return false;
+                }
+            }
+        }
+        return depth == 0;
+    }
+
+    private static List<String> splitTopLevel(String expression, String operator) {
+        List<String> parts = new ArrayList<>();
+        int depth = 0;
+        boolean quoted = false;
+        int start = 0;
+        for (int index = 0; index < expression.length(); index++) {
+            char current = expression.charAt(index);
+            if (current == '\'') {
+                quoted = !quoted;
+            }
+            if (quoted) {
+                continue;
+            }
+            if (current == '(') {
+                depth++;
+            }
+            else if (current == ')') {
+                depth--;
+            }
+            else if (depth == 0 && matchesOperator(expression, index, operator)) {
+                parts.add(expression.substring(start, index).trim());
+                index += operator.length() - 1;
+                start = index + 1;
+            }
+        }
+        if (parts.isEmpty()) {
+            return List.of(expression);
+        }
+        parts.add(expression.substring(start).trim());
+        return parts;
+    }
+
+    private static boolean matchesOperator(String expression, int index, String operator) {
+        if (!expression.regionMatches(true, index, operator, 0, operator.length())) {
+            return false;
+        }
+        return isBoundary(expression, index - 1) && isBoundary(expression, index + operator.length());
+    }
+
+    private static boolean isBoundary(String expression, int index) {
+        return index < 0 || index >= expression.length() || Character.isWhitespace(expression.charAt(index));
+    }
+
+    private static List<String> splitValues(String values) {
+        List<String> result = new ArrayList<>();
+        boolean quoted = false;
+        int start = 0;
+        for (int index = 0; index < values.length(); index++) {
+            char current = values.charAt(index);
+            if (current == '\'') {
+                quoted = !quoted;
+            }
+            else if (current == ',' && !quoted) {
+                result.add(values.substring(start, index).trim());
+                start = index + 1;
+            }
+        }
+        result.add(values.substring(start).trim());
+        return result;
+    }
+
+    private static String unquote(String value) {
+        String stripped = value.trim();
+        if (stripped.length() >= 2 && stripped.startsWith("'") && stripped.endsWith("'")) {
+            return stripped.substring(1, stripped.length() - 1);
+        }
+        return stripped;
+    }
+
+    private static int partitionKeyIndex(Table table, String partitionKeyName) {
+        List<Column> partitionKeys = table.getPartitionKeys();
+        if (partitionKeys == null) {
+            return -1;
+        }
+        for (int index = 0; index < partitionKeys.size(); index++) {
+            if (partitionKeyName.equals(partitionKeys.get(index).getName())) {
+                return index;
+            }
+        }
+        return -1;
+    }
+
+    private static ColumnError columnStatisticsNotFoundError(String columnName) {
+        return new ColumnError(
+                columnName,
+                new ErrorDetail("EntityNotFoundException", "Statistics do not exist for this column"));
     }
 
     private String databaseArn(String region, String databaseName) {
@@ -488,6 +852,18 @@ public class GlueService {
 
     public record BatchDeleteTableError(
             @JsonProperty("TableName") String tableName,
+            @JsonProperty("ErrorDetail") ErrorDetail errorDetail) {}
+
+    public record BatchCreatePartitionError(
+            @JsonProperty("PartitionValues") List<String> partitionValues,
+            @JsonProperty("ErrorDetail") ErrorDetail errorDetail) {}
+
+    public record BatchUpdatePartitionEntry(
+            @JsonProperty("PartitionValueList") List<String> partitionValueList,
+            @JsonProperty("PartitionInput") Partition partitionInput) {}
+
+    public record BatchUpdatePartitionError(
+            @JsonProperty("PartitionValueList") List<String> partitionValueList,
             @JsonProperty("ErrorDetail") ErrorDetail errorDetail) {}
 
     public record ErrorDetail(

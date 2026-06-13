@@ -59,7 +59,13 @@ table_input() {
                         }
                     }
                 ]
-            }
+            },
+            PartitionKeys: [
+                {
+                    Name: "year",
+                    Type: "int"
+                }
+            ]
         }'
 }
 
@@ -230,12 +236,77 @@ function_input() {
         --partition-input '{"Values":["2026"]}'
     assert_success
 
+    run aws_cmd glue batch-create-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-input-list '[{"Values":["2027"]},{"Values":["2028"]}]'
+    assert_success
+    batch_create_error_count=$(json_get "$output" '.Errors | length')
+    [ "$batch_create_error_count" = "0" ]
+
+    run aws_cmd glue batch-create-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-input-list '[{"Values":["2027"]}]'
+    assert_success
+    duplicate_partition_value=$(json_get "$output" '.Errors[0].PartitionValues[0]')
+    duplicate_error_code=$(json_get "$output" '.Errors[0].ErrorDetail.ErrorCode')
+    [ "$duplicate_partition_value" = "2027" ]
+    [ "$duplicate_error_code" = "AlreadyExistsException" ]
+
+    batch_update_entries='[
+        {"PartitionValueList":["2026"],"PartitionInput":{"Values":["2026"],"Parameters":{"after":"yes"}}},
+        {"PartitionValueList":["missing"],"PartitionInput":{"Values":["missing"]}}
+    ]'
+    run aws_cmd glue batch-update-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --entries "$batch_update_entries"
+    assert_success
+    updated_missing_partition_value=$(json_get "$output" '.Errors[0].PartitionValueList[0]')
+    updated_missing_error_code=$(json_get "$output" '.Errors[0].ErrorDetail.ErrorCode')
+    [ "$updated_missing_partition_value" = "missing" ]
+    [ "$updated_missing_error_code" = "EntityNotFoundException" ]
+
+    run aws_cmd glue update-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-value-list 2027 \
+        --partition-input '{"Values":["2027"],"Parameters":{"updated":"yes"}}'
+    assert_success
+
+    run aws_cmd glue update-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-value-list missing \
+        --partition-input '{"Values":["missing"]}'
+    assert_failure
+    [[ "$output" == *"EntityNotFoundException"* ]]
+
     run aws_cmd glue get-partitions \
         --database-name "$DB_NAME" \
         --table-name "$TABLE_NAME"
     assert_success
     value=$(json_get "$output" '.Partitions[0].Values[0]')
+    parameter=$(json_get "$output" '.Partitions[0].Parameters.after')
     [ "$value" = "2026" ]
+    [ "$parameter" = "yes" ]
+
+    run aws_cmd glue get-partitions \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --expression "year >= 2026 AND year <= 2027"
+    assert_success
+    filtered_count=$(json_get "$output" '.Partitions | length')
+    [ "$filtered_count" = "2" ]
+
+    run aws_cmd glue get-partitions \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --expression "year in (2026, 2028)"
+    assert_success
+    filtered_count=$(json_get "$output" '.Partitions | length')
+    [ "$filtered_count" = "2" ]
 
     run aws_cmd glue delete-table \
         --database-name "$DB_NAME" \
