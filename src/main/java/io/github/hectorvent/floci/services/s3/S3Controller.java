@@ -87,24 +87,34 @@ public class S3Controller {
     private final S3SelectService s3SelectService;
     private final RegionResolver regionResolver;
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
+    private final io.github.hectorvent.floci.services.ui.UiPages uiPages;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
                         RegionResolver regionResolver,
-                        io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest) {
+                        io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
+                        io.github.hectorvent.floci.services.ui.UiPages uiPages) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
         this.currentVertxRequest = currentVertxRequest;
+        this.uiPages = uiPages;
     }
 
     // --- Bucket operations ---
 
     @GET
-    @Produces(MediaType.APPLICATION_XML)
-    public Response listBuckets(@HeaderParam("X-Amz-Target") String target) {
+    @Produces({MediaType.TEXT_HTML, MediaType.APPLICATION_XML})
+    public Response listBuckets(@HeaderParam("X-Amz-Target") String target,
+                                @HeaderParam("Accept") String accept) {
         if (target != null) {
             return null;
+        }
+        // A browser hitting the root endpoint (Accept: text/html) gets the Floci
+        // landing page; SDK/CLI callers (no Accept, */*, or an XML/JSON Accept) fall
+        // through to the normal S3 ListBuckets behavior untouched.
+        if (accept != null && accept.contains(MediaType.TEXT_HTML)) {
+            return Response.ok(uiPages.landingHtml(), MediaType.TEXT_HTML).build();
         }
         try {
             List<Bucket> buckets = s3Service.listBuckets();

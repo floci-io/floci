@@ -164,6 +164,8 @@ floci:
       enabled: true
     ecr:
       enabled: true
+    ui:
+      enabled: true
     bedrock-runtime:
       enabled: true
     eks:

@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Starting Floci UI…</title>
+  <style>
+    :root { color-scheme: dark; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 50% -10%, #1b2a4a 0%, #0b1020 60%, #070a14 100%);
+      color: #e6ebf5;
+    }
+    .card {
+      width: min(480px, 92vw); padding: 40px 44px; border-radius: 18px; text-align: center;
+      background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.08);
+      box-shadow: 0 30px 80px rgba(0,0,0,0.45);
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; font-weight: 700; letter-spacing: -0.02em; }
+    p { color: #9aa6bd; font-size: 14px; line-height: 1.6; margin: 0; }
+    .spinner {
+      width: 46px; height: 46px; margin: 6px auto 22px; border-radius: 50%;
+      border: 4px solid rgba(255,255,255,0.12); border-top-color: #5b9dff;
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .err { color: #ff9a9a; }
+    code { background: rgba(255,255,255,0.07); padding: 2px 7px; border-radius: 6px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="spinner" id="spinner"></div>
+    <h1 id="title">Starting Floci UI…</h1>
+    <p id="msg">Launching the UI container. This can take a moment the first time while the image is pulled.</p>
+  </main>
+  <script>
+    (function () {
+      var title = document.getElementById('title');
+      var msg = document.getElementById('msg');
+      var spinner = document.getElementById('spinner');
+      var attempts = 0;
+
+      function fail(text) {
+        spinner.style.display = 'none';
+        title.textContent = 'Floci UI unavailable';
+        title.className = 'err';
+        msg.innerHTML = text;
+      }
+
+      function poll() {
+        attempts++;
+        fetch('/_floci/ui/status', { headers: { 'Accept': 'application/json' } })
+          .then(function (r) { return r.json(); })
+          .then(function (s) {
+            if (s.ready && s.url) {
+              window.location.replace(s.url);
+              return;
+            }
+            if (s.error) {
+              fail(s.error);
+              return;
+            }
+            if (attempts > 150) { // ~5 min at 2s
+              fail('Timed out waiting for the UI to become ready.');
+              return;
+            }
+            setTimeout(poll, 2000);
+          })
+          .catch(function () {
+            if (attempts > 150) { fail('Could not reach Floci.'); return; }
+            setTimeout(poll, 2000);
+          });
+      }
+      poll();
+    })();
+  </script>
+</body>
+</html>
