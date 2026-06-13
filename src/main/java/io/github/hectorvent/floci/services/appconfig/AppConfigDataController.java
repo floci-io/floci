@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.appconfig;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataService.ConfigurationData;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.*;
@@ -35,9 +36,17 @@ public class AppConfigDataController {
         return Response.status(201).entity(Map.of("InitialConfigurationToken", token)).build();
     }
 
+    // Bound to an internal path rather than the public "/configuration" so that
+    // an S3 bucket named "configuration" is not shadowed by this route (issue
+    // #1294). AppConfigConfigurationRouteFilter rewrites genuine GetLatestConfiguration
+    // requests (those carrying a configuration_token) onto this path; requests
+    // without a token fall through to S3's /{bucket} handler.
     @GET
-    @Path("/configuration")
+    @Path(AppConfigConfigurationRouteFilter.INTERNAL_PATH)
     public Response getLatestConfiguration(@QueryParam("configuration_token") String token) {
+        if (token == null || token.isBlank()) {
+            throw new AwsException("BadRequestException", "configuration_token is required", 400);
+        }
         ConfigurationData data = service.getLatestConfiguration(token);
         return Response.ok(data.content())
                 .header("Content-Type", data.contentType())
