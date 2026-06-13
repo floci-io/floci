@@ -1,4 +1,4 @@
-
+package io.github.hectorvent.floci.services.docdb.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
