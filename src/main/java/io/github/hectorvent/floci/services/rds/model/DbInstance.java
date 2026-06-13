@@ -36,10 +36,9 @@ public class DbInstance {
     private Instant createdAt;
     private int proxyPort;
 
-    private String dockerVolumeName; // null in in-memory mode; "floci-rds-<id>" otherwise
-    private String volumeId; // 6-char hex, generated once at creation; null on older persisted resources
+    private String dockerVolumeName;
+    private String volumeId;
 
-    // Transient — not persisted; restored on startup by re-launching containers
     private transient String containerId;
     private transient String containerHost;
     private transient int containerPort;

@@ -319,6 +319,50 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbSubnetGroupRejectsDuplicateWithModelCode() {
+        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b")));
+
+        assertEquals("DBSubnetGroupAlreadyExists", exception.getErrorCode());
+    }
+
+    @Test
+    void createDbSubnetGroupPopulatesArn() {
+        DbSubnetGroup group = rdsService.createDbSubnetGroup("my-subnet-group", "desc",
+                List.of("subnet-default-a", "subnet-default-b"));
+
+        assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group", group.getDbSubnetGroupArn());
+    }
+
+    @Test
+    void createDbSubnetGroupRequiresSubnetIdsWithMissingParameter() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of()));
+
+        assertEquals("MissingParameter", exception.getErrorCode());
+    }
+
+    @Test
+    void resolveDbSubnetGroupViewReturnsStoredCustomGroup() {
+        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b"));
+
+        DbSubnetGroup group = rdsService.resolveDbSubnetGroupView("my-subnet-group");
+
+        assertEquals("my-subnet-group", group.getDbSubnetGroupName());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group", group.getDbSubnetGroupArn());
+    }
+
+    @Test
+    void resolveDbSubnetGroupViewReturnsDefaultGroupForBlankName() {
+        DbSubnetGroup group = rdsService.resolveDbSubnetGroupView(null);
+
+        assertEquals("default", group.getDbSubnetGroupName());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:default", group.getDbSubnetGroupArn());
+    }
+
+    @Test
     void modifyDbClusterParameterGroupAppliesParameters() {
         rdsService.createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc");
 
