@@ -19,12 +19,14 @@ import software.amazon.awssdk.services.glue.model.CreateTableRequest;
 import software.amazon.awssdk.services.glue.model.CreateUserDefinedFunctionRequest;
 import software.amazon.awssdk.services.glue.model.DatabaseInput;
 import software.amazon.awssdk.services.glue.model.DeleteColumnStatisticsForPartitionRequest;
+import software.amazon.awssdk.services.glue.model.DeleteColumnStatisticsForTableRequest;
 import software.amazon.awssdk.services.glue.model.DeleteDatabaseRequest;
 import software.amazon.awssdk.services.glue.model.DeletePartitionRequest;
 import software.amazon.awssdk.services.glue.model.DeleteTableRequest;
 import software.amazon.awssdk.services.glue.model.DeleteUserDefinedFunctionRequest;
 import software.amazon.awssdk.services.glue.model.EntityNotFoundException;
 import software.amazon.awssdk.services.glue.model.GetColumnStatisticsForPartitionRequest;
+import software.amazon.awssdk.services.glue.model.GetColumnStatisticsForTableRequest;
 import software.amazon.awssdk.services.glue.model.GetDatabaseRequest;
 import software.amazon.awssdk.services.glue.model.GetDatabasesRequest;
 import software.amazon.awssdk.services.glue.model.GetPartitionRequest;
@@ -43,6 +45,7 @@ import software.amazon.awssdk.services.glue.model.SerDeInfo;
 import software.amazon.awssdk.services.glue.model.StorageDescriptor;
 import software.amazon.awssdk.services.glue.model.TableInput;
 import software.amazon.awssdk.services.glue.model.UpdateColumnStatisticsForPartitionRequest;
+import software.amazon.awssdk.services.glue.model.UpdateColumnStatisticsForTableRequest;
 import software.amazon.awssdk.services.glue.model.UpdatePartitionRequest;
 import software.amazon.awssdk.services.glue.model.UpdateTableRequest;
 import software.amazon.awssdk.services.glue.model.UpdateUserDefinedFunctionRequest;
@@ -162,6 +165,44 @@ class GlueCatalogTest {
                 .build()).tableList())
                 .extracting(table -> table.name())
                 .contains(TABLE_NAME);
+        glue.updateColumnStatisticsForTable(UpdateColumnStatisticsForTableRequest.builder()
+                .databaseName(DATABASE_NAME)
+                .tableName(TABLE_NAME)
+                .columnStatisticsList(ColumnStatistics.builder()
+                        .columnName("id")
+                        .columnType("int")
+                        .analyzedTime(Instant.EPOCH)
+                        .statisticsData(ColumnStatisticsData.builder()
+                                .type("LONG")
+                                .longColumnStatisticsData(LongColumnStatisticsData.builder()
+                                        .minimumValue(1L)
+                                        .maximumValue(10L)
+                                        .numberOfNulls(0L)
+                                        .numberOfDistinctValues(10L)
+                                        .build())
+                                .build())
+                        .build())
+                .build());
+        glue.deleteColumnStatisticsForTable(DeleteColumnStatisticsForTableRequest.builder()
+                .databaseName(DATABASE_NAME)
+                .tableName(TABLE_NAME)
+                .columnName("id")
+                .build());
+        glue.deleteColumnStatisticsForTable(DeleteColumnStatisticsForTableRequest.builder()
+                .databaseName(DATABASE_NAME)
+                .tableName(TABLE_NAME)
+                .columnName("id")
+                .build());
+        var deletedStatistics = glue.getColumnStatisticsForTable(GetColumnStatisticsForTableRequest.builder()
+                .databaseName(DATABASE_NAME)
+                .tableName(TABLE_NAME)
+                .columnNames("id")
+                .build());
+        assertThat(deletedStatistics.columnStatisticsList())
+                .isEmpty();
+        assertThat(deletedStatistics.errors())
+                .singleElement()
+                .satisfies(error -> assertThat(error.error().errorCode()).isEqualTo("EntityNotFoundException"));
 
         glue.updateTable(UpdateTableRequest.builder()
                 .databaseName(DATABASE_NAME)

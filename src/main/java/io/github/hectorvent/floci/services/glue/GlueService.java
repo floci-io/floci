@@ -308,6 +308,11 @@ public class GlueService {
         return new ColumnStatisticsResult(columnStatistics, errors);
     }
 
+    public void deleteColumnStatisticsForTable(String databaseName, String tableName, String columnName) {
+        getTable(databaseName, tableName);
+        columnStatisticsStore.delete(columnStatisticsKey(databaseName, tableName, columnName));
+    }
+
     public void createPartition(String databaseName, String tableName, Partition partition) {
         Table table = getTable(databaseName, tableName);
         String key = partitionKey(databaseName, tableName, partition.getValues());

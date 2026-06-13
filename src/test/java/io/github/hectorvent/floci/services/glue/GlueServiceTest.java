@@ -805,6 +805,23 @@ class GlueServiceTest {
     }
 
     @Test
+    void columnStatisticsCanBeDeleted() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        glueService.updateColumnStatisticsForTable("db1", "plain", List.of(columnStatistics("id")));
+
+        glueService.deleteColumnStatisticsForTable("db1", "plain", "id");
+        glueService.deleteColumnStatisticsForTable("db1", "plain", "id");
+
+        GlueService.ColumnStatisticsResult fetched =
+                glueService.getColumnStatisticsForTable("db1", "plain", List.of("id"));
+        assertTrue(fetched.columnStatisticsList().isEmpty());
+        assertEquals(1, fetched.errors().size());
+        assertEquals("EntityNotFoundException", fetched.errors().getFirst().error().errorCode());
+    }
+
+    @Test
     void getColumnStatisticsReportsMissingColumns() {
         Table table = new Table();
         table.setName("plain");

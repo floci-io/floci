@@ -116,6 +116,7 @@ public class GlueJsonHandler {
             }
             case "UpdateColumnStatisticsForTable" -> handleUpdateColumnStatisticsForTable(request);
             case "GetColumnStatisticsForTable" -> handleGetColumnStatisticsForTable(request);
+            case "DeleteColumnStatisticsForTable" -> handleDeleteColumnStatisticsForTable(request);
             case "CreatePartition" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
@@ -189,6 +190,14 @@ public class GlueJsonHandler {
                 "ColumnStatisticsList", result.columnStatisticsList(),
                 "Errors", result.errors()))
                 .build();
+    }
+
+    private Response handleDeleteColumnStatisticsForTable(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        String columnName = request.get("ColumnName").asText();
+        glueService.deleteColumnStatisticsForTable(dbName, tableName, columnName);
+        return Response.ok().build();
     }
 
     private Response handleBatchCreatePartition(JsonNode request) {
