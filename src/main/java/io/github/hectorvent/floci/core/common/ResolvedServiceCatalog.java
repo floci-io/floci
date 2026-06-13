@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.appconfig.AppConfigController;
 import io.github.hectorvent.floci.services.backup.BackupController;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataController;
+import io.github.hectorvent.floci.services.batch.BatchController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
@@ -232,6 +233,11 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodeBuild_20161006."), Set.of("codebuild"), Set.of(), Set.of()),
+                descriptor("batch", "batch", config.services().batch().enabled(), true,
+                        "batch", storageMode(config.storage().services().batch().mode(), config.storage().mode()),
+                        config.storage().services().batch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("batch"), Set.of(), Set.of(BatchController.class)),
                 descriptor("codedeploy", "codedeploy", config.services().codedeploy().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

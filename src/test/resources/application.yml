@@ -34,6 +34,8 @@ floci:
         flush-interval-ms: 60000
       opensearch:
         flush-interval-ms: 60000
+      batch:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
@@ -177,6 +179,9 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+    batch:
+      enabled: true
+      runner-mode: immediate
     codedeploy:
       enabled: true
     autoscaling:

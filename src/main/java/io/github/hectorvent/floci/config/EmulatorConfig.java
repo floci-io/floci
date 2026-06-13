@@ -172,6 +172,7 @@ public interface EmulatorConfig {
         BackupStorageConfig backup();
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
+        BatchStorageConfig batch();
     }
 
     interface SsmStorageConfig {
@@ -292,6 +293,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface BatchStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -368,6 +376,7 @@ public interface EmulatorConfig {
         CloudTrailServiceConfig cloudtrail();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
+        BatchServiceConfig batch();
     }
 
     interface CloudTrailServiceConfig {
@@ -418,6 +427,16 @@ public interface EmulatorConfig {
     interface CodeBuildServiceConfig {
         @WithDefault("true")
         boolean enabled();
+
+        Optional<String> dockerNetwork();
+    }
+
+    interface BatchServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("immediate")
+        String runnerMode();
 
         Optional<String> dockerNetwork();
     }

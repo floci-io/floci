@@ -82,6 +82,8 @@ floci:
         flush-interval-ms: 5000
       opensearch:
         flush-interval-ms: 5000
+      batch:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
@@ -286,6 +288,10 @@ floci:
       mock: false
     codebuild:
       enabled: true
+      # docker-network: floci-network
+    batch:
+      enabled: true
+      runner-mode: immediate
       # docker-network: floci-network
     codedeploy:
       enabled: true

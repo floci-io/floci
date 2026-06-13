@@ -1,6 +1,9 @@
 package io.github.hectorvent.floci.services.eventbridge;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import io.github.hectorvent.floci.services.batch.BatchService;
+import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -19,16 +22,19 @@ class EventBridgeInvokerTest {
 
     private EventBridgeInvoker invoker;
     private SqsService sqsService;
+    private BatchService batchService;
 
     @BeforeEach
     void setUp() {
         LambdaService lambdaService = mock(LambdaService.class);
         sqsService = mock(SqsService.class);
         SnsService snsService = mock(SnsService.class);
+        batchService = mock(BatchService.class);
         invoker = new EventBridgeInvoker(
                 lambdaService,
                 sqsService,
                 snsService,
+                batchService,
                 new ObjectMapper(),
                 mock(io.github.hectorvent.floci.config.EmulatorConfig.class)
         );
@@ -42,6 +48,79 @@ class EventBridgeInvokerTest {
         invoker.invokeTarget(target, event, "eu-west-1");
 
         verify(sqsService).sendMessage(anyString(), eq(event), anyInt(), isNull(), isNull(), eq("eu-west-1"));
+    }
+
+    @Test
+    void invokeTarget_batchTarget_submitsBatchJobWithParametersFromPayload() throws Exception {
+        JsonNode retryStrategy = new ObjectMapper().readTree("{\"Attempts\":2}");
+        Target target = new Target("id1",
+                "arn:aws:batch:us-west-2:000000000000:job-queue/my-queue",
+                "{\"Parameters\":{\"inputKey\":\"inputs/1.json\",\"count\":2}}",
+                null);
+        BatchParameters batchParameters = new BatchParameters();
+        batchParameters.setJobDefinition("my-job:1");
+        batchParameters.setJobName("scheduled-job");
+        batchParameters.setRetryStrategy(retryStrategy);
+        target.setBatchParameters(batchParameters);
+
+        invoker.invokeTarget(target, "{\"ignored\":true}", "us-east-1");
+
+        verify(batchService).submitFromEventBridge(
+                eq("arn:aws:batch:us-west-2:000000000000:job-queue/my-queue"),
+                eq("my-job:1"),
+                eq("scheduled-job"),
+                eq(Map.of("inputKey", "inputs/1.json", "count", "2")),
+                eq(retryStrategy),
+                eq("us-west-2")
+        );
+    }
+
+    @Test
+    void invokeTarget_batchTargetDoesNotMapFlatPayloadToParameters() {
+        Target target = new Target("id1",
+                "arn:aws:batch:us-west-2:000000000000:job-queue/my-queue",
+                "{\"inputKey\":\"ignored\"}",
+                null);
+        BatchParameters batchParameters = new BatchParameters();
+        batchParameters.setJobDefinition("my-job:1");
+        batchParameters.setJobName("scheduled-job");
+        target.setBatchParameters(batchParameters);
+
+        invoker.invokeTarget(target, "{\"ignored\":true}", "us-east-1");
+
+        verify(batchService).submitFromEventBridge(
+                eq("arn:aws:batch:us-west-2:000000000000:job-queue/my-queue"),
+                eq("my-job:1"),
+                eq("scheduled-job"),
+                eq(Map.of()),
+                isNull(),
+                eq("us-west-2")
+        );
+    }
+
+    @Test
+    void invokeTarget_batchTargetWithoutExplicitInputDoesNotMapEventEnvelopeToParameters() {
+        Target target = new Target("id1",
+                "arn:aws:batch:us-west-2:000000000000:job-queue/my-queue",
+                null,
+                null);
+        BatchParameters batchParameters = new BatchParameters();
+        batchParameters.setJobDefinition("my-job:1");
+        batchParameters.setJobName("scheduled-job");
+        target.setBatchParameters(batchParameters);
+
+        invoker.invokeTarget(target, """
+                {"source":"local.test","region":"us-east-1","detail":{"inputKey":"ignored"}}
+                """, "us-east-1");
+
+        verify(batchService).submitFromEventBridge(
+                eq("arn:aws:batch:us-west-2:000000000000:job-queue/my-queue"),
+                eq("my-job:1"),
+                eq("scheduled-job"),
+                eq(Map.of()),
+                isNull(),
+                eq("us-west-2")
+        );
     }
 
     @Test
