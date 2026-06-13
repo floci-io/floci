@@ -4,13 +4,13 @@ Floci's IoT service emulates the AWS IoT Core control plane, IoT Data shadow API
 
 ## Phase 7 MQTT Broker Decision
 
-Status: incomplete.
+Status: complete.
 
-Phase 7 must keep the embedded Moquette broker. Replacing it with a hand-written socket broker is not acceptable because real MQTT client compatibility requires broker behavior beyond simple CONNECT, SUBSCRIBE, and QoS 0 PUBLISH handling.
+Phase 7 keeps the embedded Moquette broker. Replacing it with a hand-written socket broker is not acceptable because real MQTT client compatibility requires broker behavior beyond simple CONNECT, SUBSCRIBE, and QoS 0 PUBLISH handling.
 
 The broker direction for phase 7 is:
 
-- Use Moquette from JitPack as the MQTT broker dependency.
+- Use the vendored Floci Moquette build as the MQTT broker dependency.
 - Keep native-image support required, including the Moquette runtime-initialization configuration needed by Quarkus native builds.
 - Target real AWS IoT/device SDK style MQTT 5 clients, not only handcrafted packet tests.
 - Require MQTT 5 CONNECT, SUBSCRIBE, and PUBLISH handling with MQTT 5 property-length encoding for QoS 0 traffic.
@@ -36,8 +36,8 @@ Phase 7 implementation note:
 
 - A first Moquette restoration slice showed that stock Moquette rejects inbound client publishes to topics beginning with `$` before the publish interceptor can handle them.
 - The log message is `Avoid to publish on topic which contains reserved topic (starts with $)`.
-- This blocks AWS IoT reserved request topics such as `$aws/things/{thingName}/shadow/update` on the stock-Moquette path.
-- Supporting AWS IoT reserved request topics therefore requires a Moquette patch/fork, an upstream change, or a broker front-filter that consumes `$aws` requests before Moquette rejects them.
+- This blocked AWS IoT reserved request topics such as `$aws/things/{thingName}/shadow/update` on the stock-Moquette path.
+- Floci uses a patched Moquette build that allows configured reserved publish prefixes, with Floci configuring `$aws/`.
 
 Current accepted limitation:
 
@@ -56,7 +56,7 @@ The MQTT integration should keep service behavior separated from broker mechanic
 
 ## Phase 7 Completion Criteria
 
-Phase 7 is not complete until all of the following are true:
+Phase 7 completion criteria:
 
 - Moquette is restored as the active MQTT broker implementation.
 - The hand-written socket broker is removed or no longer used for MQTT service behavior.
@@ -66,6 +66,25 @@ Phase 7 is not complete until all of the following are true:
 - Classic unnamed shadow MQTT topics are covered by automated tests.
 - Named shadow MQTT topics are covered by automated tests.
 - Relevant IoT compatibility tests pass against the native binary.
+
+## Rules Engine
+
+Status: complete for the first action slice.
+
+Phase 8 adds stored IoT topic rules and dispatches matching IoT publishes to rule actions.
+
+Supported rule behavior:
+
+- `CreateTopicRule`, `GetTopicRule`, `ListTopicRules`, `EnableTopicRule`, `DisableTopicRule`, and `DeleteTopicRule` through AWS SDK-compatible IoT control-plane paths.
+- SQL topic filter extraction for rules shaped like `SELECT * FROM 'topic/filter'`.
+- MQTT-style topic filter matching for exact topics, `+`, and terminal `#`.
+- IoT Data `Publish` and MQTT publishes use the same rule dispatch path.
+- `republish` action republishes the original payload to another MQTT topic through Moquette.
+- `sqs` action sends the original payload to an SQS queue through Floci's SQS service boundary.
+
+Current limitations:
+
+- SQL projection, WHERE clauses, functions, substitutions, error actions, and additional AWS IoT rule action types are follow-up scope.
 
 Open follow-up scope for phase 7 unless explicitly deferred:
 

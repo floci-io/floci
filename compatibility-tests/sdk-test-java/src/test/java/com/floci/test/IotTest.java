@@ -10,25 +10,34 @@ import software.amazon.awssdk.services.iot.model.AttributePayload;
 import software.amazon.awssdk.services.iot.model.AttachPolicyRequest;
 import software.amazon.awssdk.services.iot.model.AttachThingPrincipalRequest;
 import software.amazon.awssdk.services.iot.model.CertificateStatus;
+import software.amazon.awssdk.services.iot.model.Action;
 import software.amazon.awssdk.services.iot.model.CreateKeysAndCertificateRequest;
 import software.amazon.awssdk.services.iot.model.CreatePolicyRequest;
 import software.amazon.awssdk.services.iot.model.CreateThingRequest;
+import software.amazon.awssdk.services.iot.model.CreateTopicRuleRequest;
+import software.amazon.awssdk.services.iot.model.DeleteTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.DeleteThingRequest;
 import software.amazon.awssdk.services.iot.model.DescribeCertificateRequest;
 import software.amazon.awssdk.services.iot.model.DescribeEndpointRequest;
 import software.amazon.awssdk.services.iot.model.DescribeThingRequest;
+import software.amazon.awssdk.services.iot.model.DisableTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.DetachPolicyRequest;
 import software.amazon.awssdk.services.iot.model.DetachThingPrincipalRequest;
+import software.amazon.awssdk.services.iot.model.EnableTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.GetPolicyRequest;
+import software.amazon.awssdk.services.iot.model.GetTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.ListCertificatesRequest;
 import software.amazon.awssdk.services.iot.model.ListPoliciesRequest;
 import software.amazon.awssdk.services.iot.model.ListThingsRequest;
 import software.amazon.awssdk.services.iot.model.ListTagsForResourceRequest;
 import software.amazon.awssdk.services.iot.model.ListThingPrincipalsRequest;
+import software.amazon.awssdk.services.iot.model.ListTopicRulesRequest;
+import software.amazon.awssdk.services.iot.model.SqsAction;
 import software.amazon.awssdk.services.iot.model.ResourceAlreadyExistsException;
 import software.amazon.awssdk.services.iot.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.iot.model.Tag;
 import software.amazon.awssdk.services.iot.model.TagResourceRequest;
+import software.amazon.awssdk.services.iot.model.TopicRulePayload;
 import software.amazon.awssdk.services.iot.model.UntagResourceRequest;
 import software.amazon.awssdk.services.iot.model.UpdateCertificateRequest;
 import software.amazon.awssdk.services.iot.model.UpdateThingRequest;
@@ -38,6 +47,10 @@ import software.amazon.awssdk.services.iotdataplane.model.GetThingShadowRequest;
 import software.amazon.awssdk.services.iotdataplane.model.ListNamedShadowsForThingRequest;
 import software.amazon.awssdk.services.iotdataplane.model.PublishRequest;
 import software.amazon.awssdk.services.iotdataplane.model.UpdateThingShadowRequest;
+import software.amazon.awssdk.services.sqs.SqsClient;
+import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
+import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
+import software.amazon.awssdk.services.sqs.model.ReceiveMessageRequest;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -59,6 +72,7 @@ class IotTest {
 
     private final IotClient iot = TestFixtures.iotClient();
     private final IotDataPlaneClient iotData = TestFixtures.iotDataClient();
+    private final SqsClient sqs = TestFixtures.sqsClient();
 
     @Test
     void describeEndpoint() {
@@ -252,6 +266,59 @@ class IotTest {
                 .build());
         iotData.deleteThingShadow(DeleteThingShadowRequest.builder().thingName(thingName).shadowName("settings").build());
         iotData.deleteThingShadow(DeleteThingShadowRequest.builder().thingName(thingName).build());
+    }
+
+    @Test
+    void topicRuleCrudAndSqsAction() {
+        String ruleName = "java-iot-topic-rule";
+        String queueUrl = sqs.createQueue(CreateQueueRequest.builder()
+                .queueName("java-iot-rule-queue")
+                .build()).queueUrl();
+
+        try {
+            iot.createTopicRule(CreateTopicRuleRequest.builder()
+                    .ruleName(ruleName)
+                    .topicRulePayload(TopicRulePayload.builder()
+                            .sql("SELECT * FROM 'devices/java-iot/rules'")
+                            .description("java topic rule")
+                            .ruleDisabled(false)
+                            .actions(Action.builder()
+                                    .sqs(SqsAction.builder()
+                                            .roleArn("arn:aws:iam::000000000000:role/iot-rule-role")
+                                            .queueUrl(queueUrl)
+                                            .useBase64(false)
+                                            .build())
+                                    .build())
+                            .build())
+                    .build());
+
+            var got = iot.getTopicRule(GetTopicRuleRequest.builder().ruleName(ruleName).build());
+            assertThat(got.rule().ruleName()).isEqualTo(ruleName);
+            assertThat(got.rule().actions().get(0).sqs().queueUrl()).isEqualTo(queueUrl);
+
+            iot.disableTopicRule(DisableTopicRuleRequest.builder().ruleName(ruleName).build());
+            var listed = iot.listTopicRules(ListTopicRulesRequest.builder().build());
+            assertThat(listed.rules()).anyMatch(rule -> ruleName.equals(rule.ruleName()) && rule.ruleDisabled());
+
+            iot.enableTopicRule(EnableTopicRuleRequest.builder().ruleName(ruleName).build());
+            iotData.publish(PublishRequest.builder()
+                    .topic("devices/java-iot/rules")
+                    .payload(SdkBytes.fromUtf8String("java-rule-payload"))
+                    .build());
+
+            var received = sqs.receiveMessage(ReceiveMessageRequest.builder()
+                    .queueUrl(queueUrl)
+                    .maxNumberOfMessages(1)
+                    .build());
+            assertThat(received.messages()).hasSize(1);
+            assertThat(received.messages().get(0).body()).isEqualTo("java-rule-payload");
+        } finally {
+            try {
+                iot.deleteTopicRule(DeleteTopicRuleRequest.builder().ruleName(ruleName).build());
+            } catch (Exception ignored) {
+            }
+            sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
+        }
     }
 
     @Test

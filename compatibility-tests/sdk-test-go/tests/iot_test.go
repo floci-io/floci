@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iot"
 	iottypes "github.com/aws/aws-sdk-go-v2/service/iot/types"
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
+	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -226,6 +227,61 @@ func TestIoT(t *testing.T) {
 		require.NoError(t, err)
 		_, err = dataSvc.DeleteThingShadow(ctx, &iotdataplane.DeleteThingShadowInput{ThingName: aws.String(thingName)})
 		require.NoError(t, err)
+	})
+
+	t.Run("TopicRuleCrudAndSqsAction", func(t *testing.T) {
+		dataSvc := testutil.IoTDataClient()
+		sqsSvc := testutil.SQSClient()
+		ruleName := "go-iot-topic-rule"
+		queueName := "go-iot-rule-queue"
+		queue, err := sqsSvc.CreateQueue(ctx, &sqs.CreateQueueInput{QueueName: aws.String(queueName)})
+		require.NoError(t, err)
+		queueURL := aws.ToString(queue.QueueUrl)
+		defer sqsSvc.DeleteQueue(ctx, &sqs.DeleteQueueInput{QueueUrl: aws.String(queueURL)})
+		defer svc.DeleteTopicRule(ctx, &iot.DeleteTopicRuleInput{RuleName: aws.String(ruleName)})
+
+		_, err = svc.CreateTopicRule(ctx, &iot.CreateTopicRuleInput{
+			RuleName: aws.String(ruleName),
+			TopicRulePayload: &iottypes.TopicRulePayload{
+				Sql:          aws.String("SELECT * FROM 'devices/go-iot/rules'"),
+				Description:  aws.String("go topic rule"),
+				RuleDisabled: aws.Bool(false),
+				Actions: []iottypes.Action{{Sqs: &iottypes.SqsAction{
+					RoleArn:   aws.String("arn:aws:iam::000000000000:role/iot-rule-role"),
+					QueueUrl:  aws.String(queueURL),
+					UseBase64: aws.Bool(false),
+				}}},
+			},
+		})
+		require.NoError(t, err)
+
+		got, err := svc.GetTopicRule(ctx, &iot.GetTopicRuleInput{RuleName: aws.String(ruleName)})
+		require.NoError(t, err)
+		require.NotNil(t, got.Rule)
+		assert.Equal(t, ruleName, aws.ToString(got.Rule.RuleName))
+		assert.Equal(t, queueURL, aws.ToString(got.Rule.Actions[0].Sqs.QueueUrl))
+
+		_, err = svc.DisableTopicRule(ctx, &iot.DisableTopicRuleInput{RuleName: aws.String(ruleName)})
+		require.NoError(t, err)
+		listed, err := svc.ListTopicRules(ctx, &iot.ListTopicRulesInput{})
+		require.NoError(t, err)
+		foundDisabled := false
+		for _, rule := range listed.Rules {
+			if aws.ToString(rule.RuleName) == ruleName && aws.ToBool(rule.RuleDisabled) {
+				foundDisabled = true
+			}
+		}
+		assert.True(t, foundDisabled)
+
+		_, err = svc.EnableTopicRule(ctx, &iot.EnableTopicRuleInput{RuleName: aws.String(ruleName)})
+		require.NoError(t, err)
+		_, err = dataSvc.Publish(ctx, &iotdataplane.PublishInput{Topic: aws.String("devices/go-iot/rules"), Payload: []byte("go-rule-payload")})
+		require.NoError(t, err)
+
+		received, err := sqsSvc.ReceiveMessage(ctx, &sqs.ReceiveMessageInput{QueueUrl: aws.String(queueURL), MaxNumberOfMessages: 1})
+		require.NoError(t, err)
+		require.Len(t, received.Messages, 1)
+		assert.Equal(t, "go-rule-payload", aws.ToString(received.Messages[0].Body))
 	})
 
 	t.Run("MqttConnectPublishSubscribe", func(t *testing.T) {

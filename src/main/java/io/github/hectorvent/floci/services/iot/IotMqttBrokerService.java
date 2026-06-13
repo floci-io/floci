@@ -133,7 +133,7 @@ public class IotMqttBrokerService {
                 return;
             }
 
-            eventRecorder.record(topic, bytes);
+            iotService.get().publish(topic, bytes);
         }
 
         @Override

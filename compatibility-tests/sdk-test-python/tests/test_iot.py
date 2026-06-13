@@ -159,6 +159,52 @@ def test_iot_data_shadows_and_publish(iot_data_client, unique_name):
     iot_data_client.delete_thing_shadow(thingName=thing_name)
 
 
+def test_topic_rule_crud_and_sqs_action(iot_client, iot_data_client, sqs_client, unique_name):
+    rule_name = f"{unique_name}-rule"
+    queue_name = f"{unique_name}-iot-rule-queue"
+    queue_url = sqs_client.create_queue(QueueName=queue_name)["QueueUrl"]
+
+    try:
+        iot_client.create_topic_rule(
+            ruleName=rule_name,
+            topicRulePayload={
+                "sql": f"SELECT * FROM 'devices/{unique_name}/rules'",
+                "description": "python topic rule",
+                "ruleDisabled": False,
+                "actions": [
+                    {
+                        "sqs": {
+                            "roleArn": "arn:aws:iam::000000000000:role/iot-rule-role",
+                            "queueUrl": queue_url,
+                            "useBase64": False,
+                        }
+                    }
+                ],
+            },
+        )
+
+        got = iot_client.get_topic_rule(ruleName=rule_name)
+        assert got["rule"]["ruleName"] == rule_name
+        assert got["rule"]["sql"] == f"SELECT * FROM 'devices/{unique_name}/rules'"
+        assert got["rule"]["actions"][0]["sqs"]["queueUrl"] == queue_url
+
+        iot_client.disable_topic_rule(ruleName=rule_name)
+        listed = iot_client.list_topic_rules()
+        assert any(rule["ruleName"] == rule_name and rule["ruleDisabled"] for rule in listed["rules"])
+
+        iot_client.enable_topic_rule(ruleName=rule_name)
+        iot_data_client.publish(topic=f"devices/{unique_name}/rules", payload=b"python-rule-payload")
+
+        received = sqs_client.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=1)
+        assert received["Messages"][0]["Body"] == "python-rule-payload"
+    finally:
+        try:
+            iot_client.delete_topic_rule(ruleName=rule_name)
+        except ClientError:
+            pass
+        sqs_client.delete_queue(QueueUrl=queue_url)
+
+
 def test_mqtt_connect_publish_subscribe(unique_name):
     topic = f"devices/{unique_name}/mqtt"
     payload = b"python-mqtt"

@@ -21,6 +21,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
 
+import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -186,6 +187,72 @@ class IotMqttEnabledIntegrationTest {
         }
     }
 
+    @Test
+    void namedShadowTopicsPublishAcceptedResponses() throws Exception {
+        String thingName = "phase7NamedThing";
+        String updateTopic = "$aws/things/" + thingName + "/shadow/name/settings/update";
+        String getTopic = "$aws/things/" + thingName + "/shadow/name/settings/get";
+
+        try (Socket subscriber = connectMqtt("phase7-named-sub")) {
+            subscribe(subscriber, updateTopic + "/accepted");
+            subscribe(subscriber, getTopic + "/accepted");
+
+            try (Socket publisher = connectMqtt("phase7-named-pub")) {
+                publish(publisher, updateTopic,
+                        json("{\"state\":{\"desired\":{\"mode\":\"auto\"}},\"clientToken\":\"named-update\"}"));
+                MqttPublish updateAccepted = readPublish(subscriber.getInputStream());
+                JsonNode updatePayload = readJson(updateAccepted.payload());
+                assertEquals(updateTopic + "/accepted", updateAccepted.topic());
+                assertEquals("auto", updatePayload.path("state").path("desired").path("mode").asText());
+                assertEquals("named-update", updatePayload.path("clientToken").asText());
+
+                publish(publisher, getTopic, json("{\"clientToken\":\"named-get\"}"));
+                MqttPublish getAccepted = readPublish(subscriber.getInputStream());
+                JsonNode getPayload = readJson(getAccepted.payload());
+                assertEquals(getTopic + "/accepted", getAccepted.topic());
+                assertEquals("auto", getPayload.path("state").path("desired").path("mode").asText());
+                assertEquals("named-get", getPayload.path("clientToken").asText());
+            }
+        }
+    }
+
+    @Test
+    void topicRuleRepublishPublishesToMqttSubscribers() throws Exception {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                  "topicRulePayload": {
+                    "sql": "SELECT * FROM 'devices/phase8/mqtt/source'",
+                    "actions": [
+                      {
+                        "republish": {
+                          "roleArn": "arn:aws:iam::000000000000:role/iot-rule-role",
+                          "topic": "devices/phase8/mqtt/target"
+                        }
+                      }
+                    ]
+                  }
+                }
+                """)
+        .when()
+            .put("/rules/phase8MqttRepublishRule")
+        .then()
+            .statusCode(200);
+
+        try (Socket subscriber = connectMqtt("phase8-republish-sub")) {
+            subscribe(subscriber, "devices/phase8/mqtt/target");
+
+            try (Socket publisher = connectMqtt("phase8-republish-pub")) {
+                publish(publisher, "devices/phase8/mqtt/source", "mqtt-rule-payload".getBytes(StandardCharsets.UTF_8));
+            }
+
+            MqttPublish republished = readPublish(subscriber.getInputStream());
+            assertEquals("devices/phase8/mqtt/target", republished.topic());
+            assertArrayEquals("mqtt-rule-payload".getBytes(StandardCharsets.UTF_8), republished.payload());
+        }
+    }
+
     private Socket connectMqtt(String clientId) throws IOException {
         Socket socket = new Socket();
         socket.connect(new InetSocketAddress("127.0.0.1", PORT), 2_000);
@@ -207,7 +274,7 @@ class IotMqttEnabledIntegrationTest {
         variable.write(0x00);
         variable.write(0x3c);
         variable.write(0x00);
-        writeUtf8(variable, clientId);
+        writeUtf8(variable, uniqueClientId(clientId));
         socket.getOutputStream().write(packet(0x10, variable.toByteArray()));
         byte[] connack = readPacket(socket.getInputStream());
         assertMqtt5SuccessConnack(connack);
@@ -228,8 +295,12 @@ class IotMqttEnabledIntegrationTest {
         variable.write(0x02);
         variable.write(0x00);
         variable.write(0x3c);
-        writeUtf8(variable, clientId);
+        writeUtf8(variable, uniqueClientId(clientId));
         return packet(0x10, variable.toByteArray());
+    }
+
+    private String uniqueClientId(String clientId) {
+        return clientId + "-" + System.nanoTime();
     }
 
     private void subscribe(Socket socket, String topic) throws IOException {

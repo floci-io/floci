@@ -12,12 +12,16 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
 import io.github.hectorvent.floci.services.iot.model.IotShadow;
+import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.iot.model.Thing;
+import io.github.hectorvent.floci.services.sqs.SqsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
+import java.util.Base64;
 import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
@@ -41,50 +45,58 @@ public class IotService {
     private final StorageBackend<String, Set<String>> policyAttachmentStore;
     private final StorageBackend<String, Set<String>> thingPrincipalStore;
     private final StorageBackend<String, IotShadow> shadowStore;
+    private final StorageBackend<String, IotTopicRule> topicRuleStore;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
     private final IotPublishEventRecorder publishEventRecorder;
     private final IotMqttBrokerService mqttBrokerService;
+    private final SqsService sqsService;
 
     @Inject
     public IotService(StorageFactory storageFactory,
                       EmulatorConfig config,
                       RegionResolver regionResolver,
-                      ObjectMapper objectMapper,
-                      IotPublishEventRecorder publishEventRecorder,
-                      IotMqttBrokerService mqttBrokerService) {
+                       ObjectMapper objectMapper,
+                       IotPublishEventRecorder publishEventRecorder,
+                       IotMqttBrokerService mqttBrokerService,
+                       SqsService sqsService) {
         this(storageFactory.create("iot", "iot-things.json", new TypeReference<Map<String, Thing>>() {}),
                 storageFactory.create("iot", "iot-certificates.json", new TypeReference<Map<String, IotCertificate>>() {}),
                 storageFactory.create("iot", "iot-policies.json", new TypeReference<Map<String, IotPolicy>>() {}),
                 storageFactory.create("iot", "iot-policy-attachments.json", new TypeReference<Map<String, Set<String>>>() {}),
                 storageFactory.create("iot", "iot-thing-principals.json", new TypeReference<Map<String, Set<String>>>() {}),
                 storageFactory.create("iot", "iot-shadows.json", new TypeReference<Map<String, IotShadow>>() {}),
-                config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService);
+                storageFactory.create("iot", "iot-topic-rules.json", new TypeReference<Map<String, IotTopicRule>>() {}),
+                config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService);
     }
 
     IotService(StorageBackend<String, Thing> thingStore,
                StorageBackend<String, IotCertificate> certificateStore,
                StorageBackend<String, IotPolicy> policyStore,
-               StorageBackend<String, Set<String>> policyAttachmentStore,
-               StorageBackend<String, Set<String>> thingPrincipalStore,
-               StorageBackend<String, IotShadow> shadowStore,
-               EmulatorConfig config,
-               RegionResolver regionResolver,
-               ObjectMapper objectMapper,
-               IotPublishEventRecorder publishEventRecorder,
-               IotMqttBrokerService mqttBrokerService) {
+                StorageBackend<String, Set<String>> policyAttachmentStore,
+                StorageBackend<String, Set<String>> thingPrincipalStore,
+                StorageBackend<String, IotShadow> shadowStore,
+                StorageBackend<String, IotTopicRule> topicRuleStore,
+                EmulatorConfig config,
+                RegionResolver regionResolver,
+                ObjectMapper objectMapper,
+                IotPublishEventRecorder publishEventRecorder,
+                IotMqttBrokerService mqttBrokerService,
+                SqsService sqsService) {
         this.thingStore = thingStore;
         this.certificateStore = certificateStore;
         this.policyStore = policyStore;
         this.policyAttachmentStore = policyAttachmentStore;
         this.thingPrincipalStore = thingPrincipalStore;
         this.shadowStore = shadowStore;
+        this.topicRuleStore = topicRuleStore;
         this.config = config;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
         this.publishEventRecorder = publishEventRecorder;
         this.mqttBrokerService = mqttBrokerService;
+        this.sqsService = sqsService;
     }
 
     public String describeEndpoint(String endpointType) {
@@ -300,7 +312,56 @@ public class IotService {
     }
 
     public void publish(String topic, byte[] payload) {
-        publishEventRecorder.record(topic, payload);
+        handlePublish(topic, payload, true);
+    }
+
+    public IotTopicRule createTopicRule(String ruleName, JsonNode payload, String region) {
+        IotTopicRule rule = new IotTopicRule();
+        rule.setRuleName(ruleName);
+        rule.setRuleArn(regionResolver.buildArn("iot", region, "rule/" + ruleName));
+        rule.setSql(payload.path("sql").asText());
+        rule.setDescription(payload.path("description").asText(null));
+        rule.setRuleDisabled(payload.path("ruleDisabled").asBoolean(false));
+        JsonNode actions = payload.path("actions");
+        rule.setActionsJson(actions.isArray() ? actions.toString() : "[]");
+        rule.setCreatedAt(Instant.now());
+        topicRuleStore.put(topicRuleKey(region, ruleName), rule);
+        return rule;
+    }
+
+    public IotTopicRule getTopicRule(String ruleName, String region) {
+        return topicRuleStore.get(topicRuleKey(region, ruleName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Topic rule not found: " + ruleName, 404));
+    }
+
+    public List<IotTopicRule> listTopicRules(String region) {
+        String prefix = "topic-rule:" + region + ":";
+        return topicRuleStore.scan(key -> key.startsWith(prefix)).stream()
+                .sorted(Comparator.comparing(IotTopicRule::getRuleName))
+                .toList();
+    }
+
+    public void deleteTopicRule(String ruleName, String region) {
+        topicRuleStore.delete(topicRuleKey(region, ruleName));
+    }
+
+    public void setTopicRuleEnabled(String ruleName, boolean enabled, String region) {
+        IotTopicRule rule = getTopicRule(ruleName, region);
+        rule.setRuleDisabled(!enabled);
+        topicRuleStore.put(topicRuleKey(region, ruleName), rule);
+    }
+
+    void handlePublish(String topic, byte[] payload, boolean evaluateRules) {
+        byte[] eventPayload = payload == null ? new byte[0] : payload;
+        publishEventRecorder.record(topic, eventPayload);
+        if (!evaluateRules) {
+            return;
+        }
+        for (IotTopicRule rule : listTopicRules(config.defaultRegion())) {
+            if (!rule.isRuleDisabled() && topicMatches(extractTopicPattern(rule.getSql()), topic)) {
+                executeTopicRule(rule, eventPayload);
+            }
+        }
     }
 
     void handleReservedMqttPublish(String topic, byte[] payload, BiConsumer<String, byte[]> publisher) {
@@ -346,6 +407,7 @@ public class IotService {
     private String policyAttachmentKey(String region, String policyName) { return "policy-attachment:" + region + ":" + policyName; }
     private String thingPrincipalKey(String region, String thingName) { return "thing-principal:" + region + ":" + thingName; }
     private String shadowKey(String region, String thingName, String shadowName) { return "shadow:" + region + ":" + thingName + ":" + (shadowName == null ? "" : shadowName); }
+    private String topicRuleKey(String region, String ruleName) { return "topic-rule:" + region + ":" + ruleName; }
 
     private JsonNode readJson(String json) {
         try {
@@ -355,13 +417,85 @@ public class IotService {
         }
     }
 
+    private void executeTopicRule(IotTopicRule rule, byte[] payload) {
+        try {
+            JsonNode actions = objectMapper.readTree(rule.getActionsJson());
+            if (!actions.isArray()) {
+                return;
+            }
+            for (JsonNode action : actions) {
+                JsonNode republish = action.path("republish");
+                if (republish.isObject()) {
+                    String targetTopic = republish.path("topic").asText(null);
+                    if (targetTopic != null && !targetTopic.isBlank()) {
+                        handlePublish(targetTopic, payload, false);
+                        mqttBrokerService.publish(targetTopic, payload);
+                    }
+                }
+                JsonNode sqs = action.path("sqs");
+                if (sqs.isObject()) {
+                    String queueUrl = sqs.path("queueUrl").asText(null);
+                    if (queueUrl != null && !queueUrl.isBlank()) {
+                        String body = sqs.path("useBase64").asBoolean(false)
+                                ? Base64.getEncoder().encodeToString(payload)
+                                : new String(payload, StandardCharsets.UTF_8);
+                        sqsService.sendMessage(queueUrl, body, 0, config.defaultRegion());
+                    }
+                }
+            }
+        } catch (Exception e) {
+            throw new AwsException("InvalidRequestException", "Invalid topic rule action for " + rule.getRuleName() + ": " + e.getMessage(), 400);
+        }
+    }
+
+    private String extractTopicPattern(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        int from = sql.toUpperCase().indexOf(" FROM ");
+        if (from < 0) {
+            return null;
+        }
+        String tail = sql.substring(from + " FROM ".length()).trim();
+        if (tail.length() >= 2 && (tail.charAt(0) == '\'' || tail.charAt(0) == '"')) {
+            char quote = tail.charAt(0);
+            int end = tail.indexOf(quote, 1);
+            if (end > 1) {
+                return tail.substring(1, end);
+            }
+        }
+        return null;
+    }
+
+    private boolean topicMatches(String filter, String topic) {
+        if (filter == null || topic == null) {
+            return false;
+        }
+        String[] filterParts = filter.split("/", -1);
+        String[] topicParts = topic.split("/", -1);
+        int i = 0;
+        for (; i < filterParts.length; i++) {
+            String filterPart = filterParts[i];
+            if ("#".equals(filterPart)) {
+                return i == filterParts.length - 1;
+            }
+            if (i >= topicParts.length) {
+                return false;
+            }
+            if (!"+".equals(filterPart) && !filterPart.equals(topicParts[i])) {
+                return false;
+            }
+        }
+        return i == topicParts.length;
+    }
+
     private void publishShadowUpdate(ReservedShadowTopic topic, JsonNode request, String clientToken, String region,
                                      BiConsumer<String, byte[]> publisher) {
-        JsonNode previous = shadowStore.get(shadowKey(region, topic.thingName(), null))
+        JsonNode previous = shadowStore.get(shadowKey(region, topic.thingName(), topic.shadowName()))
                 .map(IotShadow::getDocument)
                 .map(this::readJson)
                 .orElse(null);
-        JsonNode current = updateThingShadow(topic.thingName(), null, request, region);
+        JsonNode current = updateThingShadow(topic.thingName(), topic.shadowName(), request, region);
         ObjectNode accepted = withClientToken(current.deepCopy(), clientToken);
         publishJson(topic.acceptedTopic(), accepted, publisher);
 
@@ -394,12 +528,12 @@ public class IotService {
     }
 
     private void publishShadowGet(ReservedShadowTopic topic, String clientToken, String region, BiConsumer<String, byte[]> publisher) {
-        ObjectNode accepted = withClientToken(getThingShadow(topic.thingName(), null, region).deepCopy(), clientToken);
+        ObjectNode accepted = withClientToken(getThingShadow(topic.thingName(), topic.shadowName(), region).deepCopy(), clientToken);
         publishJson(topic.acceptedTopic(), accepted, publisher);
     }
 
     private void publishShadowDelete(ReservedShadowTopic topic, String clientToken, String region, BiConsumer<String, byte[]> publisher) {
-        ObjectNode accepted = withClientToken(deleteThingShadow(topic.thingName(), null, region).deepCopy(), clientToken);
+        ObjectNode accepted = withClientToken(deleteThingShadow(topic.thingName(), topic.shadowName(), region).deepCopy(), clientToken);
         publishJson(topic.acceptedTopic(), accepted, publisher);
     }
 
@@ -431,12 +565,17 @@ public class IotService {
     }
 
     private ReservedShadowTopic parseReservedShadowTopic(String topic) {
-        String[] parts = topic.split("/");
-        if (parts.length != 5 || !"$aws".equals(parts[0]) || !"things".equals(parts[1])
-                || !"shadow".equals(parts[3])) {
+        if (!topic.startsWith("$aws/things/")) {
             return null;
         }
-        return new ReservedShadowTopic(parts[2], parts[4]);
+        String[] parts = topic.split("/");
+        if (parts.length == 5 && "things".equals(parts[1]) && "shadow".equals(parts[3])) {
+            return new ReservedShadowTopic(parts[2], null, parts[4]);
+        }
+        if (parts.length == 7 && "things".equals(parts[1]) && "shadow".equals(parts[3]) && "name".equals(parts[4])) {
+            return new ReservedShadowTopic(parts[2], parts[5], parts[6]);
+        }
+        return null;
     }
 
     private void mergeObject(ObjectNode parent, String field, JsonNode patch) {
@@ -483,8 +622,11 @@ public class IotService {
         return parts;
     }
 
-    private record ReservedShadowTopic(String thingName, String operation) {
+    private record ReservedShadowTopic(String thingName, String shadowName, String operation) {
         private String baseTopic() {
+            if (shadowName != null && !shadowName.isBlank()) {
+                return "$aws/things/" + thingName + "/shadow/name/" + shadowName + "/" + operation;
+            }
             return "$aws/things/" + thingName + "/shadow/" + operation;
         }
 
@@ -497,11 +639,18 @@ public class IotService {
         }
 
         private String documentsTopic() {
-            return "$aws/things/" + thingName + "/shadow/update/documents";
+            return updateBaseTopic() + "/documents";
         }
 
         private String deltaTopic() {
-            return "$aws/things/" + thingName + "/shadow/update/delta";
+            return updateBaseTopic() + "/delta";
+        }
+
+        private String updateBaseTopic() {
+            if (shadowName != null && !shadowName.isBlank()) {
+                return "$aws/things/" + thingName + "/shadow/name/" + shadowName + "/update";
+            }
+            return "$aws/things/" + thingName + "/shadow/update";
         }
     }
 }

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
+import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.iot.model.Thing;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
@@ -272,6 +273,90 @@ public class IotController {
         return Response.ok(response).build();
     }
 
+    @PUT
+    @Path("/rules/{ruleName}")
+    public Response createTopicRule(@Context HttpHeaders headers,
+                                    @PathParam("ruleName") String ruleName,
+                                    String body) {
+        return createTopicRuleResponse(headers, ruleName, body);
+    }
+
+    @POST
+    @Path("/rules/{ruleName}")
+    public Response createTopicRulePost(@Context HttpHeaders headers,
+                                        @PathParam("ruleName") String ruleName,
+                                        String body) {
+        return createTopicRuleResponse(headers, ruleName, body);
+    }
+
+    private Response createTopicRuleResponse(HttpHeaders headers, String ruleName, String body) {
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            JsonNode payload = request.has("topicRulePayload") ? request.path("topicRulePayload") : request;
+            IotTopicRule rule = iotService.createTopicRule(ruleName, payload, regionResolver.resolveRegion(headers));
+            ObjectNode response = objectMapper.createObjectNode();
+            response.put("ruleArn", rule.getRuleArn());
+            response.put("ruleName", rule.getRuleName());
+            return Response.ok(response).build();
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/rules/{ruleName}")
+    public Response getTopicRule(@Context HttpHeaders headers,
+                                 @PathParam("ruleName") String ruleName) {
+        IotTopicRule rule = iotService.getTopicRule(ruleName, regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ruleArn", rule.getRuleArn());
+        response.set("rule", buildTopicRuleResponse(rule));
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/rules")
+    public Response listTopicRules(@Context HttpHeaders headers) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode rules = response.putArray("rules");
+        for (IotTopicRule rule : iotService.listTopicRules(regionResolver.resolveRegion(headers))) {
+            ObjectNode item = rules.addObject();
+            item.put("ruleArn", rule.getRuleArn());
+            item.put("ruleName", rule.getRuleName());
+            item.put("topicPattern", topicPattern(rule.getSql()));
+            item.put("ruleDisabled", rule.isRuleDisabled());
+            putEpoch(item, "createdAt", rule.getCreatedAt());
+        }
+        return Response.ok(response).build();
+    }
+
+    @DELETE
+    @Path("/rules/{ruleName}")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteTopicRule(@Context HttpHeaders headers,
+                                    @PathParam("ruleName") String ruleName) {
+        iotService.deleteTopicRule(ruleName, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/rules/{ruleName}/enable")
+    @Consumes(MediaType.WILDCARD)
+    public Response enableTopicRule(@Context HttpHeaders headers,
+                                    @PathParam("ruleName") String ruleName) {
+        iotService.setTopicRuleEnabled(ruleName, true, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/rules/{ruleName}/disable")
+    @Consumes(MediaType.WILDCARD)
+    public Response disableTopicRule(@Context HttpHeaders headers,
+                                     @PathParam("ruleName") String ruleName) {
+        iotService.setTopicRuleEnabled(ruleName, false, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Map<String, String> parseAttributes(String body) {
         try {
             JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
@@ -343,6 +428,40 @@ public class IotController {
         response.put("policyDocument", policy.getPolicyDocument());
         response.put("defaultVersionId", policy.getDefaultVersionId());
         return response;
+    }
+
+    private ObjectNode buildTopicRuleResponse(IotTopicRule rule) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("ruleName", rule.getRuleName());
+        response.put("sql", rule.getSql());
+        response.put("description", rule.getDescription());
+        response.put("ruleDisabled", rule.isRuleDisabled());
+        putEpoch(response, "createdAt", rule.getCreatedAt());
+        try {
+            response.set("actions", objectMapper.readTree(rule.getActionsJson()));
+        } catch (JsonProcessingException e) {
+            response.putArray("actions");
+        }
+        return response;
+    }
+
+    private String topicPattern(String sql) {
+        if (sql == null) {
+            return null;
+        }
+        int from = sql.toUpperCase().indexOf(" FROM ");
+        if (from < 0) {
+            return null;
+        }
+        String tail = sql.substring(from + " FROM ".length()).trim();
+        if (tail.length() >= 2 && (tail.charAt(0) == '\'' || tail.charAt(0) == '"')) {
+            char quote = tail.charAt(0);
+            int end = tail.indexOf(quote, 1);
+            if (end > 1) {
+                return tail.substring(1, end);
+            }
+        }
+        return null;
     }
 
     private void putEpoch(ObjectNode node, String field, Instant instant) {
