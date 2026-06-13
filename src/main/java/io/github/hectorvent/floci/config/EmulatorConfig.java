@@ -324,6 +324,7 @@ public interface EmulatorConfig {
         RdsDataServiceConfig rdsData();
         EventBridgeServiceConfig eventbridge();
         CloudMapServiceConfig cloudmap();
+        EmrServiceConfig emr();
         SchedulerServiceConfig scheduler();
         CloudWatchLogsServiceConfig cloudwatchlogs();
         CloudWatchMetricsServiceConfig cloudwatchmetrics();
@@ -573,6 +574,18 @@ public interface EmulatorConfig {
          *  transitions from PENDING to SUCCESS. 0 = complete immediately. */
         @WithDefault("0")
         int operationCompletionDelaySeconds();
+    }
+
+    interface EmrServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("emr-7.5.0")
+        String defaultReleaseLabel();
+
+        /** Delay before a cluster reaches WAITING; 0 = advance synchronously. */
+        @WithDefault("0")
+        int clusterStartupDelaySeconds();
     }
 
     interface SchedulerServiceConfig {

@@ -112,6 +112,8 @@ floci:
       enabled: true
     cloudmap:
       enabled: true
+    emr:
+      enabled: true
     scheduler:
       enabled: true
     cloudwatchlogs:

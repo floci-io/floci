@@ -176,6 +176,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>cloudtrail</artifactId>
         </dependency>
+        <!-- EMR client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>emr</artifactId>
+        </dependency>
         <!-- Kinesis client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
