@@ -362,7 +362,17 @@ public class S3Controller {
                                     .header("x-amz-website-redirect-location", "index")
                                     .build();
                         } catch (AwsException e) {
-                            // If index.html is missing, we could serve ErrorDocument, but for now we fall back to listObjects
+                            if (webConfig.getErrorDocument() != null) {
+                                try {
+                                    S3Object errorObj = s3Service.getObject(bucket, webConfig.getErrorDocument());
+                                    return Response.status(404)
+                                            .entity(errorObj.getData())
+                                            .type(errorObj.getContentType())
+                                            .header("Content-Length", errorObj.getSize())
+                                            .build();
+                                } catch (AwsException ignored) {
+                                }
+                            }
                         }
                     }
                 } catch (AwsException e) {
@@ -615,6 +625,23 @@ public class S3Controller {
 
             return fullObjectResponse(bucket, key, versionId, obj, overrides);
         } catch (AwsException e) {
+            if ("NoSuchKey".equals(e.getErrorCode())) {
+                try {
+                    WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
+                    if (webConfig.getErrorDocument() != null) {
+                        try {
+                            S3Object errorObj = s3Service.getObject(bucket, webConfig.getErrorDocument());
+                            return Response.status(404)
+                                    .entity(errorObj.getData())
+                                    .type(errorObj.getContentType())
+                                    .header("Content-Length", errorObj.getSize())
+                                    .build();
+                        } catch (AwsException ignored) {
+                        }
+                    }
+                } catch (AwsException ignored) {
+                }
+            }
             return xmlErrorResponse(e);
         }
     }
