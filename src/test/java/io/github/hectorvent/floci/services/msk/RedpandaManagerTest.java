@@ -8,30 +8,47 @@ import com.github.dockerjava.api.model.Ports;
 import com.sun.net.httpserver.HttpServer;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.junit.jupiter.api.io.TempDir;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.net.InetSocketAddress;
+import java.nio.file.Path;
 import java.util.Map;
+import java.util.Optional;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_DEEP_STUBS;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class RedpandaManagerTest {
 
-    @Mock
-    private ContainerBuilder containerBuilder;
+    private static final int KAFKA_PORT = 9092;
+
     @Mock
     private ContainerLifecycleManager lifecycleManager;
     @Mock
@@ -39,11 +56,51 @@ class RedpandaManagerTest {
     @Mock
     private ContainerDetector containerDetector;
     @Mock
+    private RegionResolver regionResolver;
+    @Mock
+    private PortAllocator portAllocator;
+    @Mock
     private EmulatorConfig config;
     @Mock
-    private RegionResolver regionResolver;
+    private DockerHostResolver dockerHostResolver;
+    @Mock
+    private EmbeddedDnsServer embeddedDnsServer;
+
+    @TempDir
+    Path tempDir;
+
+    RedpandaManager manager;
 
     private HttpServer adminServer;
+
+    @BeforeEach
+    void setUp() {
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.MskServiceConfig msk = mock(EmulatorConfig.MskServiceConfig.class);
+        EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);
+        EmulatorConfig.StorageConfig storage = mock(EmulatorConfig.StorageConfig.class);
+
+        lenient().when(config.services()).thenReturn(services);
+        lenient().when(services.msk()).thenReturn(msk);
+        lenient().when(services.dockerNetwork()).thenReturn(Optional.empty());
+        lenient().when(msk.defaultImage()).thenReturn("redpandadata/redpanda:latest");
+        lenient().when(msk.kafkaHostPortBase()).thenReturn(9300);
+        lenient().when(msk.kafkaHostPortMax()).thenReturn(9399);
+        lenient().when(config.docker()).thenReturn(docker);
+        lenient().when(docker.logMaxSize()).thenReturn("10m");
+        lenient().when(docker.logMaxFile()).thenReturn("3");
+        lenient().when(config.storage()).thenReturn(storage);
+        lenient().when(storage.hostPersistentPath()).thenReturn(tempDir.toAbsolutePath().toString());
+
+        lenient().when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
+
+        ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
+        manager = new RedpandaManager(containerBuilder, lifecycleManager, logStreamer, containerDetector,
+                config, regionResolver, portAllocator);
+
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+        lenient().when(regionResolver.getDefaultRegion()).thenReturn("us-east-1");
+    }
 
     @AfterEach
     void tearDown() {
@@ -52,8 +109,10 @@ class RedpandaManagerTest {
         }
     }
 
-    private static MskCluster newCluster() {
-        return new MskCluster("arn:aws:kafka:us-east-1:000000000000:cluster/test-cluster/abc", "test-cluster", "3.6.0");
+    private MskCluster newCluster() {
+        MskCluster cluster = new MskCluster("arn:aws:kafka:us-east-1:000000000000:cluster/test-cluster/abc", "test-cluster", "3.6.0");
+        cluster.setVolumeId("abc123");
+        return cluster;
     }
 
     private int startFakeAdminServer() throws Exception {
@@ -87,9 +146,6 @@ class RedpandaManagerTest {
                 ExposedPort.tcp(RedpandaManager.ADMIN_PORT),
                 new Ports.Binding[] { new Ports.Binding("0.0.0.0", String.valueOf(adminHostPort)) }));
 
-        RedpandaManager manager = new RedpandaManager(
-                containerBuilder, lifecycleManager, logStreamer, containerDetector, config, regionResolver);
-
         MskCluster cluster = newCluster();
         cluster.setContainerId("container-id");
         cluster.setBootstrapBrokers("localhost:19092");
@@ -97,5 +153,68 @@ class RedpandaManagerTest {
         assertTrue(manager.isReady(cluster),
                 "isReady() should report ready once /v1/status/ready answers 200; "
                         + "if it regresses to polling /ready (which always 404s), this assertion fails");
+    }
+
+    @Test
+    void nativeModeAdvertisesPreAllocatedLocalhostAddress() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        when(portAllocator.allocate(9300, 9399)).thenReturn(54321);
+
+        ContainerInfo info = new ContainerInfo("container-123",
+                Map.of(KAFKA_PORT, new EndpointInfo("localhost", 54321)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        manager.startContainer(newCluster());
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        ContainerSpec spec = specCaptor.getValue();
+
+        int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
+        assertTrue(flagIndex >= 0, "cmd should contain --advertise-kafka-addr");
+        assertEquals("localhost:54321", spec.cmd().get(flagIndex + 1));
+
+        assertEquals(Integer.valueOf(54321), spec.portBindings().get(KAFKA_PORT));
+    }
+
+    @Test
+    void containerModeAdvertisesContainerNameAddress() {
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+
+        ContainerInfo info = new ContainerInfo("container-456",
+                Map.of(KAFKA_PORT, new EndpointInfo("172.18.0.5", KAFKA_PORT)));
+        when(lifecycleManager.createAndStart(any())).thenReturn(info);
+
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+
+        manager.startContainer(newCluster());
+
+        verify(lifecycleManager).createAndStart(specCaptor.capture());
+        ContainerSpec spec = specCaptor.getValue();
+
+        int flagIndex = spec.cmd().indexOf("--advertise-kafka-addr");
+        assertTrue(flagIndex >= 0, "cmd should contain --advertise-kafka-addr");
+        assertEquals("floci-msk-test-cluster:9092", spec.cmd().get(flagIndex + 1));
+
+        assertFalse(spec.portBindings().containsKey(KAFKA_PORT), "container mode should not publish ports to host");
+        assertTrue(spec.exposedPorts().contains(KAFKA_PORT));
+        assertTrue(spec.exposedPorts().contains(RedpandaManager.ADMIN_PORT));
+
+        verifyNoInteractions(portAllocator);
+    }
+
+    @Test
+    void stopContainerReleasesAllocatedKafkaHostPort() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+
+        MskCluster cluster = newCluster();
+        cluster.setContainerId("container-id");
+        cluster.setBootstrapBrokers("localhost:54321");
+
+        manager.stopContainer(cluster);
+
+        verify(lifecycleManager).stopAndRemove("container-id", null);
+        verify(portAllocator).release(54321);
     }
 }
