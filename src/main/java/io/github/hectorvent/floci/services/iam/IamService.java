@@ -866,6 +866,10 @@ public class IamService {
                 sessions.delete(accessKeyId);
                 return null; // expired — unknown key → bypass
             }
+
+            if (session.getRoleArn() == null) {
+                return null; // identity session without mapped caller context — preserve historical bypass
+            }
             List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
             String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
             return new CallerContext(identityPolicies, session.getSessionPolicyDocument(), boundaryDoc);
@@ -898,6 +902,9 @@ public class IamService {
     }
 
     private String resolveRoleBoundaryDocument(String roleArn) {
+        if (roleArn == null) {
+            return null;
+        }
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
         return roles.get(roleName)
                 .map(IamRole::getPermissionsBoundaryArn)
@@ -984,6 +991,9 @@ public class IamService {
     }
 
     private List<String> collectRolePolicies(String roleArn) {
+        if (roleArn == null) {
+            return null;
+        }
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
         Optional<IamRole> roleOpt = roles.get(roleName);
         if (roleOpt.isEmpty()) {
