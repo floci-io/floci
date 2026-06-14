@@ -387,6 +387,25 @@ class GlueServiceTest {
     }
 
     @Test
+    void getPartitionsReturnsPartitionsSortedByValuesRegardlessOfCreationOrder() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setPartitionKeys(List.of(new Column("year", "string")));
+        glueService.createTable("db1", table);
+        for (String value : List.of("2028", "2026", "2027")) {
+            Partition partition = new Partition();
+            partition.setValues(List.of(value));
+            glueService.createPartition("db1", "plain", partition);
+        }
+
+        // Deterministic ordering: returned in sorted order, not storage-scan order. No re-sort here.
+        assertEquals(List.of(List.of("2026"), List.of("2027"), List.of("2028")),
+                glueService.getPartitions("db1", "plain").stream()
+                        .map(Partition::getValues)
+                        .toList());
+    }
+
+    @Test
     void partitionKeysDoNotCollideForCommaSeparatedValues() {
         Table table = new Table();
         table.setName("plain");
