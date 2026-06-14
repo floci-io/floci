@@ -1900,23 +1900,28 @@ public class CloudFormationResourceProvisioner {
                     "Custom resource " + r.getLogicalId() + " has an unresolved ServiceToken", 400);
         }
 
-        // Resolve intrinsics to concrete values. ServiceToken is not part of the ResourceProperties
-        // the handler receives. CloudFormation stringifies every scalar in ResourceProperties
+        // Resolve intrinsics to concrete values. CloudFormation keeps ServiceToken inside
+        // ResourceProperties (and also surfaces it at the top level of the event), so we leave it
+        // in place here. CloudFormation stringifies every scalar in ResourceProperties
         // (true -> "true", 5 -> "5") while preserving list/map structure; handlers (e.g. CDK's)
         // rely on this and call String methods on the values, so we must match it.
         JsonNode resolvedProps = engine.resolveNode(props);
         ObjectNode resolved = resolvedProps.isObject()
                 ? ((ObjectNode) resolvedProps).deepCopy()
                 : objectMapper.createObjectNode();
-        resolved.remove("ServiceToken");
         ObjectNode resourceProperties = (ObjectNode) stringifyScalars(resolved);
 
         boolean isUpdate = r.getPhysicalId() != null;
         String requestType = isUpdate ? "Update" : "Create";
         String priorPhysicalId = isUpdate ? r.getPhysicalId() : null;
 
+        // On Update, CloudFormation includes the previous ResourceProperties so the handler can diff.
+        // The prior values were stashed at the last create/update; read them before we overwrite below.
+        ObjectNode oldResourceProperties = isUpdate ? readStashedProperties(r) : null;
+
         JsonNode response = invokeCustomResourceHandler(serviceToken, requestType, r.getLogicalId(),
-                r.getResourceType(), priorPhysicalId, resourceProperties, region, accountId, stackName);
+                r.getResourceType(), priorPhysicalId, resourceProperties, oldResourceProperties,
+                region, accountId, stackName);
 
         String status = response.path("Status").asText("FAILED");
         if (!"SUCCESS".equals(status)) {
@@ -1952,22 +1957,11 @@ public class CloudFormationResourceProvisioner {
             LOG.debugv("Custom resource {0} has no stored ServiceToken; skipping Delete", r.getLogicalId());
             return;
         }
-        ObjectNode resourceProperties = objectMapper.createObjectNode();
-        try {
-            String stored = r.getAttributes().get(CR_PROPERTIES_ATTR);
-            if (stored != null) {
-                JsonNode parsed = objectMapper.readTree(stored);
-                if (parsed.isObject()) {
-                    resourceProperties = (ObjectNode) parsed;
-                }
-            }
-        } catch (Exception e) {
-            LOG.debugv("Could not parse stored properties for custom resource {0}: {1}",
-                    r.getLogicalId(), e.getMessage());
-        }
+        ObjectNode stashed = readStashedProperties(r);
+        ObjectNode resourceProperties = stashed != null ? stashed : objectMapper.createObjectNode();
         try {
             JsonNode response = invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(),
-                    r.getResourceType(), r.getPhysicalId(), resourceProperties, region,
+                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region,
                     accountFromArn(serviceToken), "");
             if (!"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
                 LOG.warnv("Custom resource {0} Delete reported FAILED: {1}",
@@ -1979,10 +1973,27 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
+    // Reads the ResourceProperties stashed at the last create/update (CR_PROPERTIES_ATTR).
+    // Returns null when nothing is stashed or it cannot be parsed.
+    private ObjectNode readStashedProperties(StackResource r) {
+        String stored = r.getAttributes().get(CR_PROPERTIES_ATTR);
+        if (stored == null) {
+            return null;
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(stored);
+            return parsed.isObject() ? (ObjectNode) parsed : null;
+        } catch (Exception e) {
+            LOG.debugv("Could not parse stored properties for custom resource {0}: {1}",
+                    r.getLogicalId(), e.getMessage());
+            return null;
+        }
+    }
+
     private JsonNode invokeCustomResourceHandler(String serviceToken, String requestType, String logicalId,
                                                  String resourceType, String physicalId,
-                                                 ObjectNode resourceProperties, String region,
-                                                 String accountId, String stackName) {
+                                                 ObjectNode resourceProperties, ObjectNode oldResourceProperties,
+                                                 String region, String accountId, String stackName) {
         String token = customResourceResponseStore.register();
         try {
             ObjectNode event = objectMapper.createObjectNode();
@@ -1998,6 +2009,9 @@ public class CloudFormationResourceProvisioner {
             }
             event.put("ServiceToken", serviceToken);
             event.set("ResourceProperties", resourceProperties);
+            if (oldResourceProperties != null) {
+                event.set("OldResourceProperties", oldResourceProperties);
+            }
 
             byte[] payload = objectMapper.writeValueAsBytes(event);
             InvokeResult result = lambdaService.invoke(region, serviceToken, payload,

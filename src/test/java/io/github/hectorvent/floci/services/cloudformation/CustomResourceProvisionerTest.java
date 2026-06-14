@@ -16,7 +16,6 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -104,11 +103,40 @@ class CustomResourceProvisionerTest {
         assertEquals("Create", event.get("RequestType").asText());
         assertTrue(event.get("ResponseURL").asText().startsWith("http://floci:4566/cfn-response/"));
         assertEquals("hi", event.get("ResourceProperties").get("Message").asText());
-        assertFalse(event.get("ResourceProperties").has("ServiceToken"));
+        // CloudFormation carries ServiceToken both at the top level and inside ResourceProperties.
+        assertEquals(SERVICE_TOKEN, event.get("ServiceToken").asText());
+        assertEquals(SERVICE_TOKEN, event.get("ResourceProperties").get("ServiceToken").asText());
         // Scalars are stringified to match CloudFormation (true -> "true"), not native JSON booleans.
         JsonNode prune = event.get("ResourceProperties").get("Prune");
         assertTrue(prune.isTextual(), "Prune should be stringified");
         assertEquals("true", prune.asText());
+    }
+
+    @Test
+    void updateInvokesHandlerWithOldResourceProperties() {
+        stubHandler("phys-123", Map.of("Greeting", "hello"));
+
+        // Seed the prior create's stashed ResourceProperties so this provision is an Update.
+        ObjectNode oldProps = mapper.createObjectNode();
+        oldProps.put("ServiceToken", SERVICE_TOKEN);
+        oldProps.put("Message", "old");
+        Map<String, String> existingAttributes =
+                Map.of("__FlociResourceProperties", oldProps.toString());
+
+        StackResource r = provisioner.provision("MyCr", "Custom::Test", props(),
+                engine(), "us-east-1", "000000000000", "my-stack", "phys-123", existingAttributes);
+
+        assertEquals("CREATE_COMPLETE", r.getStatus());
+
+        ArgumentCaptor<byte[]> payload = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(eq("us-east-1"), eq(SERVICE_TOKEN), payload.capture(),
+                eq(InvocationType.RequestResponse));
+        JsonNode event = readEvent(payload);
+        assertEquals("Update", event.get("RequestType").asText());
+        assertEquals("phys-123", event.get("PhysicalResourceId").asText());
+        assertEquals("hi", event.get("ResourceProperties").get("Message").asText());
+        // CloudFormation includes the previous properties on Update so handlers can diff.
+        assertEquals("old", event.get("OldResourceProperties").get("Message").asText());
     }
 
     @Test
