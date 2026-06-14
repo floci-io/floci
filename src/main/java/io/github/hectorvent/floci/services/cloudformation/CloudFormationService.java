@@ -538,7 +538,7 @@ public class CloudFormationService {
                 if (resource.getPhysicalId() != null && "CREATE_COMPLETE".equals(resource.getStatus())) {
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_IN_PROGRESS", null);
-                    provisioner.delete(resource.getResourceType(), resource.getPhysicalId(), region);
+                    provisioner.delete(resource, region);
                     resource.setStatus("DELETE_COMPLETE");
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE", null);

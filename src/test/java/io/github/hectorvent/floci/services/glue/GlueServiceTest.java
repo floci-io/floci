@@ -67,6 +67,7 @@ class GlueServiceTest {
                 tableVersionStore,
                 columnStatisticsStore,
                 partitionStore,
+                new InMemoryStorage<String, Map<String, Object>>(),
                 new InMemoryStorage<String, UserDefinedFunction>(),
                 schemaRegistryService, regionResolver, new ResourceGroupsTaggingService());
         glueService.createDatabase(new Database("db1"));
@@ -347,6 +348,232 @@ class GlueServiceTest {
     }
 
     @Test
+    void partitionsCanBeFetchedFilteredAndDeleted() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setPartitionKeys(List.of(new Column("part", "int")));
+        glueService.createTable("db1", table);
+        Partition first = new Partition();
+        first.setValues(List.of("1"));
+        glueService.createPartition("db1", "plain", first);
+        Partition second = new Partition();
+        second.setValues(List.of("2"));
+        glueService.createPartition("db1", "plain", second);
+
+        assertEquals(List.of("1"), glueService.getPartition("db1", "plain", List.of("1")).getValues());
+        assertEquals(List.of(List.of("1")), glueService.batchGetPartitions(
+                        "db1", "plain", List.of(List.of("1"), List.of("missing"))).stream()
+                .map(Partition::getValues)
+                .toList());
+        assertEquals(List.of(List.of("1")), glueService.getPartitions("db1", "plain", "part = 1").stream()
+                .map(Partition::getValues)
+                .toList());
+        assertEquals(List.of(List.of("1"), List.of("2")), glueService.getPartitions("db1", "plain", "part >= 1 AND part <= 2").stream()
+                .map(Partition::getValues)
+                .sorted((left, right) -> left.get(0).compareTo(right.get(0)))
+                .toList());
+        assertEquals(List.of(List.of("1")), glueService.getPartitions("db1", "plain", "part in (1, 3)").stream()
+                .map(Partition::getValues)
+                .toList());
+        AwsException invalidExpression = assertThrows(AwsException.class,
+                () -> glueService.getPartitions("db1", "plain", "part between 1 and 2"));
+        assertEquals("InvalidInputException", invalidExpression.getErrorCode());
+
+        glueService.deletePartition("db1", "plain", List.of("2"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.getPartition("db1", "plain", List.of("2")));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void getPartitionsReturnsPartitionsSortedByValuesRegardlessOfCreationOrder() {
+        Table table = new Table();
+        table.setName("plain");
+        table.setPartitionKeys(List.of(new Column("year", "string")));
+        glueService.createTable("db1", table);
+        for (String value : List.of("2028", "2026", "2027")) {
+            Partition partition = new Partition();
+            partition.setValues(List.of(value));
+            glueService.createPartition("db1", "plain", partition);
+        }
+
+        // Deterministic ordering: returned in sorted order, not storage-scan order. No re-sort here.
+        assertEquals(List.of(List.of("2026"), List.of("2027"), List.of("2028")),
+                glueService.getPartitions("db1", "plain").stream()
+                        .map(Partition::getValues)
+                        .toList());
+    }
+
+    @Test
+    void partitionKeysDoNotCollideForCommaSeparatedValues() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        Partition first = new Partition();
+        first.setValues(List.of("a,b"));
+        Partition second = new Partition();
+        second.setValues(List.of("a", "b"));
+
+        glueService.createPartition("db1", "plain", first);
+        glueService.createPartition("db1", "plain", second);
+
+        assertEquals(List.of("a,b"), glueService.getPartition("db1", "plain", List.of("a,b")).getValues());
+        assertEquals(List.of("a", "b"), glueService.getPartition("db1", "plain", List.of("a", "b")).getValues());
+    }
+
+    @Test
+    void batchCreatePartitionCreatesNewPartitionsAndReportsDuplicates() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        Partition first = new Partition();
+        first.setValues(List.of("2026"));
+        Partition duplicate = new Partition();
+        duplicate.setValues(List.of("2026"));
+        Partition second = new Partition();
+        second.setValues(List.of("2027"));
+
+        List<GlueService.BatchCreatePartitionError> firstResult =
+                glueService.batchCreatePartitions("db1", "plain", List.of(first, second));
+        List<GlueService.BatchCreatePartitionError> secondResult =
+                glueService.batchCreatePartitions("db1", "plain", List.of(duplicate));
+
+        assertTrue(firstResult.isEmpty());
+        assertEquals(1, secondResult.size());
+        assertEquals(List.of("2026"), secondResult.getFirst().partitionValues());
+        assertEquals("AlreadyExistsException", secondResult.getFirst().errorDetail().errorCode());
+        assertEquals(2, glueService.getPartitions("db1", "plain").size());
+    }
+
+    @Test
+    void batchUpdatePartitionUpdatesPartitionsAndReportsMissingPartitions() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        Partition existing = new Partition();
+        existing.setValues(List.of("2026"));
+        existing.setParameters(Map.of("before", "yes"));
+        glueService.createPartition("db1", "plain", existing);
+        Partition updated = new Partition();
+        updated.setValues(List.of("2026"));
+        updated.setParameters(Map.of("after", "yes"));
+        Partition missing = new Partition();
+        missing.setValues(List.of("missing"));
+
+        List<GlueService.BatchUpdatePartitionError> result = glueService.batchUpdatePartitions("db1", "plain", List.of(
+                new GlueService.BatchUpdatePartitionEntry(List.of("2026"), updated),
+                new GlueService.BatchUpdatePartitionEntry(List.of("missing"), missing)));
+
+        assertEquals(Map.of("after", "yes"), glueService.getPartition("db1", "plain", List.of("2026")).getParameters());
+        assertEquals(1, result.size());
+        assertEquals(List.of("missing"), result.getFirst().partitionValueList());
+        assertEquals("EntityNotFoundException", result.getFirst().errorDetail().errorCode());
+        assertEquals("Partition [missing] not found", result.getFirst().errorDetail().errorMessage());
+    }
+
+    @Test
+    void updatePartitionUpdatesPartitionAndThrowsForMissingPartition() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        Partition existing = new Partition();
+        existing.setValues(List.of("2026"));
+        existing.setParameters(Map.of("before", "yes"));
+        glueService.createPartition("db1", "plain", existing);
+        Partition updated = new Partition();
+        updated.setValues(List.of("2026"));
+        updated.setParameters(Map.of("after", "yes"));
+
+        glueService.updatePartition("db1", "plain", List.of("2026"), updated);
+
+        assertEquals(Map.of("after", "yes"), glueService.getPartition("db1", "plain", List.of("2026")).getParameters());
+        Partition missing = new Partition();
+        missing.setValues(List.of("missing"));
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.updatePartition("db1", "plain", List.of("missing"), missing));
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        assertEquals("Partition not found.", ex.getMessage());
+    }
+
+    @Test
+    void deletePartitionForMissingPartitionThrows() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.deletePartition("db1", "plain", List.of("missing")));
+
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        assertEquals("Cannot find partition.", ex.getMessage());
+    }
+
+    @Test
+    void partitionColumnStatisticsCanBeUpdatedFetchedAndDeleted() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        Partition partition = new Partition();
+        partition.setValues(List.of("1"));
+        glueService.createPartition("db1", "plain", partition);
+        Map<String, Object> statistics = Map.of(
+                "ColumnName", "id",
+                "ColumnType", "int",
+                "AnalyzedTime", Instant.EPOCH,
+                "StatisticsData", Map.of(
+                        "Type", "LONG",
+                        "LongColumnStatisticsData", Map.of(
+                                "MinimumValue", 1,
+                                "MaximumValue", 10,
+                                "NumberOfNulls", 0,
+                                "NumberOfDistinctValues", 10)));
+
+        glueService.updateColumnStatisticsForPartition("db1", "plain", List.of("1"), List.of(statistics));
+        GlueService.ColumnStatisticsResult result = glueService.getColumnStatisticsForPartition(
+                "db1", "plain", List.of("1"), List.of("id", "missing"));
+
+        assertEquals(List.of(statistics), result.columnStatisticsList());
+        assertEquals(1, result.errors().size());
+        assertEquals("missing", result.errors().get(0).columnName());
+        assertEquals(
+                new GlueService.ErrorDetail("EntityNotFoundException", "Statistics do not exist for this column"),
+                result.errors().get(0).error());
+
+        glueService.deleteColumnStatisticsForPartition("db1", "plain", List.of("1"), "id");
+        GlueService.ColumnStatisticsResult afterDelete = glueService.getColumnStatisticsForPartition(
+                "db1", "plain", List.of("1"), List.of("id"));
+
+        assertTrue(afterDelete.columnStatisticsList().isEmpty());
+        assertEquals(1, afterDelete.errors().size());
+    }
+
+    @Test
+    void updatePartitionColumnStatisticsRejectsMissingRequiredFields() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        Partition partition = new Partition();
+        partition.setValues(List.of("1"));
+        glueService.createPartition("db1", "plain", partition);
+
+        for (String field : List.of(
+                GlueService.COLUMN_NAME,
+                GlueService.COLUMN_TYPE,
+                GlueService.ANALYZED_TIME,
+                GlueService.STATISTICS_DATA)) {
+            Map<String, Object> statistics = new LinkedHashMap<>(columnStatistics("id"));
+            statistics.remove(field);
+
+            AwsException exception = assertThrows(AwsException.class,
+                    () -> glueService.updateColumnStatisticsForPartition("db1", "plain", List.of("1"), List.of(statistics)));
+
+            assertEquals("InvalidInputException", exception.getErrorCode());
+            assertEquals(field + " is required", exception.getMessage());
+        }
+    }
+
+    @Test
     void deleteDatabaseDoesNotDeleteSimilarDatabaseNames() {
         glueService.createDatabase(new Database("a"));
         glueService.createDatabase(new Database("a:b"));
@@ -365,6 +592,15 @@ class GlueServiceTest {
                 () -> glueService.deleteDatabase("missing"));
 
         assertEquals("EntityNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void deleteTableForMissingTableThrows() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> glueService.deleteTable("db1", "missing_table"));
+
+        assertEquals("EntityNotFoundException", ex.getErrorCode());
+        assertTrue(ex.getMessage().contains("db1.missing_table"));
     }
 
     @Test
@@ -594,6 +830,23 @@ class GlueServiceTest {
         assertTrue(fetched.errors().isEmpty());
         assertEquals("id", fetched.columnStatisticsList().get(0).get(GlueService.COLUMN_NAME));
         assertEquals("LONG", ((Map<?, ?>) fetched.columnStatisticsList().get(0).get("StatisticsData")).get("Type"));
+    }
+
+    @Test
+    void columnStatisticsCanBeDeleted() {
+        Table table = new Table();
+        table.setName("plain");
+        glueService.createTable("db1", table);
+        glueService.updateColumnStatisticsForTable("db1", "plain", List.of(columnStatistics("id")));
+
+        glueService.deleteColumnStatisticsForTable("db1", "plain", "id");
+        glueService.deleteColumnStatisticsForTable("db1", "plain", "id");
+
+        GlueService.ColumnStatisticsResult fetched =
+                glueService.getColumnStatisticsForTable("db1", "plain", List.of("id"));
+        assertTrue(fetched.columnStatisticsList().isEmpty());
+        assertEquals(1, fetched.errors().size());
+        assertEquals("EntityNotFoundException", fetched.errors().getFirst().error().errorCode());
     }
 
     @Test

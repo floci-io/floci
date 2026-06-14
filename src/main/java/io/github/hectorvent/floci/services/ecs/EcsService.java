@@ -193,15 +193,31 @@ public class EcsService {
     public TaskDefinition registerTaskDefinition(String family, List<ContainerDefinition> containerDefs,
                                                   NetworkMode networkMode, String cpu, String memory,
                                                   String taskRoleArn, String executionRoleArn,
+                                                  List<String> requiresCompatibilities,
                                                   String region) {
         return registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, null, region);
+                taskRoleArn, executionRoleArn, requiresCompatibilities, null, region);
     }
 
     public TaskDefinition registerTaskDefinition(String family, List<ContainerDefinition> containerDefs,
                                                   NetworkMode networkMode, String cpu, String memory,
                                                   String taskRoleArn, String executionRoleArn,
+                                                  List<String> requiresCompatibilities,
                                                   Map<String, String> tags, String region) {
+        if (requiresCompatibilities != null && requiresCompatibilities.contains("FARGATE")) {
+            if (networkMode != NetworkMode.awsvpc) {
+                throw new AwsException("ClientException", "Fargate only supports network mode 'awsvpc'.", 400);
+            }
+            if (cpu == null) {
+                throw new AwsException("ClientException", "Fargate requires that 'cpu' be defined at the task level.", 400);
+            }
+            if (memory == null) {
+                throw new AwsException("ClientException", "Fargate requires that 'memory' be defined at the task level.", 400);
+            }
+            if (!isValidFargateCpuMemory(cpu, memory)) {
+                throw new AwsException("ClientException", "No Fargate configuration exists for given values.", 400);
+            }
+        }
         int revision = latestRevisions.merge(family, 1, Integer::sum);
 
         TaskDefinition td = new TaskDefinition();
@@ -214,6 +230,14 @@ public class EcsService {
         td.setTaskRoleArn(taskRoleArn);
         td.setExecutionRoleArn(executionRoleArn);
         td.setContainerDefinitions(containerDefs != null ? containerDefs : List.of());
+        td.setRequiresCompatibilities(requiresCompatibilities);
+
+        if (requiresCompatibilities != null && !requiresCompatibilities.isEmpty()) {
+            td.setCompatibilities(new java.util.ArrayList<>(requiresCompatibilities));
+        } else {
+            td.setCompatibilities(java.util.List.of("EC2"));
+        }
+
         td.setTaskDefinitionArn(regionResolver.buildArn("ecs", region,
                 "task-definition/" + family + ":" + revision));
         if (tags != null && !tags.isEmpty()) {
@@ -223,6 +247,63 @@ public class EcsService {
         taskDefinitions.put(family + ":" + revision, td);
         LOG.infov("Registered task definition: {0}:{1}", family, revision);
         return td;
+    }
+
+    private boolean isValidFargateCpuMemory(String cpuStr, String memStr) {
+        if (cpuStr == null || memStr == null) return false;
+        int cpu = parseCpu(cpuStr);
+        int memory = parseMemory(memStr);
+        if (cpu <= 0 || memory <= 0) return false;
+
+        if (cpu == 256) return memory == 512 || memory == 1024 || memory == 2048;
+        if (cpu == 512) return memory >= 1024 && memory <= 4096 && memory % 1024 == 0;
+        if (cpu == 1024) return memory >= 2048 && memory <= 8192 && memory % 1024 == 0;
+        if (cpu == 2048) return memory >= 4096 && memory <= 16384 && memory % 1024 == 0;
+        if (cpu == 4096) return memory >= 8192 && memory <= 30720 && memory % 1024 == 0;
+        if (cpu == 8192) return memory >= 16384 && memory <= 61440 && memory % 4096 == 0;
+        if (cpu == 16384) return memory >= 32768 && memory <= 122880 && memory % 8192 == 0;
+        
+        return false;
+    }
+
+    private int parseCpu(String cpu) {
+        if (cpu.toUpperCase().endsWith("VCPU")) {
+            try {
+                double v = Double.parseDouble(cpu.substring(0, cpu.length() - 4).trim());
+                return (int) Math.round(v * 1024);
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        try {
+            return Integer.parseInt(cpu.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
+    }
+
+    private int parseMemory(String mem) {
+        if (mem.toUpperCase().endsWith("GB")) {
+            try {
+                double v = Double.parseDouble(mem.substring(0, mem.length() - 2).trim());
+                return (int) Math.round(v * 1024);
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        if (mem.toUpperCase().endsWith("MB") || mem.toUpperCase().endsWith("MIB")) {
+            try {
+                double v = Double.parseDouble(mem.replaceAll("(?i)mib|mb", "").trim());
+                return (int) Math.round(v);
+            } catch (NumberFormatException e) {
+                return -1;
+            }
+        }
+        try {
+            return Integer.parseInt(mem.trim());
+        } catch (NumberFormatException e) {
+            return -1;
+        }
     }
 
     public TaskDefinition describeTaskDefinition(String taskDefinitionRef, String region) {

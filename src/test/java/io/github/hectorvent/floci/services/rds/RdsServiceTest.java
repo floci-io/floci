@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.rds;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
@@ -12,16 +13,23 @@ import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
+import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 
 import java.util.Collection;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -46,6 +54,9 @@ class RdsServiceTest {
         when(servicesConfig.rds()).thenReturn(rdsConfig);
         when(rdsConfig.proxyBasePort()).thenReturn(7000);
         when(rdsConfig.proxyMaxPort()).thenReturn(7099);
+        when(rdsConfig.defaultPostgresImage()).thenReturn("postgres:16-alpine");
+        when(rdsConfig.defaultMysqlImage()).thenReturn("mysql:8.0");
+        when(rdsConfig.defaultMariadbImage()).thenReturn("mariadb:11");
 
         rdsService = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
@@ -59,7 +70,7 @@ class RdsServiceTest {
     void createDbInstanceGeneratesMissingFields() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
-                20, false, null, null);
+                20, false, null, null, null);
 
         assertEquals("mydb", instance.getDbInstanceIdentifier());
         assertNotNull(instance.getDbiResourceId());
@@ -68,10 +79,97 @@ class RdsServiceTest {
     }
 
     @Test
+    void postgresImageUsesRequestedEngineVersionAndDefaultFlavor() {
+        assertEquals("postgres:18.1-alpine",
+                RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1"));
+        assertEquals("example.com/library/postgres:18.1-alpine",
+                RdsService.imageForRequestedVersion("example.com/library/postgres:16-alpine", "18.1"));
+        assertEquals("postgres:18.1",
+                RdsService.imageForRequestedVersion("postgres", "18.1"));
+        assertEquals("postgres:18.1-alpine",
+                RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1-alpine"));
+    }
+
+    @Test
+    void createDbInstanceStartsContainerWithRequestedEngineVersionImage() {
+        rdsService.createDbInstance("mydb", "postgres", "18.1",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        verify(containerManager).start(eq("mydb"), any(), eq(DatabaseEngine.POSTGRES),
+                eq("postgres:18.1-alpine"), eq("admin"), eq("password"), eq("dbname"));
+    }
+
+    @Test
+    void dbInstanceTagsRoundTripAndMutateByArn() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, false, null,
+                java.util.Map.of("example:ClusterId", "cluster-a"));
+
+        assertEquals(java.util.Map.of("example:ClusterId", "cluster-a"),
+                rdsService.listTagsForResource(instance.getDbInstanceArn()));
+
+        rdsService.addTagsToResource(instance.getDbInstanceArn(), java.util.Map.of("Name", "mydb"));
+        assertEquals(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"),
+                rdsService.listTagsForResource(instance.getDbInstanceArn()));
+
+        rdsService.removeTagsFromResource(instance.getDbInstanceArn(), java.util.List.of("Name"));
+        assertEquals(java.util.Map.of("example:ClusterId", "cluster-a"),
+                rdsService.listTagsForResource(instance.getDbInstanceArn()));
+    }
+
+    @Test
+    void dbInstanceEndpointUsesResolvedProxyHost() {
+        DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
+        when(dockerHostResolver.resolve()).thenReturn("floci.local");
+        RdsService service = new RdsService(containerManager, proxyManager, regionResolver, config,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver);
+
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        assertEquals("floci.local", instance.getEndpoint().address());
+    }
+
+    @Test
+    void createDbInstanceWithManagedMasterPasswordCreatesSecret() {
+        SecretsManagerService secretsManager = mock(SecretsManagerService.class);
+        Secret secret = new Secret();
+        secret.setArn("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret");
+        when(secretsManager.createSecret(any(), any(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1")))
+                .thenReturn(secret);
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                secretsManager);
+
+        DbInstance instance = service.createDbInstance("mydb", "postgres", "13",
+                "admin", null, "dbname", "db.t3.micro",
+                20, true, null, null, null, true, "kms-key-1");
+
+        assertEquals("arn:aws:secretsmanager:us-east-1:123456789012:secret:rds!db-secret", instance.getMasterUserSecretArn());
+        assertEquals("active", instance.getMasterUserSecretStatus());
+        assertEquals("kms-key-1", instance.getMasterUserSecretKmsKeyId());
+        assertNotNull(instance.getMasterPassword());
+        assertTrue(instance.getMasterPassword().startsWith("floci-"));
+
+        ArgumentCaptor<String> secretName = ArgumentCaptor.forClass(String.class);
+        ArgumentCaptor<String> secretString = ArgumentCaptor.forClass(String.class);
+        verify(secretsManager).createSecret(secretName.capture(), secretString.capture(), eq(null), any(), eq("kms-key-1"), eq(null), eq("us-east-1"));
+        assertTrue(secretName.getValue().startsWith("rds!db-"));
+        assertTrue(secretString.getValue().contains("\"username\":\"admin\""));
+        assertTrue(secretString.getValue().contains("\"password\":\"" + instance.getMasterPassword() + "\""));
+        assertTrue(secretString.getValue().contains("\"dbInstanceIdentifier\":\"mydb\""));
+    }
+
+    @Test
     void listDbInstancesIsCaseInsensitive() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
-                20, false, null, null);
+                20, false, null, null, null);
 
         Collection<DbInstance> result = rdsService.listDbInstances("MYDB");
         assertEquals(1, result.size());
@@ -91,9 +189,9 @@ class RdsServiceTest {
     void modifyDbInstanceBlankPasswordDoesNotOverwriteExistingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",
-                20, false, null, null);
+                20, false, null, null, null);
 
-        DbInstance modified = rdsService.modifyDbInstance("mydb", "   ", null);
+        DbInstance modified = rdsService.modifyDbInstance("mydb", "   ", null, null);
 
         assertEquals("original-password", modified.getMasterPassword());
         assertFalse(modified.isIamDatabaseAuthenticationEnabled());
@@ -103,12 +201,61 @@ class RdsServiceTest {
     void modifyDbInstanceCanToggleIamWithoutChangingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",
-                20, false, null, null);
+                20, false, null, null, null);
 
-        DbInstance modified = rdsService.modifyDbInstance("mydb", null, true);
+        DbInstance modified = rdsService.modifyDbInstance("mydb", null, true, null);
 
         assertEquals("original-password", modified.getMasterPassword());
         assertTrue(modified.isIamDatabaseAuthenticationEnabled());
+    }
+
+    @Test
+    void modifyDbInstanceRejectsMissingDbSubnetGroup() {
+        rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "original-password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        AwsException exception = assertThrows(AwsException.class,
+                () -> rdsService.modifyDbInstance("mydb", null, null, "missing-subnet-group"));
+
+        assertEquals("DBSubnetGroupNotFoundFault", exception.getErrorCode());
+    }
+
+    @Test
+    void dbSubnetGroupRoundTrip() {
+        DbSubnetGroup group = rdsService.createDbSubnetGroup(
+                "sample-db-subnets", "test", java.util.List.of("subnet-aaa", "subnet-bbb"));
+
+        assertEquals("sample-db-subnets", group.getDbSubnetGroupName());
+        assertEquals(java.util.List.of("subnet-aaa", "subnet-bbb"), group.getSubnetIds());
+        assertEquals(1, rdsService.listDbSubnetGroups("sample-db-subnets").size());
+
+        rdsService.deleteDbSubnetGroup("sample-db-subnets");
+        assertTrue(rdsService.listDbSubnetGroups("sample-db-subnets").isEmpty());
+    }
+
+    @Test
+    void createDbInstanceRejectsMissingDbSubnetGroupBeforeStartingRuntime() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbInstance("mydb", "postgres", "13",
+                        "admin", "password", "dbname", "db.t3.micro",
+                        20, false, null, "missing-subnet-group", null));
+
+        assertEquals("DBSubnetGroupNotFoundFault", exception.getErrorCode());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+        verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(),
+                any(), anyInt(), any(), any(), any(), any());
+    }
+
+    @Test
+    void describeOrderableDbInstanceOptionsFiltersByEngineVersionAndClass() {
+        var result = rdsService.describeOrderableDbInstanceOptions(
+                "postgres", "18.1", "db.t3.micro");
+
+        assertEquals(1, result.size());
+        assertEquals("postgres", result.getFirst().get("engine"));
+        assertEquals("18.1", result.getFirst().get("engineVersion"));
+        assertEquals("db.t3.micro", result.getFirst().get("dbInstanceClass"));
     }
 
     @Test
@@ -190,7 +337,7 @@ class RdsServiceTest {
                 instances, clusters, parameterGroups, clusterParameterGroups);
         DbInstance created = initialService.createDbInstance("mydb", "postgres", "16.3",
                 "admin", "secret", "app", "db.t3.micro",
-                20, false, null, null);
+                20, false, null, null, null);
 
         String persistedVolumeId = created.getVolumeId();
         int persistedProxyPort = created.getProxyPort();
@@ -214,7 +361,7 @@ class RdsServiceTest {
         assertEquals(15432, restored.getContainerPort());
 
         verify(restoredContainerManager).start(eq("mydb"), eq(persistedVolumeId),
-                eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("secret"), eq("app"));
+                eq(DatabaseEngine.POSTGRES), eq("postgres:16.3-alpine"), eq("admin"), eq("secret"), eq("app"));
         verify(restoredProxyManager).startProxy(eq("mydb"), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(persistedProxyPort), eq("127.0.0.1"), eq(15432),
                 eq("admin"), eq("secret"), eq("app"), any());
@@ -236,7 +383,7 @@ class RdsServiceTest {
                 "admin", "secret", "app", false, null);
         DbInstance member = initialService.createDbInstance("member1", "aurora-postgresql", "16.3",
                 "admin", "secret", "app", "db.t3.medium",
-                20, false, null, "cluster1");
+                20, false, null, null, "cluster1");
 
         RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
         RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
@@ -259,7 +406,7 @@ class RdsServiceTest {
         assertEquals(15432, restoredMember.getContainerPort());
 
         verify(restoredContainerManager).start(eq("cluster1"), eq(cluster.getVolumeId()),
-                eq(DatabaseEngine.POSTGRES), any(), eq("admin"), eq("secret"), eq("app"));
+                eq(DatabaseEngine.POSTGRES), eq("postgres:16.3-alpine"), eq("admin"), eq("secret"), eq("app"));
         verify(restoredProxyManager).startProxy(eq("cluster1"), eq(DatabaseEngine.POSTGRES),
                 eq(false), eq(cluster.getProxyPort()), eq("127.0.0.1"), eq(15432),
                 eq("admin"), eq("secret"), eq("app"), any());
@@ -274,7 +421,17 @@ class RdsServiceTest {
                                   StorageBackend<String, DbCluster> clusters,
                                   StorageBackend<String, DbParameterGroup> parameterGroups,
                                   StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups) {
+        return newService(containerManager, proxyManager, instances, clusters, parameterGroups, clusterParameterGroups, null);
+    }
+
+    private RdsService newService(RdsContainerManager containerManager,
+                                  RdsProxyManager proxyManager,
+                                  StorageBackend<String, DbInstance> instances,
+                                  StorageBackend<String, DbCluster> clusters,
+                                  StorageBackend<String, DbParameterGroup> parameterGroups,
+                                  StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+                                  SecretsManagerService secretsManager) {
         return new RdsService(containerManager, proxyManager, regionResolver, config,
-                instances, clusters, parameterGroups, clusterParameterGroups);
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(), secretsManager);
     }
 }

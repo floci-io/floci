@@ -1,17 +1,30 @@
 package io.github.hectorvent.floci.services.s3;
 
 import io.quarkus.test.junit.QuarkusTest;
+import io.restassured.response.ValidatableResponse;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 
+import static java.util.Collections.frequency;
+import static java.util.concurrent.TimeUnit.SECONDS;
+import static java.util.stream.Collectors.toList;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.junit.jupiter.api.Assertions.assertEquals;
 
 @QuarkusTest
 class S3ConditionalWriteIntegrationTest {
+    private static final String PRECONDITION_FAILED_MESSAGE =
+            "At least one of the pre-conditions you specified did not hold";
 
     @Test
     void putObject_ifNoneMatchStar_succeedsWhenKeyMissing() {
@@ -34,16 +47,53 @@ class S3ConditionalWriteIntegrationTest {
         String bucket = createBucket("put-if-none-existing");
         putObject(bucket, "object.txt", "first");
 
-        given()
+        ValidatableResponse response = given()
             .header("If-None-Match", "*")
             .body("second")
         .when()
             .put("/" + bucket + "/object.txt")
-        .then()
-            .statusCode(412)
-            .body(containsString("PreconditionFailed"));
+        .then();
+
+        assertPreconditionFailed(response, "If-None-Match");
 
         assertObjectBody(bucket, "object.txt", "first");
+    }
+
+    @Test
+    void concurrentPutObject_ifNoneMatchStar_allowsOnlyOneWriter()
+            throws Exception {
+        String bucket = createBucket("put-if-none-concurrent");
+        String key = "object.txt";
+        int writers = 16;
+        CyclicBarrier barrier = new CyclicBarrier(writers);
+        ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+
+        try {
+            List<Future<Integer>> futures = java.util.stream.IntStream.range(0, writers)
+                    .mapToObj(writer -> executor.submit(() -> {
+                        barrier.await();
+                        return given()
+                            .header("If-None-Match", "*")
+                            .body("writer-" + writer)
+                        .when()
+                            .put("/" + bucket + "/" + key)
+                        .then()
+                            .extract()
+                            .statusCode();
+                    }))
+                    .collect(toList());
+
+            List<Integer> statusCodes = new ArrayList<>();
+            for (Future<Integer> future : futures) {
+                statusCodes.add(future.get(30, SECONDS));
+            }
+
+            assertEquals(1, frequency(statusCodes, 200));
+            assertEquals(writers - 1, frequency(statusCodes, 412));
+        }
+        finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -67,14 +117,14 @@ class S3ConditionalWriteIntegrationTest {
         String bucket = createBucket("put-if-none-match");
         String eTag = putObject(bucket, "object.txt", "first");
 
-        given()
+        ValidatableResponse response = given()
             .header("If-None-Match", eTag)
             .body("second")
         .when()
             .put("/" + bucket + "/object.txt")
-        .then()
-            .statusCode(412)
-            .body(containsString("PreconditionFailed"));
+        .then();
+
+        assertPreconditionFailed(response, "If-None-Match");
 
         assertObjectBody(bucket, "object.txt", "first");
     }
@@ -100,14 +150,14 @@ class S3ConditionalWriteIntegrationTest {
         String bucket = createBucket("put-if-match-wrong");
         putObject(bucket, "object.txt", "first");
 
-        given()
+        ValidatableResponse response = given()
             .header("If-Match", "\"not-the-current-etag\"")
             .body("second")
         .when()
             .put("/" + bucket + "/object.txt")
-        .then()
-            .statusCode(412)
-            .body(containsString("PreconditionFailed"));
+        .then();
+
+        assertPreconditionFailed(response, "If-Match");
 
         assertObjectBody(bucket, "object.txt", "first");
     }
@@ -132,23 +182,23 @@ class S3ConditionalWriteIntegrationTest {
                 .statusCode(200)
                 .extract().header("ETag");
 
-        given()
+        ValidatableResponse response = given()
             .header("If-None-Match", stripQuotes(currentETag))
             .body("third")
         .when()
             .put("/" + bucket + "/object.txt")
-        .then()
-            .statusCode(412)
-            .body(containsString("PreconditionFailed"));
+        .then();
 
-        given()
+        assertPreconditionFailed(response, "If-None-Match");
+
+        response = given()
             .header("If-None-Match", "\"*\"")
             .body("third")
         .when()
             .put("/" + bucket + "/object.txt")
-        .then()
-            .statusCode(412)
-            .body(containsString("PreconditionFailed"));
+        .then();
+
+        assertPreconditionFailed(response, "If-None-Match");
 
         assertObjectBody(bucket, "object.txt", "second");
     }
@@ -160,15 +210,15 @@ class S3ConditionalWriteIntegrationTest {
         String uploadId = initiateMultipartUpload(bucket, "object.txt");
         uploadPart(bucket, "object.txt", uploadId, 1, "second");
 
-        given()
+        ValidatableResponse response = given()
             .contentType("application/xml")
             .header("If-None-Match", "*")
             .body(completeMultipartXml(1))
         .when()
             .post("/" + bucket + "/object.txt?uploadId=" + uploadId)
-        .then()
-            .statusCode(412)
-            .body(containsString("PreconditionFailed"));
+        .then();
+
+        assertPreconditionFailed(response, "If-None-Match");
 
         assertObjectBody(bucket, "object.txt", "first");
     }
@@ -200,15 +250,15 @@ class S3ConditionalWriteIntegrationTest {
         String uploadId = initiateMultipartUpload(bucket, "object.txt");
         uploadPart(bucket, "object.txt", uploadId, 1, "second");
 
-        given()
+        ValidatableResponse response = given()
             .contentType("application/xml")
             .header("If-Match", "\"not-the-current-etag\"")
             .body(completeMultipartXml(1))
         .when()
             .post("/" + bucket + "/object.txt?uploadId=" + uploadId)
-        .then()
-            .statusCode(412)
-            .body(containsString("PreconditionFailed"));
+        .then();
+
+        assertPreconditionFailed(response, "If-Match");
 
         assertObjectBody(bucket, "object.txt", "first");
     }
@@ -240,6 +290,13 @@ class S3ConditionalWriteIntegrationTest {
         .then()
             .statusCode(200)
             .body(equalTo(body));
+    }
+
+    private static void assertPreconditionFailed(ValidatableResponse response, String condition) {
+        response.statusCode(412)
+                .body("Error.Code", equalTo("PreconditionFailed"))
+                .body("Error.Message", equalTo(PRECONDITION_FAILED_MESSAGE))
+                .body("Error.Condition", equalTo(condition));
     }
 
     private static String initiateMultipartUpload(String bucket, String key) {

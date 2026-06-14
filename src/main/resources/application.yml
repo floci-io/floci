@@ -45,6 +45,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
 
 
 floci:
@@ -196,6 +197,10 @@ floci:
     eventbridge:
       enabled: true
     cloudmap:
+      enabled: true
+    emr:
+      enabled: true
+    wafv2:
       enabled: true
     scheduler:
       enabled: true
