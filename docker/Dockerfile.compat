@@ -23,4 +23,13 @@ RUN microdnf install -y --nodocs python3 python3-pip \
 COPY bin/awslocal /usr/local/bin/awslocal
 RUN chmod +x /usr/local/bin/awslocal
 
+# Pre-create the init-hook directories so archive-based copies (Testcontainers
+# withCopyFileToContainer / `docker cp`) can drop hooks straight into them.
+# Docker's archive extract unpacks into an existing dir and never mkdir -p's the
+# parents, so without these the copy fails. Mirrors LocalStack, which ships
+# /etc/localstack/init. Owned by the runtime user (uid 1001, group root).
+RUN mkdir -p /etc/localstack/init/boot.d /etc/localstack/init/start.d /etc/localstack/init/ready.d \
+             /etc/floci/init/boot.d /etc/floci/init/start.d /etc/floci/init/ready.d \
+    && chown -R 1001:root /etc/localstack /etc/floci
+
 USER 1001
