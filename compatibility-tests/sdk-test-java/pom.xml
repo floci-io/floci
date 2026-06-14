@@ -250,6 +250,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>iotdataplane</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iotjobsdataplane</artifactId>
+        </dependency>
         <!-- EKS client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

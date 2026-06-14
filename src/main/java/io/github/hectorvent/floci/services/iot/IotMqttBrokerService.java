@@ -115,6 +115,17 @@ public class IotMqttBrokerService {
         broker.internalPublish(message, INTERNAL_CLIENT_ID);
     }
 
+    boolean disconnectClient(String clientId, boolean cleanSession) {
+        Server broker = server;
+        if (broker == null) {
+            return false;
+        }
+        boolean disconnected = cleanSession
+                ? broker.disconnectAndPurgeClientState(clientId)
+                : broker.disconnectClient(clientId);
+        return disconnected;
+    }
+
     private final class PublishInterceptor extends AbstractInterceptHandler {
         @Override
         public String getID() {

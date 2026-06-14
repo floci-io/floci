@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iot"
 	iottypes "github.com/aws/aws-sdk-go-v2/service/iot/types"
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
+	jobsdata "github.com/aws/aws-sdk-go-v2/service/iotjobsdataplane"
+	jobsdatatypes "github.com/aws/aws-sdk-go-v2/service/iotjobsdataplane/types"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -218,11 +220,15 @@ func TestIoT(t *testing.T) {
 		require.NoError(t, err)
 	})
 
-	t.Run("IoTDataShadowsAndPublish", func(t *testing.T) {
+		t.Run("IoTDataShadowsAndPublish", func(t *testing.T) {
 		dataSvc := testutil.IoTDataClient()
 		thingName := "go-iot-shadow-thing"
 
-		_, err := dataSvc.GetThingShadow(ctx, &iotdataplane.GetThingShadowInput{ThingName: aws.String(thingName)})
+		_, err := dataSvc.DeleteConnection(ctx, &iotdataplane.DeleteConnectionInput{ClientId: aws.String("go-iot-missing-client")})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ResourceNotFoundException")
+
+		_, err = dataSvc.GetThingShadow(ctx, &iotdataplane.GetThingShadowInput{ThingName: aws.String(thingName)})
 		require.Error(t, err)
 
 		updated, err := dataSvc.UpdateThingShadow(ctx, &iotdataplane.UpdateThingShadowInput{
@@ -318,6 +324,105 @@ func TestIoT(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, received.Messages, 1)
 		assert.Equal(t, "go-rule-payload", aws.ToString(received.Messages[0].Body))
+	})
+
+	t.Run("ThingTypesGroupsAndJobs", func(t *testing.T) {
+		jobsSvc := testutil.IoTJobsDataClient()
+		thingType := "go-iot-type"
+		thingName := "go-iot-typed-thing"
+		groupName := "go-iot-group"
+		jobID := "go-iot-job"
+		_, _ = svc.DeleteThing(ctx, &iot.DeleteThingInput{ThingName: aws.String(thingName)})
+		_, _ = svc.DeleteThingGroup(ctx, &iot.DeleteThingGroupInput{ThingGroupName: aws.String(groupName)})
+		_, _ = svc.DeprecateThingType(ctx, &iot.DeprecateThingTypeInput{ThingTypeName: aws.String(thingType)})
+		_, _ = svc.DeleteThingType(ctx, &iot.DeleteThingTypeInput{ThingTypeName: aws.String(thingType)})
+
+		jobsEndpoint, err := svc.DescribeEndpoint(ctx, &iot.DescribeEndpointInput{EndpointType: aws.String("iot:Jobs")})
+		require.NoError(t, err)
+		assert.NotEmpty(t, aws.ToString(jobsEndpoint.EndpointAddress))
+
+		createdType, err := svc.CreateThingType(ctx, &iot.CreateThingTypeInput{
+			ThingTypeName: aws.String(thingType),
+			ThingTypeProperties: &iottypes.ThingTypeProperties{
+				ThingTypeDescription: aws.String("go type"),
+				SearchableAttributes:  []string{"model"},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, thingType, aws.ToString(createdType.ThingTypeName))
+		describedType, err := svc.DescribeThingType(ctx, &iot.DescribeThingTypeInput{ThingTypeName: aws.String(thingType)})
+		require.NoError(t, err)
+		assert.Equal(t, "go type", aws.ToString(describedType.ThingTypeProperties.ThingTypeDescription))
+
+		_, err = svc.UpdateThingType(ctx, &iot.UpdateThingTypeInput{
+			ThingTypeName: aws.String(thingType),
+			ThingTypeProperties: &iottypes.ThingTypeProperties{
+				ThingTypeDescription: aws.String("go type updated"),
+				SearchableAttributes:  []string{"model", "fw"},
+			},
+		})
+		require.NoError(t, err)
+
+		createdThing, err := svc.CreateThing(ctx, &iot.CreateThingInput{
+			ThingName:     aws.String(thingName),
+			ThingTypeName: aws.String(thingType),
+			AttributePayload: &iottypes.AttributePayload{
+				Attributes: map[string]string{"model": "g1"},
+			},
+		})
+		require.NoError(t, err)
+		thingArn := aws.ToString(createdThing.ThingArn)
+		describedThing, err := svc.DescribeThing(ctx, &iot.DescribeThingInput{ThingName: aws.String(thingName)})
+		require.NoError(t, err)
+		assert.Equal(t, thingType, aws.ToString(describedThing.ThingTypeName))
+
+		createdGroup, err := svc.CreateThingGroup(ctx, &iot.CreateThingGroupInput{
+			ThingGroupName: aws.String(groupName),
+			ThingGroupProperties: &iottypes.ThingGroupProperties{
+				ThingGroupDescription: aws.String("go group"),
+				AttributePayload:      &iottypes.AttributePayload{Attributes: map[string]string{"fleet": "go"}},
+			},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, groupName, aws.ToString(createdGroup.ThingGroupName))
+		_, err = svc.AddThingToThingGroup(ctx, &iot.AddThingToThingGroupInput{ThingGroupName: aws.String(groupName), ThingName: aws.String(thingName)})
+		require.NoError(t, err)
+		thingsInGroup, err := svc.ListThingsInThingGroup(ctx, &iot.ListThingsInThingGroupInput{ThingGroupName: aws.String(groupName)})
+		require.NoError(t, err)
+		assert.Contains(t, thingsInGroup.Things, thingName)
+
+		jobDoc := `{"operation":"reboot"}`
+		createdJob, err := svc.CreateJob(ctx, &iot.CreateJobInput{JobId: aws.String(jobID), Targets: []string{thingArn}, Document: aws.String(jobDoc), Description: aws.String("go job")})
+		require.NoError(t, err)
+		assert.Equal(t, jobID, aws.ToString(createdJob.JobId))
+		pending, err := jobsSvc.GetPendingJobExecutions(ctx, &jobsdata.GetPendingJobExecutionsInput{ThingName: aws.String(thingName)})
+		require.NoError(t, err)
+		require.NotEmpty(t, pending.QueuedJobs)
+		started, err := jobsSvc.StartNextPendingJobExecution(ctx, &jobsdata.StartNextPendingJobExecutionInput{ThingName: aws.String(thingName), StatusDetails: map[string]string{"phase": "download"}})
+		require.NoError(t, err)
+		assert.Equal(t, jobsdatatypes.JobExecutionStatusInProgress, started.Execution.Status)
+		updated, err := jobsSvc.UpdateJobExecution(ctx, &jobsdata.UpdateJobExecutionInput{
+			ThingName:                aws.String(thingName),
+			JobId:                    aws.String(jobID),
+			Status:                   jobsdatatypes.JobExecutionStatusSucceeded,
+			ExpectedVersion:          aws.Int64(2),
+			IncludeJobExecutionState: aws.Bool(true),
+			IncludeJobDocument:       aws.Bool(true),
+		})
+		require.NoError(t, err)
+		assert.Equal(t, jobsdatatypes.JobExecutionStatusSucceeded, updated.ExecutionState.Status)
+		assert.Contains(t, aws.ToString(updated.JobDocument), "reboot")
+
+		_, err = svc.RemoveThingFromThingGroup(ctx, &iot.RemoveThingFromThingGroupInput{ThingGroupName: aws.String(groupName), ThingName: aws.String(thingName)})
+		require.NoError(t, err)
+		_, err = svc.DeleteThingGroup(ctx, &iot.DeleteThingGroupInput{ThingGroupName: aws.String(groupName)})
+		require.NoError(t, err)
+		_, err = svc.DeleteThing(ctx, &iot.DeleteThingInput{ThingName: aws.String(thingName)})
+		require.NoError(t, err)
+		_, err = svc.DeprecateThingType(ctx, &iot.DeprecateThingTypeInput{ThingTypeName: aws.String(thingType)})
+		require.NoError(t, err)
+		_, err = svc.DeleteThingType(ctx, &iot.DeleteThingTypeInput{ThingTypeName: aws.String(thingType)})
+		require.NoError(t, err)
 	})
 
 	t.Run("MqttConnectPublishSubscribe", func(t *testing.T) {

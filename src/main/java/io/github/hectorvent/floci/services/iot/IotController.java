@@ -8,7 +8,11 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
+import io.github.hectorvent.floci.services.iot.model.IotJob;
+import io.github.hectorvent.floci.services.iot.model.IotJobExecution;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
+import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
+import io.github.hectorvent.floci.services.iot.model.IotThingType;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.iot.model.Thing;
 import jakarta.inject.Inject;
@@ -64,7 +68,7 @@ public class IotController {
                                 @Context HttpHeaders headers,
                                 String body) {
         String region = regionResolver.resolveRegion(headers);
-        Thing thing = iotService.createThing(thingName, parseAttributes(body), region);
+        Thing thing = iotService.createThing(thingName, parseAttributes(body), parseThingTypeName(body), region);
         return Response.ok(buildThingResponse(thing)).build();
     }
 
@@ -437,6 +441,286 @@ public class IotController {
         return Response.ok(response).build();
     }
 
+    @POST
+    @Path("/thing-types/{thingTypeName}")
+    public Response createThingType(@Context HttpHeaders headers,
+                                    @PathParam("thingTypeName") String thingTypeName,
+                                    String body) {
+        IotThingType type = iotService.createThingType(thingTypeName, parseProperties(body, "thingTypeProperties"), regionResolver.resolveRegion(headers));
+        return Response.ok(buildThingTypeCreateResponse(type)).build();
+    }
+
+    @GET
+    @Path("/thing-types/{thingTypeName}")
+    public Response describeThingType(@Context HttpHeaders headers,
+                                      @PathParam("thingTypeName") String thingTypeName) {
+        return Response.ok(buildThingTypeDescription(iotService.describeThingType(thingTypeName, regionResolver.resolveRegion(headers)))).build();
+    }
+
+    @GET
+    @Path("/thing-types")
+    public Response listThingTypes(@Context HttpHeaders headers,
+                                   @QueryParam("maxResults") Integer maxResults,
+                                   @QueryParam("nextToken") String nextToken) {
+        IotService.Page<IotThingType> page = iotService.listThingTypes(regionResolver.resolveRegion(headers), maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode types = response.putArray("thingTypes");
+        page.items().forEach(type -> types.add(buildThingTypeSummary(type)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @PATCH
+    @Path("/thing-types/{thingTypeName}")
+    public Response updateThingType(@Context HttpHeaders headers,
+                                    @PathParam("thingTypeName") String thingTypeName,
+                                    String body) {
+        iotService.updateThingType(thingTypeName, parseProperties(body, "thingTypeProperties"), regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/thing-types/{thingTypeName}/deprecate")
+    @Consumes(MediaType.WILDCARD)
+    public Response deprecateThingType(@Context HttpHeaders headers,
+                                       @PathParam("thingTypeName") String thingTypeName) {
+        iotService.deprecateThingType(thingTypeName, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @DELETE
+    @Path("/thing-types/{thingTypeName}")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteThingType(@Context HttpHeaders headers,
+                                    @PathParam("thingTypeName") String thingTypeName) {
+        iotService.deleteThingType(thingTypeName, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @POST
+    @Path("/thing-groups/{thingGroupName}")
+    public Response createThingGroup(@Context HttpHeaders headers,
+                                     @PathParam("thingGroupName") String thingGroupName,
+                                     String body) {
+        IotThingGroup group = iotService.createThingGroup(thingGroupName, parseProperties(body, "thingGroupProperties"), regionResolver.resolveRegion(headers));
+        return Response.ok(buildThingGroupCreateResponse(group)).build();
+    }
+
+    @GET
+    @Path("/thing-groups/{thingGroupName}")
+    public Response describeThingGroup(@Context HttpHeaders headers,
+                                       @PathParam("thingGroupName") String thingGroupName) {
+        return Response.ok(buildThingGroupDescription(iotService.describeThingGroup(thingGroupName, regionResolver.resolveRegion(headers)))).build();
+    }
+
+    @GET
+    @Path("/thing-groups")
+    public Response listThingGroups(@Context HttpHeaders headers,
+                                    @QueryParam("maxResults") Integer maxResults,
+                                    @QueryParam("nextToken") String nextToken) {
+        IotService.Page<IotThingGroup> page = iotService.listThingGroups(regionResolver.resolveRegion(headers), maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode groups = response.putArray("thingGroups");
+        page.items().forEach(group -> groups.add(buildThingGroupSummary(group)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @PATCH
+    @Path("/thing-groups/{thingGroupName}")
+    public Response updateThingGroup(@Context HttpHeaders headers,
+                                     @PathParam("thingGroupName") String thingGroupName,
+                                     String body) {
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            Long expectedVersion = request.hasNonNull("expectedVersion") ? request.path("expectedVersion").asLong() : null;
+            IotThingGroup group = iotService.updateThingGroup(thingGroupName, request.path("thingGroupProperties"), expectedVersion,
+                    regionResolver.resolveRegion(headers));
+            ObjectNode response = objectMapper.createObjectNode();
+            response.put("version", group.getVersion());
+            return Response.ok(response).build();
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @DELETE
+    @Path("/thing-groups/{thingGroupName}")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteThingGroup(@Context HttpHeaders headers,
+                                     @PathParam("thingGroupName") String thingGroupName) {
+        iotService.deleteThingGroup(thingGroupName, regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @PUT
+    @Path("/thing-groups/addThingToThingGroup")
+    public Response addThingToThingGroup(@Context HttpHeaders headers,
+                                         String body) {
+        GroupMembershipRequest request = parseGroupMembershipRequest(body);
+        iotService.addThingToThingGroup(request.thingGroupName(), request.thingName(), regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @PUT
+    @Path("/thing-groups/removeThingFromThingGroup")
+    public Response removeThingFromThingGroup(@Context HttpHeaders headers,
+                                              String body) {
+        GroupMembershipRequest request = parseGroupMembershipRequest(body);
+        iotService.removeThingFromThingGroup(request.thingGroupName(), request.thingName(), regionResolver.resolveRegion(headers));
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    @GET
+    @Path("/thing-groups/{thingGroupName}/things")
+    public Response listThingsInThingGroup(@Context HttpHeaders headers,
+                                           @PathParam("thingGroupName") String thingGroupName) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode things = response.putArray("things");
+        iotService.listThingsInThingGroup(thingGroupName, regionResolver.resolveRegion(headers)).forEach(things::add);
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/things/{thingName}/thing-groups")
+    public Response listThingGroupsForThing(@Context HttpHeaders headers,
+                                            @PathParam("thingName") String thingName) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode groups = response.putArray("thingGroups");
+        iotService.listThingGroupsForThing(thingName, regionResolver.resolveRegion(headers)).forEach(group -> groups.add(buildThingGroupSummary(group)));
+        return Response.ok(response).build();
+    }
+
+    @PUT
+    @Path("/jobs/{jobId}")
+    public Response createJob(@Context HttpHeaders headers,
+                              @PathParam("jobId") String jobId,
+                              String body) {
+        try {
+            IotJob job = iotService.createJob(jobId, objectMapper.readTree(body == null || body.isBlank() ? "{}" : body),
+                    regionResolver.resolveRegion(headers));
+            ObjectNode response = objectMapper.createObjectNode();
+            response.put("jobArn", job.getJobArn());
+            response.put("jobId", job.getJobId());
+            response.put("description", job.getDescription());
+            return Response.ok(response).build();
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/jobs/{jobId}")
+    public Response describeJob(@Context HttpHeaders headers,
+                                @PathParam("jobId") String jobId) {
+        IotJob job = iotService.describeJob(jobId, regionResolver.resolveRegion(headers));
+        ObjectNode response = objectMapper.createObjectNode();
+        if (job.getDocumentSource() != null) {
+            response.put("documentSource", job.getDocumentSource());
+        }
+        response.set("job", buildJobResponse(job));
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/jobs")
+    public Response listJobs(@Context HttpHeaders headers,
+                             @QueryParam("maxResults") Integer maxResults,
+                             @QueryParam("nextToken") String nextToken) {
+        IotService.Page<IotJob> page = iotService.listJobs(regionResolver.resolveRegion(headers), maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode jobs = response.putArray("jobs");
+        page.items().forEach(job -> jobs.add(buildJobSummary(job)));
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/things/{thingName}/jobs")
+    public Response listJobExecutionsForThing(@Context HttpHeaders headers,
+                                              @PathParam("thingName") String thingName,
+                                              @QueryParam("maxResults") Integer maxResults,
+                                              @QueryParam("nextToken") String nextToken) {
+        IotService.Page<IotJobExecution> page = iotService.listJobExecutionsForThing(thingName,
+                regionResolver.resolveRegion(headers), maxResults, nextToken);
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode executionSummaries = response.putArray("executionSummaries");
+        ArrayNode queuedJobs = response.putArray("queuedJobs");
+        ArrayNode inProgressJobs = response.putArray("inProgressJobs");
+        page.items().forEach(execution -> {
+            ObjectNode controlSummary = executionSummaries.addObject();
+            controlSummary.put("jobId", execution.getJobId());
+            controlSummary.set("jobExecutionSummary", buildJobExecutionSummary(execution));
+            if ("IN_PROGRESS".equals(execution.getStatus())) {
+                inProgressJobs.add(buildJobsDataExecutionSummary(execution));
+            } else if ("QUEUED".equals(execution.getStatus())) {
+                queuedJobs.add(buildJobsDataExecutionSummary(execution));
+            }
+        });
+        if (page.nextToken() != null) {
+            response.put("nextToken", page.nextToken());
+        }
+        return Response.ok(response).build();
+    }
+
+    @GET
+    @Path("/things/{thingName}/jobs/{jobId}")
+    public Response describeJobExecution(@Context HttpHeaders headers,
+                                         @PathParam("thingName") String thingName,
+                                         @PathParam("jobId") String jobId) {
+        String region = regionResolver.resolveRegion(headers);
+        IotJobExecution execution = iotService.describeJobExecution(thingName, jobId, region);
+        return Response.ok(jobExecutionResponse(execution, iotService.describeJob(jobId, region), true)).build();
+    }
+
+    @PUT
+    @Path("/things/{thingName}/jobs/{jobId}")
+    public Response startNextPendingJobExecution(@Context HttpHeaders headers,
+                                                 @PathParam("thingName") String thingName,
+                                                 @PathParam("jobId") String jobId,
+                                                 String body) {
+        if (!"$next".equals(jobId)) {
+            throw new AwsException("InvalidRequestException", "Unsupported job execution PUT path: " + jobId, 400);
+        }
+        String region = regionResolver.resolveRegion(headers);
+        IotJobExecution execution = iotService.startNextPendingJobExecution(thingName, parseStatusDetails(body), region);
+        return Response.ok(jobExecutionResponse(execution, iotService.describeJob(execution.getJobId(), region), true)).build();
+    }
+
+    @POST
+    @Path("/things/{thingName}/jobs/{jobId}")
+    public Response updateJobExecution(@Context HttpHeaders headers,
+                                       @PathParam("thingName") String thingName,
+                                       @PathParam("jobId") String jobId,
+                                       String body) {
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            Long expectedVersion = request.hasNonNull("expectedVersion") ? request.path("expectedVersion").asLong() : null;
+            String region = regionResolver.resolveRegion(headers);
+            IotJobExecution execution = iotService.updateJobExecution(thingName, jobId, request.path("status").asText(null),
+                    parseStatusDetails(request.path("statusDetails")), expectedVersion, region);
+            ObjectNode response = objectMapper.createObjectNode();
+            if (request.path("includeJobExecutionState").asBoolean(false)) {
+                ObjectNode state = response.putObject("executionState");
+                state.put("status", execution.getStatus());
+                state.put("versionNumber", execution.getVersionNumber());
+                state.set("statusDetails", objectMapper.valueToTree(execution.getStatusDetails()));
+            }
+            if (request.path("includeJobDocument").asBoolean(false)) {
+                response.put("jobDocument", iotService.describeJob(jobId, region).getDocument());
+            }
+            return Response.ok(response).build();
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
     @PUT
     @Path("/rules/{ruleName}")
     public Response createTopicRule(@Context HttpHeaders headers,
@@ -570,6 +854,33 @@ public class IotController {
         }
     }
 
+    private String parseThingTypeName(String body) {
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            return request.path("thingTypeName").asText(null);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
+    private JsonNode parseProperties(String body, String field) {
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            return request.path(field);
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
+    private GroupMembershipRequest parseGroupMembershipRequest(String body) {
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            return new GroupMembershipRequest(request.path("thingGroupName").asText(null), request.path("thingName").asText(null));
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
     private List<String> parseTagKeys(JsonNode tagKeysNode) {
         List<String> tagKeys = new ArrayList<>();
         if (tagKeysNode != null && tagKeysNode.isArray()) {
@@ -590,11 +901,29 @@ public class IotController {
         }
     }
 
+    private Map<String, String> parseStatusDetails(String body) {
+        try {
+            JsonNode request = objectMapper.readTree(body == null || body.isBlank() ? "{}" : body);
+            return parseStatusDetails(request.path("statusDetails"));
+        } catch (JsonProcessingException e) {
+            throw new AwsException("InvalidRequestException", e.getMessage(), 400);
+        }
+    }
+
+    private Map<String, String> parseStatusDetails(JsonNode node) {
+        Map<String, String> details = new HashMap<>();
+        if (node != null && node.isObject()) {
+            node.fields().forEachRemaining(entry -> details.put(entry.getKey(), entry.getValue().asText()));
+        }
+        return details;
+    }
+
     private ObjectNode buildThingResponse(Thing thing) {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("thingName", thing.getThingName());
         response.put("thingArn", thing.getThingArn());
         response.put("thingId", thing.getThingId());
+        response.put("thingTypeName", thing.getThingTypeName());
         response.set("attributes", objectMapper.valueToTree(thing.getAttributes()));
         response.put("version", thing.getVersion());
         putEpoch(response, "creationDate", thing.getCreationDate());
@@ -640,6 +969,139 @@ public class IotController {
         return response;
     }
 
+    private ObjectNode buildJobResponse(IotJob job) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("jobArn", job.getJobArn());
+        response.put("jobId", job.getJobId());
+        response.put("targetSelection", job.getTargetSelection());
+        response.put("status", job.getStatus());
+        ArrayNode targets = response.putArray("targets");
+        job.getTargets().forEach(targets::add);
+        response.put("description", job.getDescription());
+        putEpoch(response, "createdAt", job.getCreatedAt());
+        putEpoch(response, "lastUpdatedAt", job.getLastUpdatedAt());
+        return response;
+    }
+
+    private ObjectNode buildThingTypeCreateResponse(IotThingType type) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("thingTypeName", type.getThingTypeName());
+        response.put("thingTypeArn", type.getThingTypeArn());
+        response.put("thingTypeId", type.getThingTypeId());
+        return response;
+    }
+
+    private ObjectNode buildThingTypeDescription(IotThingType type) {
+        ObjectNode response = buildThingTypeCreateResponse(type);
+        response.set("thingTypeProperties", buildThingTypeProperties(type));
+        ObjectNode metadata = response.putObject("thingTypeMetadata");
+        metadata.put("deprecated", type.isDeprecated());
+        putEpoch(metadata, "creationDate", type.getCreationDate());
+        putEpoch(metadata, "deprecatedDate", type.getDeprecatedDate());
+        return response;
+    }
+
+    private ObjectNode buildThingTypeSummary(IotThingType type) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("thingTypeName", type.getThingTypeName());
+        response.put("thingTypeArn", type.getThingTypeArn());
+        response.put("thingTypeId", type.getThingTypeId());
+        return response;
+    }
+
+    private ObjectNode buildThingTypeProperties(IotThingType type) {
+        ObjectNode properties = objectMapper.createObjectNode();
+        properties.put("thingTypeDescription", type.getDescription());
+        ArrayNode attrs = properties.putArray("searchableAttributes");
+        type.getSearchableAttributes().forEach(attrs::add);
+        return properties;
+    }
+
+    private ObjectNode buildThingGroupCreateResponse(IotThingGroup group) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("thingGroupName", group.getThingGroupName());
+        response.put("thingGroupArn", group.getThingGroupArn());
+        response.put("thingGroupId", group.getThingGroupId());
+        return response;
+    }
+
+    private ObjectNode buildThingGroupDescription(IotThingGroup group) {
+        ObjectNode response = buildThingGroupCreateResponse(group);
+        response.set("thingGroupProperties", buildThingGroupProperties(group));
+        response.put("version", group.getVersion());
+        ObjectNode metadata = response.putObject("thingGroupMetadata");
+        putEpoch(metadata, "creationDate", group.getCreationDate());
+        return response;
+    }
+
+    private ObjectNode buildThingGroupSummary(IotThingGroup group) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("groupName", group.getThingGroupName());
+        response.put("groupArn", group.getThingGroupArn());
+        return response;
+    }
+
+    private ObjectNode buildThingGroupProperties(IotThingGroup group) {
+        ObjectNode properties = objectMapper.createObjectNode();
+        properties.put("thingGroupDescription", group.getDescription());
+        ObjectNode attributePayload = properties.putObject("attributePayload");
+        attributePayload.set("attributes", objectMapper.valueToTree(group.getAttributes()));
+        return properties;
+    }
+
+    private ObjectNode buildJobSummary(IotJob job) {
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("jobArn", job.getJobArn());
+        response.put("jobId", job.getJobId());
+        response.put("targetSelection", job.getTargetSelection());
+        response.put("status", job.getStatus());
+        putEpoch(response, "createdAt", job.getCreatedAt());
+        putEpoch(response, "lastUpdatedAt", job.getLastUpdatedAt());
+        return response;
+    }
+
+    private ObjectNode jobExecutionResponse(IotJobExecution execution, IotJob job, boolean includeDocument) {
+        ObjectNode response = objectMapper.createObjectNode();
+        ObjectNode executionNode = buildJobExecution(execution);
+        if (includeDocument && job.getDocument() != null) {
+            executionNode.put("jobDocument", job.getDocument());
+        }
+        response.set("execution", executionNode);
+        return response;
+    }
+
+    private ObjectNode buildJobExecution(IotJobExecution execution) {
+        ObjectNode node = objectMapper.createObjectNode();
+        node.put("jobId", execution.getJobId());
+        node.put("thingName", execution.getThingName());
+        node.put("thingArn", execution.getThingArn());
+        node.put("status", execution.getStatus());
+        node.set("statusDetails", objectMapper.valueToTree(execution.getStatusDetails()));
+        putEpochSeconds(node, "queuedAt", execution.getQueuedAt());
+        putEpochSeconds(node, "startedAt", execution.getStartedAt());
+        putEpochSeconds(node, "lastUpdatedAt", execution.getLastUpdatedAt());
+        node.put("executionNumber", execution.getExecutionNumber());
+        node.put("versionNumber", execution.getVersionNumber());
+        return node;
+    }
+
+    private ObjectNode buildJobExecutionSummary(IotJobExecution execution) {
+        ObjectNode summary = objectMapper.createObjectNode();
+        summary.put("status", execution.getStatus());
+        putEpochSeconds(summary, "queuedAt", execution.getQueuedAt());
+        putEpochSeconds(summary, "startedAt", execution.getStartedAt());
+        putEpochSeconds(summary, "lastUpdatedAt", execution.getLastUpdatedAt());
+        summary.put("executionNumber", execution.getExecutionNumber());
+        return summary;
+    }
+
+    private ObjectNode buildJobsDataExecutionSummary(IotJobExecution execution) {
+        ObjectNode summary = buildJobExecutionSummary(execution);
+        summary.put("jobId", execution.getJobId());
+        summary.put("versionNumber", execution.getVersionNumber());
+        return summary;
+    }
+
     private ObjectNode buildTopicRuleResponse(IotTopicRule rule) {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("ruleName", rule.getRuleName());
@@ -678,5 +1140,14 @@ public class IotController {
         if (instant != null) {
             node.put(field, instant.toEpochMilli() / 1000.0);
         }
+    }
+
+    private void putEpochSeconds(ObjectNode node, String field, Instant instant) {
+        if (instant != null) {
+            node.put(field, instant.getEpochSecond());
+        }
+    }
+
+    private record GroupMembershipRequest(String thingGroupName, String thingName) {
     }
 }

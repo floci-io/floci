@@ -11,43 +11,67 @@ import software.amazon.awssdk.services.iot.model.AttachPolicyRequest;
 import software.amazon.awssdk.services.iot.model.AttachThingPrincipalRequest;
 import software.amazon.awssdk.services.iot.model.CertificateStatus;
 import software.amazon.awssdk.services.iot.model.Action;
+import software.amazon.awssdk.services.iot.model.AddThingToThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.CreateKeysAndCertificateRequest;
+import software.amazon.awssdk.services.iot.model.CreateJobRequest;
 import software.amazon.awssdk.services.iot.model.CreatePolicyRequest;
+import software.amazon.awssdk.services.iot.model.CreateThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.CreateThingRequest;
+import software.amazon.awssdk.services.iot.model.CreateThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.CreateTopicRuleRequest;
+import software.amazon.awssdk.services.iot.model.DeleteThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.DeleteTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.DeleteThingRequest;
+import software.amazon.awssdk.services.iot.model.DeleteThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.DescribeCertificateRequest;
 import software.amazon.awssdk.services.iot.model.DescribeEndpointRequest;
+import software.amazon.awssdk.services.iot.model.DescribeJobRequest;
 import software.amazon.awssdk.services.iot.model.DescribeThingRequest;
+import software.amazon.awssdk.services.iot.model.DescribeThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.DisableTopicRuleRequest;
+import software.amazon.awssdk.services.iot.model.DeprecateThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.DetachPolicyRequest;
 import software.amazon.awssdk.services.iot.model.DetachThingPrincipalRequest;
 import software.amazon.awssdk.services.iot.model.EnableTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.GetPolicyRequest;
 import software.amazon.awssdk.services.iot.model.GetTopicRuleRequest;
 import software.amazon.awssdk.services.iot.model.ListCertificatesRequest;
+import software.amazon.awssdk.services.iot.model.ListJobExecutionsForThingRequest;
+import software.amazon.awssdk.services.iot.model.ListJobsRequest;
 import software.amazon.awssdk.services.iot.model.ListPoliciesRequest;
+import software.amazon.awssdk.services.iot.model.ListThingGroupsForThingRequest;
+import software.amazon.awssdk.services.iot.model.ListThingsInThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.ListThingsRequest;
 import software.amazon.awssdk.services.iot.model.ListTagsForResourceRequest;
 import software.amazon.awssdk.services.iot.model.ListThingPrincipalsRequest;
+import software.amazon.awssdk.services.iot.model.ListThingTypesRequest;
 import software.amazon.awssdk.services.iot.model.ListTopicRulesRequest;
+import software.amazon.awssdk.services.iot.model.RemoveThingFromThingGroupRequest;
 import software.amazon.awssdk.services.iot.model.SqsAction;
 import software.amazon.awssdk.services.iot.model.ResourceAlreadyExistsException;
 import software.amazon.awssdk.services.iot.model.ResourceNotFoundException;
 import software.amazon.awssdk.services.iot.model.Tag;
 import software.amazon.awssdk.services.iot.model.TagResourceRequest;
+import software.amazon.awssdk.services.iot.model.ThingGroupProperties;
+import software.amazon.awssdk.services.iot.model.ThingTypeProperties;
 import software.amazon.awssdk.services.iot.model.TopicRulePayload;
 import software.amazon.awssdk.services.iot.model.UntagResourceRequest;
 import software.amazon.awssdk.services.iot.model.UpdateCertificateRequest;
 import software.amazon.awssdk.services.iot.model.UpdateThingRequest;
+import software.amazon.awssdk.services.iot.model.UpdateThingTypeRequest;
 import software.amazon.awssdk.services.iot.model.VersionConflictException;
 import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
+import software.amazon.awssdk.services.iotdataplane.model.DeleteConnectionRequest;
 import software.amazon.awssdk.services.iotdataplane.model.DeleteThingShadowRequest;
 import software.amazon.awssdk.services.iotdataplane.model.GetThingShadowRequest;
 import software.amazon.awssdk.services.iotdataplane.model.ListNamedShadowsForThingRequest;
 import software.amazon.awssdk.services.iotdataplane.model.PublishRequest;
 import software.amazon.awssdk.services.iotdataplane.model.UpdateThingShadowRequest;
+import software.amazon.awssdk.services.iotjobsdataplane.IotJobsDataPlaneClient;
+import software.amazon.awssdk.services.iotjobsdataplane.model.GetPendingJobExecutionsRequest;
+import software.amazon.awssdk.services.iotjobsdataplane.model.JobExecutionStatus;
+import software.amazon.awssdk.services.iotjobsdataplane.model.StartNextPendingJobExecutionRequest;
+import software.amazon.awssdk.services.iotjobsdataplane.model.UpdateJobExecutionRequest;
 import software.amazon.awssdk.services.sqs.SqsClient;
 import software.amazon.awssdk.services.sqs.model.CreateQueueRequest;
 import software.amazon.awssdk.services.sqs.model.DeleteQueueRequest;
@@ -73,6 +97,7 @@ class IotTest {
 
     private final IotClient iot = TestFixtures.iotClient();
     private final IotDataPlaneClient iotData = TestFixtures.iotDataClient();
+    private final IotJobsDataPlaneClient iotJobsData = TestFixtures.iotJobsDataClient();
     private final SqsClient sqs = TestFixtures.sqsClient();
 
     @Test
@@ -268,6 +293,11 @@ class IotTest {
     @Test
     void iotDataShadowsAndPublish() {
         String thingName = "java-iot-shadow-thing";
+        assertThatThrownBy(() -> iotData.deleteConnection(DeleteConnectionRequest.builder()
+                .clientId("java-iot-missing-client")
+                .build()))
+                .isInstanceOf(software.amazon.awssdk.services.iotdataplane.model.ResourceNotFoundException.class);
+
         assertThatThrownBy(() -> iotData.getThingShadow(GetThingShadowRequest.builder()
                 .thingName(thingName)
                 .build()))
@@ -355,6 +385,107 @@ class IotTest {
             }
             sqs.deleteQueue(DeleteQueueRequest.builder().queueUrl(queueUrl).build());
         }
+    }
+
+    @Test
+    void thingTypesGroupsAndJobs() {
+        String thingType = "java-iot-type";
+        String thingName = "java-iot-typed-thing";
+        String groupName = "java-iot-group";
+        String jobId = "java-iot-job";
+        try {
+            iot.deleteThing(DeleteThingRequest.builder().thingName(thingName).build());
+        } catch (Exception ignored) {
+        }
+        try {
+            iot.deleteThingGroup(DeleteThingGroupRequest.builder().thingGroupName(groupName).build());
+        } catch (Exception ignored) {
+        }
+        try {
+            iot.deprecateThingType(DeprecateThingTypeRequest.builder().thingTypeName(thingType).build());
+            iot.deleteThingType(DeleteThingTypeRequest.builder().thingTypeName(thingType).build());
+        } catch (Exception ignored) {
+        }
+
+        var jobsEndpoint = iot.describeEndpoint(DescribeEndpointRequest.builder().endpointType("iot:Jobs").build());
+        assertThat(jobsEndpoint.endpointAddress()).isNotBlank();
+
+        var createdType = iot.createThingType(CreateThingTypeRequest.builder()
+                .thingTypeName(thingType)
+                .thingTypeProperties(ThingTypeProperties.builder()
+                        .thingTypeDescription("java type")
+                        .searchableAttributes("model")
+                        .build())
+                .build());
+        assertThat(createdType.thingTypeName()).isEqualTo(thingType);
+        var describedType = iot.describeThingType(DescribeThingTypeRequest.builder().thingTypeName(thingType).build());
+        assertThat(describedType.thingTypeProperties().thingTypeDescription()).isEqualTo("java type");
+        assertThat(iot.listThingTypes(ListThingTypesRequest.builder().build()).thingTypes())
+                .anyMatch(type -> thingType.equals(type.thingTypeName()));
+
+        iot.updateThingType(UpdateThingTypeRequest.builder()
+                .thingTypeName(thingType)
+                .thingTypeProperties(ThingTypeProperties.builder()
+                        .thingTypeDescription("java type updated")
+                        .searchableAttributes("model", "fw")
+                        .build())
+                .build());
+
+        var createdThing = iot.createThing(CreateThingRequest.builder()
+                .thingName(thingName)
+                .thingTypeName(thingType)
+                .attributePayload(AttributePayload.builder().attributes(Map.of("model", "j1")).build())
+                .build());
+        assertThat(iot.describeThing(DescribeThingRequest.builder().thingName(thingName).build()).thingTypeName()).isEqualTo(thingType);
+
+        var createdGroup = iot.createThingGroup(CreateThingGroupRequest.builder()
+                .thingGroupName(groupName)
+                .thingGroupProperties(ThingGroupProperties.builder()
+                        .thingGroupDescription("java group")
+                        .attributePayload(AttributePayload.builder().attributes(Map.of("fleet", "java")).build())
+                        .build())
+                .build());
+        assertThat(createdGroup.thingGroupName()).isEqualTo(groupName);
+        iot.addThingToThingGroup(AddThingToThingGroupRequest.builder().thingGroupName(groupName).thingName(thingName).build());
+        assertThat(iot.listThingsInThingGroup(ListThingsInThingGroupRequest.builder().thingGroupName(groupName).build()).things()).contains(thingName);
+        assertThat(iot.listThingGroupsForThing(ListThingGroupsForThingRequest.builder().thingName(thingName).build()).thingGroups())
+                .anyMatch(group -> groupName.equals(group.groupName()));
+
+        var createdJob = iot.createJob(CreateJobRequest.builder()
+                .jobId(jobId)
+                .targets(createdThing.thingArn())
+                .document("{\"operation\":\"reboot\"}")
+                .description("java job")
+                .build());
+        assertThat(createdJob.jobId()).isEqualTo(jobId);
+        assertThat(iot.describeJob(DescribeJobRequest.builder().jobId(jobId).build()).job().statusAsString()).isEqualTo("IN_PROGRESS");
+        assertThat(iot.listJobs(ListJobsRequest.builder().build()).jobs()).anyMatch(job -> jobId.equals(job.jobId()));
+        assertThat(iot.listJobExecutionsForThing(ListJobExecutionsForThingRequest.builder().thingName(thingName).build()).executionSummaries())
+                .anyMatch(execution -> jobId.equals(execution.jobId()));
+
+        var pending = iotJobsData.getPendingJobExecutions(GetPendingJobExecutionsRequest.builder().thingName(thingName).build());
+        assertThat(pending.queuedJobs()).anyMatch(job -> jobId.equals(job.jobId()));
+        var started = iotJobsData.startNextPendingJobExecution(StartNextPendingJobExecutionRequest.builder()
+                .thingName(thingName)
+                .statusDetails(Map.of("phase", "download"))
+                .build());
+        assertThat(started.execution().status()).isEqualTo(JobExecutionStatus.IN_PROGRESS);
+        var updated = iotJobsData.updateJobExecution(UpdateJobExecutionRequest.builder()
+                .thingName(thingName)
+                .jobId(jobId)
+                .status(JobExecutionStatus.SUCCEEDED)
+                .expectedVersion(2L)
+                .includeJobExecutionState(true)
+                .includeJobDocument(true)
+                .build());
+        assertThat(updated.executionState().status()).isEqualTo(JobExecutionStatus.SUCCEEDED);
+        assertThat(updated.jobDocument()).contains("reboot");
+
+        iot.removeThingFromThingGroup(RemoveThingFromThingGroupRequest.builder().thingGroupName(groupName).thingName(thingName).build());
+        iot.deleteThingGroup(DeleteThingGroupRequest.builder().thingGroupName(groupName).build());
+        iot.deleteThing(DeleteThingRequest.builder().thingName(thingName).build());
+        iot.deprecateThingType(DeprecateThingTypeRequest.builder().thingTypeName(thingType).build());
+        iot.deleteThingType(DeleteThingTypeRequest.builder().thingTypeName(thingType).build());
     }
 
     @Test

@@ -15,6 +15,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
@@ -22,6 +23,7 @@ import java.util.Arrays;
 import java.util.Map;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -53,6 +55,29 @@ class IotMqttEnabledIntegrationTest {
         try (Socket client = connectMqtt5("phase6-connect-v5")) {
             assertTrue(client.isConnected());
         }
+    }
+
+    @Test
+    void deleteConnectionClosesConnectedMqttClient() throws Exception {
+        String clientId = "phase6-delete-" + System.nanoTime();
+
+        try (Socket client = connectMqttClientId(clientId)) {
+            given()
+                .queryParam("cleanSession", true)
+            .when()
+                .delete("/connections/{clientId}", clientId)
+            .then()
+                .statusCode(200);
+
+            assertSocketClosed(client);
+        }
+
+        given()
+        .when()
+            .delete("/connections/{clientId}", clientId)
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("ResourceNotFoundException"));
     }
 
     @Test
@@ -254,10 +279,14 @@ class IotMqttEnabledIntegrationTest {
     }
 
     private Socket connectMqtt(String clientId) throws IOException {
+        return connectMqttClientId(uniqueClientId(clientId));
+    }
+
+    private Socket connectMqttClientId(String clientId) throws IOException {
         Socket socket = new Socket();
         socket.connect(new InetSocketAddress("127.0.0.1", PORT), 2_000);
         socket.setSoTimeout(2_000);
-        socket.getOutputStream().write(connectPacket(clientId));
+        socket.getOutputStream().write(connectPacketForClientId(clientId));
         byte[] connack = readPacket(socket.getInputStream());
         assertArrayEquals(new byte[] {0x20, 0x02, 0x00, 0x00}, connack);
         return socket;
@@ -289,13 +318,17 @@ class IotMqttEnabledIntegrationTest {
     }
 
     private byte[] connectPacket(String clientId) throws IOException {
+        return connectPacketForClientId(uniqueClientId(clientId));
+    }
+
+    private byte[] connectPacketForClientId(String clientId) throws IOException {
         ByteArrayOutputStream variable = new ByteArrayOutputStream();
         writeUtf8(variable, "MQTT");
         variable.write(0x04);
         variable.write(0x02);
         variable.write(0x00);
         variable.write(0x3c);
-        writeUtf8(variable, uniqueClientId(clientId));
+        writeUtf8(variable, clientId);
         return packet(0x10, variable.toByteArray());
     }
 
@@ -485,6 +518,14 @@ class IotMqttEnabledIntegrationTest {
             Thread.sleep(25);
         }
         throw new AssertionError("MQTT publish event was not recorded");
+    }
+
+    private void assertSocketClosed(Socket socket) throws IOException {
+        try {
+            assertEquals(-1, socket.getInputStream().read());
+        } catch (SocketTimeoutException e) {
+            throw new AssertionError("MQTT connection stayed open after DeleteConnection", e);
+        }
     }
 
     private record MqttPublish(String topic, byte[] payload) {

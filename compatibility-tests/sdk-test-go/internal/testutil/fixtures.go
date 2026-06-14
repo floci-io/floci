@@ -19,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/iot"
 	"github.com/aws/aws-sdk-go-v2/service/iotdataplane"
+	"github.com/aws/aws-sdk-go-v2/service/iotjobsdataplane"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/lambda"
@@ -151,6 +152,11 @@ func IoTClient() *iot.Client {
 // IoTDataClient returns a new AWS IoT Data Plane client.
 func IoTDataClient() *iotdataplane.Client {
 	return iotdataplane.NewFromConfig(Config())
+}
+
+// IoTJobsDataClient returns a new AWS IoT Jobs Data Plane client.
+func IoTJobsDataClient() *iotjobsdataplane.Client {
+	return iotjobsdataplane.NewFromConfig(Config())
 }
 
 // RDSClient returns a new RDS client.

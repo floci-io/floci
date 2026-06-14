@@ -91,6 +91,16 @@ public class IotDataController {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    @DELETE
+    @Path("/connections/{clientId: .+}")
+    @Consumes(MediaType.WILDCARD)
+    public Response deleteConnection(@PathParam("clientId") String clientId,
+                                     @QueryParam("cleanSession") Boolean cleanSession,
+                                     @QueryParam("preventWillMessage") Boolean preventWillMessage) {
+        iotService.deleteConnection(clientId, Boolean.TRUE.equals(cleanSession));
+        return Response.ok().build();
+    }
+
     @GET
     @Path("/retainedMessage/{topic: .+}")
     public Response getRetainedMessage(@PathParam("topic") String topic) {

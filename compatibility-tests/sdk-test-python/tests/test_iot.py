@@ -373,6 +373,87 @@ def test_topic_rule_crud_and_sqs_action(iot_client, iot_data_client, sqs_client,
         sqs_client.delete_queue(QueueUrl=queue_url)
 
 
+def test_thing_types_groups_and_jobs(iot_client, iot_jobs_data_client, unique_name):
+    thing_type = f"{unique_name}-type"
+    thing_name = f"{unique_name}-typed-thing"
+    group_name = f"{unique_name}-group"
+    job_id = f"{unique_name}-job"
+
+    endpoint = iot_client.describe_endpoint(endpointType="iot:Jobs")
+    assert endpoint["endpointAddress"]
+
+    created_type = iot_client.create_thing_type(
+        thingTypeName=thing_type,
+        thingTypeProperties={"thingTypeDescription": "python type", "searchableAttributes": ["model"]},
+    )
+    assert created_type["thingTypeName"] == thing_type
+    described_type = iot_client.describe_thing_type(thingTypeName=thing_type)
+    assert described_type["thingTypeProperties"]["thingTypeDescription"] == "python type"
+    assert "model" in described_type["thingTypeProperties"]["searchableAttributes"]
+    assert any(item["thingTypeName"] == thing_type for item in iot_client.list_thing_types()["thingTypes"])
+
+    iot_client.update_thing_type(
+        thingTypeName=thing_type,
+        thingTypeProperties={"thingTypeDescription": "python type updated", "searchableAttributes": ["model", "fw"]},
+    )
+    thing = iot_client.create_thing(
+        thingName=thing_name,
+        thingTypeName=thing_type,
+        attributePayload={"attributes": {"model": "p1"}},
+    )
+    thing_arn = thing["thingArn"]
+    assert iot_client.describe_thing(thingName=thing_name)["thingTypeName"] == thing_type
+
+    group = iot_client.create_thing_group(
+        thingGroupName=group_name,
+        thingGroupProperties={
+            "thingGroupDescription": "python group",
+            "attributePayload": {"attributes": {"fleet": "python"}},
+        },
+    )
+    assert group["thingGroupName"] == group_name
+    described_group = iot_client.describe_thing_group(thingGroupName=group_name)
+    assert described_group["thingGroupProperties"]["attributePayload"]["attributes"]["fleet"] == "python"
+    iot_client.add_thing_to_thing_group(thingGroupName=group_name, thingName=thing_name)
+    assert thing_name in iot_client.list_things_in_thing_group(thingGroupName=group_name)["things"]
+    assert any(item["groupName"] == group_name for item in iot_client.list_thing_groups_for_thing(thingName=thing_name)["thingGroups"])
+
+    created_job = iot_client.create_job(
+        jobId=job_id,
+        targets=[thing_arn],
+        document=json.dumps({"operation": "reboot"}),
+        description="python job",
+    )
+    assert created_job["jobId"] == job_id
+    assert iot_client.describe_job(jobId=job_id)["job"]["status"] == "IN_PROGRESS"
+    assert any(job["jobId"] == job_id for job in iot_client.list_jobs()["jobs"])
+    assert any(item["jobId"] == job_id for item in iot_client.list_job_executions_for_thing(thingName=thing_name)["executionSummaries"])
+
+    pending = iot_jobs_data_client.get_pending_job_executions(thingName=thing_name)
+    assert any(job["jobId"] == job_id for job in pending["queuedJobs"])
+    started = iot_jobs_data_client.start_next_pending_job_execution(
+        thingName=thing_name,
+        statusDetails={"phase": "download"},
+    )
+    assert started["execution"]["status"] == "IN_PROGRESS"
+    updated = iot_jobs_data_client.update_job_execution(
+        thingName=thing_name,
+        jobId=job_id,
+        status="SUCCEEDED",
+        expectedVersion=2,
+        includeJobExecutionState=True,
+        includeJobDocument=True,
+    )
+    assert updated["executionState"]["status"] == "SUCCEEDED"
+    assert json.loads(updated["jobDocument"])["operation"] == "reboot"
+
+    iot_client.remove_thing_from_thing_group(thingGroupName=group_name, thingName=thing_name)
+    iot_client.delete_thing_group(thingGroupName=group_name)
+    iot_client.delete_thing(thingName=thing_name)
+    iot_client.deprecate_thing_type(thingTypeName=thing_type)
+    iot_client.delete_thing_type(thingTypeName=thing_type)
+
+
 def test_mqtt_connect_publish_subscribe(unique_name):
     topic = f"devices/{unique_name}/mqtt"
     payload = b"python-mqtt"

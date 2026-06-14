@@ -10,9 +10,13 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iot.model.IotCertificate;
+import io.github.hectorvent.floci.services.iot.model.IotJob;
+import io.github.hectorvent.floci.services.iot.model.IotJobExecution;
 import io.github.hectorvent.floci.services.iot.model.IotPolicy;
 import io.github.hectorvent.floci.services.iot.model.IotRetainedMessage;
 import io.github.hectorvent.floci.services.iot.model.IotShadow;
+import io.github.hectorvent.floci.services.iot.model.IotThingGroup;
+import io.github.hectorvent.floci.services.iot.model.IotThingType;
 import io.github.hectorvent.floci.services.iot.model.IotTopicRule;
 import io.github.hectorvent.floci.services.iot.model.Thing;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -50,6 +54,11 @@ public class IotService {
     private final StorageBackend<String, IotShadow> shadowStore;
     private final StorageBackend<String, IotTopicRule> topicRuleStore;
     private final StorageBackend<String, IotRetainedMessage> retainedMessageStore;
+    private final StorageBackend<String, IotJob> jobStore;
+    private final StorageBackend<String, IotJobExecution> jobExecutionStore;
+    private final StorageBackend<String, IotThingType> thingTypeStore;
+    private final StorageBackend<String, IotThingGroup> thingGroupStore;
+    private final StorageBackend<String, Set<String>> thingGroupMembershipStore;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
     private final ObjectMapper objectMapper;
@@ -75,6 +84,11 @@ public class IotService {
                 storageFactory.create("iot", "iot-shadows.json", new TypeReference<Map<String, IotShadow>>() {}),
                 storageFactory.create("iot", "iot-topic-rules.json", new TypeReference<Map<String, IotTopicRule>>() {}),
                 storageFactory.create("iot", "iot-retained-messages.json", new TypeReference<Map<String, IotRetainedMessage>>() {}),
+                storageFactory.create("iot", "iot-jobs.json", new TypeReference<Map<String, IotJob>>() {}),
+                storageFactory.create("iot", "iot-job-executions.json", new TypeReference<Map<String, IotJobExecution>>() {}),
+                storageFactory.create("iot", "iot-thing-types.json", new TypeReference<Map<String, IotThingType>>() {}),
+                storageFactory.create("iot", "iot-thing-groups.json", new TypeReference<Map<String, IotThingGroup>>() {}),
+                storageFactory.create("iot", "iot-thing-group-memberships.json", new TypeReference<Map<String, Set<String>>>() {}),
                 config, regionResolver, objectMapper, publishEventRecorder, mqttBrokerService, sqsService, snsService);
     }
 
@@ -83,10 +97,15 @@ public class IotService {
                StorageBackend<String, IotPolicy> policyStore,
                 StorageBackend<String, Set<String>> policyAttachmentStore,
                  StorageBackend<String, Set<String>> thingPrincipalStore,
-                 StorageBackend<String, IotShadow> shadowStore,
-                 StorageBackend<String, IotTopicRule> topicRuleStore,
-                 StorageBackend<String, IotRetainedMessage> retainedMessageStore,
-                 EmulatorConfig config,
+                  StorageBackend<String, IotShadow> shadowStore,
+                  StorageBackend<String, IotTopicRule> topicRuleStore,
+                  StorageBackend<String, IotRetainedMessage> retainedMessageStore,
+                  StorageBackend<String, IotJob> jobStore,
+                  StorageBackend<String, IotJobExecution> jobExecutionStore,
+                  StorageBackend<String, IotThingType> thingTypeStore,
+                  StorageBackend<String, IotThingGroup> thingGroupStore,
+                  StorageBackend<String, Set<String>> thingGroupMembershipStore,
+                  EmulatorConfig config,
                  RegionResolver regionResolver,
                  ObjectMapper objectMapper,
                  IotPublishEventRecorder publishEventRecorder,
@@ -101,6 +120,11 @@ public class IotService {
         this.shadowStore = shadowStore;
         this.topicRuleStore = topicRuleStore;
         this.retainedMessageStore = retainedMessageStore;
+        this.jobStore = jobStore;
+        this.jobExecutionStore = jobExecutionStore;
+        this.thingTypeStore = thingTypeStore;
+        this.thingGroupStore = thingGroupStore;
+        this.thingGroupMembershipStore = thingGroupMembershipStore;
         this.config = config;
         this.regionResolver = regionResolver;
         this.objectMapper = objectMapper;
@@ -112,7 +136,7 @@ public class IotService {
 
     public String describeEndpoint(String endpointType) {
         String effectiveType = endpointType == null || endpointType.isBlank() ? DEFAULT_ENDPOINT_TYPE : endpointType;
-        if (!DEFAULT_ENDPOINT_TYPE.equals(effectiveType)) {
+        if (!Set.of(DEFAULT_ENDPOINT_TYPE, "iot:Data", "iot:Jobs").contains(effectiveType)) {
             throw new AwsException("InvalidRequestException", "Unsupported endpoint type: " + effectiveType, 400);
         }
         startMqttIfEnabled();
@@ -121,12 +145,20 @@ public class IotService {
     }
 
     public Thing createThing(String thingName, Map<String, String> attributes, String region) {
+        return createThing(thingName, attributes, null, region);
+    }
+
+    public Thing createThing(String thingName, Map<String, String> attributes, String thingTypeName, String region) {
         startMqttIfEnabled();
         validateThingName(thingName);
+        if (thingTypeName != null && !thingTypeName.isBlank()) {
+            describeThingType(thingTypeName, region);
+        }
         String key = thingKey(region, thingName);
         Thing existing = thingStore.get(key).orElse(null);
         if (existing != null) {
-            if (existing.getAttributes().equals(attributes)) {
+            if (existing.getAttributes().equals(attributes)
+                    && java.util.Objects.equals(existing.getThingTypeName(), blankToNull(thingTypeName))) {
                 return existing;
             }
             throw new AwsException("ResourceAlreadyExistsException", "Thing already exists: " + thingName, 409);
@@ -138,6 +170,7 @@ public class IotService {
         thing.setThingArn(regionResolver.buildArn("iot", region, "thing/" + thingName));
         thing.setThingId(UUID.randomUUID().toString());
         thing.setAttributes(attributes);
+        thing.setThingTypeName(blankToNull(thingTypeName));
         thing.setVersion(1L);
         thing.setCreationDate(now);
         thing.setLastModifiedDate(now);
@@ -177,6 +210,14 @@ public class IotService {
     public void deleteThing(String thingName, String region) {
         describeThing(thingName, region);
         thingStore.delete(thingKey(region, thingName));
+        for (String key : thingGroupMembershipStore.keys()) {
+            if (key.startsWith("thing-group-membership:" + region + ":")) {
+                Set<String> members = new HashSet<>(thingGroupMembershipStore.get(key).orElse(Set.of()));
+                if (members.remove(thingName)) {
+                    thingGroupMembershipStore.put(key, members);
+                }
+            }
+        }
     }
 
     public Map<String, String> listTagsForResource(String resourceArn) {
@@ -482,6 +523,16 @@ public class IotService {
         handlePublish(topic, eventPayload, true);
     }
 
+    public void deleteConnection(String clientId, boolean cleanSession) {
+        if (clientId == null || clientId.isBlank() || clientId.length() > 128 || clientId.startsWith("$")) {
+            throw new AwsException("InvalidRequestException", "Invalid MQTT clientId: " + clientId, 400);
+        }
+        boolean disconnected = mqttBrokerService.disconnectClient(clientId, cleanSession);
+        if (!disconnected) {
+            throw new AwsException("ResourceNotFoundException", "MQTT client is not connected: " + clientId, 404);
+        }
+    }
+
     public IotRetainedMessage getRetainedMessage(String topic) {
         return retainedMessageStore.get(retainedMessageKey(topic))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Retained message not found: " + topic, 404));
@@ -492,6 +543,258 @@ public class IotService {
                 .sorted(Comparator.comparing(IotRetainedMessage::getTopic))
                 .toList();
         return paginate(messages, maxResults, nextToken);
+    }
+
+    public IotThingType createThingType(String thingTypeName, JsonNode properties, String region) {
+        String key = thingTypeKey(region, thingTypeName);
+        IotThingType existing = thingTypeStore.get(key).orElse(null);
+        if (existing != null) {
+            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingTypeDescription").asText(null))
+                    && existing.getSearchableAttributes().equals(stringList(properties.path("searchableAttributes")))) {
+                return existing;
+            }
+            throw new AwsException("ResourceAlreadyExistsException", "Thing type already exists: " + thingTypeName, 409);
+        }
+        IotThingType type = new IotThingType();
+        type.setThingTypeName(thingTypeName);
+        type.setThingTypeArn(regionResolver.buildArn("iot", region, "thingtype/" + thingTypeName));
+        type.setThingTypeId(UUID.randomUUID().toString());
+        updateThingTypeProperties(type, properties);
+        type.setCreationDate(Instant.now());
+        thingTypeStore.put(key, type);
+        return type;
+    }
+
+    public IotThingType describeThingType(String thingTypeName, String region) {
+        return thingTypeStore.get(thingTypeKey(region, thingTypeName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Thing type not found: " + thingTypeName, 404));
+    }
+
+    public Page<IotThingType> listThingTypes(String region, Integer maxResults, String nextToken) {
+        return paginate(thingTypeStore.scan(key -> key.startsWith("thing-type:" + region + ":")).stream()
+                .sorted(Comparator.comparing(IotThingType::getThingTypeName))
+                .toList(), maxResults, nextToken);
+    }
+
+    public IotThingType updateThingType(String thingTypeName, JsonNode properties, String region) {
+        IotThingType type = describeThingType(thingTypeName, region);
+        updateThingTypeProperties(type, properties);
+        thingTypeStore.put(thingTypeKey(region, thingTypeName), type);
+        return type;
+    }
+
+    public void deprecateThingType(String thingTypeName, String region) {
+        IotThingType type = describeThingType(thingTypeName, region);
+        type.setDeprecated(true);
+        type.setDeprecatedDate(Instant.now());
+        thingTypeStore.put(thingTypeKey(region, thingTypeName), type);
+    }
+
+    public void deleteThingType(String thingTypeName, String region) {
+        describeThingType(thingTypeName, region);
+        boolean inUse = listThings(region).stream().anyMatch(thing -> thingTypeName.equals(thing.getThingTypeName()));
+        if (inUse) {
+            throw new AwsException("InvalidRequestException", "Cannot delete thing type with associated things", 400);
+        }
+        thingTypeStore.delete(thingTypeKey(region, thingTypeName));
+    }
+
+    public IotThingGroup createThingGroup(String thingGroupName, JsonNode properties, String region) {
+        String key = thingGroupKey(region, thingGroupName);
+        IotThingGroup existing = thingGroupStore.get(key).orElse(null);
+        if (existing != null) {
+            if (java.util.Objects.equals(existing.getDescription(), properties.path("thingGroupDescription").asText(null))
+                    && existing.getAttributes().equals(parseAttributePayload(properties.path("attributePayload")))) {
+                return existing;
+            }
+            throw new AwsException("ResourceAlreadyExistsException", "Thing group already exists: " + thingGroupName, 409);
+        }
+        IotThingGroup group = new IotThingGroup();
+        group.setThingGroupName(thingGroupName);
+        group.setThingGroupArn(regionResolver.buildArn("iot", region, "thinggroup/" + thingGroupName));
+        group.setThingGroupId(UUID.randomUUID().toString());
+        group.setCreationDate(Instant.now());
+        updateThingGroupProperties(group, properties);
+        thingGroupStore.put(key, group);
+        return group;
+    }
+
+    public IotThingGroup describeThingGroup(String thingGroupName, String region) {
+        return thingGroupStore.get(thingGroupKey(region, thingGroupName))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Thing group not found: " + thingGroupName, 404));
+    }
+
+    public Page<IotThingGroup> listThingGroups(String region, Integer maxResults, String nextToken) {
+        return paginate(thingGroupStore.scan(key -> key.startsWith("thing-group:" + region + ":")).stream()
+                .sorted(Comparator.comparing(IotThingGroup::getThingGroupName))
+                .toList(), maxResults, nextToken);
+    }
+
+    public IotThingGroup updateThingGroup(String thingGroupName, JsonNode properties, Long expectedVersion, String region) {
+        IotThingGroup group = describeThingGroup(thingGroupName, region);
+        if (expectedVersion != null && group.getVersion() != expectedVersion) {
+            throw new AwsException("VersionConflictException", "Thing group version does not match expectedVersion", 409);
+        }
+        updateThingGroupProperties(group, properties);
+        group.setVersion(group.getVersion() + 1);
+        thingGroupStore.put(thingGroupKey(region, thingGroupName), group);
+        return group;
+    }
+
+    public void deleteThingGroup(String thingGroupName, String region) {
+        describeThingGroup(thingGroupName, region);
+        thingGroupStore.delete(thingGroupKey(region, thingGroupName));
+        thingGroupMembershipStore.delete(thingGroupMembershipKey(region, thingGroupName));
+    }
+
+    public void addThingToThingGroup(String thingGroupName, String thingName, String region) {
+        describeThingGroup(thingGroupName, region);
+        describeThing(thingName, region);
+        Set<String> members = new HashSet<>(thingGroupMembershipStore.get(thingGroupMembershipKey(region, thingGroupName)).orElse(Set.of()));
+        members.add(thingName);
+        thingGroupMembershipStore.put(thingGroupMembershipKey(region, thingGroupName), members);
+    }
+
+    public void removeThingFromThingGroup(String thingGroupName, String thingName, String region) {
+        describeThingGroup(thingGroupName, region);
+        Set<String> members = new HashSet<>(thingGroupMembershipStore.get(thingGroupMembershipKey(region, thingGroupName)).orElse(Set.of()));
+        members.remove(thingName);
+        thingGroupMembershipStore.put(thingGroupMembershipKey(region, thingGroupName), members);
+    }
+
+    public Set<String> listThingsInThingGroup(String thingGroupName, String region) {
+        describeThingGroup(thingGroupName, region);
+        return new java.util.TreeSet<>(thingGroupMembershipStore.get(thingGroupMembershipKey(region, thingGroupName)).orElse(Set.of()));
+    }
+
+    public List<IotThingGroup> listThingGroupsForThing(String thingName, String region) {
+        describeThing(thingName, region);
+        String prefix = "thing-group-membership:" + region + ":";
+        return thingGroupMembershipStore.keys().stream()
+                .filter(key -> key.startsWith(prefix) && thingGroupMembershipStore.get(key).orElse(Set.of()).contains(thingName))
+                .map(key -> key.substring(prefix.length()))
+                .map(groupName -> thingGroupStore.get(thingGroupKey(region, groupName)))
+                .flatMap(Optional::stream)
+                .sorted(Comparator.comparing(IotThingGroup::getThingGroupName))
+                .toList();
+    }
+
+    public IotJob createJob(String jobId, JsonNode request, String region) {
+        startMqttIfEnabled();
+        if (jobStore.get(jobKey(region, jobId)).isPresent()) {
+            throw new AwsException("ResourceAlreadyExistsException", "Job already exists: " + jobId, 409);
+        }
+        JsonNode targetsNode = request.path("targets");
+        if (!targetsNode.isArray() || targetsNode.isEmpty()) {
+            throw new AwsException("InvalidRequestException", "targets is required", 400);
+        }
+
+        Instant now = Instant.now();
+        IotJob job = new IotJob();
+        job.setJobId(jobId);
+        job.setJobArn(regionResolver.buildArn("iot", region, "job/" + jobId));
+        job.setDocument(request.path("document").asText(null));
+        job.setDocumentSource(request.path("documentSource").asText(null));
+        job.setDescription(request.path("description").asText(null));
+        job.setTargetSelection(request.path("targetSelection").asText("SNAPSHOT"));
+        job.setCreatedAt(now);
+        job.setLastUpdatedAt(now);
+
+        List<String> targets = new java.util.ArrayList<>();
+        Set<String> thingNames = new java.util.TreeSet<>();
+        targetsNode.forEach(target -> {
+            String value = target.asText();
+            if (value != null && !value.isBlank()) {
+                targets.add(value);
+                thingNames.addAll(thingNamesForJobTarget(value, region));
+            }
+        });
+        if (thingNames.isEmpty()) {
+            throw new AwsException("ResourceNotFoundException", "No job targets found", 404);
+        }
+        job.setTargets(targets);
+        jobStore.put(jobKey(region, jobId), job);
+
+        for (String thingName : thingNames) {
+            Thing thing = describeThing(thingName, region);
+            IotJobExecution execution = new IotJobExecution();
+            execution.setJobId(jobId);
+            execution.setThingName(thingName);
+            execution.setThingArn(thing.getThingArn());
+            execution.setStatus("QUEUED");
+            execution.setQueuedAt(now);
+            execution.setLastUpdatedAt(now);
+            jobExecutionStore.put(jobExecutionKey(region, thingName, jobId), execution);
+        }
+        return job;
+    }
+
+    public IotJob describeJob(String jobId, String region) {
+        return jobStore.get(jobKey(region, jobId))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Job not found: " + jobId, 404));
+    }
+
+    public Page<IotJob> listJobs(String region, Integer maxResults, String nextToken) {
+        List<IotJob> jobs = jobStore.scan(key -> key.startsWith("job:" + region + ":")).stream()
+                .sorted(Comparator.comparing(IotJob::getJobId))
+                .toList();
+        return paginate(jobs, maxResults, nextToken);
+    }
+
+    public Page<IotJobExecution> listJobExecutionsForThing(String thingName, String region, Integer maxResults, String nextToken) {
+        describeThing(thingName, region);
+        List<IotJobExecution> executions = jobExecutionStore.scan(key -> key.startsWith("job-execution:" + region + ":" + thingName + ":")).stream()
+                .sorted(Comparator.comparing(IotJobExecution::getJobId))
+                .toList();
+        return paginate(executions, maxResults, nextToken);
+    }
+
+    public IotJobExecution describeJobExecution(String thingName, String jobId, String region) {
+        describeThing(thingName, region);
+        describeJob(jobId, region);
+        return jobExecutionStore.get(jobExecutionKey(region, thingName, jobId))
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Job execution not found: " + jobId, 404));
+    }
+
+    public IotJobExecution startNextPendingJobExecution(String thingName, Map<String, String> statusDetails, String region) {
+        IotJobExecution execution = listJobExecutionsForThing(thingName, region, null, null).items().stream()
+                .filter(item -> "QUEUED".equals(item.getStatus()) || "IN_PROGRESS".equals(item.getStatus()))
+                .findFirst()
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "No pending job executions for thing: " + thingName, 404));
+        if ("QUEUED".equals(execution.getStatus())) {
+            execution.setStatus("IN_PROGRESS");
+            execution.setStartedAt(Instant.now());
+            execution.setVersionNumber(execution.getVersionNumber() + 1);
+        }
+        if (statusDetails != null && !statusDetails.isEmpty()) {
+            execution.setStatusDetails(statusDetails);
+        }
+        execution.setLastUpdatedAt(Instant.now());
+        jobExecutionStore.put(jobExecutionKey(region, thingName, execution.getJobId()), execution);
+        return execution;
+    }
+
+    public IotJobExecution updateJobExecution(String thingName, String jobId, String status, Map<String, String> statusDetails,
+                                             Long expectedVersion, String region) {
+        IotJobExecution execution = describeJobExecution(thingName, jobId, region);
+        validateJobExecutionStatus(status);
+        if (expectedVersion != null && execution.getVersionNumber() != expectedVersion) {
+            throw new AwsException("VersionConflictException", "Job execution version does not match expectedVersion", 409);
+        }
+        if (Set.of("SUCCEEDED", "FAILED", "TIMED_OUT", "REJECTED", "REMOVED", "CANCELED").contains(execution.getStatus())) {
+            throw new AwsException("InvalidStateTransitionException", "Job execution is already terminal", 409);
+        }
+        execution.setStatus(status);
+        if ("IN_PROGRESS".equals(status) && execution.getStartedAt() == null) {
+            execution.setStartedAt(Instant.now());
+        }
+        if (statusDetails != null) {
+            execution.setStatusDetails(statusDetails);
+        }
+        execution.setVersionNumber(execution.getVersionNumber() + 1);
+        execution.setLastUpdatedAt(Instant.now());
+        jobExecutionStore.put(jobExecutionKey(region, thingName, jobId), execution);
+        return execution;
     }
 
     public IotTopicRule createTopicRule(String ruleName, JsonNode payload, String region) {
@@ -626,6 +929,11 @@ public class IotService {
     private String shadowKey(String region, String thingName, String shadowName) { return "shadow:" + region + ":" + thingName + ":" + (shadowName == null ? "" : shadowName); }
     private String topicRuleKey(String region, String ruleName) { return "topic-rule:" + region + ":" + ruleName; }
     private String retainedMessageKey(String topic) { return "retained:" + topic; }
+    private String jobKey(String region, String jobId) { return "job:" + region + ":" + jobId; }
+    private String jobExecutionKey(String region, String thingName, String jobId) { return "job-execution:" + region + ":" + thingName + ":" + jobId; }
+    private String thingTypeKey(String region, String thingTypeName) { return "thing-type:" + region + ":" + thingTypeName; }
+    private String thingGroupKey(String region, String thingGroupName) { return "thing-group:" + region + ":" + thingGroupName; }
+    private String thingGroupMembershipKey(String region, String thingGroupName) { return "thing-group-membership:" + region + ":" + thingGroupName; }
 
     private JsonNode readJson(String json) {
         try {
@@ -875,6 +1183,57 @@ public class IotService {
         boolean thingAttached = thingPrincipalStore.scan(key -> key.startsWith("thing-principal:" + region + ":")).stream()
                 .anyMatch(principals -> principals.contains(certificateArn));
         return policyAttached || thingAttached;
+    }
+
+    private Set<String> thingNamesForJobTarget(String target, String region) {
+        String resource = target.startsWith("arn:") ? resourceFromArn(target) : target;
+        if (resource.startsWith("thing/")) {
+            String thingName = resource.substring("thing/".length());
+            describeThing(thingName, region);
+            return Set.of(thingName);
+        }
+        if (resource.startsWith("thinggroup/")) {
+            String thingGroupName = resource.substring("thinggroup/".length());
+            return listThingsInThingGroup(thingGroupName, region);
+        }
+        throw new AwsException("ResourceNotFoundException", "Unsupported or missing job target: " + target, 404);
+    }
+
+    private void updateThingTypeProperties(IotThingType type, JsonNode properties) {
+        type.setDescription(properties.path("thingTypeDescription").asText(null));
+        type.setSearchableAttributes(stringList(properties.path("searchableAttributes")));
+    }
+
+    private void updateThingGroupProperties(IotThingGroup group, JsonNode properties) {
+        group.setDescription(properties.path("thingGroupDescription").asText(null));
+        group.setAttributes(parseAttributePayload(properties.path("attributePayload")));
+    }
+
+    private List<String> stringList(JsonNode node) {
+        List<String> values = new java.util.ArrayList<>();
+        if (node != null && node.isArray()) {
+            node.forEach(item -> values.add(item.asText()));
+        }
+        return values;
+    }
+
+    private Map<String, String> parseAttributePayload(JsonNode attributePayload) {
+        Map<String, String> attributes = new TreeMap<>();
+        JsonNode attributesNode = attributePayload.path("attributes");
+        if (attributesNode.isObject()) {
+            attributesNode.fields().forEachRemaining(entry -> attributes.put(entry.getKey(), entry.getValue().asText()));
+        }
+        return attributes;
+    }
+
+    private String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value;
+    }
+
+    private void validateJobExecutionStatus(String status) {
+        if (!Set.of("QUEUED", "IN_PROGRESS", "SUCCEEDED", "FAILED", "TIMED_OUT", "REJECTED", "REMOVED", "CANCELED").contains(status)) {
+            throw new AwsException("InvalidRequestException", "Unsupported job execution status: " + status, 400);
+        }
     }
 
     private String regionFromArn(String resourceArn) {

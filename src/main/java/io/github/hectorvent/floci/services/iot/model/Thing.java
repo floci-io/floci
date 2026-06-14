@@ -9,6 +9,7 @@ public class Thing {
     private String thingName;
     private String thingArn;
     private String thingId;
+    private String thingTypeName;
     private Map<String, String> attributes = new HashMap<>();
     private Map<String, String> tags = new HashMap<>();
     private long version;
@@ -37,6 +38,14 @@ public class Thing {
 
     public void setThingId(String thingId) {
         this.thingId = thingId;
+    }
+
+    public String getThingTypeName() {
+        return thingTypeName;
+    }
+
+    public void setThingTypeName(String thingTypeName) {
+        this.thingTypeName = thingTypeName;
     }
 
     public Map<String, String> getAttributes() {
