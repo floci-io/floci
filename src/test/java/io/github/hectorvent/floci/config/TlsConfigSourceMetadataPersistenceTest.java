@@ -9,13 +9,12 @@ import org.junit.jupiter.api.io.TempDir;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Unit tests for metadata persistence in TlsConfigSource.
- * 
+ *
  * Tests that metadata is correctly persisted after certificate generation:
  * - Metadata file is created
  * - Metadata contains correct hostnames
@@ -55,7 +54,7 @@ class TlsConfigSourceMetadataPersistenceTest {
 
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
-        assertTrue(Files.exists(metadataFile), 
+        assertTrue(Files.exists(metadataFile),
             "Metadata file should be created after certificate generation");
     }
 
@@ -70,19 +69,19 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         CertificateMetadata metadata = readMetadata(metadataFile);
-        
+
         assertNotNull(metadata.getHostnames(), "Hostnames should not be null");
-        assertTrue(metadata.getHostnames().contains("localhost"), 
+        assertTrue(metadata.getHostnames().contains("localhost"),
             "Metadata should contain 'localhost'");
-        assertTrue(metadata.getHostnames().contains("127.0.0.1"), 
+        assertTrue(metadata.getHostnames().contains("127.0.0.1"),
             "Metadata should contain '127.0.0.1'");
-        assertTrue(metadata.getHostnames().contains("0.0.0.0"), 
+        assertTrue(metadata.getHostnames().contains("0.0.0.0"),
             "Metadata should contain '0.0.0.0'");
-        assertTrue(metadata.getHostnames().contains("*.localhost"), 
+        assertTrue(metadata.getHostnames().contains("*.localhost"),
             "Metadata should contain '*.localhost'");
-        assertTrue(metadata.getHostnames().contains("localhost.floci.io"), 
+        assertTrue(metadata.getHostnames().contains("localhost.floci.io"),
             "Metadata should contain 'localhost.floci.io'");
-        assertTrue(metadata.getHostnames().contains("*.localhost.floci.io"), 
+        assertTrue(metadata.getHostnames().contains("*.localhost.floci.io"),
             "Metadata should contain '*.localhost.floci.io'");
     }
 
@@ -100,8 +99,8 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         CertificateMetadata metadata = readMetadata(metadataFile);
-        
-        assertTrue(metadata.getHostnames().contains("floci"), 
+
+        assertTrue(metadata.getHostnames().contains("floci"),
             "Metadata should contain custom hostname 'floci'");
     }
 
@@ -119,8 +118,8 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         CertificateMetadata metadata = readMetadata(metadataFile);
-        
-        assertTrue(metadata.getHostnames().contains("myhost"), 
+
+        assertTrue(metadata.getHostnames().contains("myhost"),
             "Metadata should contain hostname 'myhost' from base URL");
     }
 
@@ -139,10 +138,10 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         CertificateMetadata metadata = readMetadata(metadataFile);
-        
-        assertTrue(metadata.getHostnames().contains("newhost"), 
+
+        assertTrue(metadata.getHostnames().contains("newhost"),
             "Metadata should contain 'newhost' from FLOCI_HOSTNAME");
-        assertTrue(metadata.getHostnames().contains("oldhost"), 
+        assertTrue(metadata.getHostnames().contains("oldhost"),
             "Metadata should contain 'oldhost' from FLOCI_BASE_URL");
     }
 
@@ -157,10 +156,10 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         CertificateMetadata metadata = readMetadata(metadataFile);
-        
-        assertNotNull(metadata.getGeneratedAt(), 
+
+        assertNotNull(metadata.getGeneratedAt(),
             "Metadata should contain generatedAt timestamp");
-        assertFalse(metadata.getGeneratedAt().isBlank(), 
+        assertFalse(metadata.getGeneratedAt().isBlank(),
             "Timestamp should not be blank");
     }
 
@@ -175,10 +174,10 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         CertificateMetadata metadata = readMetadata(metadataFile);
-        
-        assertNotNull(metadata.getFlociVersion(), 
+
+        assertNotNull(metadata.getFlociVersion(),
             "Metadata should contain flociVersion");
-        assertEquals("dev", metadata.getFlociVersion(), 
+        assertEquals("dev", metadata.getFlociVersion(),
             "Version should default to 'dev' when FLOCI_VERSION not set");
     }
 
@@ -190,15 +189,15 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Arrange
         // Note: We can't set environment variables in Java, so we'll test the default behavior
         // The actual environment variable handling is tested in integration tests
-        
+
         // Act
         new TlsConfigSource();
 
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         CertificateMetadata metadata = readMetadata(metadataFile);
-        
-        assertNotNull(metadata.getFlociVersion(), 
+
+        assertNotNull(metadata.getFlociVersion(),
             "Metadata should contain flociVersion");
     }
 
@@ -213,7 +212,7 @@ class TlsConfigSourceMetadataPersistenceTest {
         // Assert
         Path metadataFile = tempDir.resolve("tls/floci-selfsigned.metadata.json");
         String json = Files.readString(metadataFile);
-        
+
         assertFalse(json.isBlank(), "Metadata file should not be empty");
         assertTrue(json.contains("hostnames"), "JSON should contain 'hostnames' field");
         assertTrue(json.contains("generatedAt"), "JSON should contain 'generatedAt' field");

@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.eks;
 
 import io.github.hectorvent.floci.services.eks.model.Cluster;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.Consumes;
 import jakarta.ws.rs.DELETE;
@@ -61,6 +62,39 @@ public class EksController {
     public Response deleteCluster(@PathParam("name") String name) {
         Cluster cluster = eksService.deleteCluster(name);
         return Response.ok(Map.of("cluster", cluster)).build();
+    }
+
+    // Managed node groups. These explicit routes outrank S3's path-style catch-all
+    // (@Path("/{bucket}/{key: .+}")), which previously swallowed these paths (issue #1137).
+
+    @POST
+    @Path("/clusters/{name}/node-groups")
+    public Response createNodegroup(@PathParam("name") String name, Nodegroup request) {
+        Nodegroup nodegroup = eksService.createNodegroup(name, request);
+        return Response.ok(Map.of("nodegroup", nodegroup)).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/node-groups")
+    public Response listNodegroups(@PathParam("name") String name) {
+        List<String> nodegroups = eksService.listNodegroups(name);
+        return Response.ok(Map.of("nodegroups", nodegroups)).build();
+    }
+
+    @GET
+    @Path("/clusters/{name}/node-groups/{nodegroupName}")
+    public Response describeNodegroup(@PathParam("name") String name,
+                                      @PathParam("nodegroupName") String nodegroupName) {
+        Nodegroup nodegroup = eksService.describeNodegroup(name, nodegroupName);
+        return Response.ok(Map.of("nodegroup", nodegroup)).build();
+    }
+
+    @DELETE
+    @Path("/clusters/{name}/node-groups/{nodegroupName}")
+    public Response deleteNodegroup(@PathParam("name") String name,
+                                    @PathParam("nodegroupName") String nodegroupName) {
+        Nodegroup nodegroup = eksService.deleteNodegroup(name, nodegroupName);
+        return Response.ok(Map.of("nodegroup", nodegroup)).build();
     }
 
 }

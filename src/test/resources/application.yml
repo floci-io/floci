@@ -100,12 +100,21 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
       default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
+      enabled: true
+    cloudmap:
+      enabled: true
+    emr:
+      enabled: true
+    wafv2:
       enabled: true
     scheduler:
       enabled: true
@@ -195,6 +204,8 @@ floci:
     bcm-data-exports:
       enabled: true
       emit-mode: off
+    cloudtrail:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:

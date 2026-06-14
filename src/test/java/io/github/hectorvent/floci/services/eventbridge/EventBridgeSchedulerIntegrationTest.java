@@ -299,7 +299,16 @@ class EventBridgeSchedulerIntegrationTest {
             @Override
             public StorageConfig storage() { return null; }
             @Override
-            public DnsConfig dns() { return Optional::empty; }
+            public DnsConfig dns() {
+                return new DnsConfig() {
+                    @Override
+                    public Optional<List<String>> extraSuffixes() { return Optional.empty(); }
+                    @Override
+                    public boolean containerFallbackEnabled() { return true; }
+                    @Override
+                    public List<String> containerFallbackServers() { return List.of("8.8.8.8", "8.8.4.4"); }
+                };
+            }
             @Override
             public AuthConfig auth() { return null; }
             @Override

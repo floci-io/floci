@@ -41,4 +41,20 @@ if [ "${LOCALSTACK_PARITY:-true}" != "false" ]; then
     . /usr/local/bin/localstack-parity.sh
 fi
 
+# Fall back to the image's default command when invoked with no arguments.
+# Some tooling re-executes this entrypoint directly with an empty argv —
+# Testcontainers' LocalStackContainer does exactly that via its starter
+# script — and `exec "$@"` with no argv would make the script reach EOF
+# and exit 0 without ever starting the emulator. LocalStack's entrypoint
+# ignores its argv entirely, so this keeps drop-in parity.
+# The default matches the CMD of the image variant: native images ship
+# /app/application, JVM images ship /app/quarkus-app/quarkus-run.jar.
+if [ $# -eq 0 ]; then
+    if [ -x /app/application ]; then
+        set -- /app/application -Dquarkus.http.host=0.0.0.0
+    else
+        set -- java -jar /app/quarkus-app/quarkus-run.jar -Dquarkus.http.host=0.0.0.0
+    fi
+fi
+
 exec "$@"

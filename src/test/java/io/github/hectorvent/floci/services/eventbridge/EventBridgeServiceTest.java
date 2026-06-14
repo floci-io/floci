@@ -618,4 +618,127 @@ class EventBridgeServiceTest {
         assertFalse(service.matchesPattern(event,
                 "{\"source\":[\"my.app\"],\"account\":[\"999999999999\"],\"detail\":{\"status\":[\"CONFIRMED\"]}}"));
     }
+
+    // ─────────────── Envelope region/account propagation ───────────────
+
+    @Test
+    void putEvents_envelopeRegionMatchesPutEventsCallRegion() throws Exception {
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                "A test rule", null, null, "eu-west-1");
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sqs:eu-west-1:000000000000:my-queue");
+        service.putTargets("my-rule", null, List.of(target), "eu-west-1");
+
+        List<Map<String, Object>> entries = List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")
+        );
+
+        EventBridgeService.PutEventsResult result = service.putEvents(entries, "eu-west-1");
+        assertEquals(0, result.failedCount());
+
+        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("eu-west-1"));
+        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        assertEquals("eu-west-1", envelope.path("region").asText(),
+                "envelope.region should reflect the PutEvents call's region, not the resolver default");
+        assertEquals("000000000000", envelope.path("account").asText());
+    }
+
+    @Test
+    void putEvents_envelopeRegionFromEntryWinsOverCallRegion() throws Exception {
+        // Simulates the archive-replay path which stamps "Region" / "Account" on the
+        // re-emitted entry from the originating event's envelope.
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, "us-west-2");
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sqs:us-west-2:000000000000:replay-queue");
+        service.putTargets("my-rule", null, List.of(target), "us-west-2");
+
+        java.util.Map<String, Object> entry = new java.util.HashMap<>();
+        entry.put("Source", "my.app");
+        entry.put("DetailType", "Test");
+        entry.put("Detail", "{}");
+        entry.put("Region", "ap-northeast-1");
+        entry.put("Account", "111111111111");
+
+        service.putEvents(List.of(entry), "us-west-2");
+
+        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("us-west-2"));
+        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        assertEquals("ap-northeast-1", envelope.path("region").asText(),
+                "entry.Region should win over the PutEvents call region");
+        assertEquals("111111111111", envelope.path("account").asText(),
+                "entry.Account should win over the resolver default");
+    }
+
+    @Test
+    void putEvents_matchesPatternUsesCallRegionForRegionFilter() throws Exception {
+        // A rule with a region-filter for the call region (eu-west-1) must match a
+        // PutEvents entry that didn't supply Region — the entry should be normalized to
+        // the call region before matchesPattern() sees it. Without the normalization the
+        // pattern's region filter would compare against the resolver default (us-east-1)
+        // and the rule would miss.
+        service.putRule("region-filtered", null,
+                "{\"source\":[\"my.app\"],\"region\":[\"eu-west-1\"]}",
+                null, RuleState.ENABLED, null, null, null, "eu-west-1");
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sqs:eu-west-1:000000000000:filtered-queue");
+        service.putTargets("region-filtered", null, List.of(target), "eu-west-1");
+
+        service.putEvents(List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), "eu-west-1");
+
+        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq("eu-west-1"));
+        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        assertEquals("eu-west-1", envelope.path("region").asText(),
+                "envelope and pattern matching must agree on the entry's effective region");
+    }
+
+    @Test
+    void putEvents_matchesPatternRejectsWrongRegionFilterUnderNonDefaultCall() {
+        // The mirror of the above: a rule whose region-filter does NOT match the call
+        // region must not fire. Pre-fix, an entry without Region would default to
+        // resolver-default us-east-1 in matchesPattern, accidentally satisfying a filter
+        // like {"region":["us-east-1"]} even when PutEvents was called against
+        // eu-west-1.
+        service.putRule("default-region-filtered", null,
+                "{\"source\":[\"my.app\"],\"region\":[\"us-east-1\"]}",
+                null, RuleState.ENABLED, null, null, null, "eu-west-1");
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sqs:eu-west-1:000000000000:wrong-region-queue");
+        service.putTargets("default-region-filtered", null, List.of(target), "eu-west-1");
+
+        service.putEvents(List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), "eu-west-1");
+
+        verify(invokerMock, org.mockito.Mockito.never()).invokeTarget(eq(target), any(), any());
+    }
+
+    @Test
+    void putEvents_envelopeDefaultsRegressionForDefaultRegionCall() throws Exception {
+        // Regression: when neither the entry nor the call carries a region (callers in
+        // the default region), the envelope still stamps the resolver default — same
+        // behavior as before the fix.
+        service.putRule("my-rule", null, "{\"source\":[\"my.app\"]}", null, RuleState.ENABLED,
+                null, null, null, REGION);
+        Target target = new Target();
+        target.setId("t1");
+        target.setArn("arn:aws:sqs:us-east-1:000000000000:default-queue");
+        service.putTargets("my-rule", null, List.of(target), REGION);
+
+        service.putEvents(List.of(
+                Map.of("Source", "my.app", "DetailType", "Test", "Detail", "{}")), REGION);
+
+        org.mockito.ArgumentCaptor<String> json = org.mockito.ArgumentCaptor.forClass(String.class);
+        verify(invokerMock).invokeTarget(eq(target), json.capture(), eq(REGION));
+        com.fasterxml.jackson.databind.JsonNode envelope = OBJECT_MAPPER.readTree(json.getValue());
+        assertEquals(REGION, envelope.path("region").asText());
+        assertEquals("000000000000", envelope.path("account").asText());
+    }
 }

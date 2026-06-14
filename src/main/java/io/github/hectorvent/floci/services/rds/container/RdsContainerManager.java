@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.rds.container;
 
+import com.github.dockerjava.api.async.ResultCallback;
+import com.github.dockerjava.api.model.Frame;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ServiceConfigAccess;
@@ -16,14 +18,17 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.io.ByteArrayOutputStream;
 import java.io.Closeable;
 import java.io.IOException;
-import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manages backend Docker container lifecycle for RDS DB instances and clusters.
@@ -105,6 +110,7 @@ public class RdsContainerManager {
         EndpointInfo endpoint = info.getEndpoint(enginePort);
 
         LOG.infov("RDS backend for instance {0}: {1}", instanceId, endpoint);
+        initializeEngine(containerName, info.containerId(), engine, masterUsername);
 
         RdsContainerHandle handle = new RdsContainerHandle(
                 info.containerId(), instanceId, endpoint.host(), endpoint.port());
@@ -164,6 +170,103 @@ public class RdsContainerManager {
             case MYSQL, MARIADB -> "/var/lib/mysql";
         };
     }
+
+    private void initializeEngine(String containerName, String containerId, DatabaseEngine engine, String masterUsername) {
+        if (engine == DatabaseEngine.POSTGRES) {
+            initializePostgresIamRole(containerName, containerId, masterUsername);
+        }
+    }
+
+    static String postgresIamRoleInitSql() {
+        return """
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'rds_iam') THEN
+                        CREATE ROLE rds_iam;
+                    END IF;
+                END
+                $$;
+                """;
+    }
+
+    private void initializePostgresIamRole(String containerName, String containerId, String masterUsername) {
+        String effectiveUser = (masterUsername != null && !masterUsername.isBlank()) ? masterUsername : "postgres";
+        String[] cmd = {
+                "psql",
+                "-v", "ON_ERROR_STOP=1",
+                "-U", effectiveUser,
+                "-d", "postgres",
+                "-c", postgresIamRoleInitSql()
+        };
+        String lastOutput = "";
+        for (int attempt = 1; attempt <= 60; attempt++) {
+            try {
+                ContainerExecResult result = execInContainer(containerId, cmd, 5);
+                lastOutput = result.output();
+                if (result.exitCode() == 0) {
+                    LOG.infov("Initialized PostgreSQL IAM role in RDS container {0}", containerName);
+                    return;
+                }
+            } catch (Exception e) {
+                lastOutput = e.getMessage();
+            }
+            try {
+                TimeUnit.SECONDS.sleep(1);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new IllegalStateException("Interrupted initializing PostgreSQL IAM role in " + containerName, e);
+            }
+        }
+        throw new IllegalStateException("Timed out initializing PostgreSQL IAM role in " + containerName + ": " + lastOutput);
+    }
+
+    private ContainerExecResult execInContainer(String containerId, String[] cmd, int timeoutSeconds) throws Exception {
+        String execId = lifecycleManager.getDockerClient().execCreateCmd(containerId)
+                .withCmd(cmd)
+                .withAttachStdout(true)
+                .withAttachStderr(true)
+                .exec()
+                .getId();
+
+        CountDownLatch latch = new CountDownLatch(1);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        Closeable callback = lifecycleManager.getDockerClient().execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+            @Override
+            public void onNext(Frame frame) {
+                if (frame.getPayload() != null) {
+                    try {
+                        output.write(frame.getPayload());
+                    } catch (IOException ignored) {
+                    }
+                }
+            }
+
+            @Override
+            public void onComplete() {
+                latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable t) {
+                LOG.warnv(t, "Container exec {0} failed", execId);
+                latch.countDown();
+            }
+        });
+        try {
+            boolean completed = latch.await(timeoutSeconds, TimeUnit.SECONDS);
+            if (!completed) {
+                return new ContainerExecResult(-1, "Timed out after " + timeoutSeconds + "s");
+            }
+            Long exitCode = lifecycleManager.getDockerClient().inspectExecCmd(execId).exec().getExitCodeLong();
+            return new ContainerExecResult(
+                    exitCode != null ? exitCode : -1,
+                    output.toString(StandardCharsets.UTF_8));
+        } finally {
+            callback.close();
+        }
+    }
+
+    record ContainerExecResult(long exitCode, String output) {}
 
     public void removeVolume(String instanceId, String volumeId) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {

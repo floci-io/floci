@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
+import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -609,6 +610,27 @@ public class SesController {
             if (parsedTags != null) {
                 cs.setTags(parsedTags);
             }
+            JsonNode suppressionNode = request.path("SuppressionOptions");
+            if (!suppressionNode.isMissingNode() && !suppressionNode.isNull()) {
+                if (!suppressionNode.isObject()) {
+                    throw new AwsException("SerializationException", "Expected null", 400);
+                }
+                JsonNode reasonsNode = suppressionNode.path("SuppressedReasons");
+                if (reasonsNode.isMissingNode() || reasonsNode.isNull()) {
+                    throw new AwsException("InternalFailure",
+                            "An internal failure has occurred.", 500);
+                }
+                SuppressionOptions options = new SuppressionOptions();
+                options.setSuppressedReasons(parseSuppressedReasons(reasonsNode));
+                cs.setSuppressionOptions(options);
+            }
+            JsonNode sendingNode = request.path("SendingOptions");
+            if (!sendingNode.isMissingNode() && !sendingNode.isNull()) {
+                if (!sendingNode.isObject()) {
+                    throw new AwsException("SerializationException", "Expected null", 400);
+                }
+                cs.setSendingEnabled(parseSendingEnabled(sendingNode.path("SendingEnabled")));
+            }
             sesService.createConfigurationSet(cs, region);
             LOG.infov("SES V2 CreateConfigurationSet: {0}", name);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -648,9 +670,67 @@ public class SesController {
                 tagNode.put("Value", t.value());
                 tags.add(tagNode);
             }
+            if (cs.getSuppressionOptions() != null) {
+                ObjectNode suppressionNode = result.putObject("SuppressionOptions");
+                ArrayNode reasons = suppressionNode.putArray("SuppressedReasons");
+                for (String r : cs.getSuppressionOptions().getSuppressedReasons()) {
+                    reasons.add(r);
+                }
+            }
+            ObjectNode sendingNode = result.putObject("SendingOptions");
+            sendingNode.put("SendingEnabled", cs.isSendingEnabledEffective());
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/suppression-options")
+    public Response putConfigurationSetSuppressionOptions(@Context HttpHeaders headers,
+                                                          @PathParam("configurationSetName") String name,
+                                                          String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            List<String> reasons = parseSuppressedReasons(request.path("SuppressedReasons"));
+            sesService.putConfigurationSetSuppressionOptions(name, reasons, region);
+            LOG.infov("SES V2 PutConfigurationSetSuppressionOptions: {0} on {1}", reasons, name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/sending")
+    public Response putConfigurationSetSendingOptions(@Context HttpHeaders headers,
+                                                       @PathParam("configurationSetName") String name,
+                                                       String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            JsonNode enabledNode = request.path("SendingEnabled");
+            if (enabledNode.isMissingNode() || enabledNode.isNull() || !enabledNode.isBoolean()) {
+                throw new AwsException("BadRequestException",
+                        "SendingEnabled must be present and must be a boolean.", 400);
+            }
+            sesService.setConfigurationSetSendingEnabled(name, enabledNode.booleanValue(), region);
+            LOG.infov("SES V2 PutConfigurationSetSendingOptions: {0} on {1}",
+                    enabledNode.booleanValue(), name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 
@@ -1009,12 +1089,12 @@ public class SesController {
         result.set("DkimAttributes", buildDkimAttributes(identity));
 
         ObjectNode mailFromAttributes = result.putObject("MailFromAttributes");
+        mailFromAttributes.put("BehaviorOnMxFailure", v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
         String mailFromDomain = identity.getMailFromDomain();
-        mailFromAttributes.put("MailFromDomain", mailFromDomain == null ? "" : mailFromDomain);
-        mailFromAttributes.put("MailFromDomainStatus",
-                mailFromDomain == null ? "NOT_STARTED" : toV2Status(identity.getMailFromDomainStatus()));
-        mailFromAttributes.put("BehaviorOnMxFailure",
-                v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
+        if (mailFromDomain != null && !mailFromDomain.isEmpty()) {
+            mailFromAttributes.put("MailFromDomain", mailFromDomain);
+            mailFromAttributes.put("MailFromDomainStatus", toV2Status(identity.getMailFromDomainStatus()));
+        }
 
         result.putObject("Policies");
         ArrayNode tags = result.putArray("Tags");
@@ -1196,6 +1276,77 @@ public class SesController {
     }
 
     /**
+     * Parses a {@code SuppressedReasons} JSON array into a list, validating
+     * structure only; reason values are validated by the service layer.
+     * Structural violations reproduce the AWS deserialization-layer errors
+     * (verified against real AWS SES V2 on 2026-06-13): a non-array node and
+     * non-string scalar / container elements fail with
+     * {@code SerializationException}, while {@code null} elements pass
+     * deserialization and are rejected by the service-layer value validation,
+     * exactly as AWS does. Missing / null yields an empty list for the PUT
+     * path, which AWS treats as an explicit empty override.
+     */
+    private static List<String> parseSuppressedReasons(JsonNode reasonsNode) {
+        List<String> reasons = new ArrayList<>();
+        if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
+            if (!reasonsNode.isArray()) {
+                throw new AwsException("SerializationException", "Expected list or null", 400);
+            }
+            for (JsonNode r : reasonsNode) {
+                if (r.isTextual() || r.isNull()) {
+                    reasons.add(r.asText(null));
+                } else if (r.isNumber()) {
+                    throw new AwsException("SerializationException",
+                            "NUMBER_VALUE can not be converted to a String", 400);
+                } else if (r.isBoolean()) {
+                    throw new AwsException("SerializationException",
+                            (r.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
+                                    + " can not be converted to a String", 400);
+                } else {
+                    throw unexpectedStartError(r);
+                }
+            }
+        }
+        return reasons;
+    }
+
+    /**
+     * Reproduces the AWS deserialization behavior for {@code SendingEnabled}
+     * (verified against real AWS SES V2 on 2026-06-13): a missing member
+     * defaults to {@code false}, any string coerces to {@code true}, and
+     * explicit {@code null} or non-boolean scalars fail with
+     * {@code SerializationException}.
+     */
+    private static boolean parseSendingEnabled(JsonNode enabledNode) {
+        if (enabledNode.isMissingNode()) {
+            return false;
+        }
+        if (enabledNode.isBoolean()) {
+            return enabledNode.booleanValue();
+        }
+        if (enabledNode.isTextual()) {
+            return true;
+        }
+        if (enabledNode.isNull()) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        if (enabledNode.isNumber()) {
+            throw new AwsException("SerializationException",
+                    "NUMBER_VALUE can not be converted to a Boolean", 400);
+        }
+        throw unexpectedStartError(enabledNode);
+    }
+
+    private static AwsException unexpectedStartError(JsonNode node) {
+        if (node.isArray()) {
+            return new AwsException("SerializationException",
+                    "Start of list found where not expected", 400);
+        }
+        return new AwsException("SerializationException",
+                "Start of structure or map found where not expected.", 400);
+    }
+
+    /**
      * Parse a V2 SES {@code Content.Simple.Headers} / {@code Content.Template.Headers} array
      * (additional message headers, elements use {@code Name}/{@code Value}). Returns an empty
      * list when the node is absent so callers can pass it through unconditionally.
@@ -1267,6 +1418,8 @@ public class SesController {
                     new AwsException("NotFoundException", e.getMessage(), 404);
             case "AlreadyExists", "ConfigurationSetAlreadyExists" ->
                     new AwsException("AlreadyExistsException", e.getMessage(), 400);
+            case "ConfigurationSetSendingPausedException" ->
+                    new AwsException("SendingPausedException", e.getMessage(), 400);
             default -> e;
         };
     }

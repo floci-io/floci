@@ -189,10 +189,6 @@ public class SqsService {
         }
     }
 
-    public Queue createQueue(String queueName, Map<String, String> attributes) {
-        return createQueue(queueName, attributes, null, regionResolver.getDefaultRegion());
-    }
-
     public Queue createQueue(String queueName, Map<String, String> attributes, String region) {
         return createQueue(queueName, attributes, null, region);
     }
@@ -263,10 +259,6 @@ public class SqsService {
         return queue;
     }
 
-    public void deleteQueue(String queueUrl) {
-        deleteQueue(queueUrl, regionResolver.getDefaultRegion());
-    }
-
     public void deleteQueue(String queueUrl, String region) {
         String storageKey = regionKey(region, queueUrl);
         if (queueStore.get(storageKey).isEmpty()) {
@@ -285,11 +277,12 @@ public class SqsService {
         if (dedupStore != null) {
             dedupStore.delete(storageKey);
         }
+        // Wake parked ReceiveMessage long polls so they observe the deletion
+        // and finish, instead of staying registered against this queue URL.
+        // Left alone they would survive a delete + recreate under the same URL
+        // and consume deliveries that belong to the new queue's consumers.
+        notifyReceivers(storageKey);
         LOG.infov("Deleted queue: {0}", queueUrl);
-    }
-
-    public List<Queue> listQueues(String namePrefix) {
-        return listQueues(namePrefix, regionResolver.getDefaultRegion());
     }
 
     public List<Queue> listQueues(String namePrefix, String region) {
@@ -307,10 +300,6 @@ public class SqsService {
         });
     }
 
-    public String getQueueUrl(String queueName) {
-        return getQueueUrl(queueName, regionResolver.getDefaultRegion());
-    }
-
     public String getQueueUrl(String queueName, String region) {
         String accountId = regionResolver.getAccountId();
         String queueUrl = baseUrl + "/" + accountId + "/" + queueName;
@@ -320,10 +309,6 @@ public class SqsService {
                     "The specified queue does not exist for this wsdl version.", 400);
         }
         return queueUrl;
-    }
-
-    public Map<String, String> getQueueAttributes(String queueUrl, List<String> attributeNames) {
-        return getQueueAttributes(queueUrl, attributeNames, regionResolver.getDefaultRegion());
     }
 
     public Map<String, String> getQueueAttributes(String queueUrl, List<String> attributeNames, String region) {
@@ -341,6 +326,7 @@ public class SqsService {
         var counts = getOrCreateQueue(storageKey).messageCounts();
         attrs.put("ApproximateNumberOfMessages", String.valueOf(counts.visible()));
         attrs.put("ApproximateNumberOfMessagesNotVisible", String.valueOf(counts.inFlight()));
+        attrs.put("ApproximateNumberOfMessagesDelayed", String.valueOf(counts.delayed()));
 
         if (attributeNames == null || attributeNames.contains("All")) {
             return attrs;
@@ -354,18 +340,8 @@ public class SqsService {
         return filtered;
     }
 
-    public Message sendMessage(String queueUrl, String body, int delaySeconds) {
-        return sendMessage(queueUrl, body, delaySeconds, null, null);
-    }
-
     public Message sendMessage(String queueUrl, String body, int delaySeconds, String region) {
         return sendMessage(queueUrl, body, delaySeconds, null, null, region);
-    }
-
-    public Message sendMessage(String queueUrl, String body, int delaySeconds,
-                               String messageGroupId, String messageDeduplicationId) {
-        return sendMessage(queueUrl, body, delaySeconds, messageGroupId, messageDeduplicationId, null,
-                regionResolver.getDefaultRegion());
     }
 
     public Message sendMessage(String queueUrl, String body, int delaySeconds,
@@ -607,11 +583,6 @@ public class SqsService {
         }
     }
 
-    public List<Message> receiveMessage(String queueUrl, int maxMessages, int visibilityTimeout, int waitTimeSeconds) {
-        return receiveMessage(queueUrl, maxMessages, visibilityTimeout, waitTimeSeconds,
-                regionResolver.getDefaultRegion());
-    }
-
     public List<Message> receiveMessage(String queueUrl, int maxMessages, int visibilityTimeout,
                                         int waitTimeSeconds, String region) {
         String storageKey = regionKey(region, queueUrl);
@@ -626,8 +597,20 @@ public class SqsService {
         long start = System.currentTimeMillis();
         long maxWait = waitTimeSeconds * 1000L;
         Object lock = queueLocks.computeIfAbsent(storageKey, k -> new Object());
+        // The queue incarnation this call polls against. DeleteQueue removes it
+        // from messagesByQueue (and CreateQueue registers a fresh instance), so
+        // an identity change tells a parked long poll that its queue is gone.
+        GuardedMessageQueue polledQueue = getOrCreateQueue(storageKey);
 
         while (true) {
+            if (messagesByQueue.get(storageKey) != polledQueue) {
+                // The queue was deleted mid-poll (and possibly recreated under
+                // the same URL). Finish empty-handed: a receive opened against
+                // the deleted incarnation must not consume deliveries — nor
+                // burn ApproximateReceiveCount / redrive budget — that belong
+                // to the new queue's consumers.
+                return Collections.emptyList();
+            }
             List<Message> result = doReceiveMessage(storageKey, maxMessages, visibilityTimeout, region);
             if (!result.isEmpty() || maxWait <= 0) {
                 if (!result.isEmpty() && LOG.isTraceEnabled()) {
@@ -729,18 +712,10 @@ public class SqsService {
         }
     }
 
-    public List<Message> peekMessages(String queueUrl) {
-        return peekMessages(queueUrl, regionResolver.getDefaultRegion());
-    }
-
     public List<Message> peekMessages(String queueUrl, String region) {
         String storageKey = regionKey(region, queueUrl);
         ensureQueueExists(storageKey);
         return getOrCreateQueue(storageKey).peekAll();
-    }
-
-    public void deleteMessage(String queueUrl, String receiptHandle) {
-        deleteMessage(queueUrl, receiptHandle, regionResolver.getDefaultRegion());
     }
 
     public void deleteMessage(String queueUrl, String receiptHandle, String region) {
@@ -764,10 +739,6 @@ public class SqsService {
         }
     }
 
-    public void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout) {
-        changeMessageVisibility(queueUrl, receiptHandle, visibilityTimeout, regionResolver.getDefaultRegion());
-    }
-
     public void changeMessageVisibility(String queueUrl, String receiptHandle, int visibilityTimeout, String region) {
         String storageKey = regionKey(region, queueUrl);
         ensureQueueExists(storageKey);
@@ -777,10 +748,6 @@ public class SqsService {
             throw new AwsException("ReceiptHandleIsInvalid",
                     "The input receipt handle is not a valid receipt handle.", 400);
         }
-    }
-
-    public void purgeQueue(String queueUrl) {
-        purgeQueue(queueUrl, regionResolver.getDefaultRegion());
     }
 
     public void purgeQueue(String queueUrl, String region) {
@@ -890,8 +857,8 @@ public class SqsService {
         }
 
         var srcQueueInitial = getOrCreateQueue(srcKey);
-        long toMove = srcQueueInitial.messageCounts().visible()
-                + srcQueueInitial.messageCounts().inFlight();
+        var srcCounts = srcQueueInitial.messageCounts();
+        long toMove = srcCounts.visible() + srcCounts.inFlight() + srcCounts.delayed();
 
         String taskHandle = "task-" + UUID.randomUUID();
         moveTasksByHandle.put(taskHandle, new MoveTask(

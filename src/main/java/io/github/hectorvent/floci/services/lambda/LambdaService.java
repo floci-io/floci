@@ -502,13 +502,11 @@ public class LambdaService {
                 @SuppressWarnings("unchecked")
                 Map<String, Object> imageConfig = (Map<String, Object>) ic;
                 if (imageConfig.containsKey("Command")) {
-                    @SuppressWarnings("unchecked")
                     List<String> cmd = imageConfig.get("Command") instanceof List<?>
                             ? ((List<?>) imageConfig.get("Command")).stream().map(Object::toString).toList() : null;
                     fn.setImageConfigCommand(cmd);
                 }
                 if (imageConfig.containsKey("EntryPoint")) {
-                    @SuppressWarnings("unchecked")
                     List<String> ep = imageConfig.get("EntryPoint") instanceof List<?>
                             ? ((List<?>) imageConfig.get("EntryPoint")).stream().map(Object::toString).toList() : null;
                     fn.setImageConfigEntryPoint(ep);
@@ -832,7 +830,7 @@ public class LambdaService {
         snapshot.setEnvironment(fn.getEnvironment());
         snapshot.setLastModified(System.currentTimeMillis());
         snapshot.setRevisionId(UUID.randomUUID().toString());
-        
+
         functionStore.save(region, snapshot);
         LOG.infov("Published version {0} for function {1}", version, functionName);
         return snapshot;
@@ -984,7 +982,7 @@ public class LambdaService {
         functionName = ref.name();
         qualifier = ref.qualifier();
         LambdaUrlConfig urlConfig = getFunctionUrlConfig(region, functionName, qualifier);
-        
+
         if (request.containsKey("AuthType")) {
             urlConfig.setAuthType((String) request.get("AuthType"));
         }

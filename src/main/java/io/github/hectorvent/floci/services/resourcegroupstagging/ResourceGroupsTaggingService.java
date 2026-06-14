@@ -38,6 +38,12 @@ public class ResourceGroupsTaggingService {
         }
     }
 
+    public void deleteResources(List<String> resourceArns, String region) {
+        for (String arn : resourceArns) {
+            store.remove(key(region, arn));
+        }
+    }
+
     // ─── GetResources ──────────────────────────────────────────────────────────
 
     public record TagFilter(String key, List<String> values) {}

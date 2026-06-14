@@ -72,6 +72,19 @@ final class AwsManagedPolicies {
         new ManagedPolicyDef("AmazonEKSFargatePodExecutionRolePolicy", "/",
                 "Provides access to other AWS service resources required to run Amazon EKS pods on AWS Fargate."),
 
+        // EKS cluster and node group policies (required by the EKS console/SDK and
+        // the terraform-aws-modules/eks module — see #1092).
+        new ManagedPolicyDef("AmazonEKSClusterPolicy", "/",
+                "Provides Kubernetes the permissions it requires to manage resources on your behalf."),
+        new ManagedPolicyDef("AmazonEKSServicePolicy", "/",
+                "This policy allows Amazon Elastic Container Service for Kubernetes to create and manage the necessary resources to operate EKS Clusters."),
+        new ManagedPolicyDef("AmazonEKSVPCResourceController", "/",
+                "Policy used by VPC Resource Controller to manage ENI and IPs for worker nodes."),
+        new ManagedPolicyDef("AmazonEKSWorkerNodePolicy", "/",
+                "This policy allows Amazon EKS worker nodes to connect to Amazon EKS Clusters."),
+        new ManagedPolicyDef("AmazonEKS_CNI_Policy", "/",
+                "Provides the Amazon VPC CNI Plugin the permissions it requires to modify the IP address configuration on your EKS worker nodes."),
+
         // S3 Object Lambda execution role policy
         new ManagedPolicyDef("AmazonS3ObjectLambdaExecutionRolePolicy", "/service-role/",
                 "Provides write permissions to CloudWatch Logs for S3 Object Lambda access points."),

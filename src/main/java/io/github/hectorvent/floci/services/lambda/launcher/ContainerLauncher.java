@@ -108,8 +108,7 @@ public class ContainerLauncher {
         String region = m.group(2);
         String repoAndTag = m.group(3);
         ecrRegistryManager.ensureStarted();
-        int port = ecrRegistryManager.effectivePort();
-        String rewritten = account + ".dkr.ecr." + region + ".localhost:" + port + "/" + repoAndTag;
+        String rewritten = ecrRegistryManager.getRepositoryUri(account, region, repoAndTag);
         LOG.infov("Rewriting ECR image URI {0} -> {1}", image, rewritten);
         return rewritten;
     }

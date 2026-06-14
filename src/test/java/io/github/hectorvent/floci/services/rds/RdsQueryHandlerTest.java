@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
@@ -129,6 +130,115 @@ class RdsQueryHandlerTest {
         verify(service).listDbInstances(null);
     }
 
+    @Test
+    void describeDbInstances_usesStoredDbSubnetGroup() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setDbSubnetGroupName("sample-db-subnets");
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+        when(service.getDbSubnetGroup("sample-db-subnets")).thenReturn(new DbSubnetGroup(
+                "sample-db-subnets", "test subnets", "vpc-123", List.of("subnet-aaa", "subnet-bbb")));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-aaa</SubnetIdentifier>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-bbb</SubnetIdentifier>"));
+        assertFalse(body.contains("<SubnetIdentifier>subnet-00000000</SubnetIdentifier>"));
+    }
+
+    @Test
+    void describeDbInstances_includesTagList() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setTags(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"));
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<TagList>"));
+        assertTrue(body.contains("<Key>example:ClusterId</Key>"));
+        assertTrue(body.contains("<Value>cluster-a</Value>"));
+        assertTrue(body.contains("<Key>Name</Key>"));
+        assertTrue(body.contains("<Value>mydb</Value>"));
+    }
+
+    @Test
+    void createDbInstance_passesCreateTagsToService() {
+        DbInstance instance = makeInstance("mydb");
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq(null), eq(null), eq(null), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null),
+                eq(java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"))))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("Tags.member.1.Key", "example:ClusterId");
+        p.add("Tags.member.1.Value", "cluster-a");
+        p.add("Tags.member.2.Key", "Name");
+        p.add("Tags.member.2.Value", "mydb");
+        handler.handle("CreateDBInstance", p);
+
+        verify(service).createDbInstance("mydb", "postgres", "16.3",
+                null, null, null, "db.t3.micro", 20, false, null, null, null, false, null,
+                java.util.Map.of("example:ClusterId", "cluster-a", "Name", "mydb"));
+    }
+
+    @Test
+    void listTagsForResource_returnsStoredTags() {
+        when(service.listTagsForResource("arn:aws:rds:us-east-1:000000000000:db:mydb"))
+                .thenReturn(java.util.Map.of("Name", "mydb"));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
+        Response response = handler.handle("ListTagsForResource", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<TagList>"));
+        assertTrue(body.contains("<Key>Name</Key>"));
+        assertTrue(body.contains("<Value>mydb</Value>"));
+    }
+
+    @Test
+    void addAndRemoveTagsForResource_passThrough() {
+        MultivaluedMap<String, String> add = params();
+        add.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
+        add.add("Tags.member.1.Key", "Name");
+        add.add("Tags.member.1.Value", "mydb");
+        handler.handle("AddTagsToResource", add);
+
+        verify(service).addTagsToResource("arn:aws:rds:us-east-1:000000000000:db:mydb", java.util.Map.of("Name", "mydb"));
+
+        MultivaluedMap<String, String> remove = params();
+        remove.add("ResourceName", "arn:aws:rds:us-east-1:000000000000:db:mydb");
+        remove.add("TagKeys.member.1", "Name");
+        handler.handle("RemoveTagsFromResource", remove);
+
+        verify(service).removeTagsFromResource("arn:aws:rds:us-east-1:000000000000:db:mydb", List.of("Name"));
+    }
+
+    @Test
+    void describeOrderableDbInstanceOptions_usesServiceCatalog() {
+        when(service.describeOrderableDbInstanceOptions("postgres", "16.3", "db.t4g.medium"))
+                .thenReturn(List.of(java.util.Map.of(
+                        "engine", "postgres",
+                        "engineVersion", "16.3",
+                        "dbInstanceClass", "db.t4g.medium")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("Engine", "postgres");
+        p.add("EngineVersion", "16.3");
+        p.add("DBInstanceClass", "db.t4g.medium");
+        Response response = handler.handle("DescribeOrderableDBInstanceOptions", p);
+
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<OrderableDBInstanceOption>"));
+        assertTrue(body.contains("<DBInstanceClass>db.t4g.medium</DBInstanceClass>"));
+    }
+
     // ──────────────────────────── DBParameterGroups XML tag ──────────────────────
 
     @Test
@@ -148,7 +258,7 @@ class RdsQueryHandlerTest {
         DbInstance instance = makeInstance("mydb");
         when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
                 eq("admin"), eq("secret"), eq("dbname"), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null), eq(java.util.Map.of())))
                 .thenReturn(instance);
 
         MultivaluedMap<String, String> p = params();
@@ -161,7 +271,36 @@ class RdsQueryHandlerTest {
         handler.handle("CreateDBInstance", p);
 
         verify(service).createDbInstance("mydb", "postgres", "16.3",
-                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null);
+                "admin", "secret", "dbname", "db.t3.micro", 20, false, null, null, null, false, null, java.util.Map.of());
+    }
+
+    @Test
+    void createDbInstancePassesManagedMasterUserSecretOptions() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setMasterUserSecretArn("arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456");
+        instance.setMasterUserSecretStatus("active");
+        instance.setMasterUserSecretKmsKeyId("kms-key-1");
+        when(service.createDbInstance(eq("mydb"), eq("postgres"), eq("16.3"),
+                eq("admin"), eq(null), eq("dbname"), eq("db.t3.micro"),
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(true), eq("kms-key-1"), eq(java.util.Map.of())))
+                .thenReturn(instance);
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBInstanceIdentifier", "mydb");
+        p.add("Engine", "postgres");
+        p.add("MasterUsername", "admin");
+        p.add("DBName", "dbname");
+        p.add("ManageMasterUserPassword", "true");
+        p.add("MasterUserSecretKmsKeyId", "kms-key-1");
+        Response response = handler.handle("CreateDBInstance", p);
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<MasterUserSecret>"));
+        assertTrue(body.contains("<SecretArn>arn:aws:secretsmanager:us-east-1:000000000000:secret:rds!db-123456</SecretArn>"));
+        assertTrue(body.contains("<SecretStatus>active</SecretStatus>"));
+        assertTrue(body.contains("<KmsKeyId>kms-key-1</KmsKeyId>"));
+        verify(service).createDbInstance("mydb", "postgres", "16.3",
+                "admin", null, "dbname", "db.t3.micro", 20, false, null, null, null, true, "kms-key-1", java.util.Map.of());
     }
 
     @Test
@@ -171,7 +310,7 @@ class RdsQueryHandlerTest {
         // AwsException wrapping into a 400 query error.
         when(service.createDbInstance(eq("mydb"), eq("oracle"), eq("1.0"),
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
-                eq(20), eq(false), eq(null), eq(null)))
+                eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null), eq(java.util.Map.of())))
                 .thenThrow(new AwsException("InvalidParameterValue",
                         "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
 
@@ -182,6 +321,51 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
+    }
+
+    @Test
+    void createDbSubnetGroup_passesSubnetMembersToService() {
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb")))
+                .thenReturn(new DbSubnetGroup(
+                        "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "sample-db-subnets");
+        p.add("DBSubnetGroupDescription", "test");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-aaa");
+        p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
+        Response response = handler.handle("CreateDBSubnetGroup", p);
+
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"));
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
+        assertTrue(body.contains("<Subnets><Subnet>"));
+        assertFalse(body.contains("<Subnets><member>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-aaa</SubnetIdentifier>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-bbb</SubnetIdentifier>"));
+    }
+
+    @Test
+    void modifyDbSubnetGroup_passesSubnetMembersToService() {
+        when(service.modifyDbSubnetGroup("sample-db-subnets", List.of("subnet-new-a", "subnet-new-b")))
+                .thenReturn(new DbSubnetGroup(
+                        "sample-db-subnets", "test", "vpc-123", List.of("subnet-new-a", "subnet-new-b")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "sample-db-subnets");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-new-a");
+        p.add("SubnetIds.SubnetIdentifier.2", "subnet-new-b");
+        Response response = handler.handle("ModifyDBSubnetGroup", p);
+
+        verify(service).modifyDbSubnetGroup("sample-db-subnets", List.of("subnet-new-a", "subnet-new-b"));
+        String body = (String) response.getEntity();
+        assertEquals(200, response.getStatus());
+        assertTrue(body.contains("<DBSubnetGroupName>sample-db-subnets</DBSubnetGroupName>"));
+        assertTrue(body.contains("<Subnets><Subnet>"));
+        assertFalse(body.contains("<Subnets><member>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-new-a</SubnetIdentifier>"));
+        assertTrue(body.contains("<SubnetIdentifier>subnet-new-b</SubnetIdentifier>"));
     }
 
     @Test

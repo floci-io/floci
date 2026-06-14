@@ -1,11 +1,13 @@
 package io.github.hectorvent.floci.services.glue;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Partition;
 import io.github.hectorvent.floci.services.glue.model.Table;
+import io.github.hectorvent.floci.services.glue.model.UserDefinedFunction;
 import io.github.hectorvent.floci.services.glue.schemaregistry.GlueSchemaRegistryService;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.Registry;
 import io.github.hectorvent.floci.services.glue.schemaregistry.model.RegistryId;
@@ -26,6 +28,10 @@ import java.util.Objects;
 @ApplicationScoped
 public class GlueJsonHandler {
 
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() {};
+    private static final TypeReference<List<Map<String, Object>>> MAP_LIST = new TypeReference<>() {};
+    private static final TypeReference<List<Partition>> PARTITION_LIST = new TypeReference<>() {};
+
     private final GlueService glueService;
     private final GlueSchemaRegistryService schemaRegistryService;
     private final ObjectMapper mapper;
@@ -43,7 +49,11 @@ public class GlueJsonHandler {
         return switch (action) {
             case "CreateDatabase" -> {
                 Database db = mapper.treeToValue(request.get("DatabaseInput"), Database.class);
-                glueService.createDatabase(db);
+                @SuppressWarnings("unchecked")
+                Map<String, String> tags = request.has("Tags")
+                        ? mapper.convertValue(request.get("Tags"), Map.class)
+                        : null;
+                glueService.createDatabase(db, tags, region);
                 yield Response.ok().build();
             }
             case "GetDatabase" -> {
@@ -53,6 +63,17 @@ public class GlueJsonHandler {
             }
             case "GetDatabases" -> {
                 yield Response.ok(Map.of("DatabaseList", glueService.getDatabases())).build();
+            }
+            case "DeleteDatabase" -> {
+                String name = request.get("Name").asText();
+                glueService.deleteDatabase(name, region);
+                yield Response.ok().build();
+            }
+            case "UpdateDatabase" -> {
+                String name = request.get("Name").asText();
+                Database db = mapper.treeToValue(request.get("DatabaseInput"), Database.class);
+                glueService.updateDatabase(name, db);
+                yield Response.ok().build();
             }
             case "CreateTable" -> {
                 String dbName = request.get("DatabaseName").asText();
@@ -70,12 +91,32 @@ public class GlueJsonHandler {
                 String dbName = request.get("DatabaseName").asText();
                 yield Response.ok(Map.of("TableList", glueService.getTables(dbName))).build();
             }
+            case "UpdateTable" -> {
+                String dbName = request.get("DatabaseName").asText();
+                Table table = mapper.treeToValue(request.get("TableInput"), Table.class);
+                glueService.updateTable(dbName, table, request.path("VersionId").asText(null),
+                        request.path("SkipArchive").asBoolean(false));
+                yield Response.ok().build();
+            }
+            case "GetTableVersions" -> {
+                String dbName = request.get("DatabaseName").asText();
+                String tableName = request.get("TableName").asText();
+                yield Response.ok(Map.of("TableVersions", glueService.getTableVersions(dbName, tableName))).build();
+            }
             case "DeleteTable" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("Name").asText();
                 glueService.deleteTable(dbName, tableName);
                 yield Response.ok().build();
             }
+            case "BatchDeleteTable" -> {
+                String dbName = request.get("DatabaseName").asText();
+                List<String> tableNames = mapper.convertValue(request.get("TablesToDelete"), STRING_LIST);
+                yield Response.ok(Map.of("Errors", glueService.batchDeleteTables(dbName, tableNames))).build();
+            }
+            case "UpdateColumnStatisticsForTable" -> handleUpdateColumnStatisticsForTable(request);
+            case "GetColumnStatisticsForTable" -> handleGetColumnStatisticsForTable(request);
+            case "DeleteColumnStatisticsForTable" -> handleDeleteColumnStatisticsForTable(request);
             case "CreatePartition" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
@@ -83,11 +124,26 @@ public class GlueJsonHandler {
                 glueService.createPartition(dbName, tableName, partition);
                 yield Response.ok().build();
             }
+            case "BatchCreatePartition" -> handleBatchCreatePartition(request);
+            case "BatchUpdatePartition" -> handleBatchUpdatePartition(request);
+            case "GetPartition" -> handleGetPartition(request);
+            case "BatchGetPartition" -> handleBatchGetPartition(request);
             case "GetPartitions" -> {
                 String dbName = request.get("DatabaseName").asText();
                 String tableName = request.get("TableName").asText();
-                yield Response.ok(Map.of("Partitions", glueService.getPartitions(dbName, tableName))).build();
+                String expression = request.path("Expression").asText(null);
+                yield Response.ok(Map.of("Partitions", glueService.getPartitions(dbName, tableName, expression))).build();
             }
+            case "DeletePartition" -> handleDeletePartition(request);
+            case "UpdatePartition" -> handleUpdatePartition(request);
+            case "UpdateColumnStatisticsForPartition" -> handleUpdateColumnStatisticsForPartition(request);
+            case "GetColumnStatisticsForPartition" -> handleGetColumnStatisticsForPartition(request);
+            case "DeleteColumnStatisticsForPartition" -> handleDeleteColumnStatisticsForPartition(request);
+            case "CreateUserDefinedFunction" -> handleCreateUserDefinedFunction(request);
+            case "GetUserDefinedFunction" -> handleGetUserDefinedFunction(request);
+            case "GetUserDefinedFunctions" -> handleGetUserDefinedFunctions(request);
+            case "UpdateUserDefinedFunction" -> handleUpdateUserDefinedFunction(request);
+            case "DeleteUserDefinedFunction" -> handleDeleteUserDefinedFunction(request);
             case "CreateRegistry" -> handleCreateRegistry(request, region);
             case "GetRegistry" -> handleGetRegistry(request, region);
             case "ListRegistries" -> handleListRegistries(request);
@@ -113,6 +169,161 @@ public class GlueJsonHandler {
             case "GetTags" -> handleGetTags(request);
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };
+    }
+
+    private Response handleUpdateColumnStatisticsForTable(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<Map<String, Object>> columnStatistics =
+                mapper.convertValue(request.get("ColumnStatisticsList"), MAP_LIST);
+        glueService.updateColumnStatisticsForTable(dbName, tableName, columnStatistics);
+        return Response.ok(Map.of("Errors", List.of())).build();
+    }
+
+    private Response handleGetColumnStatisticsForTable(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> columnNames = mapper.convertValue(request.get("ColumnNames"), STRING_LIST);
+        GlueService.ColumnStatisticsResult result =
+                glueService.getColumnStatisticsForTable(dbName, tableName, columnNames);
+        return Response.ok(Map.of(
+                "ColumnStatisticsList", result.columnStatisticsList(),
+                "Errors", result.errors()))
+                .build();
+    }
+
+    private Response handleDeleteColumnStatisticsForTable(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        String columnName = request.get("ColumnName").asText();
+        glueService.deleteColumnStatisticsForTable(dbName, tableName, columnName);
+        return Response.ok().build();
+    }
+
+    private Response handleBatchCreatePartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<Partition> partitions = mapper.convertValue(request.get("PartitionInputList"), PARTITION_LIST);
+        return Response.ok(Map.of("Errors", glueService.batchCreatePartitions(dbName, tableName, partitions))).build();
+    }
+
+    private Response handleBatchUpdatePartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<GlueService.BatchUpdatePartitionEntry> entries =
+                mapper.convertValue(request.get("Entries"), new TypeReference<>() {});
+        return Response.ok(Map.of("Errors", glueService.batchUpdatePartitions(dbName, tableName, entries))).build();
+    }
+
+    private Response handleGetPartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> partitionValues = mapper.convertValue(request.get("PartitionValues"), STRING_LIST);
+        return Response.ok(Map.of(
+                "Partition",
+                glueService.getPartition(dbName, tableName, partitionValues)))
+                .build();
+    }
+
+    private Response handleBatchGetPartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<Map<String, Object>> partitionsToGet = mapper.convertValue(request.get("PartitionsToGet"), MAP_LIST);
+        List<List<String>> partitionValues = partitionsToGet.stream()
+                .map(partition -> mapper.convertValue(partition.get("Values"), STRING_LIST))
+                .toList();
+        return Response.ok(Map.of(
+                "Partitions", glueService.batchGetPartitions(dbName, tableName, partitionValues),
+                "UnprocessedKeys", List.of()))
+                .build();
+    }
+
+    private Response handleDeletePartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> partitionValues = mapper.convertValue(request.get("PartitionValues"), STRING_LIST);
+        glueService.deletePartition(dbName, tableName, partitionValues);
+        return Response.ok().build();
+    }
+
+    private Response handleUpdatePartition(JsonNode request) throws Exception {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> partitionValues = mapper.convertValue(request.get("PartitionValueList"), STRING_LIST);
+        Partition partition = mapper.treeToValue(request.get("PartitionInput"), Partition.class);
+        glueService.updatePartition(dbName, tableName, partitionValues, partition);
+        return Response.ok().build();
+    }
+
+    private Response handleUpdateColumnStatisticsForPartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> partitionValues = mapper.convertValue(request.get("PartitionValues"), STRING_LIST);
+        List<Map<String, Object>> columnStatistics = mapper.convertValue(request.get("ColumnStatisticsList"), MAP_LIST);
+        glueService.updateColumnStatisticsForPartition(dbName, tableName, partitionValues, columnStatistics);
+        return Response.ok(Map.of("Errors", List.of())).build();
+    }
+
+    private Response handleGetColumnStatisticsForPartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> partitionValues = mapper.convertValue(request.get("PartitionValues"), STRING_LIST);
+        List<String> columnNames = mapper.convertValue(request.get("ColumnNames"), STRING_LIST);
+        GlueService.ColumnStatisticsResult result = glueService.getColumnStatisticsForPartition(
+                dbName, tableName, partitionValues, columnNames);
+        return Response.ok(Map.of(
+                "ColumnStatisticsList", result.columnStatisticsList(),
+                "Errors", result.errors()))
+                .build();
+    }
+
+    private Response handleDeleteColumnStatisticsForPartition(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String tableName = request.get("TableName").asText();
+        List<String> partitionValues = mapper.convertValue(request.get("PartitionValues"), STRING_LIST);
+        String columnName = request.get("ColumnName").asText();
+        glueService.deleteColumnStatisticsForPartition(dbName, tableName, partitionValues, columnName);
+        return Response.ok().build();
+    }
+
+    private Response handleCreateUserDefinedFunction(JsonNode request) throws Exception {
+        String dbName = request.get("DatabaseName").asText();
+        UserDefinedFunction function = mapper.treeToValue(request.get("FunctionInput"), UserDefinedFunction.class);
+        glueService.createUserDefinedFunction(dbName, function);
+        return Response.ok().build();
+    }
+
+    private Response handleGetUserDefinedFunction(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String functionName = request.get("FunctionName").asText();
+        return Response.ok(Map.of(
+                "UserDefinedFunction",
+                glueService.getUserDefinedFunction(dbName, functionName)))
+                .build();
+    }
+
+    private Response handleGetUserDefinedFunctions(JsonNode request) {
+        String dbName = request.path("DatabaseName").asText(null);
+        String pattern = request.path("Pattern").asText(null);
+        String functionType = request.path("FunctionType").asText(null);
+        var page = glueService.getUserDefinedFunctions(
+                dbName, pattern, functionType, readMaxResults(request), readNextToken(request));
+        return Response.ok(pageResponse("UserDefinedFunctions", page.functions(), page.nextToken())).build();
+    }
+
+    private Response handleUpdateUserDefinedFunction(JsonNode request) throws Exception {
+        String dbName = request.get("DatabaseName").asText();
+        String functionName = request.get("FunctionName").asText();
+        UserDefinedFunction function = mapper.treeToValue(request.get("FunctionInput"), UserDefinedFunction.class);
+        glueService.updateUserDefinedFunction(dbName, functionName, function);
+        return Response.ok().build();
+    }
+
+    private Response handleDeleteUserDefinedFunction(JsonNode request) {
+        String dbName = request.get("DatabaseName").asText();
+        String functionName = request.get("FunctionName").asText();
+        glueService.deleteUserDefinedFunction(dbName, functionName);
+        return Response.ok().build();
     }
 
     private Response handleCreateRegistry(JsonNode request, String region) {

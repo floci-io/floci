@@ -223,11 +223,28 @@ on its container IP. All Lambda containers launched by Floci are configured to
 use it as their DNS resolver. The embedded DNS server:
 
 - Resolves `*.localhost.floci.io` → Floci's Docker network IP
-- Forwards all other queries to the upstream resolver from `/etc/resolv.conf`
+- Forwards all other queries to the upstream resolver(s) from `/etc/resolv.conf`,
+  falling back to public resolvers so **public hostnames** (e.g.
+  `business-api.tiktok.com`) resolve from inside Lambda containers
 
 No extra configuration or `cap_add` is needed — Docker containers have
 `CAP_NET_BIND_SERVICE` in their default capability set, so Floci (running as a
 non-root user) can bind UDP/53 without any changes to your Compose file.
+
+!!! note "Resolving public hostnames from Lambda"
+    A Lambda whose handler reaches a public host (`fetch()`/HTTPS to e.g.
+    `business-api.tiktok.com`) resolves it through Floci's embedded DNS. As a
+    safety net, Floci also appends configurable public resolvers (default
+    `8.8.8.8`, `8.8.4.4`) after its own IP on each spawned container's DNS list,
+    so name resolution still works if the embedded forwarder cannot answer.
+
+    Tune or disable this for offline / locked-down networks where those resolvers
+    are blocked:
+
+    ```bash
+    FLOCI_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1   # use different resolvers
+    FLOCI_DNS_CONTAINER_FALLBACK_ENABLED=false             # inject only Floci's DNS
+    ```
 
 !!! tip "Docker Compose service names"
     If Floci runs as a Docker Compose service, set `FLOCI_HOSTNAME` to the

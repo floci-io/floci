@@ -52,6 +52,7 @@ public class KmsService {
     private final StorageBackend<String, KmsAlias> aliasStore;
     private final StorageBackend<String, KmsGrant> grantStore;
     private final RegionResolver regionResolver;
+    private final SecureRandom secureRandom;
 
     @Inject
     public KmsService(StorageFactory storageFactory, RegionResolver regionResolver) {
@@ -65,13 +66,33 @@ public class KmsService {
     }
 
     KmsService(StorageBackend<String, KmsKey> keyStore,
-                StorageBackend<String, KmsAlias> aliasStore,
+               StorageBackend<String, KmsAlias> aliasStore,
                StorageBackend<String, KmsGrant> grantStore,
-                RegionResolver regionResolver) {
+               RegionResolver regionResolver) {
+        this(keyStore, aliasStore, grantStore, regionResolver, new SecureRandom());
+    }
+
+    KmsService(StorageBackend<String, KmsKey> keyStore,
+               StorageBackend<String, KmsAlias> aliasStore,
+               StorageBackend<String, KmsGrant> grantStore,
+               RegionResolver regionResolver,
+               SecureRandom secureRandom) {
         this.keyStore = keyStore;
         this.aliasStore = aliasStore;
         this.grantStore = grantStore;
         this.regionResolver = regionResolver;
+        this.secureRandom = secureRandom;
+    }
+
+    public byte[] generateRandom(int numberOfBytes) {
+        if (numberOfBytes < 1 || numberOfBytes > 1024) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + numberOfBytes + "' at 'numberOfBytes' failed to satisfy constraint: Member must have value greater than or equal to 1 and less than or equal to 1024",
+                    400);
+        }
+        byte[] bytes = new byte[numberOfBytes];
+        secureRandom.nextBytes(bytes);
+        return bytes;
     }
 
     private String buildDefaultKeyPolicy() {
@@ -468,6 +489,13 @@ public class KmsService {
         LOG.infov("Updated key policy for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    public void updateKeyDescription(String keyId, String description, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        key.setDescription(description);
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Updated description for KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
     // ──────────────────────────── Key Rotation ────────────────────────────
 
     public boolean getKeyRotationStatus(String keyId, String region) {
@@ -493,6 +521,14 @@ public class KmsService {
         key.setKeyRotationEnabled(false);
         keyStore.put(region + "::" + key.getKeyId(), key);
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
+    public void disableKey(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        key.setEnabled(false);
+        key.setKeyState("Disabled");
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Disabled KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
     private static final int ON_DEMAND_ROTATION_LIMIT = 25;

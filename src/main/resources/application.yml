@@ -19,11 +19,12 @@ quarkus:
     delay-enabled: true
   native:
     resources:
-      # The Pricing service reads its bundled snapshot at runtime via
+      # The Pricing service reads its bundled snapshot, and EC2 reads its image
+      # catalog (ec2/image-catalog.yaml), at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
-      # cannot detect dynamically-built paths, so the tree is registered
+      # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**
+      includes: pricing-snapshots/**,ec2/*.yaml
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -44,6 +45,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
 
 
 floci:
@@ -92,6 +94,15 @@ floci:
     # Via env var (comma-separated): FLOCI_DNS_EXTRA_SUFFIXES=localhost.localstack.cloud,other.internal
     # extra-suffixes:
     #   - localhost.localstack.cloud
+
+    # Public resolvers appended after Floci's embedded DNS on spawned containers' HostConfig.Dns,
+    # and used as the fallback upstream for Floci's own DNS forwarder. Lets Lambda/CodeBuild
+    # resolve public hostnames even if the embedded forwarder cannot answer.
+    # Disable in offline/locked-down networks where these resolvers are blocked.
+    container-fallback-enabled: true              # FLOCI_DNS_CONTAINER_FALLBACK_ENABLED
+    container-fallback-servers:                   # FLOCI_DNS_CONTAINER_FALLBACK_SERVERS=1.1.1.1,1.0.0.1
+      - 8.8.8.8
+      - 8.8.4.4
 
   auth:
     validate-signatures: false
@@ -173,12 +184,21 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
       default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
+      enabled: true
+    cloudmap:
+      enabled: true
+    emr:
+      enabled: true
+    wafv2:
       enabled: true
     scheduler:
       enabled: true
@@ -264,6 +284,8 @@ floci:
       api-server-max-port: 6599
       data-path: ./data/eks
       keep-running-on-shutdown: false
+      endpoint-mode: host          # host = https://localhost:<hostPort> (host-reachable); network = container DNS name
+      iam-auth-webhook: true       # wire a token-auth webhook into k3s so `aws eks get-token` works
     elbv2:
       enabled: true
       mock: false
@@ -297,6 +319,8 @@ floci:
     bcm-data-exports:
       enabled: true
       emit-mode: synchronous
+    cloudtrail:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:

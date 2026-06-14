@@ -25,6 +25,52 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void updateKeyDescriptionRoundTripThroughJsonHandler() {
+        String keyId = given()
+            .header("X-Amz-Target", "TrentService.CreateKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "Description": "old description"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KeyMetadata.KeyId", notNullValue())
+            .extract().jsonPath().getString("KeyMetadata.KeyId");
+
+        given()
+            .header("X-Amz-Target", "TrentService.UpdateKeyDescription")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "KeyId": "%s",
+                    "Description": "new description"
+                }
+                """.formatted(keyId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "TrentService.DescribeKey")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "KeyId": "%s"
+                }
+                """.formatted(keyId))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("KeyMetadata.Description", equalTo("new description"));
+    }
+
+    @Test
     void generateMacAndVerifyMacRoundTripThroughJsonHandler() {
         String keyId = given()
             .header("X-Amz-Target", "TrentService.CreateKey")
@@ -110,6 +156,170 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void generateRandomReturnsBase64Plaintext() {
+        // RED phase: This test is expected to fail until GenerateRandom is wired
+        // in KmsJsonHandler.handle(). Currently returns 400 UnsupportedOperation.
+        String plaintextBase64 = given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": 32
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Plaintext", notNullValue())
+            .extract().jsonPath().getString("Plaintext");
+
+        assertEquals(32, Base64.getDecoder().decode(plaintextBase64).length);
+    }
+
+    @Test
+    void generateRandomMissingNumberOfBytesReturnsError() {
+        given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void generateRandomZeroBytesReturnsError() {
+        given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": 0
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void generateRandomNegativeBytesReturnsError() {
+        given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": -1
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void generateRandomTooManyBytesReturnsError() {
+        given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": 1025
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void generateRandomOneByteReturnsSuccess() {
+        String plaintextBase64 = given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": 1
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Plaintext", notNullValue())
+            .extract().jsonPath().getString("Plaintext");
+
+        assertEquals(1, Base64.getDecoder().decode(plaintextBase64).length);
+    }
+
+    @Test
+    void generateRandomMaxBytesReturnsSuccess() {
+        String plaintextBase64 = given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": 1024
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Plaintext", notNullValue())
+            .extract().jsonPath().getString("Plaintext");
+
+        assertEquals(1024, Base64.getDecoder().decode(plaintextBase64).length);
+    }
+
+    @Test
+    void generateRandomWithRecipientReturnsError() {
+        given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": 32,
+                    "Recipient": {}
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
+    void generateRandomWithCustomKeyStoreIdReturnsError() {
+        given()
+            .header("X-Amz-Target", "TrentService.GenerateRandom")
+            .contentType(KMS_CONTENT_TYPE)
+            .body("""
+                {
+                    "NumberOfBytes": 32,
+                    "CustomKeyStoreId": "cks-1234567890"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ValidationException"));
+    }
+
+    @Test
     void rotateKeyOnDemandReturnsKeyId() {
         String keyId = given()
                 .header("X-Amz-Target", "TrentService.CreateKey")
@@ -131,6 +341,70 @@ class KmsIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("KeyId", equalTo(keyId));
+    }
+
+    @Test
+    void disableKeyUpdatesDescribeKeyState() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"disable-key\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.DisableKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.Enabled", equalTo(false))
+                .body("KeyMetadata.KeyState", equalTo("Disabled"));
+    }
+
+    @Test
+    void updateKeyDescriptionRequiresDescription() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"missing-description-update\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.UpdateKeyDescription")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("ValidationException"));
     }
 
     @Test

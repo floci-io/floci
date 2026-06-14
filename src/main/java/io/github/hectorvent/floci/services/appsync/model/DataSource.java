@@ -21,6 +21,7 @@ public class DataSource {
     private Map<String, Object> relationalDatabaseConfig;
     private Map<String, Object> openSearchServiceConfig;
     private Map<String, Object> amazonBedrockRuntimeConfig;
+    private String dataSourceArn;
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
@@ -54,4 +55,7 @@ public class DataSource {
 
     public Map<String, Object> getAmazonBedrockRuntimeConfig() { return amazonBedrockRuntimeConfig; }
     public void setAmazonBedrockRuntimeConfig(Map<String, Object> config) { this.amazonBedrockRuntimeConfig = config; }
+
+    public String getDataSourceArn() { return dataSourceArn; }
+    public void setDataSourceArn(String dataSourceArn) { this.dataSourceArn = dataSourceArn; }
 }

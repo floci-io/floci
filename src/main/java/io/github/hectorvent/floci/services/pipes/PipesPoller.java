@@ -224,7 +224,6 @@ public class PipesPoller {
             }
         }
         try {
-            @SuppressWarnings("unchecked")
             Map<String, Object> result = (pipeAccountId != null)
                     ? kinesisService.getRecordsForAccount(pipeAccountId, iterator, batchSize, region)
                     : kinesisService.getRecords(iterator, batchSize, region);
@@ -232,7 +231,6 @@ public class PipesPoller {
             if (nextIterator != null) {
                 kinesisIterators.put(pipeKey, nextIterator);
             }
-            @SuppressWarnings("unchecked")
             List<?> records = (List<?>) result.get("Records");
             if (records == null || records.isEmpty()) {
                 return;
@@ -355,7 +353,7 @@ public class PipesPoller {
         }
         try {
             String queueUrl = AwsArnUtils.arnToQueueUrl(dlqArn, baseUrl);
-            sqsService.sendMessage(queueUrl, payload, 0);
+            sqsService.sendMessage(queueUrl, payload, 0, region);
             LOG.infov("Pipe {0}: sent failed records to DLQ {1}", pipe.getName(), dlqArn);
             return true;
         } catch (Exception e) {

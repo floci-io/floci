@@ -177,7 +177,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**52 AWS services. Broad coverage. Free forever.**
+**54 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -189,7 +189,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · ELB v2 · Auto Scaling\nCodeDeploy · Backup · Bedrock Runtime · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nCodeDeploy · Backup · Bedrock Runtime · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -220,10 +220,10 @@ Floci supports local emulation for application services, data services, eventing
 |---|---|
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
-| API and identity | API Gateway REST, API Gateway v2, Cognito, ACM, Route53 |
+| API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
-| Graph database | Neptune |
-| Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract |
+| Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract, Transcribe |
+| Databases | RDS, RDS Data API, Neptune |
 | Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
@@ -245,6 +245,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Lambda | Real Docker | Runtime environment, execution model, warm container pool, aliases, Function URLs |
 | API Gateway REST | In-process | Resources, methods, stages, Lambda proxy, MOCK integrations, AWS integrations |
 | API Gateway v2 | In-process | HTTP APIs, routes, integrations, JWT authorizers, stages |
+| AppSync | In-process | GraphQL API management API, schema registry, AWS scalars, domain names, channel namespaces |
 | IAM | In-process | Users, roles, groups, policies, instance profiles, access keys |
 | STS | In-process | AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
 | Cognito | In-process | User pools, app clients, auth flows, JWKS and OpenID well-known endpoints |
@@ -260,6 +261,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | CloudWatch Metrics | In-process | Custom metrics, statistics, alarms |
 | ElastiCache | Real Docker | Redis / Valkey protocol, IAM auth, SigV4 validation |
 | RDS | Real Docker | PostgreSQL, MySQL, MariaDB, IAM auth, JDBC-compatible engines |
+| RDS Data API | REST JSON over real RDS containers | Raw SQL execution and transactions for local MySQL / MariaDB RDS resources |
 | Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server; RDS-shaped control plane; Gremlin WebSocket on port 8182 with SigV4 proxy |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
@@ -269,6 +271,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |
 | ACM | In-process | Certificate issuance and validation lifecycle |
 | ECR | In-process with real registry | Repositories, docker push / pull, image-backed Lambda functions |
+| Resource Groups Tagging API | In-process | GetResources, tag and untag resources, tag key and value discovery across services |
 | SES | In-process | Send email, raw email, identity verification, DKIM, templates |
 | SES v2 | In-process | REST JSON API, identities, DKIM, account sending, templates |
 | OpenSearch | Real Docker | Domain CRUD, tags, versions, instance types, upgrade stubs |
@@ -283,8 +286,10 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
+| Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
 | Textract | In-process stub | API-compatible stubs, dummy block data, async job simulation |
+| Transcribe | In-process stub | Transcription jobs and custom vocabularies; jobs complete immediately, no real audio processing |
 | Pricing | In-process with static snapshot | Product discovery, attributes, price list files, pagination |
 | Cost Explorer | In-process | Cost synthesized from Floci resource state and pricing snapshots |
 | Cost and Usage Reports | In-process with floci-duck sidecar | CUR 2.0 and FOCUS 1.2 columns, account-scoped storage, Parquet emission |
@@ -654,14 +659,14 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 | `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 899 |
 | `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 366 |
 | `sdk-test-python` | Python 3 | boto3 | 272 |
-| `sdk-test-go` | Go | AWS SDK for Go v2 | 144 |
+| `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 145 |
 | `sdk-test-awscli` | Bash | AWS CLI v2 | 152 |
 | `sdk-test-rust` | Rust | AWS SDK for Rust | 90 |
 | `compat-terraform` | Terraform | v1.10+ | 14 |
 | `compat-opentofu` | OpenTofu | v1.9+ | 14 |
 | `compat-cdk` | AWS CDK | v2+ | 17 |
 
-**1,968 automated compatibility tests across 6 SDKs and 3 IaC tools.**
+**1,969 automated compatibility tests across 6 SDKs and 3 IaC tools.**
 
 ## Migrating from LocalStack
 
@@ -688,7 +693,7 @@ LocalStack environment variables are translated automatically:
 | `LAMBDA_REMOVE_CONTAINERS=1` | `FLOCI_SERVICES_LAMBDA_EPHEMERAL=true` |
 | `DEBUG=1` | `QUARKUS_LOG_LEVEL=DEBUG` |
 
-Init scripts mounted under `/etc/localstack/init/` run unchanged. The `/_localstack/init` and `/_localstack/health` endpoints are still served. Set `LOCALSTACK_PARITY=false` to opt out of automatic translation.
+Init scripts mounted under `/etc/localstack/init/` run unchanged. The `/_localstack/init` and `/_localstack/health` endpoints are still served. Once the emulator is up, the log also ends with a LocalStack-style `Ready.` line, so tooling that watches the log for it — such as the default wait strategy of Testcontainers' `LocalStackContainer` — works unchanged. Set `LOCALSTACK_PARITY=false` to opt out of automatic translation.
 
 See the [full migration guide](https://floci.io/floci/getting-started/migrate-from-localstack/).
 

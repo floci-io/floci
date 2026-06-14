@@ -325,7 +325,6 @@ public class CodeDeployJsonHandler {
         return Response.ok(Map.of()).build();
     }
 
-    @SuppressWarnings("unchecked")
     private Map<String, Object> extractGroupFields(JsonNode req) throws Exception {
         Map<String, Object> fields = new HashMap<>();
         for (String field : new String[]{"ec2TagFilters", "onPremisesInstanceTagFilters", "autoScalingGroups",

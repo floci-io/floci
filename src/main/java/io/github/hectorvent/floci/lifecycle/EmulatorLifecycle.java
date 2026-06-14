@@ -42,6 +42,14 @@ public class EmulatorLifecycle {
     @ConfigProperty(name = "quarkus.application.version", defaultValue = "")
     Optional<String> appVersion = Optional.empty();
 
+    /**
+     * Bound to the LOCALSTACK_PARITY environment variable through the standard
+     * MicroProfile Config env-var mapping. Same gate as docker/entrypoint.sh:
+     * parity behavior is enabled unless the value is exactly "false".
+     */
+    @ConfigProperty(name = "localstack.parity", defaultValue = "true")
+    String localstackParity = "true";
+
     private final StorageFactory storageFactory;
     private final ServiceRegistry serviceRegistry;
     private final EmulatorConfig config;
@@ -135,7 +143,7 @@ public class EmulatorLifecycle {
         if (!hasStart && !hasReady) {
             initLifecycleState.markStartCompleted();
             initLifecycleState.markReadyCompleted();
-            LOG.info("=== AWS Local Emulator Ready ===");
+            logReady();
         }
     }
 
@@ -158,13 +166,27 @@ public class EmulatorLifecycle {
                 initializationHooksRunner.run(InitializationHook.READY);
             }
             initLifecycleState.markReadyCompleted();
-            LOG.info("=== AWS Local Emulator Ready ===");
+            logReady();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.error("Startup hook execution interrupted — shutting down", e);
         } catch (Exception e) {
             LOG.error("Startup hook execution failed — shutting down", e);
             Quarkus.asyncExit();
+        }
+    }
+
+    /**
+     * LocalStack prints a line ending in "Ready." when its gateway is up, and
+     * ecosystem tooling keys on it — Testcontainers' LocalStackContainer default
+     * wait strategy polls the log for the regex {@code .*Ready\.} and times out
+     * against Floci's banner alone. Emit the parity line alongside the banner so
+     * such tooling works out of the box.
+     */
+    private void logReady() {
+        LOG.info("=== AWS Local Emulator Ready ===");
+        if (!"false".equals(localstackParity)) {
+            LOG.info("Ready.");
         }
     }
 

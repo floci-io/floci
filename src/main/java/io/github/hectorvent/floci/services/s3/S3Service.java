@@ -25,7 +25,9 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -44,6 +46,8 @@ public class S3Service {
     private static final String ALL_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AllUsers";
     private static final String AUTHENTICATED_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AuthenticatedUsers";
     private static final Set<String> SUPPORTED_SERVER_SIDE_ENCRYPTION_VALUES = Set.of("AES256", "aws:kms", "aws:kms:dsse", "aws:fsx");
+    private static final String SSE_C_ALGORITHM = "AES256";
+    private static final int SSE_C_KEY_BYTES = 32;
 
     @FunctionalInterface
     interface LambdaInvoker {
@@ -279,8 +283,19 @@ public class S3Service {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            return storeObjectInternal(bucket, bucketName, key, data, contentType, metadata, checksum, parts, options);
+        }
+    }
+
+    private S3Object storeObjectInternal(Bucket bucket, String bucketName, String key, byte[] data,
+                                         String contentType, Map<String, String> metadata,
+                                         S3Checksum checksum, List<Part> parts, PutObjectOptions options) {
         PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
+        SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
+        rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
+        checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
         S3Object object = new S3Object(bucketName, key, data, contentType);
         if (metadata != null) {
@@ -296,6 +311,10 @@ public class S3Service {
         object.setContentDisposition(effectiveOptions.getContentDisposition());
         object.setCacheControl(effectiveOptions.getCacheControl());
         object.setServerSideEncryption(normalizedServerSideEncryption);
+        if (sseCustomerKey != null) {
+            object.setSseCustomerAlgorithm(sseCustomerKey.algorithm());
+            object.setSseCustomerKeyMd5(sseCustomerKey.keyMd5());
+        }
         object.setAcl(cannedObjectAclXml(effectiveOptions.getAcl()));
         if (effectiveOptions.getTagging() != null && !effectiveOptions.getTagging().isEmpty()) {
             object.setTags(new HashMap<>(effectiveOptions.getTagging()));
@@ -355,6 +374,49 @@ public class S3Service {
         return object;
     }
 
+    private void checkWritePreconditions(String bucketName, String key, String ifMatch, String ifNoneMatch) {
+        if (ifMatch == null && ifNoneMatch == null) {
+            return;
+        }
+
+        S3Object existing;
+        try {
+            existing = headObject(bucketName, key);
+        }
+        catch (AwsException e) {
+            if ("NoSuchKey".equals(e.getErrorCode()) && ifMatch == null) {
+                return;
+            }
+            throw e;
+        }
+
+        if (ifMatch != null && !eTagMatches(ifMatch, existing.getETag())) {
+            throw new S3PreconditionFailedException("If-Match");
+        }
+        if (ifNoneMatch != null && eTagMatches(ifNoneMatch, existing.getETag())) {
+            throw new S3PreconditionFailedException("If-None-Match");
+        }
+    }
+
+    private boolean eTagMatches(String headerValue, String eTag) {
+        String normalizedETag = normalizeEntityTag(eTag);
+        for (String candidate : headerValue.split(",")) {
+            String normalizedCandidate = normalizeEntityTag(candidate);
+            if ("*".equals(normalizedCandidate) || normalizedCandidate.equals(normalizedETag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String normalizeEntityTag(String value) {
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.length() >= 2 && normalized.startsWith("\"") && normalized.endsWith("\"")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
     private void applyObjectLock(S3Object object, Bucket bucket,
                                  String objectLockMode, Instant retainUntilDate, String legalHoldStatus) {
         if (objectLockMode != null) {
@@ -407,6 +469,27 @@ public class S3Service {
 
     public S3Object headObject(String bucketName, String key, String versionId) {
         return getObjectMetadata(bucketName, key, versionId);
+    }
+
+    public InputStream openObjectStream(String bucketName, String key, String versionId) {
+        getObjectMetadata(bucketName, key, versionId);
+        if (inMemory) {
+            byte[] data = versionId != null
+                    ? memoryDataStore.get(versionedKey(bucketName, key, versionId))
+                    : memoryDataStore.get(objectKey(bucketName, key));
+            if (data == null) {
+                throw new IllegalStateException("S3 object data is missing for " + bucketName + "/" + key);
+            }
+            return new ByteArrayInputStream(data);
+        }
+        try {
+            Path path = versionId != null
+                    ? resolveVersionedPath(bucketName, key, versionId)
+                    : resolveObjectPath(bucketName, key);
+            return Files.newInputStream(path);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to open S3 object stream", e);
+        }
     }
 
     public S3Object getObjectMetadata(String bucketName, String key, String versionId) {
@@ -737,15 +820,25 @@ public class S3Service {
     public S3Object copyObject(String sourceBucket, String sourceKey,
                                String destBucket, String destKey, String versionId, CopyObjectOptions options)
     {
+        CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
         S3Object source = getObject(sourceBucket, sourceKey, versionId);
+        validateSseCustomerAccess(source,
+                effectiveOptions.getCopySourceSseCustomerAlgorithm(),
+                effectiveOptions.getCopySourceSseCustomerKey(),
+                effectiveOptions.getCopySourceSseCustomerKeyMd5());
         return copyS3Object(sourceBucket, sourceKey,
-                destBucket, destKey, source, options);
+                destBucket, destKey, source, effectiveOptions);
     }
 
     public S3Object copyObject(String sourceBucket, String sourceKey,
                                String destBucket, String destKey, CopyObjectOptions options) {
+        CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
         S3Object source = getObject(sourceBucket, sourceKey);
-        return copyS3Object(sourceBucket, sourceKey, destBucket, destKey, source, options);
+        validateSseCustomerAccess(source,
+                effectiveOptions.getCopySourceSseCustomerAlgorithm(),
+                effectiveOptions.getCopySourceSseCustomerKey(),
+                effectiveOptions.getCopySourceSseCustomerKeyMd5());
+        return copyS3Object(sourceBucket, sourceKey, destBucket, destKey, source, effectiveOptions);
     }
 
     // --- Versioning Operations ---
@@ -1073,11 +1166,21 @@ public class S3Service {
     public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
                                                    Map<String, String> metadata, String storageClass,
                                                    String contentDisposition, String serverSideEncryption, String acl) {
+        return initiateMultipartUpload(bucket, key, contentType, metadata, storageClass, contentDisposition,
+                serverSideEncryption, acl, null, null, null);
+    }
+
+    public MultipartUpload initiateMultipartUpload(String bucket, String key, String contentType,
+                                                   Map<String, String> metadata, String storageClass,
+                                                   String contentDisposition, String serverSideEncryption, String acl,
+                                                   String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
         ensureBucketExists(bucket);
         if (acl != null && !acl.isBlank()) {
             cannedObjectAclXml(acl);
         }
         String normalizedServerSideEncryption = normalizeServerSideEncryption(serverSideEncryption);
+        SseCustomerKey customerKey = validateSseCustomerKey(sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
+        rejectConflictingServerSideEncryption(normalizedServerSideEncryption, customerKey);
         MultipartUpload upload = new MultipartUpload(bucket, key, contentType);
         if (metadata != null) {
             upload.getMetadata().putAll(metadata);
@@ -1085,6 +1188,10 @@ public class S3Service {
         upload.setStorageClass(ObjectAttributeName.normalizeStorageClass(storageClass));
         upload.setContentDisposition(contentDisposition);
         upload.setServerSideEncryption(normalizedServerSideEncryption);
+        if (customerKey != null) {
+            upload.setSseCustomerAlgorithm(customerKey.algorithm());
+            upload.setSseCustomerKeyMd5(customerKey.keyMd5());
+        }
         upload.setAcl(acl);
 
         if (inMemory) {
@@ -1103,6 +1210,11 @@ public class S3Service {
     }
 
     public String uploadPart(String bucket, String key, String uploadId, int partNumber, byte[] data) {
+        return uploadPart(bucket, key, uploadId, partNumber, data, null, null, null);
+    }
+
+    public String uploadPart(String bucket, String key, String uploadId, int partNumber, byte[] data,
+                             String sseCustomerAlgorithm, String sseCustomerKey, String sseCustomerKeyMd5) {
         MultipartUpload upload = multipartUploads.get(uploadId);
         if (upload == null || !upload.getBucket().equals(bucket) || !upload.getKey().equals(key)) {
             throw new AwsException("NoSuchUpload",
@@ -1112,6 +1224,7 @@ public class S3Service {
             throw new AwsException("InvalidArgument",
                     "Part number must be between 1 and 10000.", 400);
         }
+        validateSseCustomerAccess(upload, sseCustomerAlgorithm, sseCustomerKey, sseCustomerKeyMd5);
 
         if (inMemory) {
             memoryMultipartStore.get(uploadId).put(partNumber, data);
@@ -1135,7 +1248,20 @@ public class S3Service {
     public String uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
                                   String sourceBucket, String sourceKey, String sourceVersionId,
                                   String copySourceRange) {
+        return uploadPartCopy(destBucket, destKey, uploadId, partNumber, sourceBucket, sourceKey,
+                sourceVersionId, copySourceRange, SseCustomerHeaders.EMPTY, SseCustomerHeaders.EMPTY);
+    }
+
+    public String uploadPartCopy(String destBucket, String destKey, String uploadId, int partNumber,
+                                  String sourceBucket, String sourceKey, String sourceVersionId,
+                                  String copySourceRange,
+                                  SseCustomerHeaders copySourceSseCustomerHeaders,
+                                  SseCustomerHeaders sseCustomerHeaders) {
         S3Object source = getObject(sourceBucket, sourceKey, sourceVersionId);
+        validateSseCustomerAccess(source,
+                copySourceSseCustomerHeaders.algorithm(),
+                copySourceSseCustomerHeaders.key(),
+                copySourceSseCustomerHeaders.keyMd5());
         byte[] data = source.getData();
 
         if (copySourceRange != null && !copySourceRange.isBlank()) {
@@ -1150,7 +1276,8 @@ public class S3Service {
             data = Arrays.copyOfRange(data, start, end + 1);
         }
 
-        return uploadPart(destBucket, destKey, uploadId, partNumber, data);
+        return uploadPart(destBucket, destKey, uploadId, partNumber, data,
+                sseCustomerHeaders.algorithm(), sseCustomerHeaders.key(), sseCustomerHeaders.keyMd5());
     }
 
     public S3Object completeMultipartUpload(String bucket, String key, String uploadId, List<Integer> partNumbers) {
@@ -1198,6 +1325,10 @@ public class S3Service {
                             .withContentDisposition(upload.getContentDisposition())
                             .withServerSideEncryption(upload.getServerSideEncryption())
                             .withAcl(upload.getAcl()));
+            if (upload.getSseCustomerAlgorithm() != null) {
+                object.setSseCustomerAlgorithm(upload.getSseCustomerAlgorithm());
+                object.setSseCustomerKeyMd5(upload.getSseCustomerKeyMd5());
+            }
             // Override the ETag with the composite multipart ETag
             object.setETag(compositeETag);
             objectStore.put(objectKey(bucket, key), object);
@@ -1641,6 +1772,101 @@ public class S3Service {
         return normalized;
     }
 
+    static SseCustomerKey validateSseCustomerKey(String algorithm, String key, String keyMd5) {
+        boolean hasAnySseCustomerHeader = hasText(algorithm) || hasText(key) || hasText(keyMd5);
+        if (!hasAnySseCustomerHeader) {
+            return null;
+        }
+        if (!hasText(algorithm) || !hasText(key) || !hasText(keyMd5)) {
+            throw new AwsException("InvalidRequest",
+                    "SSE-C requests require algorithm, key, and key MD5 headers.", 400);
+        }
+        String normalizedAlgorithm = algorithm.trim();
+        if (!SSE_C_ALGORITHM.equals(normalizedAlgorithm)) {
+            throw new AwsException("InvalidArgument",
+                    "Unsupported x-amz-server-side-encryption-customer-algorithm value: " + normalizedAlgorithm, 400);
+        }
+        String normalizedKey = key.trim();
+        String computedMd5 = computeSseCustomerKeyMd5(normalizedKey);
+        if (!computedMd5.equals(keyMd5.trim())) {
+            throw new AwsException("InvalidDigest",
+                    "The x-amz-server-side-encryption-customer-key-MD5 value is invalid.", 400);
+        }
+        return new SseCustomerKey(normalizedAlgorithm, computedMd5);
+    }
+
+    static void validateSseCustomerAccess(S3Object object, String algorithm, String key, String keyMd5) {
+        if (object.getSseCustomerAlgorithm() == null) {
+            return;
+        }
+        SseCustomerKey requestKey = validateSseCustomerKey(algorithm, key, keyMd5);
+        if (requestKey == null) {
+            throw new AwsException("InvalidRequest",
+                    "SSE-C encrypted objects require customer key headers.", 400);
+        }
+        if (!object.getSseCustomerAlgorithm().equals(requestKey.algorithm()) ||
+                !object.getSseCustomerKeyMd5().equals(requestKey.keyMd5())) {
+            throw new AwsException("AccessDenied",
+                    "The provided SSE-C customer key does not match the object.", 403);
+        }
+    }
+
+    static void validateSseCustomerAccess(MultipartUpload upload, String algorithm, String key, String keyMd5) {
+        if (upload.getSseCustomerAlgorithm() == null) {
+            if (hasText(algorithm) || hasText(key) || hasText(keyMd5)) {
+                throw new AwsException("InvalidRequest",
+                        "SSE-C headers are not valid for multipart uploads initiated without SSE-C.", 400);
+            }
+            return;
+        }
+        SseCustomerKey requestKey = validateSseCustomerKey(algorithm, key, keyMd5);
+        if (requestKey == null) {
+            throw new AwsException("InvalidRequest",
+                    "SSE-C multipart uploads require customer key headers.", 400);
+        }
+        if (!upload.getSseCustomerAlgorithm().equals(requestKey.algorithm()) ||
+                !upload.getSseCustomerKeyMd5().equals(requestKey.keyMd5())) {
+            throw new AwsException("AccessDenied",
+                    "The provided SSE-C customer key does not match the multipart upload.", 403);
+        }
+    }
+
+    private static boolean hasText(String value) {
+        return value != null && !value.isBlank();
+    }
+
+    private static void rejectConflictingServerSideEncryption(String serverSideEncryption, SseCustomerKey sseCustomerKey) {
+        if (serverSideEncryption != null && sseCustomerKey != null) {
+            throw new AwsException("InvalidRequest",
+                    "SSE-C cannot be combined with x-amz-server-side-encryption.", 400);
+        }
+    }
+
+    private static String computeSseCustomerKeyMd5(String key) {
+        try {
+            byte[] decodedKey = Base64.getDecoder().decode(key.trim());
+            if (decodedKey.length != SSE_C_KEY_BYTES) {
+                throw new AwsException("InvalidArgument",
+                        "The x-amz-server-side-encryption-customer-key must be a 256-bit key.", 400);
+            }
+            byte[] md5 = MessageDigest.getInstance("MD5").digest(decodedKey);
+            return Base64.getEncoder().encodeToString(md5);
+        }
+        catch (IllegalArgumentException e) {
+            throw new AwsException("InvalidArgument",
+                    "The x-amz-server-side-encryption-customer-key value is not valid base64.", 400);
+        }
+        catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 is not available", e);
+        }
+    }
+
+    record SseCustomerKey(String algorithm, String keyMd5) {}
+
+    record SseCustomerHeaders(String algorithm, String key, String keyMd5) {
+        static final SseCustomerHeaders EMPTY = new SseCustomerHeaders(null, null, null);
+    }
+
     private String ownerFullControlGrant() {
         return canonicalUserGrant(ownerId(), DEFAULT_OWNER_DISPLAY_NAME, "FULL_CONTROL");
     }
@@ -1701,7 +1927,7 @@ public class S3Service {
             return;
         }
 
-        String region = regionResolver != null ? regionResolver.getDefaultRegion() : "us-east-1";
+        String region = bucket.getRegion();
         String eventJson = buildS3EventJson(bucketName, key, eventName, obj, region, bucket.isVersioningEnabled());
 
         for (QueueNotification qn : config.getQueueConfigurations()) {
@@ -1923,6 +2149,8 @@ public class S3Service {
         copy.setContentDisposition(source.getContentDisposition());
         copy.setCacheControl(source.getCacheControl());
         copy.setServerSideEncryption(source.getServerSideEncryption());
+        copy.setSseCustomerAlgorithm(source.getSseCustomerAlgorithm());
+        copy.setSseCustomerKeyMd5(source.getSseCustomerKeyMd5());
         copy.setSize(source.getSize());
         copy.setLastModified(source.getLastModified());
         copy.setETag(source.getETag());
@@ -2135,6 +2363,11 @@ public class S3Service {
         ensureBucketExists(destBucket);
         CopyObjectOptions effectiveOptions = options != null ? options : new CopyObjectOptions();
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
+        SseCustomerKey destinationCustomerKey = validateSseCustomerKey(
+                effectiveOptions.getSseCustomerAlgorithm(),
+                effectiveOptions.getSseCustomerKey(),
+                effectiveOptions.getSseCustomerKeyMd5());
+        rejectConflictingServerSideEncryption(normalizedServerSideEncryption, destinationCustomerKey);
 
         boolean replaceMetadata = "REPLACE".equalsIgnoreCase(effectiveOptions.getMetadataDirective());
         Map<String, String> metadata = replaceMetadata ? new LinkedHashMap<>() : new LinkedHashMap<>(source.getMetadata());
@@ -2157,9 +2390,9 @@ public class S3Service {
         String effectiveCacheControl = replaceMetadata && effectiveOptions.getCacheControl() != null
                 ? effectiveOptions.getCacheControl()
                 : source.getCacheControl();
-        String effectiveServerSideEncryption = normalizedServerSideEncryption != null
-                ? normalizedServerSideEncryption
-                : source.getServerSideEncryption();
+        String effectiveServerSideEncryption = destinationCustomerKey != null
+                ? null
+                : (normalizedServerSideEncryption != null ? normalizedServerSideEncryption : source.getServerSideEncryption());
         boolean replaceTags = "REPLACE".equalsIgnoreCase(effectiveOptions.getTaggingDirective());
         Map<String, String> effectiveTags = replaceTags
                 ? effectiveOptions.getReplacementTagging()
@@ -2173,6 +2406,9 @@ public class S3Service {
                         .withContentDisposition(effectiveContentDisposition)
                         .withCacheControl(effectiveCacheControl)
                         .withServerSideEncryption(effectiveServerSideEncryption)
+                        .withSseCustomerAlgorithm(effectiveOptions.getSseCustomerAlgorithm())
+                        .withSseCustomerKey(effectiveOptions.getSseCustomerKey())
+                        .withSseCustomerKeyMd5(effectiveOptions.getSseCustomerKeyMd5())
                         .withAcl(effectiveOptions.getAcl())
                         .withTagging(effectiveTags));
         copy.setETag(source.getETag());

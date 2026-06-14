@@ -144,7 +144,7 @@ class AppSyncIntegrationTest {
             .get("/v1/apis/" + apiId + "/schema")
         .then()
             .statusCode(200)
-            .body("schema", containsString("type Query"));
+            .body("schema.definition", containsString("type Query"));
     }
 
     // ── API Keys ─────────────────────────────────────────────────────────────
@@ -516,7 +516,7 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .body("functionConfiguration.name", equalTo("my-function"))
             .body("functionConfiguration.functionId", notNullValue())
-            .body("functionConfiguration.arn", containsString("arn:aws:appsync:"))
+            .body("functionConfiguration.functionArn", containsString("arn:aws:appsync:"))
             .extract().path("functionConfiguration.functionId");
     }
 
@@ -1208,13 +1208,28 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
+        // Create a data source first (function requires it)
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "cascade-fn-ds",
+                  "type": "NONE"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/datasources")
+        .then()
+            .statusCode(200);
+
         String fnId = given()
             .header("Authorization", AUTH)
             .contentType("application/json")
             .body("""
                 {
                   "name": "cascade-fn",
-                  "dataSourceName": "none-ds"
+                  "dataSourceName": "cascade-fn-ds"
                 }
                 """)
         .when()
@@ -1444,7 +1459,1135 @@ class AppSyncIntegrationTest {
             .statusCode(400);
     }
 
+    // ── Phase 2: Model Completeness ─────────────────────────────────────────
+
+    @Test
+    @Order(200)
+    void createGraphqlApi_returnsNewFields() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "full-api",
+                  "authenticationType": "API_KEY",
+                  "apiType": "GRAPHQL",
+                  "visibility": "GLOBAL",
+                  "queryDepthLimit": 10
+                }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .body("graphqlApi.apiType", equalTo("GRAPHQL"))
+            .body("graphqlApi.visibility", equalTo("GLOBAL"))
+            .body("graphqlApi.queryDepthLimit", equalTo(10))
+            .extract().path("graphqlApi.apiId");
+
+        // cleanup
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(205)
+    void updateGraphqlApi_handlesNewFields() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "owner": "test-owner",
+                  "ownerContact": "test@example.com",
+                  "queryDepthLimit": 25,
+                  "resolverCountLimit": 100
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId)
+        .then()
+            .statusCode(200)
+            .body("graphqlApi.owner", equalTo("test-owner"))
+            .body("graphqlApi.ownerContact", equalTo("test@example.com"))
+            .body("graphqlApi.queryDepthLimit", equalTo(25))
+            .body("graphqlApi.resolverCountLimit", equalTo(100));
+    }
+
+    @Test
+    @Order(207)
+    void updateGraphqlApi_additionalAuthProviders() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "additionalAuthenticationProviders": [
+                    {"authenticationType": "AWS_IAM"}
+                  ]
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId)
+        .then()
+            .statusCode(200)
+            .body("graphqlApi.additionalAuthenticationProviders", hasSize(1))
+            .body("graphqlApi.additionalAuthenticationProviders[0].authenticationType", equalTo("AWS_IAM"));
+    }
+
+    @Test
+    @Order(210)
+    void createDataSource_returnsDataSourceArn() {
+        String dsName = "arn-test-ds";
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "%s",
+                  "type": "NONE"
+                }
+                """.formatted(dsName))
+        .when()
+            .post("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(200)
+            .body("dataSource.dataSourceArn", containsString("arn:aws:appsync:"))
+            .body("dataSource.dataSourceArn", containsString("/datasources/" + dsName));
+
+        // cleanup
+        given().header("Authorization", AUTH).delete("/v1/apis/" + apiId + "/datasources/" + dsName).then().statusCode(204);
+    }
+
+    @Test
+    @Order(215)
+    void createResolver_returnsResolverArn() {
+        String resolverName = "resolverArnTest";
+        String dsName = "resolver-arn-ds";
+
+        // create temp data source
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                { "name": "%s", "type": "NONE" }
+                """.formatted(dsName))
+            .post("/v1/apis/" + apiId + "/datasources").then().statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "fieldName": "%s",
+                  "dataSourceName": "%s"
+                }
+                """.formatted(resolverName, dsName))
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(200)
+            .body("resolver.resolverArn", containsString("arn:aws:appsync:"))
+            .body("resolver.resolverArn", containsString("/types/Query/resolvers/" + resolverName));
+
+        // cleanup
+        given().header("Authorization", AUTH).delete("/v1/apis/" + apiId + "/types/Query/resolvers/" + resolverName).then().statusCode(204);
+        given().header("Authorization", AUTH).delete("/v1/apis/" + apiId + "/datasources/" + dsName).then().statusCode(204);
+    }
+
+    @Test
+    @Order(220)
+    void getIntrospectionSchema_nestedFormat() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/schema")
+        .then()
+            .statusCode(200)
+            .body("schema.definition", containsString("type Query"));
+    }
+
+    // ── Phase 2: Domain Names ────────────────────────────────────────────────
+
+    private static String domainName;
+
+    @Test
+    @Order(300)
+    void createDomainName() {
+        domainName = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "domainName": "api.example.com",
+                  "description": "Test domain",
+                  "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/123"
+                }
+                """)
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .body("domainNameConfig.domainName", equalTo("api.example.com"))
+            .body("domainNameConfig.description", equalTo("Test domain"))
+            .body("domainNameConfig.appsyncDomainName", containsString(".appsync-api."))
+            .body("domainNameConfig.hostedZoneId", notNullValue())
+            .extract().path("domainNameConfig.domainName");
+    }
+
+    @Test
+    @Order(301)
+    void getDomainName() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/domainnames/" + domainName)
+        .then()
+            .statusCode(200)
+            .body("domainNameConfig.domainName", equalTo("api.example.com"));
+    }
+
+    @Test
+    @Order(302)
+    void listDomainNames() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .body("domainNames", hasSize(greaterThanOrEqualTo(1)));
+    }
+
+    @Test
+    @Order(303)
+    void associateApi() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "apiId": "%s"
+                }
+                """.formatted(apiId))
+        .when()
+            .post("/v1/domainnames/" + domainName + "/apiassociation")
+        .then()
+            .statusCode(200)
+            .body("apiAssociation.apiId", equalTo(apiId))
+            .body("apiAssociation.domainName", equalTo(domainName));
+    }
+
+    @Test
+    @Order(304)
+    void getAssociatedApi() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/domainnames/" + domainName + "/apiassociation")
+        .then()
+            .statusCode(200)
+            .body("apiAssociation.apiId", equalTo(apiId));
+    }
+
+    @Test
+    @Order(306)
+    void disassociateApi() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/domainnames/" + domainName + "/apiassociation")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(307)
+    void deleteDomainName() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/domainnames/" + domainName)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(308)
+    void domainName_notFound() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/domainnames/nonexistent.example.com")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    @Order(309)
+    void associateApi_invalidApi() {
+        // Create a temp domain to test invalid association
+        String tempDomain = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "domainName": "invalid-test.example.com",
+                  "description": "temp",
+                  "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/123"
+                }
+                """)
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .extract().path("domainNameConfig.domainName");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "apiId": "nonexistent00000000000000"
+                }
+                """)
+        .when()
+            .post("/v1/domainnames/" + tempDomain + "/apiassociation")
+        .then()
+            .statusCode(404);
+
+        // cleanup
+        given().header("Authorization", AUTH).delete("/v1/domainnames/" + tempDomain).then().statusCode(204);
+    }
+
+    // ── Phase 2: Channel Namespaces ──────────────────────────────────────────
+
+    private static String channelNsName;
+
+    @Test
+    @Order(400)
+    void createChannelNamespace() {
+        channelNsName = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "name": "my-channels",
+                  "description": "Test channel namespace"
+                }
+                """)
+        .when()
+            .post("/v2/apis/" + apiId + "/channelNamespaces")
+        .then()
+            .statusCode(200)
+            .body("channelNamespace.name", equalTo("my-channels"))
+            .body("channelNamespace.description", equalTo("Test channel namespace"))
+            .extract().path("channelNamespace.name");
+    }
+
+    @Test
+    @Order(401)
+    void getChannelNamespace() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v2/apis/" + apiId + "/channelNamespaces/" + channelNsName)
+        .then()
+            .statusCode(200)
+            .body("channelNamespace.name", equalTo("my-channels"));
+    }
+
+    @Test
+    @Order(402)
+    void listChannelNamespaces() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v2/apis/" + apiId + "/channelNamespaces")
+        .then()
+            .statusCode(200)
+            .body("channelNamespaces", hasSize(greaterThanOrEqualTo(1)));
+    }
+
+    @Test
+    @Order(403)
+    void deleteChannelNamespace() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v2/apis/" + apiId + "/channelNamespaces/" + channelNsName)
+        .then()
+            .statusCode(204);
+    }
+
+    // ── Phase 2: Schema Registry ─────────────────────────────────────────────
+
+    @Test
+    @Order(600)
+    void startSchemaCreation_validatesSDL() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { invalid syntax!!! }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/schemacreation")
+        .then()
+            .statusCode(400);
+    }
+
+    @Test
+    @Order(601)
+    void schemaRegistry_parseSimpleSchema() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "schema-test", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { hello: String }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("ACTIVE"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(602)
+    void schemaRegistry_parseWithAWSScalars() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "scalar-test", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { now: AWSDateTime, data: AWSJSON }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("ACTIVE"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(603)
+    void schemaRegistry_schemaExtension() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "ext-test", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { hello: String } extend type Query { world: String }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("ACTIVE"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(604)
+    void directive_awsApiKey_inSchema() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "dir-test", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query @aws_api_key { hello: String }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("ACTIVE"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(605)
+    void directive_awsSubscribe_validMutation() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "sub-test", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { dummy: String } type Mutation { createPost(id: ID!): Post } type Subscription { onPost: Post @aws_subscribe(mutations: [\\\"createPost\\\"]) } type Post { id: ID! }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("ACTIVE"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(606)
+    void directive_skipInclude_work() {
+        // @skip/@include are built-in graphql-java directives.
+        // They are valid on FIELD (in queries), not on FIELD_DEFINITION (in type definitions).
+        // This test verifies that SDL parsing still works when these standard directives
+        // are present (e.g. @deprecated on a field definition).
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "skiptest", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { hello: String @deprecated(reason: \\\"use world\\\") }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("ACTIVE"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(607)
+    void directive_unknown_rejected() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "unknowntest", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { hello: String } directive @unknownDirective on FIELD_DEFINITION"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(400);
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    // ── Phase 2: Merged APIs ───────────────────────────────────────────────
+
+    @Test
+    @Order(610)
+    void associateSourceGraphqlApi() {
+        // Create source API
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "merged-source", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        // Association between the main API and source
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "sourceApiId": "%s",
+                  "description": "test association"
+                }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociation.mergedApiId", equalTo(apiId))
+            .body("sourceApiAssociation.sourceApiId", equalTo(sourceApiId))
+            .body("sourceApiAssociation.sourceApiAssociationStatus", equalTo("MERGED"))
+            .body("sourceApiAssociation.associationId", notNullValue());
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(611)
+    void getSourceApiAssociation() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "get-source", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String assocId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200)
+            .extract().path("sourceApiAssociation.associationId");
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/mergedApis/" + apiId + "/sourceApiAssociations/" + assocId)
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociation.associationId", equalTo(assocId));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(612)
+    void listSourceApiAssociations() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "list-source", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociationSummaries", hasSize(greaterThanOrEqualTo(1)));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(613)
+    void deleteSourceApiAssociation() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "del-source", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String assocId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200)
+            .extract().path("sourceApiAssociation.associationId");
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/mergedApis/" + apiId + "/sourceApiAssociations/" + assocId)
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociationStatus", equalTo("DELETION_SCHEDULED"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
+    // ── Phase 2: New endpoint coverage ────────────────────────────────
+
+    @Test
+    @Order(614)
+    void updateDomainName() {
+        String testDomain = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "domainName": "update-test.example.com",
+                  "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/update"
+                }
+                """)
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .extract().path("domainNameConfig.domainName");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "description": "updated description" }
+                """)
+        .when()
+            .post("/v1/domainnames/" + testDomain)
+        .then()
+            .statusCode(200)
+            .body("domainNameConfig.domainName", equalTo(testDomain))
+            .body("domainNameConfig.description", equalTo("updated description"));
+
+        given().header("Authorization", AUTH).delete("/v1/domainnames/" + testDomain).then().statusCode(204);
+    }
+
+    @Test
+    @Order(615)
+    void associateMergedGraphqlApi() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "merged-source-v2", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "mergedApiIdentifier": "%s",
+                  "description": "merged test"
+                }
+                """.formatted(apiId))
+        .when()
+            .post("/v1/sourceApis/" + sourceApiId + "/mergedApiAssociations")
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociation.sourceApiId", equalTo(sourceApiId))
+            .body("sourceApiAssociation.mergedApiId", equalTo(apiId))
+            .body("sourceApiAssociation.sourceApiAssociationStatus", equalTo("MERGED"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(616)
+    void updateSourceApiAssociation() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "update-source", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String assocId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200)
+            .extract().path("sourceApiAssociation.associationId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "description": "updated assoc" }
+                """)
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations/" + assocId)
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociation.description", equalTo("updated assoc"))
+            .body("sourceApiAssociation.associationId", equalTo(assocId));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(617)
+    void disassociateMergedGraphqlApi() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "disassoc-source", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String assocId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "mergedApiIdentifier": "%s" }
+                """.formatted(apiId))
+        .when()
+            .post("/v1/sourceApis/" + sourceApiId + "/mergedApiAssociations")
+        .then()
+            .statusCode(200)
+            .extract().path("sourceApiAssociation.associationId");
+
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/sourceApis/" + sourceApiId + "/mergedApiAssociations/" + assocId)
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociationStatus", equalTo("DELETION_SCHEDULED"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
     // ── Teardown ─────────────────────────────────────────────────────────────
+
+    // ── Phase 2: Edge Cases ──────────────────────────────────────────────
+
+    @Test
+    @Order(620)
+    void updateGraphqlApi_additionalAuthProvidersNull() {
+        // Set initial providers
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "additionalAuthenticationProviders": [
+                    {"authenticationType": "AWS_IAM"}
+                  ]
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId)
+        .then()
+            .statusCode(200)
+            .body("graphqlApi.additionalAuthenticationProviders", hasSize(1));
+
+        // Send null — should preserve existing
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "additionalAuthenticationProviders": null }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId)
+        .then()
+            .statusCode(200)
+            .body("graphqlApi.additionalAuthenticationProviders", hasSize(1));
+    }
+
+    @Test
+    @Order(621)
+    void createResolver_withMaxBatchSizeZero() {
+        String dsName = "batch-zero-ds";
+        given().header("Authorization", AUTH).contentType("application/json")
+            .body("""
+                { "name": "%s", "type": "NONE" }
+                """.formatted(dsName))
+            .post("/v1/apis/" + apiId + "/datasources").then().statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "fieldName": "batchZeroTest",
+                  "dataSourceName": "%s",
+                  "maxBatchSize": 0
+                }
+                """.formatted(dsName))
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(200)
+            .body("resolver.maxBatchSize", equalTo(0));
+
+        given().header("Authorization", AUTH)
+            .delete("/v1/apis/" + apiId + "/types/Query/resolvers/batchZeroTest").then().statusCode(204);
+        given().header("Authorization", AUTH)
+            .delete("/v1/apis/" + apiId + "/datasources/" + dsName).then().statusCode(204);
+    }
+
+    @Test
+    @Order(622)
+    void updateGraphqlApi_dnsNull() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "dns": null }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId)
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(623)
+    void createDomainName_invalidCertificateArn() {
+        // Our emulator doesn't validate certificate ARN format, so this should succeed (200).
+        // AWS itself validates the pattern, but we're permissive.
+        String tempDomain = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "domainName": "invalidd-cert.example.com",
+                  "certificateArn": "not-a-valid-arn"
+                }
+                """)
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .extract().path("domainNameConfig.domainName");
+
+        given().header("Authorization", AUTH)
+            .delete("/v1/domainnames/" + tempDomain).then().statusCode(204);
+    }
+
+    @Test
+    @Order(624)
+    void deleteGraphqlApi_removesDomainAssociation() {
+        // Create a domain + API + association
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "edge-del-api", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String tempDomain = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "domainName": "edge-del.example.com",
+                  "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/edge"
+                }
+                """)
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .extract().path("domainNameConfig.domainName");
+
+        // Associate
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "apiId": "%s" }
+                """.formatted(tempApiId))
+        .when()
+            .post("/v1/domainnames/" + tempDomain + "/apiassociation")
+        .then()
+            .statusCode(200);
+
+        // Delete API
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + tempApiId)
+        .then()
+            .statusCode(204);
+
+        // Domain should still exist (association was cleaned up)
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/domainnames/" + tempDomain)
+        .then()
+            .statusCode(200);
+
+        // Cleanup domain
+        given().header("Authorization", AUTH)
+            .delete("/v1/domainnames/" + tempDomain).then().statusCode(204);
+    }
+
+    @Test
+    @Order(625)
+    void deleteDomainName_associatedApiStillWorks() {
+        // Create a domain + associate with the main apiId
+        String tempDomain = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "domainName": "edge-api-still-works.example.com",
+                  "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/edge2"
+                }
+                """)
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .extract().path("domainNameConfig.domainName");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "apiId": "%s" }
+                """.formatted(apiId))
+        .when()
+            .post("/v1/domainnames/" + tempDomain + "/apiassociation")
+        .then()
+            .statusCode(200);
+
+        // Delete domain
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/domainnames/" + tempDomain)
+        .then()
+            .statusCode(204);
+
+        // API should still work
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .get("/v1/apis/" + apiId)
+        .then()
+            .statusCode(200)
+            .body("graphqlApi.apiId", equalTo(apiId));
+    }
 
     @Test
     @Order(900)

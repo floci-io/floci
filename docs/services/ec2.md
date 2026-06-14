@@ -18,18 +18,24 @@ Terminated instances remain queryable for 1 hour (matching real EC2 tombstone be
 
 ## AMI to Docker Image Mapping
 
-Floci resolves AMI IDs to Docker images. Built-in mappings:
+Floci resolves AMI IDs to Docker images from the EC2 image catalog at
+`src/main/resources/ec2/image-catalog.yaml`. The same catalog stores the
+fallback Docker image, per-AMI Docker image mappings, and `DescribeImages`
+metadata.
 
-| AMI ID | Docker image |
-|---|---|
-| `ami-amazonlinux2023` | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
-| `ami-amazonlinux2` | `public.ecr.aws/amazonlinux/amazonlinux:2` |
-| `ami-ubuntu2204` | `public.ecr.aws/docker/library/ubuntu:22.04` |
-| `ami-ubuntu2004` | `public.ecr.aws/docker/library/ubuntu:20.04` |
-| `ami-debian12` | `public.ecr.aws/docker/library/debian:12` |
-| `ami-alpine` | `public.ecr.aws/docker/library/alpine:latest` |
+| AMI ID | Aliases | Docker image |
+|---|---|---|
+| `ami-0abcdef1234567890` | `ami-amazonlinux2` | `public.ecr.aws/amazonlinux/amazonlinux:2` |
+| `ami-0abcdef1234567891` | `ami-amazonlinux2023` | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
+| `ami-0abcdef1234567892` | `ami-ubuntu2004` | `public.ecr.aws/docker/library/ubuntu:20.04` |
+| `ami-ubuntu2204` | | `public.ecr.aws/docker/library/ubuntu:22.04` |
+| `ami-ubuntu2404-arm64` | `ami-ubuntu2404` | `public.ecr.aws/docker/library/ubuntu:24.04` |
+| `ami-ubuntu2404-amd64` | | `public.ecr.aws/docker/library/ubuntu:24.04` |
+| `ami-debian12` | | `public.ecr.aws/docker/library/debian:12` |
+| `ami-alpine` | | `public.ecr.aws/docker/library/alpine:latest` |
+| `ami-0abcdef1234567893` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
 
-Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to `public.ecr.aws/amazonlinux/amazonlinux:2023`.
+Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to the catalog `defaultDockerImage` (`public.ecr.aws/amazonlinux/amazonlinux:2023` by default).
 
 ## SSH Key Injection
 
@@ -101,7 +107,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 `RunInstances` · `DescribeInstances` · `TerminateInstances` · `StartInstances` · `StopInstances` · `RebootInstances` · `DescribeInstanceStatus` · `DescribeInstanceAttribute` · `ModifyInstanceAttribute`
 
 ### VPCs
-`CreateVpc` · `DescribeVpcs` · `DeleteVpc` · `ModifyVpcAttribute` · `DescribeVpcAttribute` · `CreateDefaultVpc` · `AssociateVpcCidrBlock` · `DisassociateVpcCidrBlock`
+`CreateVpc` · `DescribeVpcs` · `DeleteVpc` · `ModifyVpcAttribute` · `DescribeVpcAttribute` · `DescribeVpcEndpointServices` · `CreateVpcEndpoint` · `DescribeVpcEndpoints` · `DeleteVpcEndpoints` · `CreateDefaultVpc` · `AssociateVpcCidrBlock` · `DisassociateVpcCidrBlock`
 
 ### Subnets
 `CreateSubnet` · `DescribeSubnets` · `DeleteSubnet` · `ModifySubnetAttribute`
@@ -124,14 +130,26 @@ Floci seeds the following resources on first use in each region so Terraform, th
 ### Route Tables
 `CreateRouteTable` · `DescribeRouteTables` · `DeleteRouteTable` · `AssociateRouteTable` · `DisassociateRouteTable` · `CreateRoute` · `DeleteRoute`
 
+### NAT Gateways
+`CreateNatGateway` · `DescribeNatGateways` · `DeleteNatGateway`
+
 ### Elastic IPs
-`AllocateAddress` · `DescribeAddresses` · `AssociateAddress` · `DisassociateAddress` · `ReleaseAddress`
+`AllocateAddress` · `DescribeAddresses` · `DescribeAddressesAttribute` · `AssociateAddress` · `DisassociateAddress` · `ReleaseAddress`
 
 ### Availability Zones & Regions
 `DescribeAvailabilityZones` · `DescribeRegions` · `DescribeAccountAttributes`
 
 ### Instance Types
-`DescribeInstanceTypes`
+`DescribeInstanceTypes` · `DescribeInstanceTypeOfferings`
+
+### Launch Templates
+`CreateLaunchTemplate` · `DescribeLaunchTemplates` · `DeleteLaunchTemplate`
+
+### IAM Instance Profiles
+`DescribeIamInstanceProfileAssociations`
+
+### Network Interfaces
+`DescribeNetworkInterfaces`
 
 ### Volumes
 `CreateVolume` · `DescribeVolumes` · `DeleteVolume`
@@ -234,7 +252,7 @@ aws ec2 associate-address \
 
 ## Notes
 
-- `DescribeImages` returns a static list of common AMIs (Amazon Linux 2, Amazon Linux 2023, Ubuntu 20.04, Windows Server 2022) plus all Floci-native AMI IDs.
+- `DescribeImages` returns AMIs from the EC2 image catalog, including common AMIs and Floci-native AMI IDs.
 - Key material returned by `CreateKeyPair` is a dummy RSA PEM — not usable for real SSH. Use `ImportKeyPair` for working SSH access.
 - Security group rules are stored and returned correctly but are not enforced at the network level — Docker bridge networking handles routing.
 - The IMDS server identifies which instance is calling via IMDSv2 tokens (mapped at token issuance time) or by the container's bridge IP for IMDSv1.

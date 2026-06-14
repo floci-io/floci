@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,6 +23,9 @@ import java.util.*;
  */
 @ApplicationScoped
 public class DynamoDbJsonHandler {
+
+    private static final String DEFAULT_ACCOUNT_ID = "000000000000";
+    private static final String SSE_TYPE_KMS = "KMS";
 
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService dynamoDbStreamService;
@@ -187,6 +191,13 @@ public class DynamoDbJsonHandler {
             table.setStreamEnabled(true);
             table.setStreamArn(sd.getStreamArn());
             table.setStreamViewType(viewType);
+        }
+
+        JsonNode sseSpec = request.path("SSESpecification");
+        if (!sseSpec.isMissingNode() && sseSpec.path("Enabled").asBoolean(false)) {
+            table.setSseEnabled(true);
+            table.setSseType(SSE_TYPE_KMS);
+            table.setKmsMasterKeyArn(defaultKmsMasterKeyArn(region));
         }
 
         ObjectNode response = objectMapper.createObjectNode();
@@ -680,6 +691,11 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {QueryFilter} Expression parameters: {FilterExpression}", 400);
         }
+        if (attributesToGet != null && projectionExpression != null) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
+        }
 
         if (keyConditionExpr == null && keyConditions == null) {
             throw new AwsException("ValidationException",
@@ -698,7 +714,8 @@ public class DynamoDbJsonHandler {
                     + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", 400);
         }
 
-        if ("SPECIFIC_ATTRIBUTES".equals(select) && projectionExpression == null) {
+        boolean hasAttributesToGet = attributesToGet != null && attributesToGet.size() > 0;
+        if ("SPECIFIC_ATTRIBUTES".equals(select) && projectionExpression == null && !hasAttributesToGet) {
             throw new AwsException("ValidationException",
                     "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
         }
@@ -1771,6 +1788,16 @@ public class DynamoDbJsonHandler {
         ptNode.put("NumberOfDecreasesToday", table.getProvisionedThroughput().getNumberOfDecreasesToday());
         node.set("ProvisionedThroughput", ptNode);
 
+        if (table.isSseEnabled()) {
+            ObjectNode sseDescription = objectMapper.createObjectNode();
+            sseDescription.put("Status", "ENABLED");
+            sseDescription.put("SSEType", table.getSseType() != null ? table.getSseType() : SSE_TYPE_KMS);
+            sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
+                    ? table.getKmsMasterKeyArn()
+                    : defaultKmsMasterKeyArn(AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
+            node.set("SSEDescription", sseDescription);
+        }
+
         List<GlobalSecondaryIndex> gsis = table.getGlobalSecondaryIndexes();
         if (gsis != null && !gsis.isEmpty()) {
             ArrayNode gsiArray = objectMapper.createArrayNode();
@@ -1857,6 +1884,11 @@ public class DynamoDbJsonHandler {
         }
 
         return node;
+    }
+
+    private String defaultKmsMasterKeyArn(String region) {
+        return AwsArnUtils.Arn.of("kms", region, DEFAULT_ACCOUNT_ID,
+                "key/aws-managed-dynamodb").toString();
     }
 
     private ObjectNode continuousBackupsDescriptionNode(TableDefinition table) {

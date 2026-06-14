@@ -6,6 +6,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -15,6 +20,10 @@ class S3MultipartIntegrationTest {
 
     private static final String BUCKET = "multipart-test-bucket";
     private static final String KEY = "large-file.bin";
+    private static final String SSE_CUSTOMER_KEY = Base64.getEncoder().encodeToString("0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8));
+    private static final String SSE_CUSTOMER_KEY_MD5 = customerKeyMd5(SSE_CUSTOMER_KEY);
+    private static final String WRONG_SSE_CUSTOMER_KEY = Base64.getEncoder().encodeToString("abcdef0123456789abcdef0123456789".getBytes(StandardCharsets.UTF_8));
+    private static final String WRONG_SSE_CUSTOMER_KEY_MD5 = customerKeyMd5(WRONG_SSE_CUSTOMER_KEY);
     private static String uploadId;
 
     @Test
@@ -275,10 +284,223 @@ class S3MultipartIntegrationTest {
 
     @Test
     @Order(15)
+    void multipartUploadWithSseCustomerKeyRequiresMatchingPartKeys() {
+        String sseUploadId = given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+        .when()
+            .post("/" + BUCKET + "/sse-c-multipart.bin?uploads")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption-customer-algorithm", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-customer-key-MD5", equalTo(SSE_CUSTOMER_KEY_MD5))
+            .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .body("missing-key")
+        .when()
+            .put("/" + BUCKET + "/sse-c-multipart.bin?uploadId=" + sseUploadId + "&partNumber=1")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"));
+
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", WRONG_SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", WRONG_SSE_CUSTOMER_KEY_MD5)
+            .body("wrong-key")
+        .when()
+            .put("/" + BUCKET + "/sse-c-multipart.bin?uploadId=" + sseUploadId + "&partNumber=1")
+        .then()
+            .statusCode(403)
+            .body(containsString("AccessDenied"));
+
+        String partETag = given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .body("sse-c-part")
+        .when()
+            .put("/" + BUCKET + "/sse-c-multipart.bin?uploadId=" + sseUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption-customer-algorithm", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-customer-key-MD5", equalTo(SSE_CUSTOMER_KEY_MD5))
+            .extract().header("ETag");
+
+        String completeXml = """
+                <CompleteMultipartUpload>
+                    <Part><PartNumber>1</PartNumber><ETag>%s</ETag></Part>
+                </CompleteMultipartUpload>""".formatted(partETag);
+        given()
+            .contentType("application/xml")
+            .body(completeXml)
+        .when()
+            .post("/" + BUCKET + "/sse-c-multipart.bin?uploadId=" + sseUploadId)
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption-customer-algorithm", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-customer-key-MD5", equalTo(SSE_CUSTOMER_KEY_MD5));
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/sse-c-multipart.bin")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"));
+
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+        .when()
+            .get("/" + BUCKET + "/sse-c-multipart.bin")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption-customer-algorithm", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-customer-key-MD5", equalTo(SSE_CUSTOMER_KEY_MD5))
+            .body(equalTo("sse-c-part"));
+    }
+
+    @Test
+    @Order(16)
+    void uploadPartCopyWithSseCustomerSourceRequiresSourceKey() {
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .body("SSE-C-COPY")
+        .when()
+            .put("/" + BUCKET + "/sse-c-source-for-copy.bin")
+        .then()
+            .statusCode(200);
+
+        String copyUploadId = given()
+            .when()
+                .post("/" + BUCKET + "/sse-c-upload-part-copy.bin?uploads")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/sse-c-source-for-copy.bin")
+        .when()
+            .put("/" + BUCKET + "/sse-c-upload-part-copy.bin?uploadId=" + copyUploadId + "&partNumber=1")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"));
+
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/sse-c-source-for-copy.bin")
+            .header("x-amz-copy-source-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-copy-source-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-copy-source-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+        .when()
+            .put("/" + BUCKET + "/sse-c-upload-part-copy.bin?uploadId=" + copyUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .body(containsString("<CopyPartResult"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/sse-c-upload-part-copy.bin?uploadId=" + copyUploadId)
+        .then()
+            .statusCode(204);
+
+        String normalUploadId = given()
+            .when()
+                .post("/" + BUCKET + "/sse-c-headers-on-normal-upload.bin?uploads")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .body("unexpected-sse-c-part")
+        .when()
+            .put("/" + BUCKET + "/sse-c-headers-on-normal-upload.bin?uploadId=" + normalUploadId + "&partNumber=1")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/sse-c-headers-on-normal-upload.bin?uploadId=" + normalUploadId)
+        .then()
+            .statusCode(204);
+
+        String sseCopyUploadId = given()
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .when()
+                .post("/" + BUCKET + "/sse-c-upload-part-copy-dest.bin?uploads")
+            .then()
+                .statusCode(200)
+                .header("x-amz-server-side-encryption-customer-algorithm", equalTo("AES256"))
+                .header("x-amz-server-side-encryption-customer-key-MD5", equalTo(SSE_CUSTOMER_KEY_MD5))
+                .extract().xmlPath().getString("InitiateMultipartUploadResult.UploadId");
+
+        given()
+            .header("x-amz-copy-source", "/" + BUCKET + "/sse-c-source-for-copy.bin")
+            .header("x-amz-copy-source-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-copy-source-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-copy-source-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+        .when()
+            .put("/" + BUCKET + "/sse-c-upload-part-copy-dest.bin?uploadId=" + sseCopyUploadId + "&partNumber=1")
+        .then()
+            .statusCode(200)
+            .header("x-amz-server-side-encryption-customer-algorithm", equalTo("AES256"))
+            .header("x-amz-server-side-encryption-customer-key-MD5", equalTo(SSE_CUSTOMER_KEY_MD5))
+            .body(containsString("<CopyPartResult"));
+
+        given()
+        .when()
+            .delete("/" + BUCKET + "/sse-c-upload-part-copy-dest.bin?uploadId=" + sseCopyUploadId)
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(17)
+    void initiateMultipartUploadRejectsConflictingServerSideEncryption() {
+        given()
+            .header("x-amz-server-side-encryption", "AES256")
+            .header("x-amz-server-side-encryption-customer-algorithm", "AES256")
+            .header("x-amz-server-side-encryption-customer-key", SSE_CUSTOMER_KEY)
+            .header("x-amz-server-side-encryption-customer-key-MD5", SSE_CUSTOMER_KEY_MD5)
+        .when()
+            .post("/" + BUCKET + "/conflicting-sse-c-multipart.bin?uploads")
+        .then()
+            .statusCode(400)
+            .body(containsString("InvalidRequest"))
+            .body(containsString("SSE-C cannot be combined"));
+    }
+
+    @Test
+    @Order(18)
     void cleanUp() {
         given().when().delete("/" + BUCKET + "/" + KEY).then().statusCode(204);
         given().when().delete("/" + BUCKET + "/source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET + "/copy-dest.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/sse-c-multipart.bin").then().statusCode(204);
+        given().when().delete("/" + BUCKET + "/sse-c-source-for-copy.bin").then().statusCode(204);
         given().when().delete("/" + BUCKET).then().statusCode(204);
+    }
+
+    private static String customerKeyMd5(String customerKey) {
+        try {
+            byte[] md5 = MessageDigest.getInstance("MD5").digest(Base64.getDecoder().decode(customerKey));
+            return Base64.getEncoder().encodeToString(md5);
+        }
+        catch (NoSuchAlgorithmException e) {
+            throw new IllegalStateException("MD5 is not available", e);
+        }
     }
 }

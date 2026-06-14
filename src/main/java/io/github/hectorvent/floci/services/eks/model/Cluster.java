@@ -59,6 +59,9 @@ public class Cluster {
     @JsonIgnore
     private String internalEndpoint;
 
+    @JsonIgnore
+    private int hostPort;
+
     public Cluster() {}
 
     public String getName() { return name; }
@@ -105,4 +108,7 @@ public class Cluster {
 
     public String getInternalEndpoint() { return internalEndpoint; }
     public void setInternalEndpoint(String internalEndpoint) { this.internalEndpoint = internalEndpoint; }
+
+    public int getHostPort() { return hostPort; }
+    public void setHostPort(int hostPort) { this.hostPort = hostPort; }
 }

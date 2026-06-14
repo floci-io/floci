@@ -9,6 +9,7 @@ import java.util.Base64;
 import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -40,6 +41,9 @@ import io.github.hectorvent.floci.services.ec2.model.InternetGatewayAttachment;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
+import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -53,6 +57,7 @@ import io.github.hectorvent.floci.services.ec2.model.Volume;
 import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -67,6 +72,7 @@ public class Ec2Service {
     private final EmulatorConfig config;
     private final Ec2ContainerManager containerManager;
     private final AmiImageResolver amiImageResolver;
+    private final Ec2ImageCatalog imageCatalog;
 
     // region::id → resource
     private final Map<String, Vpc> vpcs = new ConcurrentHashMap<>();
@@ -79,6 +85,9 @@ public class Ec2Service {
     private final Map<String, Address> addresses = new ConcurrentHashMap<>();
     private final Map<String, Instance> instances = new ConcurrentHashMap<>();
     private final Map<String, Volume> volumes = new ConcurrentHashMap<>();
+    private final Map<String, LaunchTemplate> launchTemplates = new ConcurrentHashMap<>();
+    private final Map<String, VpcEndpoint> vpcEndpoints = new ConcurrentHashMap<>();
+    private final Map<String, NatGateway> natGateways = new ConcurrentHashMap<>();
     // resourceId → List<Tag>
     private final Map<String, List<Tag>> tags = new ConcurrentHashMap<>();
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -87,16 +96,17 @@ public class Ec2Service {
 
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
-                      AmiImageResolver amiImageResolver) {
+                      AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog) {
         this.accountId = config.defaultAccountId();
         this.config = config;
         this.containerManager = containerManager;
         this.amiImageResolver = amiImageResolver;
+        this.imageCatalog = imageCatalog;
     }
 
     // ─── Default resource seeding ──────────────────────────────────────────────
 
-    void ensureDefaultResources(String region) {
+    public void ensureDefaultResources(String region) {
         if (!seededRegions.add(region)) {
             return;
         }
@@ -136,21 +146,7 @@ public class Ec2Service {
             subnets.put(key(region, subnetIds[i]), subnet);
         }
 
-        // Default security group
-        String sgId = "sg-default";
-        SecurityGroup defaultSg = new SecurityGroup();
-        defaultSg.setGroupId(sgId);
-        defaultSg.setGroupName("default");
-        defaultSg.setDescription("default VPC security group");
-        defaultSg.setVpcId(vpcId);
-        defaultSg.setOwnerId(accountId);
-        defaultSg.setRegion(region);
-        // Default egress: all traffic
-        IpPermission egressAll = new IpPermission();
-        egressAll.setIpProtocol("-1");
-        egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
-        defaultSg.getIpPermissionsEgress().add(egressAll);
-        securityGroups.put(key(region, sgId), defaultSg);
+        createDefaultSecurityGroup(region, vpcId, "sg-default");
 
         // Default internet gateway
         String igwId = "igw-default";
@@ -161,22 +157,48 @@ public class Ec2Service {
         igw.getAttachments().add(new InternetGatewayAttachment(vpcId, "available"));
         internetGateways.put(key(region, igwId), igw);
 
-        // Main route table for default VPC
-        String rtId = "rtb-default";
+        String rtId = createMainRouteTable(region, defaultVpc, "rtb-default", "rtbassoc-default");
+
+        RouteTable mainRt = routeTables.get(key(region, rtId));
+        if (mainRt != null) {
+            mainRt.getRoutes().add(new Route("0.0.0.0/0", igwId, "CreateRoute"));
+        }
+    }
+
+    private void createDefaultSecurityGroup(String region, String vpcId, String securityGroupId) {
+        SecurityGroup defaultSg = new SecurityGroup();
+        defaultSg.setGroupId(securityGroupId);
+        defaultSg.setGroupName("default");
+        defaultSg.setDescription("default VPC security group");
+        defaultSg.setVpcId(vpcId);
+        defaultSg.setOwnerId(accountId);
+        defaultSg.setRegion(region);
+
+        // Default egress: all traffic
+        IpPermission egressAll = new IpPermission();
+        egressAll.setIpProtocol("-1");
+        egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
+        defaultSg.getIpPermissionsEgress().add(egressAll);
+        securityGroups.put(key(region, securityGroupId), defaultSg);
+    }
+
+    private String createMainRouteTable(String region, Vpc vpc, String routeTableId, String associationId) {
         RouteTable mainRt = new RouteTable();
-        mainRt.setRouteTableId(rtId);
-        mainRt.setVpcId(vpcId);
+        mainRt.setRouteTableId(routeTableId);
+        mainRt.setVpcId(vpc.getVpcId());
         mainRt.setOwnerId(accountId);
         mainRt.setRegion(region);
-        mainRt.getRoutes().add(new Route("172.31.0.0/16", "local", "CreateRouteTable"));
-        mainRt.getRoutes().add(new Route("0.0.0.0/0", igwId, "CreateRoute"));
+        mainRt.getRoutes().add(new Route(vpc.getCidrBlock(), "local", "CreateRouteTable"));
+
         RouteTableAssociation mainAssoc = new RouteTableAssociation();
-        mainAssoc.setRouteTableAssociationId("rtbassoc-default");
-        mainAssoc.setRouteTableId(rtId);
+        mainAssoc.setRouteTableAssociationId(associationId);
+        mainAssoc.setRouteTableId(routeTableId);
         mainAssoc.setMain(true);
         mainAssoc.setAssociationState("associated");
         mainRt.getAssociations().add(mainAssoc);
-        routeTables.put(key(region, rtId), mainRt);
+
+        routeTables.put(key(region, routeTableId), mainRt);
+        return routeTableId;
     }
 
     private String key(String region, String id) {
@@ -204,7 +226,7 @@ public class Ec2Service {
         // Resolve subnet
         Subnet subnet = null;
         if (subnetId != null && !subnetId.isEmpty()) {
-            subnet = getRequiredSubnet(region, subnetId);
+            subnet = requireSubnet(region, subnetId);
         } else {
             // Pick first default subnet
             subnet = subnets.values().stream()
@@ -277,6 +299,9 @@ public class Ec2Service {
             eni.setGroups(new ArrayList<>(sgIdentifiers));
             eni.setAttachmentId("eni-attach-" + randomHex(17));
             eni.setDeviceIndex(0);
+            if (inst.getLaunchTime() != null) {
+                eni.setAttachTime(ISO_FMT.format(inst.getLaunchTime()));
+            }
             inst.getNetworkInterfaces().add(eni);
 
             // Root EBS volume
@@ -318,15 +343,16 @@ public class Ec2Service {
 
         return reservation;
     }
-    
-    private Subnet getRequiredSubnet(String region, String subnetId) {
+
+    public Subnet requireSubnet(String region, String subnetId) {
+        ensureDefaultResources(region);
         Subnet subnet = subnets.get(key(region, subnetId));
-        if (subnet == null) 
+        if (subnet == null)
             throw new AwsException("InvalidSubnetID.NotFound", "The subnet ID '" + subnetId + "' does not exist", 400);
 
         return subnet;
     }
-    
+
     private String assignPrivateIp(String region, String subnetId) {
         if (subnetId == null) {
             return "172.31.0." + (10 + new Random().nextInt(200));
@@ -380,7 +406,7 @@ public class Ec2Service {
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
-            
+
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
             }
@@ -411,7 +437,7 @@ public class Ec2Service {
         List<Map<String, String>> result = new ArrayList<>();
         for (String id : instanceIds) {
             Instance inst = getRequiredInstance(region, id);
-            
+
             if (config.services().ec2().mock() && "pending".equals(inst.getState().getName())) {
                 inst.setState(InstanceState.running());
             }
@@ -517,9 +543,9 @@ public class Ec2Service {
 
     private Instance getRequiredInstance(String region, String instanceId) {
         Instance inst = instances.get(key(region, instanceId));
-        if (inst == null) 
+        if (inst == null)
             throw new AwsException("InvalidInstanceID.NotFound", "The instance ID '" + instanceId + "' does not exist", 400);
-        
+
         return inst;
     }
 
@@ -538,6 +564,9 @@ public class Ec2Service {
         vpc.getCidrBlockAssociationSet().add(
                 new VpcCidrBlockAssociation("vpc-cidr-assoc-" + randomHex(8), cidrBlock));
         vpcs.put(key(region, vpcId), vpc);
+
+        createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
+        createMainRouteTable(region, vpc, "rtb-" + randomHex(17), "rtbassoc-" + randomHex(17));
         return vpc;
     }
 
@@ -609,6 +638,78 @@ public class Ec2Service {
         }
     }
 
+    // ─── VPC Endpoints ────────────────────────────────────────────────────────
+
+    public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
+                                         List<String> routeTableIds, List<String> subnetIds,
+                                         List<String> securityGroupIds, List<Tag> endpointTags) {
+        ensureDefaultResources(region);
+        getRequiredVpc(region, vpcId);
+        for (String routeTableId : routeTableIds) {
+            getRequiredRouteTable(region, routeTableId);
+        }
+        for (String subnetId : subnetIds) {
+            requireSubnet(region, subnetId);
+        }
+        for (String securityGroupId : securityGroupIds) {
+            getRequiredSecurityGroup(region, securityGroupId);
+        }
+
+        VpcEndpoint endpoint = new VpcEndpoint();
+        endpoint.setVpcEndpointId("vpce-" + randomHex(17));
+        endpoint.setVpcId(vpcId);
+        endpoint.setServiceName(serviceName);
+        endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        endpoint.setCreationTimestamp(Instant.now());
+        endpoint.setRegion(region);
+        endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
+        endpoint.setSubnetIds(new ArrayList<>(subnetIds));
+        endpoint.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        if (endpointTags != null && !endpointTags.isEmpty()) {
+            endpoint.setTags(new ArrayList<>(endpointTags));
+            tags.put(endpoint.getVpcEndpointId(), new ArrayList<>(endpointTags));
+        }
+        vpcEndpoints.put(key(region, endpoint.getVpcEndpointId()), endpoint);
+        return endpoint;
+    }
+
+    public List<VpcEndpoint> describeVpcEndpoints(String region, List<String> endpointIds,
+                                                  Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        if (!endpointIds.isEmpty()) {
+            for (String endpointId : endpointIds) {
+                getRequiredVpcEndpoint(region, endpointId);
+            }
+        }
+        return vpcEndpoints.values().stream()
+                .filter(endpoint -> endpoint.getRegion().equals(region))
+                .filter(endpoint -> endpointIds.isEmpty() || endpointIds.contains(endpoint.getVpcEndpointId()))
+                .filter(endpoint -> matchesFilters(endpoint, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public List<VpcEndpoint> deleteVpcEndpoints(String region, List<String> endpointIds) {
+        ensureDefaultResources(region);
+        List<VpcEndpoint> deleted = new ArrayList<>();
+        for (String endpointId : endpointIds) {
+            VpcEndpoint endpoint = getRequiredVpcEndpoint(region, endpointId);
+            endpoint.setState("deleted");
+            vpcEndpoints.remove(key(region, endpointId));
+            tags.remove(endpointId);
+            deleted.add(endpoint);
+        }
+        return deleted;
+    }
+
+    private VpcEndpoint getRequiredVpcEndpoint(String region, String endpointId) {
+        VpcEndpoint endpoint = vpcEndpoints.get(key(region, endpointId));
+        if (endpoint == null) {
+            throw new AwsException("InvalidVpcEndpointId.NotFound",
+                    "The vpcEndpoint ID '" + endpointId + "' does not exist", 400);
+        }
+        return endpoint;
+    }
+
     // ─── Subnets ───────────────────────────────────────────────────────────────
 
     public Subnet createSubnet(String region, String vpcId, String cidrBlock, String availabilityZone) {
@@ -649,7 +750,7 @@ public class Ec2Service {
 
     public void modifySubnetAttribute(String region, String subnetId, String attribute, String value) {
         ensureDefaultResources(region);
-        Subnet subnet = getRequiredSubnet(region, subnetId);
+        Subnet subnet = requireSubnet(region, subnetId);
         switch (attribute) {
             case "mapPublicIpOnLaunch"           -> subnet.setMapPublicIpOnLaunch(Boolean.parseBoolean(value));
             case "assignIpv6AddressOnCreation"   -> subnet.setAssignIpv6AddressOnCreation(Boolean.parseBoolean(value));
@@ -785,7 +886,7 @@ public class Ec2Service {
         SecurityGroup sg = securityGroups.get(key(region, groupId));
         if (sg == null)
             throw new AwsException("InvalidGroup.NotFound", "The security group '" + groupId + "' does not exist", 400);
-        
+
         return sg;
     }
 
@@ -904,44 +1005,282 @@ public class Ec2Service {
     // ─── AMIs ──────────────────────────────────────────────────────────────────
 
     public List<Image> describeImages(String region, List<String> imageIds, List<String> owners) {
-        List<Image> staticImages = new ArrayList<>();
+        return describeImages(region, imageIds, owners, Map.of());
+    }
 
-        Image al2 = new Image();
-        al2.setImageId("ami-0abcdef1234567890");
-        al2.setName("amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2");
-        al2.setDescription("Amazon Linux 2 AMI");
-        al2.setArchitecture("x86_64");
-        al2.setCreationDate("2023-04-04T00:00:00.000Z");
-        staticImages.add(al2);
-
-        Image al2023 = new Image();
-        al2023.setImageId("ami-0abcdef1234567891");
-        al2023.setName("al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64");
-        al2023.setDescription("Amazon Linux 2023 AMI");
-        al2023.setArchitecture("x86_64");
-        al2023.setCreationDate("2023-03-15T00:00:00.000Z");
-        staticImages.add(al2023);
-
-        Image ubuntu = new Image();
-        ubuntu.setImageId("ami-0abcdef1234567892");
-        ubuntu.setName("ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20230324");
-        ubuntu.setDescription("Canonical, Ubuntu, 20.04 LTS");
-        ubuntu.setArchitecture("x86_64");
-        ubuntu.setCreationDate("2023-03-24T00:00:00.000Z");
-        staticImages.add(ubuntu);
-
-        Image windows = new Image();
-        windows.setImageId("ami-0abcdef1234567893");
-        windows.setName("Windows_Server-2022-English-Full-Base-2023.04.12");
-        windows.setDescription("Microsoft Windows Server 2022 Full Locale English AMI");
-        windows.setArchitecture("x86_64");
-        windows.setPlatform("windows");
-        windows.setCreationDate("2023-04-12T00:00:00.000Z");
-        staticImages.add(windows);
-
-        return staticImages.stream()
-                .filter(img -> imageIds.isEmpty() || imageIds.contains(img.getImageId()))
+    public List<Image> describeImages(String region, List<String> imageIds, List<String> owners, Map<String, List<String>> filters) {
+        return imageCatalog.images().stream()
+                .filter(Ec2ImageCatalog.CatalogImage::advertised)
+                .filter(img -> img.matchesIdOrAlias(imageIds))
+                .filter(img -> img.matchesOwner(owners))
+                .filter(img -> matchesImageFilters(img, filters))
+                .map(Ec2ImageCatalog.CatalogImage::toImage)
                 .collect(Collectors.toList());
+    }
+
+    // ─── Launch Templates ─────────────────────────────────────────────────────
+
+    public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
+                                               String instanceType, String keyName,
+                                               List<String> securityGroupIds, String userData,
+                                               List<Tag> launchTemplateTags) {
+        ensureDefaultResources(region);
+        if (name == null || name.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
+        }
+        boolean exists = launchTemplates.values().stream()
+                .anyMatch(lt -> lt.getRegion().equals(region) && name.equals(lt.getLaunchTemplateName()));
+        if (exists) {
+            throw new AwsException("InvalidLaunchTemplateName.AlreadyExistsException",
+                    "Launch template name already in use.", 400);
+        }
+
+        LaunchTemplate launchTemplate = new LaunchTemplate();
+        launchTemplate.setLaunchTemplateId("lt-" + randomHex(17));
+        launchTemplate.setLaunchTemplateName(name);
+        launchTemplate.setCreateTime(Instant.now());
+        launchTemplate.setCreatedBy("arn:aws:iam::" + accountId + ":root");
+        launchTemplate.setRegion(region);
+        launchTemplate.setImageId(imageId);
+        launchTemplate.setInstanceType(instanceType);
+        launchTemplate.setKeyName(keyName);
+        launchTemplate.setUserData(userData);
+        if (securityGroupIds != null) {
+            launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
+        }
+        if (launchTemplateTags != null && !launchTemplateTags.isEmpty()) {
+            launchTemplate.setTags(new ArrayList<>(launchTemplateTags));
+            tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
+        }
+        launchTemplate.getVersions().put("1", dataFrom(launchTemplate));
+        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
+        return launchTemplate;
+    }
+
+    public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
+                                                      String imageId, String instanceType, String keyName,
+                                                      List<String> securityGroupIds, String userData,
+                                                      String sourceVersion) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
+        LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate,
+                resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber())));
+        launchTemplate.setLatestVersionNumber(String.valueOf(latestVersion));
+        if (imageId != null && !imageId.isBlank()) {
+            data.setImageId(imageId);
+        }
+        if (instanceType != null && !instanceType.isBlank()) {
+            data.setInstanceType(instanceType);
+        }
+        if (keyName != null && !keyName.isBlank()) {
+            data.setKeyName(keyName);
+        }
+        if (userData != null && !userData.isBlank()) {
+            data.setUserData(userData);
+        }
+        if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
+            data.setSecurityGroupIds(securityGroupIds);
+        }
+        launchTemplate.getVersions().put(String.valueOf(latestVersion), data);
+        applyData(launchTemplate, data);
+        return launchTemplate;
+    }
+
+    public List<LaunchTemplate> describeLaunchTemplateVersions(String region, String id, String name,
+                                                               List<String> requestedVersions) {
+        List<LaunchTemplate> templates = describeLaunchTemplates(
+                region,
+                id != null && !id.isBlank() ? List.of(id) : List.of(),
+                name != null && !name.isBlank() ? List.of(name) : List.of(),
+                Map.of());
+        List<LaunchTemplate> versions = new ArrayList<>();
+        for (LaunchTemplate launchTemplate : templates) {
+            List<String> effectiveVersions = requestedVersions == null || requestedVersions.isEmpty()
+                    ? List.of(launchTemplate.getLatestVersionNumber())
+                    : requestedVersions;
+            for (String requestedVersion : effectiveVersions) {
+                String resolvedVersion = resolveLaunchTemplateVersion(
+                        launchTemplate, requestedVersion, launchTemplate.getLatestVersionNumber());
+                versions.add(copyForVersion(launchTemplate, resolvedVersion));
+            }
+        }
+        return versions;
+    }
+
+    public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        if (defaultVersion != null && !defaultVersion.isBlank()) {
+            String resolved = switch (defaultVersion) {
+                case "$Latest" -> launchTemplate.getLatestVersionNumber();
+                case "$Default" -> launchTemplate.getDefaultVersionNumber();
+                default -> defaultVersion;
+            };
+            int requested = parseLaunchTemplateVersion(resolved);
+            int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
+            if (requested < 1 || requested > latest) {
+                throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
+                        "The specified launch template version does not exist.", 400);
+            }
+            launchTemplate.setDefaultVersionNumber(String.valueOf(requested));
+        }
+        return launchTemplate;
+    }
+
+    public List<LaunchTemplate> describeLaunchTemplates(String region, List<String> ids,
+                                                        List<String> names, Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        return launchTemplates.values().stream()
+                .filter(lt -> lt.getRegion().equals(region))
+                .filter(lt -> ids.isEmpty() || ids.contains(lt.getLaunchTemplateId()))
+                .filter(lt -> names.isEmpty() || names.contains(lt.getLaunchTemplateName()))
+                .filter(lt -> matchesFilters(lt, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        launchTemplates.remove(key(region, launchTemplate.getLaunchTemplateId()));
+        tags.remove(launchTemplate.getLaunchTemplateId());
+        return launchTemplate;
+    }
+
+    private LaunchTemplate findLaunchTemplate(String region, String id, String name) {
+        if (id != null && !id.isBlank()) {
+            LaunchTemplate launchTemplate = launchTemplates.get(key(region, id));
+            if (launchTemplate != null) {
+                return launchTemplate;
+            }
+        } else if (name != null && !name.isBlank()) {
+            return launchTemplates.values().stream()
+                    .filter(lt -> lt.getRegion().equals(region) && name.equals(lt.getLaunchTemplateName()))
+                    .findFirst()
+                    .orElseThrow(() -> new AwsException("InvalidLaunchTemplateName.NotFoundException",
+                            "The specified launch template does not exist.", 400));
+        }
+        throw new AwsException("InvalidLaunchTemplateId.NotFoundException",
+                "The specified launch template does not exist.", 400);
+    }
+
+    private int parseLaunchTemplateVersion(String version) {
+        try {
+            return Integer.parseInt(version);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidLaunchTemplateVersion.Malformed",
+                    "The specified launch template version is not valid.", 400);
+        }
+    }
+
+    private String resolveLaunchTemplateVersion(LaunchTemplate launchTemplate, String requestedVersion,
+                                                String defaultWhenMissing) {
+        if (launchTemplate.getVersions().isEmpty()) {
+            launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(), dataFrom(launchTemplate));
+        }
+        String candidate = requestedVersion == null || requestedVersion.isBlank() ? defaultWhenMissing : requestedVersion;
+        String resolved = switch (candidate) {
+            case "$Latest" -> launchTemplate.getLatestVersionNumber();
+            case "$Default" -> launchTemplate.getDefaultVersionNumber();
+            default -> candidate;
+        };
+        int requested = parseLaunchTemplateVersion(resolved);
+        int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
+        if (requested < 1 || requested > latest || !launchTemplate.getVersions().containsKey(resolved)) {
+            throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
+                    "The specified launch template version does not exist.", 400);
+        }
+        return resolved;
+    }
+
+    private LaunchTemplateData versionData(LaunchTemplate launchTemplate, String version) {
+        return launchTemplate.getVersions().get(version);
+    }
+
+    private LaunchTemplateData dataFrom(LaunchTemplate launchTemplate) {
+        LaunchTemplateData data = new LaunchTemplateData();
+        data.setImageId(launchTemplate.getImageId());
+        data.setInstanceType(launchTemplate.getInstanceType());
+        data.setKeyName(launchTemplate.getKeyName());
+        data.setUserData(launchTemplate.getUserData());
+        data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
+        return data;
+    }
+
+    private void applyData(LaunchTemplate launchTemplate, LaunchTemplateData data) {
+        launchTemplate.setImageId(data.getImageId());
+        launchTemplate.setInstanceType(data.getInstanceType());
+        launchTemplate.setKeyName(data.getKeyName());
+        launchTemplate.setUserData(data.getUserData());
+        launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
+    }
+
+    private LaunchTemplate copyForVersion(LaunchTemplate source, String versionNumber) {
+        LaunchTemplate copy = new LaunchTemplate();
+        copy.setLaunchTemplateId(source.getLaunchTemplateId());
+        copy.setLaunchTemplateName(source.getLaunchTemplateName());
+        copy.setDefaultVersionNumber(source.getDefaultVersionNumber());
+        copy.setLatestVersionNumber(versionNumber);
+        copy.setCreateTime(source.getCreateTime());
+        copy.setCreatedBy(source.getCreatedBy());
+        copy.setRegion(source.getRegion());
+        copy.setTags(source.getTags());
+        applyData(copy, versionData(source, versionNumber));
+        return copy;
+    }
+
+    private boolean matchesImageFilters(Ec2ImageCatalog.CatalogImage image, Map<String, List<String>> filters) {
+        if (filters == null || filters.isEmpty()) {
+            return true;
+        }
+        for (Map.Entry<String, List<String>> filter : filters.entrySet()) {
+            if (!matchesImageFilter(image, filter.getKey(), filter.getValue())) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean matchesImageFilter(Ec2ImageCatalog.CatalogImage catalogImage, String name, List<String> values) {
+        Image image = catalogImage.toImage();
+        return switch (name) {
+            case "architecture" -> matchesFilterValue(values, image.getArchitecture());
+            case "hypervisor" -> matchesFilterValue(values, image.getHypervisor());
+            case "image-id" -> catalogImage.idsAndAliases().stream().anyMatch(id -> matchesFilterValue(values, id));
+            case "image-type" -> matchesFilterValue(values, "machine");
+            case "is-public" -> matchesFilterValue(values, String.valueOf(image.isPublic()));
+            case "name" -> matchesFilterValue(values, image.getName());
+            case "owner-alias" -> matchesFilterValue(values, image.getImageOwnerAlias());
+            case "owner-id" -> matchesFilterValue(values, image.getOwnerId());
+            case "root-device-name" -> matchesFilterValue(values, image.getRootDeviceName());
+            case "root-device-type" -> matchesFilterValue(values, image.getRootDeviceType());
+            case "state" -> matchesFilterValue(values, image.getState());
+            case "virtualization-type" -> matchesFilterValue(values, image.getVirtualizationType());
+            default -> true;
+        };
+    }
+
+    private boolean matchesFilterValue(List<String> patterns, String value) {
+        if (patterns == null || patterns.isEmpty()) {
+            return true;
+        }
+        if (value == null) {
+            return false;
+        }
+        return patterns.stream().anyMatch(pattern -> wildcardMatches(pattern, value));
+    }
+
+    private boolean wildcardMatches(String pattern, String value) {
+        if (pattern == null) {
+            return false;
+        }
+        if (!pattern.contains("*")) {
+            return pattern.equals(value);
+        }
+        String regex = pattern.chars()
+                .mapToObj(ch -> ch == '*' ? ".*" : java.util.regex.Pattern.quote(String.valueOf((char) ch)))
+                .collect(Collectors.joining());
+        return value.matches(regex);
     }
 
     // ─── Tags ──────────────────────────────────────────────────────────────────
@@ -988,7 +1327,13 @@ public class Ec2Service {
         RouteTable rt = routeTables.get(key(region, resourceId));
         if (rt != null) { rt.setTags(new ArrayList<>(tagList)); return; }
         KeyPair kp = keyPairs.get(key(region, resourceId));
-        if (kp != null) { kp.setTags(new ArrayList<>(tagList)); }
+        if (kp != null) { kp.setTags(new ArrayList<>(tagList)); return; }
+        LaunchTemplate lt = launchTemplates.get(key(region, resourceId));
+        if (lt != null) { lt.setTags(new ArrayList<>(tagList)); return; }
+        VpcEndpoint endpoint = vpcEndpoints.get(key(region, resourceId));
+        if (endpoint != null) { endpoint.setTags(new ArrayList<>(tagList)); return; }
+        NatGateway natGateway = natGateways.get(key(region, resourceId));
+        if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
@@ -1036,6 +1381,9 @@ public class Ec2Service {
         if (resourceId.startsWith("rtb-")) return "route-table";
         if (resourceId.startsWith("key-")) return "key-pair";
         if (resourceId.startsWith("eipalloc-")) return "elastic-ip";
+        if (resourceId.startsWith("lt-")) return "launch-template";
+        if (resourceId.startsWith("vpce-")) return "vpc-endpoint";
+        if (resourceId.startsWith("nat-")) return "natgateway";
         return "unknown";
     }
 
@@ -1084,17 +1432,17 @@ public class Ec2Service {
 
     private InternetGateway getRequiredInternetGateway(String region, String igwId) {
         InternetGateway igw = internetGateways.get(key(region, igwId));
-        if (igw == null) 
+        if (igw == null)
             throw new AwsException("InvalidInternetGatewayID.NotFound", "The internet gateway '" + igwId + "' does not exist", 400);
-        
-        return igw; 
+
+        return igw;
     }
 
     // ─── Route Tables ──────────────────────────────────────────────────────────
 
     public RouteTable createRouteTable(String region, String vpcId) {
         ensureDefaultResources(region);
-        Vpc vpc = getRequiredVpc(region, vpcId); 
+        Vpc vpc = getRequiredVpc(region, vpcId);
 
         String rtId = "rtb-" + randomHex(8);
         RouteTable rt = new RouteTable();
@@ -1113,7 +1461,7 @@ public class Ec2Service {
             throw new AwsException("InvalidVpcID.NotFound", "The vpc ID '" + vpcId + "' does not exist", 400);
 
         return vpc;
-    }       
+    }
 
     public List<RouteTable> describeRouteTables(String region, List<String> routeTableIds, Map<String, List<String>> filters) {
         ensureDefaultResources(region);
@@ -1171,10 +1519,70 @@ public class Ec2Service {
 
     private RouteTable getRequiredRouteTable(String region, String routeTableId) {
         RouteTable rt = routeTables.get(key(region, routeTableId));
-        if (rt == null) 
+        if (rt == null)
             throw new AwsException("InvalidRouteTableID.NotFound", "The route table '" + routeTableId + "' does not exist", 400);
-        
+
         return rt;
+    }
+
+    // ─── NAT Gateways ─────────────────────────────────────────────────────────
+
+    public NatGateway createNatGateway(String region, String subnetId, String allocationId,
+                                       String connectivityType, List<Tag> natGatewayTags) {
+        ensureDefaultResources(region);
+        Subnet subnet = requireSubnet(region, subnetId);
+        if (allocationId != null && !allocationId.isBlank()) {
+            getRequiredAddress(region, allocationId);
+        }
+
+        NatGateway natGateway = new NatGateway();
+        natGateway.setNatGatewayId("nat-" + randomHex(17));
+        natGateway.setSubnetId(subnetId);
+        natGateway.setVpcId(subnet.getVpcId());
+        natGateway.setAllocationId(allocationId);
+        natGateway.setConnectivityType(connectivityType != null && !connectivityType.isBlank() ? connectivityType : "public");
+        natGateway.setCreateTime(Instant.now());
+        natGateway.setRegion(region);
+        if (natGatewayTags != null && !natGatewayTags.isEmpty()) {
+            natGateway.setTags(new ArrayList<>(natGatewayTags));
+            tags.put(natGateway.getNatGatewayId(), new ArrayList<>(natGatewayTags));
+        }
+        natGateways.put(key(region, natGateway.getNatGatewayId()), natGateway);
+        return natGateway;
+    }
+
+    public List<NatGateway> describeNatGateways(String region, List<String> natGatewayIds,
+                                                Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        if (!natGatewayIds.isEmpty()) {
+            for (String natGatewayId : natGatewayIds) {
+                getRequiredNatGateway(region, natGatewayId);
+            }
+        }
+        return natGateways.values().stream()
+                .filter(natGateway -> natGateway.getRegion().equals(region))
+                .filter(natGateway -> natGatewayIds.isEmpty()
+                        || natGatewayIds.contains(natGateway.getNatGatewayId()))
+                .filter(natGateway -> matchesFilters(natGateway, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public NatGateway deleteNatGateway(String region, String natGatewayId) {
+        ensureDefaultResources(region);
+        NatGateway natGateway = getRequiredNatGateway(region, natGatewayId);
+        natGateway.setState("deleted");
+        natGateways.remove(key(region, natGatewayId));
+        tags.remove(natGatewayId);
+        return natGateway;
+    }
+
+    private NatGateway getRequiredNatGateway(String region, String natGatewayId) {
+        NatGateway natGateway = natGateways.get(key(region, natGatewayId));
+        if (natGateway == null) {
+            throw new AwsException("NatGatewayNotFound",
+                    "NatGateway " + natGatewayId + " was not found", 400);
+        }
+        return natGateway;
     }
 
     // ─── Elastic IPs ───────────────────────────────────────────────────────────
@@ -1202,9 +1610,9 @@ public class Ec2Service {
 
     private Address getRequiredAddress(String region, String allocationId) {
         Address addr = addresses.get(key(region, allocationId));
-        if (addr == null) 
+        if (addr == null)
             throw new AwsException("InvalidAllocationID.NotFound", "The allocation ID '" + allocationId + "' does not exist", 400);
-        
+
         return addr;
     }
 
@@ -1277,6 +1685,9 @@ public class Ec2Service {
         allTypes.add(buildInstanceType("t3.small", 2, 2048));
         allTypes.add(buildInstanceType("t3.medium", 2, 4096));
         allTypes.add(buildInstanceType("m5.large", 2, 8192));
+        allTypes.add(buildInstanceType("t4g.micro", 2, 1024, List.of("arm64")));
+        allTypes.add(buildInstanceType("t4g.small", 2, 2048, List.of("arm64")));
+        allTypes.add(buildInstanceType("t4g.medium", 2, 4096, List.of("arm64")));
 
         if (instanceTypeNames.isEmpty()) {
             return allTypes;
@@ -1287,13 +1698,53 @@ public class Ec2Service {
     }
 
     private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib) {
+        return buildInstanceType(name, vcpu, memMib, List.of("x86_64"));
+    }
+
+    private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib,
+                                                  List<String> supportedArchitectures) {
         Map<String, Object> t = new LinkedHashMap<>();
         t.put("instanceType", name);
         t.put("vcpu", vcpu);
         t.put("memoryMib", memMib);
-        t.put("supportedArchitectures", List.of("x86_64"));
+        t.put("supportedArchitectures", supportedArchitectures);
         t.put("currentGeneration", true);
         return t;
+    }
+
+    public List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,
+                                                                   String locationType,
+                                                                   Map<String, List<String>> filters) {
+        List<String> effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(instanceTypeNames));
+        if (filters != null && filters.containsKey("instance-type")) {
+            effectiveTypeNames.addAll(filters.get("instance-type"));
+            effectiveTypeNames = new ArrayList<>(new LinkedHashSet<>(effectiveTypeNames));
+        }
+        String effectiveLocationType = locationType != null && !locationType.isBlank()
+                ? locationType
+                : "availability-zone";
+        List<String> locations = "region".equals(effectiveLocationType)
+                ? List.of(region)
+                : describeAvailabilityZones(region).stream()
+                        .map(zone -> zone.get("zoneName"))
+                        .toList();
+        List<String> locationFilter = filters != null ? filters.get("location") : null;
+
+        List<Map<String, String>> offerings = new ArrayList<>();
+        for (Map<String, Object> type : describeInstanceTypes(effectiveTypeNames)) {
+            String instanceType = (String) type.get("instanceType");
+            for (String location : locations) {
+                if (locationFilter != null && !matchesValue(location, locationFilter)) {
+                    continue;
+                }
+                Map<String, String> offering = new LinkedHashMap<>();
+                offering.put("instanceType", instanceType);
+                offering.put("locationType", effectiveLocationType);
+                offering.put("location", location);
+                offerings.add(offering);
+            }
+        }
+        return offerings;
     }
 
     // ─── Filter matching ───────────────────────────────────────────────────────
@@ -1433,6 +1884,37 @@ public class Ec2Service {
                 default -> true;
             };
         }
+        if (resource instanceof LaunchTemplate lt) {
+            return switch (filterName) {
+                case "launch-template-id" -> matchesValue(values, lt.getLaunchTemplateId());
+                case "launch-template-name" -> matchesValue(values, lt.getLaunchTemplateName());
+                default -> true;
+            };
+        }
+        if (resource instanceof VpcEndpoint endpoint) {
+            return switch (filterName) {
+                case "service-name" -> matchesValue(values, endpoint.getServiceName());
+                case "vpc-endpoint-id" -> matchesValue(values, endpoint.getVpcEndpointId());
+                case "vpc-endpoint-type" -> matchesValue(values, endpoint.getVpcEndpointType());
+                case "vpc-id" -> matchesValue(values, endpoint.getVpcId());
+                case "state" -> matchesValue(values, endpoint.getState());
+                case "route-table-id" -> endpoint.getRouteTableIds().stream()
+                        .anyMatch(routeTableId -> matchesValue(values, routeTableId));
+                case "subnet-id" -> endpoint.getSubnetIds().stream()
+                        .anyMatch(subnetId -> matchesValue(values, subnetId));
+                default -> true;
+            };
+        }
+        if (resource instanceof NatGateway natGateway) {
+            return switch (filterName) {
+                case "nat-gateway-id" -> matchesValue(values, natGateway.getNatGatewayId());
+                case "subnet-id" -> matchesValue(values, natGateway.getSubnetId());
+                case "vpc-id" -> matchesValue(values, natGateway.getVpcId());
+                case "state" -> matchesValue(values, natGateway.getState());
+                case "connectivity-type" -> matchesValue(values, natGateway.getConnectivityType());
+                default -> true;
+            };
+        }
         if (resource instanceof Volume vol) {
             return switch (filterName) {
                 case "volume-id" -> matchesValue(values, vol.getVolumeId());
@@ -1465,7 +1947,6 @@ public class Ec2Service {
         return true;
     }
 
-    @SuppressWarnings("unchecked")
     private List<Tag> getResourceTags(Object resource) {
         if (resource instanceof Instance inst) return inst.getTags();
         if (resource instanceof Vpc vpc) return vpc.getTags();
@@ -1477,6 +1958,9 @@ public class Ec2Service {
         if (resource instanceof Address addr) return addr.getTags();
         if (resource instanceof Volume vol) return vol.getTags();
         if (resource instanceof NetworkInterface ni) return ni.getTagSet();
+        if (resource instanceof LaunchTemplate lt) return lt.getTags();
+        if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
+        if (resource instanceof NatGateway natGateway) return natGateway.getTags();
         return Collections.emptyList();
     }
 

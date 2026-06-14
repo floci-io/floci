@@ -96,4 +96,29 @@ class ElastiCacheMemcachedServiceTest {
         AwsException ex = assertThrows(AwsException.class, () -> service.getCacheCluster("my-cluster"));
         assertEquals("CacheClusterNotFound", ex.getErrorCode());
     }
+
+    @Test
+    void createClusterUsesContainerHostWhenHostnameNotConfigured() {
+        ElastiCacheMemcachedContainerManager containerManager = mock(ElastiCacheMemcachedContainerManager.class);
+        StorageFactory storageFactory = mock(StorageFactory.class);
+        EmulatorConfig config = mock(EmulatorConfig.class);
+
+        EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.ElastiCacheServiceConfig ecConfig = mock(EmulatorConfig.ElastiCacheServiceConfig.class);
+        when(config.services()).thenReturn(servicesConfig);
+        when(servicesConfig.elasticache()).thenReturn(ecConfig);
+        when(ecConfig.defaultMemcachedImage()).thenReturn("memcached:1.6");
+        when(config.hostname()).thenReturn(Optional.empty());
+
+        when(storageFactory.create(anyString(), anyString(), any())).thenAnswer(inv -> new InMemoryStorage<>());
+        when(containerManager.start(anyString(), anyString()))
+                .thenReturn(new ElastiCacheContainerHandle("cid", "cluster", "172.20.0.10", 11211));
+
+        ElastiCacheMemcachedService containerModeService =
+                new ElastiCacheMemcachedService(containerManager, storageFactory, config);
+
+        CacheCluster cluster = containerModeService.createCacheCluster("container-cluster");
+
+        assertEquals("172.20.0.10", cluster.getConfigurationEndpoint().address());
+    }
 }

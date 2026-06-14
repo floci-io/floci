@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.vertx.core.Vertx;
@@ -23,6 +24,7 @@ public class ElbV2HealthChecker {
 
     private final Vertx vertx;
     private final EmulatorConfig config;
+    private final Ec2Service ec2Service;
 
     // tgArn → (targetKey → TargetState)
     private final Map<String, Map<String, TargetState>> states = new ConcurrentHashMap<>();
@@ -30,9 +32,10 @@ public class ElbV2HealthChecker {
     private final Map<String, Long> timers = new ConcurrentHashMap<>();
 
     @Inject
-    public ElbV2HealthChecker(Vertx vertx, EmulatorConfig config) {
+    public ElbV2HealthChecker(Vertx vertx, EmulatorConfig config, Ec2Service ec2Service) {
         this.vertx = vertx;
         this.config = config;
+        this.ec2Service = ec2Service;
     }
 
     public static int effectivePort(TargetDescription target, TargetGroup tg) {
@@ -120,13 +123,14 @@ public class ElbV2HealthChecker {
             if (parts.length != 2) {
                 continue;
             }
-            String host = parts[0];
+            String targetId = parts[0];
             int port;
             try {
                 port = Integer.parseInt(parts[1]);
             } catch (NumberFormatException e) {
                 continue;
             }
+            String host = ElbV2TargetResolver.resolveHost(ec2Service, tg, targetId);
             String path = tg.getHealthCheckPath() != null ? tg.getHealthCheckPath() : "/";
             String matcher = tg.getMatcher() != null ? tg.getMatcher() : "200";
             int timeout = tg.getHealthCheckTimeoutSeconds() != null ? tg.getHealthCheckTimeoutSeconds() : 5;

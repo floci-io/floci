@@ -19,6 +19,7 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.MatcherAssert.assertThat;
+import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
@@ -5116,7 +5117,7 @@ class CloudFormationIntegrationTest {
                     "Name": "cfn-alb",
                     "Type": "application",
                     "Scheme": "internet-facing",
-                    "Subnets": ["subnet-aaa", "subnet-bbb"],
+                    "Subnets": ["subnet-default-a", "subnet-default-b"],
                     "SecurityGroups": ["sg-123"]
                   }
                 },
@@ -5126,7 +5127,7 @@ class CloudFormationIntegrationTest {
                     "Name": "cfn-tg",
                     "Protocol": "HTTP",
                     "Port": 80,
-                    "VpcId": "vpc-00000001",
+                    "VpcId": "vpc-default",
                     "TargetType": "ip",
                     "HealthCheckPath": "/health",
                     "Matcher": { "HttpCode": "200-299" }
@@ -5632,6 +5633,309 @@ class CloudFormationIntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
+
+    @Test
+    void createStack_stepFunctionsStateMachineResolvesDefinitionSubstitutionsAndIsDeletable() {
+        String template = """
+            {
+              "Resources": {
+                "MyRole": {
+                  "Type": "AWS::IAM::Role",
+                  "Properties": {
+                    "RoleName": "cfn-sfn-role",
+                    "AssumeRolePolicyDocument": {
+                      "Version": "2012-10-17",
+                      "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": { "Service": "states.amazonaws.com" },
+                        "Action": "sts:AssumeRole"
+                      }]
+                    }
+                  }
+                },
+                "MyStateMachine": {
+                  "Type": "AWS::StepFunctions::StateMachine",
+                  "Properties": {
+                    "StateMachineName": "cfn-sfn-pipeline",
+                    "RoleArn": { "Fn::GetAtt": ["MyRole", "Arn"] },
+                    "DefinitionString": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"Result\\":\\"${Marker}\\",\\"End\\":true}}}",
+                    "DefinitionSubstitutions": {
+                      "Marker": "substituted-value"
+                    },
+                    "Tags": [
+                      { "Key": "env", "Value": "test" }
+                    ]
+                  }
+                }
+              },
+              "Outputs": {
+                "StateMachineArn": { "Value": { "Ref": "MyStateMachine" } },
+                "StateMachineName": { "Value": { "Fn::GetAtt": ["MyStateMachine", "Name"] } }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "sfn-cfn-stack")
+            .formParam("TemplateBody", template)
+            .formParam("Capabilities.member.1", "CAPABILITY_NAMED_IAM")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String expectedArn = "arn:aws:states:us-east-1:000000000000:stateMachine:cfn-sfn-pipeline";
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("name", equalTo("cfn-sfn-pipeline"))
+            .body("roleArn", containsString("cfn-sfn-role"))
+            .body("definition", containsString("substituted-value"))
+            .body("definition", not(containsString("${Marker}")));
+
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "sfn-cfn-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+        assertThat(describeXml, containsString("<OutputKey>StateMachineArn</OutputKey>"));
+        assertThat(describeXml, containsString("<OutputValue>" + expectedArn + "</OutputValue>"));
+        assertThat(describeXml, containsString("<OutputKey>StateMachineName</OutputKey>"));
+        assertThat(describeXml, containsString("<OutputValue>cfn-sfn-pipeline</OutputValue>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "sfn-cfn-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.DescribeStateMachine")
+            .contentType(SFN_CONTENT_TYPE)
+            .body("{\"stateMachineArn\":\"" + expectedArn + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .body("__type", containsString("StateMachineDoesNotExist"));
+    }
+
+    // ── Issue #924: roll back failed stack creates (criterion #9) ────────────
+
+    @Test
+    void createStack_resourceFailure_rollsBackCreatedResourcesThenRetrySucceeds() {
+        // GoodBucket provisions first (DependsOn forces ordering); BadSecret then fails because
+        // it sets both SecretString and GenerateSecretString. The successful bucket must be rolled
+        // back so a corrected re-deploy starts from a clean slate.
+        String failingTemplate = """
+            {
+              "Resources": {
+                "GoodBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "cfn-rollback-bucket" }
+                },
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "DependsOn": "GoodBucket",
+                  "Properties": {
+                    "Name": "cfn-rollback-secret",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-rollback-stack")
+            .formParam("TemplateBody", failingTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The stack rolled back rather than being left half-built
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-rollback-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+
+        // The bucket that was successfully created is gone again — rollback cleaned it up
+        given()
+            .header("Host", "cfn-rollback-bucket.localhost")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(404);
+
+        // A corrected re-deploy (no failing resource) succeeds on the now-clean slate
+        String goodTemplate = """
+            {
+              "Resources": {
+                "GoodBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "cfn-rollback-bucket" }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-rollback-retry-stack")
+            .formParam("TemplateBody", goodTemplate)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-rollback-retry-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        // The bucket now exists again, provisioned by the successful retry
+        given()
+            .header("Host", "cfn-rollback-bucket.localhost")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    void createStack_resourceFailure_setsRollbackComplete_singleResource() {
+        // A lone failing resource still moves the stack to ROLLBACK_COMPLETE (no orphaned state).
+        String template = """
+            {
+              "Resources": {
+                "BadSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "Properties": {
+                    "Name": "cfn-rollback-lone-secret",
+                    "SecretString": "explicit",
+                    "GenerateSecretString": { "PasswordLength": 32 }
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-rollback-lone-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "cfn-rollback-lone-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>ROLLBACK_COMPLETE</StackStatus>"));
+
+        // The failed resource is still reported as CREATE_FAILED in the resource list
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", "cfn-rollback-lone-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("CREATE_FAILED"));
+    }
+
+    @Test
+    void createStack_apiGatewayRestApi_withEndpointConfiguration() {
+        String template = """
+            {
+              "Resources": {
+                "MyPrivateApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-private-api",
+                    "EndpointConfiguration": {
+                      "Types": ["PRIVATE"],
+                      "VpcEndpointIds": ["vpce-12345678"]
+                    }
+                  }
+                }
+              }
+            }
+            """;
+
+        String stackName = "apigw-ep-stack";
+
+        given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateStack")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body(containsString("<StackId>"));
+
+        String resourcesXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStackResources")
+                .formParam("StackName", stackName)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "MyPrivateApi");
+
+        given()
+                .when()
+                .get("/restapis/" + apiId)
+                .then()
+                .statusCode(200)
+                .body("name", equalTo("cfn-private-api"))
+                .body("endpointConfiguration.types", contains("PRIVATE"))
+                .body("endpointConfiguration.vpcEndpointIds", contains("vpce-12345678"));
     }
 
 }

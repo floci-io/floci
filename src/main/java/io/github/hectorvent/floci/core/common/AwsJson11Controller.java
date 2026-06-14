@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.glue.GlueJsonHandler;
 import io.github.hectorvent.floci.services.resourcegroupstagging.ResourceGroupsTaggingJsonHandler;
 import io.github.hectorvent.floci.services.bcmdataexports.BcmDataExportsJsonHandler;
 import io.github.hectorvent.floci.services.ce.CostExplorerJsonHandler;
+import io.github.hectorvent.floci.services.cloudtrail.CloudTrailJsonHandler;
 import io.github.hectorvent.floci.services.configservice.ConfigServiceJsonHandler;
 import io.github.hectorvent.floci.services.cur.CurJsonHandler;
 import io.github.hectorvent.floci.services.pricing.PricingJsonHandler;
@@ -22,7 +23,10 @@ import io.github.hectorvent.floci.services.transcribe.TranscribeJsonHandler;
 import io.github.hectorvent.floci.services.apigatewayv2.ApiGatewayV2JsonHandler;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
+import io.github.hectorvent.floci.services.cloudmap.CloudMapHandler;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
+import io.github.hectorvent.floci.services.emr.EmrHandler;
+import io.github.hectorvent.floci.services.wafv2.WafV2Handler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
@@ -54,6 +58,9 @@ public class AwsJson11Controller {
     private final RegionResolver regionResolver;
     private final SsmJsonHandler ssmJsonHandler;
     private final EventBridgeHandler eventBridgeHandler;
+    private final CloudMapHandler cloudMapHandler;
+    private final EmrHandler emrHandler;
+    private final WafV2Handler wafV2Handler;
     private final CloudWatchLogsHandler cloudWatchLogsHandler;
     private final SecretsManagerJsonHandler secretsManagerJsonHandler;
     private final KinesisJsonHandler kinesisJsonHandler;
@@ -78,11 +85,15 @@ public class AwsJson11Controller {
     private final CurJsonHandler curJsonHandler;
     private final BcmDataExportsJsonHandler bcmDataExportsJsonHandler;
     private final ConfigServiceJsonHandler configServiceJsonHandler;
+    private final CloudTrailJsonHandler cloudTrailJsonHandler;
 
     @Inject
     public AwsJson11Controller(ObjectMapper objectMapper, ResolvedServiceCatalog catalog,
                                RegionResolver regionResolver,
                                SsmJsonHandler ssmJsonHandler, EventBridgeHandler eventBridgeHandler,
+                               CloudMapHandler cloudMapHandler,
+                               EmrHandler emrHandler,
+                               WafV2Handler wafV2Handler,
                                CloudWatchLogsHandler cloudWatchLogsHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
                                KinesisJsonHandler kinesisJsonHandler,
@@ -103,12 +114,16 @@ public class AwsJson11Controller {
                                CostExplorerJsonHandler costExplorerJsonHandler,
                                CurJsonHandler curJsonHandler,
                                BcmDataExportsJsonHandler bcmDataExportsJsonHandler,
-                               ConfigServiceJsonHandler configServiceJsonHandler) {
+                               ConfigServiceJsonHandler configServiceJsonHandler,
+                               CloudTrailJsonHandler cloudTrailJsonHandler) {
         this.objectMapper = objectMapper;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
         this.ssmJsonHandler = ssmJsonHandler;
         this.eventBridgeHandler = eventBridgeHandler;
+        this.cloudMapHandler = cloudMapHandler;
+        this.emrHandler = emrHandler;
+        this.wafV2Handler = wafV2Handler;
         this.cloudWatchLogsHandler = cloudWatchLogsHandler;
         this.secretsManagerJsonHandler = secretsManagerJsonHandler;
         this.kinesisJsonHandler = kinesisJsonHandler;
@@ -133,6 +148,7 @@ public class AwsJson11Controller {
         this.curJsonHandler = curJsonHandler;
         this.bcmDataExportsJsonHandler = bcmDataExportsJsonHandler;
         this.configServiceJsonHandler = configServiceJsonHandler;
+        this.cloudTrailJsonHandler = cloudTrailJsonHandler;
     }
 
     @POST
@@ -163,6 +179,9 @@ public class AwsJson11Controller {
             Response delegated = switch (serviceKey) {
                 case "ssm" -> ssmJsonHandler.handle(action, request, region);
                 case "events" -> eventBridgeHandler.handle(action, request, region);
+                case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
+                case "elasticmapreduce" -> emrHandler.handle(action, request, region);
+                case "wafv2" -> wafV2Handler.handle(action, request, region);
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
@@ -187,6 +206,7 @@ public class AwsJson11Controller {
                 case "cur" -> curJsonHandler.handle(action, request, region);
                 case "bcm-data-exports" -> bcmDataExportsJsonHandler.handle(action, request, region);
                 case "config" -> configServiceJsonHandler.handle(action, request, region);
+                case "cloudtrail" -> cloudTrailJsonHandler.handle(action, request, region);
                 default -> null;
             };
             // catalog.matchTarget is protocol-agnostic: a JSON 1.0 target

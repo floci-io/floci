@@ -16,6 +16,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/pipes"
 	"github.com/aws/aws-sdk-go-v2/service/cloudwatch"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
+	"github.com/aws/aws-sdk-go-v2/service/glue"
 	"github.com/aws/aws-sdk-go-v2/service/iam"
 	"github.com/aws/aws-sdk-go-v2/service/kinesis"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
@@ -24,6 +25,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/rds"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
+	"github.com/aws/aws-sdk-go-v2/service/resourcegroupstaggingapi"
 	"github.com/aws/aws-sdk-go-v2/service/sns"
 	"github.com/aws/aws-sdk-go-v2/service/sqs"
 	"github.com/aws/aws-sdk-go-v2/service/ssm"
@@ -84,6 +86,11 @@ func LambdaClient() *lambda.Client {
 	return lambda.NewFromConfig(Config())
 }
 
+// GlueClient returns a new Glue client.
+func GlueClient() *glue.Client {
+	return glue.NewFromConfig(Config())
+}
+
 // IAMClient returns a new IAM client.
 func IAMClient() *iam.Client {
 	return iam.NewFromConfig(Config())
@@ -112,6 +119,11 @@ func KinesisClient() *kinesis.Client {
 // CloudWatchClient returns a new CloudWatch client.
 func CloudWatchClient() *cloudwatch.Client {
 	return cloudwatch.NewFromConfig(Config())
+}
+
+// ResourceGroupsTaggingAPIClient returns a new Resource Groups Tagging API client.
+func ResourceGroupsTaggingAPIClient() *resourcegroupstaggingapi.Client {
+	return resourcegroupstaggingapi.NewFromConfig(Config())
 }
 
 // ACMClient returns a new ACM client.

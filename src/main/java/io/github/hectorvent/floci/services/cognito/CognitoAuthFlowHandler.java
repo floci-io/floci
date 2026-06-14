@@ -348,6 +348,7 @@ final class CognitoAuthFlowHandler {
                 "SALT", user.getSrpSalt(),
                 "SRP_B", bPublicHex,
                 "SECRET_BLOCK", secretBlockBase64,
+                "USERNAME", user.getUsername(),
                 "USER_ID_FOR_SRP", user.getUsername()
         ));
         return result;
@@ -765,7 +766,6 @@ final class CognitoAuthFlowHandler {
                 Boolean.TRUE.equals(resp.get("autoVerifyPhone")));
     }
 
-    @SuppressWarnings("unchecked")
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
                                                                   Map<String, String> clientMetadata, String triggerSource) {
         Map<String, Object> req = new HashMap<>();
@@ -791,7 +791,6 @@ final class CognitoAuthFlowHandler {
         return null;
     }
 
-    @SuppressWarnings("unchecked")
     private static CognitoService.ClaimsOverride parseV1Override(Map<?, ?> details) {
         Map<String, Object> claimsToAddOrOverride = asStringObjectMap(details.get("claimsToAddOrOverride"));
         List<String> claimsToSuppress = asStringList(details.get("claimsToSuppress"));
@@ -817,7 +816,6 @@ final class CognitoAuthFlowHandler {
                 groupsToOverride, iamRolesToOverride, preferredRole);
     }
 
-    @SuppressWarnings("unchecked")
     private static CognitoService.ClaimsOverride parseV2Override(Map<?, ?> details) {
         Map<String, Object> idAdd = null;
         List<String> idSuppress = null;
@@ -879,7 +877,6 @@ final class CognitoAuthFlowHandler {
         return cfg;
     }
 
-    @SuppressWarnings("unchecked")
     private CognitoUser tryUserMigration(UserPool pool, UserPoolClient client, String username, String password,
                                           Map<String, String> validationData, Map<String, String> clientMetadata,
                                           String triggerSource) {

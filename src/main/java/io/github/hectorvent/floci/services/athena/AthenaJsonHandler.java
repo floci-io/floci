@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.athena;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.services.athena.model.CreateWorkGroupRequest;
 import io.github.hectorvent.floci.services.athena.model.QueryExecution;
 import io.github.hectorvent.floci.services.athena.model.QueryExecutionContext;
 import io.github.hectorvent.floci.services.athena.model.ResultConfiguration;
@@ -58,6 +59,51 @@ public class AthenaJsonHandler {
                 yield Response.ok(Map.of("QueryExecutionIds",
                         athenaService.listQueryExecutions().stream()
                                 .map(QueryExecution::getQueryExecutionId).toList())).build();
+            }
+            case "StopQueryExecution" -> {
+                athenaService.stopQueryExecution(request.get("QueryExecutionId").asText());
+                yield Response.ok(Map.of()).build();
+            }
+            case "GetWorkGroup" -> {
+                String name = request.has("WorkGroup") ? request.get("WorkGroup").asText() : "primary";
+                yield Response.ok(Map.of("WorkGroup", athenaService.getWorkGroup(name, region))).build();
+            }
+            case "ListWorkGroups" -> Response.ok(Map.of("WorkGroups", athenaService.listWorkGroups(region))).build();
+            case "CreateWorkGroup" -> {
+                CreateWorkGroupRequest createRequest = mapper.treeToValue(request, CreateWorkGroupRequest.class);
+                athenaService.createWorkGroup(createRequest, region);
+                yield Response.ok(Map.of()).build();
+            }
+            case "ListDataCatalogs" -> Response.ok(Map.of("DataCatalogsSummary", athenaService.listDataCatalogs())).build();
+            case "GetDataCatalog" -> {
+                String name = request.has("Name") ? request.get("Name").asText() : AthenaService.DEFAULT_CATALOG;
+                yield Response.ok(Map.of("DataCatalog", athenaService.getDataCatalog(name))).build();
+            }
+            case "ListDatabases" -> {
+                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                yield Response.ok(Map.of("DatabaseList", athenaService.listDatabases(catalog))).build();
+            }
+            case "ListTableMetadata" -> {
+                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
+                yield Response.ok(Map.of("TableMetadataList", athenaService.listTableMetadata(catalog, database))).build();
+            }
+            case "GetTableMetadata" -> {
+                String catalog = request.has("CatalogName") ? request.get("CatalogName").asText() : AthenaService.DEFAULT_CATALOG;
+                String database = request.path("DatabaseName").asText(request.path("Database").asText(""));
+                String tableName = request.get("TableName").asText();
+                yield Response.ok(Map.of("TableMetadata", athenaService.getTableMetadata(catalog, database, tableName))).build();
+            }
+            case "DeleteWorkGroup" -> {
+                String wg = request.path("WorkGroup").asText(null);
+                if (wg == null || !wg.matches("[a-zA-Z0-9._-]{1,128}")) {
+                    throw new AwsException("InvalidRequestException", "WorkGroup is required.", 400);
+                }
+                if ("primary".equals(wg)) {
+                    throw new AwsException("InvalidRequestException", "The primary workgroup cannot be deleted.", 400);
+                }
+                athenaService.deleteWorkGroup(wg, region);
+                yield Response.ok(Map.of()).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);
         };

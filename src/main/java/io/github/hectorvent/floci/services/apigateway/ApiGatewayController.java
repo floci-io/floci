@@ -17,6 +17,8 @@ import io.github.hectorvent.floci.services.apigateway.model.ApiGatewayResource;
 import io.github.hectorvent.floci.services.apigateway.model.ApiKey;
 import io.github.hectorvent.floci.services.apigateway.model.BasePathMapping;
 import io.github.hectorvent.floci.services.apigateway.model.CustomDomain;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointConfiguration;
+import io.github.hectorvent.floci.services.apigateway.model.EndpointType;
 import io.github.hectorvent.floci.services.apigateway.model.MethodConfig;
 import io.github.hectorvent.floci.services.apigateway.model.MethodResponse;
 import io.github.hectorvent.floci.services.apigateway.model.RequestValidator;
@@ -1517,6 +1519,20 @@ public class ApiGatewayController {
             api.getTags().forEach(tagsNode::put);
             node.set("tags", tagsNode);
         }
+
+        EndpointConfiguration epConfig = api.getEndpointConfiguration();
+        if (epConfig == null) {
+            epConfig = new EndpointConfiguration();
+            epConfig.setTypes(List.of(EndpointType.REGIONAL));
+        }
+
+        ObjectNode epNode = objectMapper.createObjectNode();
+        ArrayNode types = epNode.putArray("types");
+        epConfig.getTypes().forEach(t -> types.add(t.name()));
+        ArrayNode vpcIds = epNode.putArray("vpcEndpointIds");
+        epConfig.getVpcEndpointIds().forEach(vpcIds::add);
+        node.set("endpointConfiguration", epNode);
+
         return node;
     }
 

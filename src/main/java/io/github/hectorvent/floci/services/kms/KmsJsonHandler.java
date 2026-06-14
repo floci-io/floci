@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.kms;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
@@ -36,6 +37,7 @@ public class KmsJsonHandler {
     public Response handle(String action, JsonNode request, String region) {
         return switch (action) {
             case "CreateKey" -> handleCreateKey(request, region);
+            case "GenerateRandom" -> handleGenerateRandom(request, region);
             case "GetPublicKey" -> handleGetPublicKey(request, region);
             case "DescribeKey" -> handleDescribeKey(request, region);
             case "ListKeys" -> handleListKeys(request, region);
@@ -63,9 +65,11 @@ public class KmsJsonHandler {
             case "ListResourceTags" -> handleListResourceTags(request, region);
             case "GetKeyPolicy" -> handleGetKeyPolicy(request, region);
             case "PutKeyPolicy" -> handlePutKeyPolicy(request, region);
+            case "UpdateKeyDescription" -> handleUpdateKeyDescription(request, region);
             case "GetKeyRotationStatus" -> handleGetKeyRotationStatus(request, region);
             case "EnableKeyRotation" -> handleEnableKeyRotation(request, region);
             case "DisableKeyRotation" -> handleDisableKeyRotation(request, region);
+            case "DisableKey" -> handleDisableKey(request, region);
             case "RotateKeyOnDemand" -> handleRotateKeyOnDemand(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
@@ -473,6 +477,22 @@ public class KmsJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleUpdateKeyDescription(JsonNode request, String region) {
+        service.updateKeyDescription(
+                request.path("KeyId").asText(),
+                requiredText(request, "Description"),
+                region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private String requiredText(JsonNode request, String field) {
+        JsonNode value = request.path(field);
+        if (value.isMissingNode() || value.isNull()) {
+            throw new AwsException("ValidationException", field + " is required", 400);
+        }
+        return value.asText();
+    }
+
     private Response handleGetKeyRotationStatus(JsonNode request, String region) {
         String keyId = request.path("KeyId").asText();
         boolean enabled = service.getKeyRotationStatus(keyId, region);
@@ -491,10 +511,33 @@ public class KmsJsonHandler {
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
+    private Response handleDisableKey(JsonNode request, String region) {
+        service.disableKey(request.path("KeyId").asText(), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
     private Response handleRotateKeyOnDemand(JsonNode request, String region) {
         String keyId = service.rotateKeyOnDemand(request.path("KeyId").asText(), region);
         ObjectNode response = objectMapper.createObjectNode();
         response.put("KeyId", keyId);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGenerateRandom(JsonNode request, String region) {
+        if (!request.path("Recipient").isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "Recipient is not supported for GenerateRandom without Nitro Enclave support.",
+                    400);
+        }
+        if (!request.path("CustomKeyStoreId").isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "Custom key stores are not supported.",
+                    400);
+        }
+        int numberOfBytes = request.path("NumberOfBytes").asInt(0);
+        byte[] randomBytes = service.generateRandom(numberOfBytes);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("Plaintext", Base64.getEncoder().encodeToString(randomBytes));
         return Response.ok(response).build();
     }
 

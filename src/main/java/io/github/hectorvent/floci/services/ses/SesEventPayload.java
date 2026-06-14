@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 
@@ -35,6 +36,8 @@ final class SesEventPayload {
                             String sourceArn, String sendingAccountId, String subject,
                             List<String> toAddresses, List<String> ccAddresses,
                             List<String> bccAddresses, List<String> envelopeDestinations,
+                            List<String> suppressionBounceRecipients,
+                            List<String> suppressionComplaintRecipients,
                             String configurationSetName, List<MessageTag> emailTags,
                             List<MessageHeader> additionalHeaders, Instant timestamp) {
         ObjectNode root = mapper.createObjectNode();
@@ -43,7 +46,8 @@ final class SesEventPayload {
                 subject, toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
                 configurationSetName, emailTags, additionalHeaders, timestamp));
         root.set(blockName(eventType),
-                buildEventBlock(mapper, eventType, messageId, envelopeDestinations, timestamp));
+                buildEventBlock(mapper, eventType, messageId, envelopeDestinations,
+                        suppressionBounceRecipients, suppressionComplaintRecipients, timestamp));
         return root;
     }
 
@@ -146,7 +150,10 @@ final class SesEventPayload {
     }
 
     private static ObjectNode buildEventBlock(ObjectMapper mapper, String eventType, String messageId,
-                                              List<String> destination, Instant timestamp) {
+                                              List<String> destination,
+                                              List<String> suppressionBounceRecipients,
+                                              List<String> suppressionComplaintRecipients,
+                                              Instant timestamp) {
         ObjectNode body = mapper.createObjectNode();
         switch (eventType) {
             case "DELIVERY" -> {
@@ -164,24 +171,16 @@ final class SesEventPayload {
             case "BOUNCE" -> {
                 body.put("bounceType", "Permanent");
                 body.put("bounceSubType", "General");
-                ArrayNode bounced = body.putArray("bouncedRecipients");
-                for (String d : destination) {
-                    if (SimulatorAddresses.isBounce(d)) {
-                        ObjectNode br = bounced.addObject();
-                        br.put("emailAddress", d.trim());
-                    }
-                }
+                emitDedupedRecipientObjects(body.putArray("bouncedRecipients"),
+                        destination, SimulatorAddresses::isBounce,
+                        suppressionBounceRecipients);
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
                 body.put("feedbackId", "feedback-" + messageId);
             }
             case "COMPLAINT" -> {
-                ArrayNode complained = body.putArray("complainedRecipients");
-                for (String d : destination) {
-                    if (SimulatorAddresses.isComplaint(d)) {
-                        ObjectNode cr = complained.addObject();
-                        cr.put("emailAddress", d.trim());
-                    }
-                }
+                emitDedupedRecipientObjects(body.putArray("complainedRecipients"),
+                        destination, SimulatorAddresses::isComplaint,
+                        suppressionComplaintRecipients);
                 body.put("timestamp", ISO_MILLIS.format(timestamp));
                 body.put("feedbackId", "feedback-" + messageId);
             }
@@ -193,7 +192,34 @@ final class SesEventPayload {
         return body;
     }
 
-    private static String eventTypeLabel(String eventType) {
+    /**
+     * Emit `{emailAddress: ...}` objects into {@code arr} for every recipient that either
+     * matches {@code simulatorPredicate} in {@code envelope} or is listed in
+     * {@code suppressionRecipients}. Addresses are trimmed and deduplicated by trimmed
+     * form so the same address never appears twice when both inputs claim it.
+     */
+    private static void emitDedupedRecipientObjects(ArrayNode arr,
+                                                    List<String> envelope,
+                                                    java.util.function.Predicate<String> simulatorPredicate,
+                                                    List<String> suppressionRecipients) {
+        LinkedHashSet<String> emitted = new LinkedHashSet<>();
+        if (envelope != null) {
+            for (String d : envelope) {
+                if (d != null && simulatorPredicate.test(d) && emitted.add(d.trim())) {
+                    arr.addObject().put("emailAddress", d.trim());
+                }
+            }
+        }
+        if (suppressionRecipients != null) {
+            for (String d : suppressionRecipients) {
+                if (d != null && emitted.add(d.trim())) {
+                    arr.addObject().put("emailAddress", d.trim());
+                }
+            }
+        }
+    }
+
+    static String eventTypeLabel(String eventType) {
         return switch (eventType) {
             case "SEND" -> "Send";
             case "REJECT" -> "Reject";
@@ -206,6 +232,58 @@ final class SesEventPayload {
             case "DELIVERY_DELAY" -> "DeliveryDelay";
             case "SUBSCRIPTION" -> "Subscription";
             default -> eventType;
+        };
+    }
+
+    /**
+     * Returns the CloudWatch {@code MetricName} value AWS SES uses for an event.
+     * Mostly matches {@link #eventTypeLabel}, but at least one event type has a
+     * different spelling on CloudWatch than on the SNS payload's {@code eventType}
+     * field, and they must not be unified through {@code eventTypeLabel} or the SNS
+     * payload regresses to a non-AWS value:
+     *   - {@code RENDERING_FAILURE} → CW {@code "RenderingFailure"} (no space)
+     *     vs SNS {@code "Rendering Failure"} (with space) — verified against real
+     *     AWS via a CW event destination + a templated send with a missing
+     *     {@code TemplateData} key.
+     * {@code DELIVERY_DELAY} is not directly observed yet (sandbox cannot easily
+     * trigger SES backoff); kept as {@code "DeliveryDelay"} pending verification.
+     */
+    static String cloudWatchMetricName(String eventType) {
+        return switch (eventType) {
+            case "SEND" -> "Send";
+            case "REJECT" -> "Reject";
+            case "BOUNCE" -> "Bounce";
+            case "COMPLAINT" -> "Complaint";
+            case "DELIVERY" -> "Delivery";
+            case "OPEN" -> "Open";
+            case "CLICK" -> "Click";
+            case "RENDERING_FAILURE" -> "RenderingFailure";
+            case "DELIVERY_DELAY" -> "DeliveryDelay";
+            case "SUBSCRIPTION" -> "Subscription";
+            default -> eventType;
+        };
+    }
+
+    /**
+     * Returns the EventBridge {@code detail-type} value for a SES event. AWS uses a
+     * separate past-tense vocabulary on EventBridge (e.g. {@code Email Sent}) that
+     * differs from the SNS notification {@code eventType} value (e.g. {@code Send})
+     * — a rule pattern keyed on the EventBridge value will not match the SNS value.
+     * Reference: https://docs.aws.amazon.com/eventbridge/latest/ref/events-ref-ses.html
+     */
+    static String eventBridgeDetailType(String eventType) {
+        return switch (eventType) {
+            case "SEND" -> "Email Sent";
+            case "REJECT" -> "Email Rejected";
+            case "BOUNCE" -> "Email Bounced";
+            case "COMPLAINT" -> "Email Complaint Received";
+            case "DELIVERY" -> "Email Delivered";
+            case "OPEN" -> "Email Opened";
+            case "CLICK" -> "Email Clicked";
+            case "RENDERING_FAILURE" -> "Email Rendering Failed";
+            case "DELIVERY_DELAY" -> "Email Delivery Delayed";
+            case "SUBSCRIPTION" -> "Email Subscribed";
+            default -> "Email " + eventType;
         };
     }
 

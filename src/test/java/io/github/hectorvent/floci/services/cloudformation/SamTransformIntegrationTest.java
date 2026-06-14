@@ -69,15 +69,7 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -134,15 +126,7 @@ class SamTransformIntegrationTest {
             .statusCode(200)
             .body(containsString("<StackId>"));
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -521,7 +505,7 @@ class SamTransformIntegrationTest {
     }
 
     @Test
-    void samFunction_viaChangeSet_createsLambda() {
+    void samFunction_viaChangeSet_createsLambda() throws Exception {
         String stackName = "sam-changeset-stack";
         stacksToDelete.add(stackName);
 
@@ -562,15 +546,7 @@ class SamTransformIntegrationTest {
         .then()
             .statusCode(200);
 
-        given()
-            .contentType("application/x-www-form-urlencoded")
-            .formParam("Action", "DescribeStacks")
-            .formParam("StackName", stackName)
-        .when()
-            .post("/")
-        .then()
-            .statusCode(200)
-            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+        waitForStackStatus(stackName, "CREATE_COMPLETE");
 
         given()
         .when()
@@ -592,5 +568,34 @@ class SamTransformIntegrationTest {
         } catch (Exception e) {
             throw new RuntimeException(e);
         }
+    }
+
+    private static void waitForStackStatus(String stackName, String status) {
+        String expected = "<StackStatus>" + status + "</StackStatus>";
+        String body = "";
+        long deadline = System.nanoTime() + java.time.Duration.ofSeconds(5).toNanos();
+        while (System.nanoTime() < deadline) {
+            body = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", stackName)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+            if (body.contains(expected)) {
+                return;
+            }
+            try {
+                Thread.sleep(100);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                throw new AssertionError("Interrupted while waiting for stack " + stackName
+                        + " to reach " + expected, e);
+            }
+        }
+        assertThat(body, containsString(expected));
     }
 }

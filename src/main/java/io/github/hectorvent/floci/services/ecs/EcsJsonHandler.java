@@ -8,12 +8,14 @@ import io.github.hectorvent.floci.services.ecs.model.CapacityProvider;
 import io.github.hectorvent.floci.services.ecs.model.ClusterSetting;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerInstance;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
 import io.github.hectorvent.floci.services.ecs.model.EcsLoadBalancer;
 import io.github.hectorvent.floci.services.ecs.model.EcsServiceModel;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.KeyValuePair;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
+import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.NetworkMode;
@@ -23,6 +25,7 @@ import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
+import io.github.hectorvent.floci.services.ecs.model.Volume;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -131,7 +134,8 @@ public class EcsJsonHandler {
 
     private Response handleCreateCluster(JsonNode req, String region) {
         String name = req.path("clusterName").asText(null);
-        EcsCluster cluster = service.createCluster(name, region);
+        Map<String, String> tags = parseTagMap(req.path("tags"));
+        EcsCluster cluster = service.createCluster(name, tags, region);
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("cluster", clusterNode(cluster));
         return Response.ok(resp).build();
@@ -203,9 +207,14 @@ public class EcsJsonHandler {
         String memory = req.has("memory") ? req.path("memory").asText() : null;
         String taskRoleArn = req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null;
         String executionRoleArn = req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null;
+        List<String> requiresCompatibilities = jsonArrayToList(req.path("requiresCompatibilities"));
+        Map<String, String> tags = parseTagMap(req.path("tags"));
 
         TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, region);
+                taskRoleArn, executionRoleArn, requiresCompatibilities, tags, region);
+        // Task-level volumes are not part of registerTaskDefinition's signature; set them on the
+        // returned (and stored) task definition so they round-trip and reach RunTask launches.
+        td.setVolumes(parseVolumes(req.path("volumes")));
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("taskDefinition", taskDefinitionNode(td));
@@ -269,9 +278,11 @@ public class EcsJsonHandler {
         LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
         String group = req.has("group") ? req.path("group").asText() : null;
         String startedBy = req.has("startedBy") ? req.path("startedBy").asText() : null;
+        List<ContainerOverride> containerOverrides =
+                parseContainerOverrides(req.path("overrides").path("containerOverrides"));
 
         List<EcsTask> launched = service.runTask(cluster, taskDefinition, count,
-                launchType, group, startedBy, region);
+                launchType, group, startedBy, containerOverrides, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
@@ -379,9 +390,10 @@ public class EcsJsonHandler {
         LaunchType launchType = parseEnum(req, "launchType", LaunchType.class);
         List<EcsLoadBalancer> loadBalancers = parseLoadBalancers(req.path("loadBalancers"));
         NetworkConfiguration networkConfiguration = parseNetworkConfiguration(req.path("networkConfiguration"));
+        Map<String, String> tags = parseTagMap(req.path("tags"));
 
         EcsServiceModel svc = service.createService(cluster, serviceName, taskDefinition,
-                desiredCount, launchType, loadBalancers, networkConfiguration, region);
+                desiredCount, launchType, loadBalancers, networkConfiguration, tags, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         resp.set("service", serviceNode(svc));
@@ -911,6 +923,16 @@ public class EcsJsonHandler {
         if (td.getMemory() != null) { n.put("memory", td.getMemory()); }
         if (td.getTaskRoleArn() != null) { n.put("taskRoleArn", td.getTaskRoleArn()); }
         if (td.getExecutionRoleArn() != null) { n.put("executionRoleArn", td.getExecutionRoleArn()); }
+        if (td.getRequiresCompatibilities() != null && !td.getRequiresCompatibilities().isEmpty()) {
+            ArrayNode arr = objectMapper.createArrayNode();
+            td.getRequiresCompatibilities().forEach(arr::add);
+            n.set("requiresCompatibilities", arr);
+        }
+        if (td.getCompatibilities() != null && !td.getCompatibilities().isEmpty()) {
+            ArrayNode arr = objectMapper.createArrayNode();
+            td.getCompatibilities().forEach(arr::add);
+            n.set("compatibilities", arr);
+        }
 
         ArrayNode containers = objectMapper.createArrayNode();
         if (td.getContainerDefinitions() != null) {
@@ -919,6 +941,20 @@ public class EcsJsonHandler {
             }
         }
         n.set("containerDefinitions", containers);
+        if (td.getVolumes() != null && !td.getVolumes().isEmpty()) {
+            ArrayNode vols = objectMapper.createArrayNode();
+            for (Volume v : td.getVolumes()) {
+                ObjectNode vNode = objectMapper.createObjectNode();
+                vNode.put("name", v.name());
+                if (v.hostSourcePath() != null) {
+                    ObjectNode host = objectMapper.createObjectNode();
+                    host.put("sourcePath", v.hostSourcePath());
+                    vNode.set("host", host);
+                }
+                vols.add(vNode);
+            }
+            n.set("volumes", vols);
+        }
         if (td.getTags() != null && !td.getTags().isEmpty()) {
             n.set("tags", tagsNode(td.getTags()));
         }
@@ -954,6 +990,18 @@ public class EcsJsonHandler {
                 envArr.add(kvNode);
             }
             n.set("environment", envArr);
+        }
+
+        if (def.getMountPoints() != null && !def.getMountPoints().isEmpty()) {
+            ArrayNode mps = objectMapper.createArrayNode();
+            for (MountPoint mp : def.getMountPoints()) {
+                ObjectNode mpNode = objectMapper.createObjectNode();
+                mpNode.put("sourceVolume", mp.sourceVolume());
+                mpNode.put("containerPath", mp.containerPath());
+                mpNode.put("readOnly", mp.readOnly());
+                mps.add(mpNode);
+            }
+            n.set("mountPoints", mps);
         }
 
         return n;
@@ -1194,6 +1242,7 @@ public class EcsJsonHandler {
 
             def.setPortMappings(parsePortMappings(item.path("portMappings")));
             def.setEnvironment(parseKeyValuePairs(item.path("environment")));
+            def.setMountPoints(parseMountPoints(item.path("mountPoints")));
 
             if (item.has("command") && item.path("command").isArray()) {
                 List<String> cmd = new ArrayList<>();
@@ -1232,6 +1281,51 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             result.add(new KeyValuePair(item.path("name").asText(), item.path("value").asText()));
+        }
+        return result;
+    }
+
+    private List<Volume> parseVolumes(JsonNode node) {
+        List<Volume> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            String hostSourcePath = item.path("host").path("sourcePath").asText(null);
+            result.add(new Volume(item.path("name").asText(), hostSourcePath));
+        }
+        return result;
+    }
+
+    private List<MountPoint> parseMountPoints(JsonNode node) {
+        List<MountPoint> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            result.add(new MountPoint(
+                    item.path("sourceVolume").asText(),
+                    item.path("containerPath").asText(),
+                    item.path("readOnly").asBoolean(false)));
+        }
+        return result;
+    }
+
+    private List<ContainerOverride> parseContainerOverrides(JsonNode node) {
+        List<ContainerOverride> result = new ArrayList<>();
+        if (!node.isArray()) {
+            return result;
+        }
+        for (JsonNode item : node) {
+            ContainerOverride co = new ContainerOverride();
+            co.setName(item.path("name").asText());
+            if (item.has("command") && item.path("command").isArray()) {
+                List<String> cmd = new ArrayList<>();
+                item.path("command").forEach(c -> cmd.add(c.asText()));
+                co.setCommand(cmd);
+            }
+            co.setEnvironment(parseKeyValuePairs(item.path("environment")));
+            result.add(co);
         }
         return result;
     }

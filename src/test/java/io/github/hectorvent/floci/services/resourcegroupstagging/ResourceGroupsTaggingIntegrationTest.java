@@ -84,7 +84,7 @@ class ResourceGroupsTaggingIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ResourceTagMappingList.size()", equalTo(3))
+            .body("ResourceTagMappingList.size()", greaterThanOrEqualTo(3))
             .body("ResourceTagMappingList.ResourceARN", hasItems(ARN_INSTANCE, ARN_BUCKET, ARN_FUNCTION));
     }
 

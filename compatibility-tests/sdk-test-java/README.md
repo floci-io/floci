@@ -2,7 +2,7 @@
 
 Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the **AWS SDK for Java v2 (2.31.8)**.
 
-Runs 313 tests across 16 test classes against a live Floci instance — no mocks.
+Runs 352 tests across 17 test classes against a live Floci instance — no mocks.
 
 ## Services Covered
 
@@ -24,6 +24,7 @@ Runs 313 tests across 16 test classes against a live Floci instance — no mocks
 | `ApigwSfnJsonataCrudlTests`      | API Gateway + Step Functions JSONata CRUDL integration   |
 | `ApiGatewayV2WebSocketAndExtendedOpsTest` | API GW v2 WebSocket APIs, Update ops, Route/Integration Responses, Models, Tagging |
 | `Ec2Tests`                       | EC2 instances, VPCs, security groups, subnets            |
+| `AppSyncTest`                    | GraphQL API CRUDL, data sources, resolvers, functions, types, API keys, tags, schema validation |
 | `EcsTests`                       | ECS clusters, task definitions, services                 |
 
 ## Adding a New Test

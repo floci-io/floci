@@ -24,6 +24,12 @@ public class ConfigurationSet {
     @JsonProperty("EventDestinations")
     private List<EventDestination> eventDestinations = new ArrayList<>();
 
+    @JsonProperty("SuppressionOptions")
+    private SuppressionOptions suppressionOptions;
+
+    @JsonProperty("SendingEnabled")
+    private Boolean sendingEnabled;
+
     public ConfigurationSet() {}
 
     public ConfigurationSet(String name) {
@@ -43,5 +49,25 @@ public class ConfigurationSet {
     public List<EventDestination> getEventDestinations() { return eventDestinations; }
     public void setEventDestinations(List<EventDestination> eventDestinations) {
         this.eventDestinations = eventDestinations != null ? eventDestinations : new ArrayList<>();
+    }
+
+    public SuppressionOptions getSuppressionOptions() { return suppressionOptions; }
+    public void setSuppressionOptions(SuppressionOptions suppressionOptions) {
+        this.suppressionOptions = suppressionOptions;
+    }
+
+    public Boolean getSendingEnabled() { return sendingEnabled; }
+    public void setSendingEnabled(Boolean sendingEnabled) { this.sendingEnabled = sendingEnabled; }
+
+    /**
+     * Effective sending-enabled flag with the AWS default applied — an unset
+     * (null) field is treated as enabled, matching the AWS behaviour where a
+     * configuration set without an explicit {@code SendingEnabled} state is
+     * implicitly enabled. Use this anywhere v1/v2 read or enforce the toggle
+     * so the default rule stays consistent across surfaces.
+     */
+    @com.fasterxml.jackson.annotation.JsonIgnore
+    public boolean isSendingEnabledEffective() {
+        return sendingEnabled == null || sendingEnabled;
     }
 }
