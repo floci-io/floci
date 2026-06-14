@@ -376,7 +376,7 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("DescribeRouteTablesResponse.routeTableSet.item.vpcId", equalTo(vpcId))
             .body("DescribeRouteTablesResponse.routeTableSet.item.associationSet.item.main",
-                anyOf(equalTo(true), equalTo("true")));
+                anyOf(equalTo((Object) true), equalTo((Object) "true")));
     }
 
     @Test
@@ -2263,7 +2263,7 @@ class Ec2IntegrationTest {
             .formParam("Type", "one-time")
             .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
             .formParam("LaunchSpecification.InstanceType", "t2.micro")
-            .formParam("TagSpecification.1.ResourceType", "spot-instance-request")
+            .formParam("TagSpecification.1.ResourceType", "spot-instances-request")
             .formParam("TagSpecification.1.Tag.1.Key", "SpotKey")
             .formParam("TagSpecification.1.Tag.1.Value", "SpotValue")
             .header("Authorization", AUTH_HEADER)
@@ -2277,6 +2277,7 @@ class Ec2IntegrationTest {
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].state", equalTo("active"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].status.code", equalTo("fulfilled"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].launchSpecification.imageId", equalTo("ami-0abcdef1234567890"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].productDescription", equalTo("Linux/UNIX"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].key", equalTo("SpotKey"))
             .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo("SpotValue"))
             .extract().path("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId");

@@ -2179,7 +2179,7 @@ public class Ec2Service {
     }
 
     public List<SpotInstanceRequest> requestSpotInstances(String region, String spotPrice, Integer instanceCount,
-                                                         String type, String imageId, String instanceType,
+                                                         String type, String productDescription, String imageId, String instanceType,
                                                          String keyName, String subnetId, List<String> securityGroupIds,
                                                          String userData, String iamInstanceProfileArn,
                                                          List<Tag> spotRequestTags, List<Tag> instanceTags) {
@@ -2222,6 +2222,11 @@ public class Ec2Service {
             sir.setCreateTime(Instant.now());
             sir.setLaunchSpecification(spec);
             sir.setRegion(region);
+            if (productDescription != null && !productDescription.isBlank()) {
+                sir.setProductDescription(productDescription);
+            } else {
+                sir.setProductDescription("Linux/UNIX");
+            }
 
             if (spotRequestTags != null && !spotRequestTags.isEmpty()) {
                 sir.setTags(new ArrayList<>(spotRequestTags));

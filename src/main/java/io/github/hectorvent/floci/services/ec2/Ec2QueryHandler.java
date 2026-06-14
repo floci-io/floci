@@ -2118,6 +2118,7 @@ public class Ec2QueryHandler {
         String spotPrice = p.getFirst("SpotPrice");
         Integer instanceCount = parseIntParam(p, "InstanceCount", 1);
         String type = p.getFirst("Type");
+        String productDescription = p.getFirst("ProductDescription");
 
         String imageId = p.getFirst("LaunchSpecification.ImageId");
         String instanceType = p.getFirst("LaunchSpecification.InstanceType");
@@ -2137,7 +2138,7 @@ public class Ec2QueryHandler {
         for (int i = 1; ; i++) {
             String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
             if (resType == null) break;
-            if ("spot-instance-request".equals(resType)) {
+            if ("spot-instances-request".equals(resType)) {
                 for (int j = 1; ; j++) {
                     String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
                     if (k == null) break;
@@ -2155,7 +2156,7 @@ public class Ec2QueryHandler {
         }
 
         List<SpotInstanceRequest> requests = service.requestSpotInstances(region, spotPrice, instanceCount,
-                type, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,
+                type, productDescription, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,
                 spotRequestTags, instanceTags);
 
         XmlBuilder xml = new XmlBuilder()
