@@ -572,7 +572,7 @@ public class AppSyncController {
                                     @QueryParam("nextToken") String nextToken) {
         var page = service.listDomainNames(maxResults, nextToken);
         ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("domainNames");
+        ArrayNode items = root.putArray("domainNameConfigs");
         page.items().forEach(items::addPOJO);
         if (page.nextToken() != null) {
             root.put("nextToken", page.nextToken());

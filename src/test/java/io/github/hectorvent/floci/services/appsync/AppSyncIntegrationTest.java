@@ -1653,7 +1653,7 @@ class AppSyncIntegrationTest {
             .get("/v1/domainnames")
         .then()
             .statusCode(200)
-            .body("domainNames", hasSize(greaterThanOrEqualTo(1)));
+            .body("domainNameConfigs", hasSize(greaterThanOrEqualTo(1)));
     }
 
     @Test
