@@ -123,12 +123,6 @@ public class DocDbContainerManager {
         }
     }
 
-    /**
-     * Probes the MongoDB endpoint with a TCP connect. A successful connection means
-     * {@code mongod} has bound its listening socket and is accepting connections on the
-     * published port. The MongoDB wire protocol passes straight through, so no proxy or
-     * protocol handshake is involved — a plain TCP connect is the correct readiness signal.
-     */
     private static void waitForBackendReady(String clusterId, String host, int port) {
         long deadline = System.currentTimeMillis() + BACKEND_READY_DEADLINE_MS;
         int attempt = 0;

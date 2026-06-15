@@ -10,10 +10,6 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.not;
 
-/**
- * End-to-end test for the DocumentDB service. Creating a cluster spins up a real
- * {@code mongo} container via Docker, so this test requires a running Docker daemon.
- */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class DocDbIntegrationTest {
@@ -24,16 +20,10 @@ class DocDbIntegrationTest {
     private static final String MASTER_USERNAME = "docdbadmin";
     private static final String MASTER_PASSWORD = "secret99password";
 
-    // Fake SigV4 header — service name "docdb" is what AwsQueryController extracts
-    // to route to DocDbQueryHandler.
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/docdb/aws4_request, " +
             "SignedHeaders=content-type;host, Signature=test";
 
-    // A real Amazon DocumentDB SDK signs requests with the "rds" credential scope
-    // (DocumentDB rides the RDS API). This header reproduces that real signing scope;
-    // routing to DocDB then relies on Engine=docdb / an existing docdb cluster, exactly
-    // as the AwsQueryController "rds" case does for an unmodified DocDB SDK client.
     private static final String AUTH_RDS_SCOPE =
             "AWS4-HMAC-SHA256 Credential=test/20260615/us-east-1/rds/aws4_request, " +
             "SignedHeaders=content-type;host, Signature=test";
@@ -57,7 +47,6 @@ class DocDbIntegrationTest {
             .body(containsString("docdb"))
             .body(containsString("5.0.0"))
             .body(containsString(MASTER_USERNAME))
-            // The master password must never be echoed back in the response.
             .body(not(containsString(MASTER_PASSWORD)));
     }
 
@@ -282,11 +271,6 @@ class DocDbIntegrationTest {
             .body(containsString("UnsupportedOperation"));
     }
 
-    // ── Real DocDB SDK path: signed with the "rds" scope, disambiguated by Engine=docdb ──
-    // Proves an unmodified DocumentDB SDK (which signs as "rds", not "docdb") routes to
-    // DocDbQueryHandler via the AwsQueryController "rds" case. Self-contained: creates its
-    // own cluster (real mongo container) and tears it down.
-
     private static final String RDS_SCOPE_CLUSTER_ID = "rds-scope-docdb-cluster";
 
     @Test
@@ -305,15 +289,12 @@ class DocDbIntegrationTest {
             .statusCode(200)
             .body(containsString(RDS_SCOPE_CLUSTER_ID))
             .body(containsString("available"))
-            // Engine "docdb" in the response confirms DocDbQueryHandler answered, not the RDS handler.
             .body(containsString("docdb"));
     }
 
     @Test
     @Order(18)
     void realSdkPathDescribeByIdRoutesToDocDbViaExistingCluster() {
-        // No Engine param here (as real Describe calls omit it); routing relies on the
-        // cluster already existing in docdb storage (docDbService.hasCluster).
         given()
             .header("Authorization", AUTH_RDS_SCOPE)
             .contentType(FORM)

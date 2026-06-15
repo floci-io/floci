@@ -553,8 +553,11 @@ public interface EmulatorConfig {
     }
 
     interface DocDbServiceConfig {
-        @WithDefault("true") 
+        @WithDefault("true")
         boolean enabled();
+
+        @WithDefault("false")
+        boolean mock();
 
         @WithDefault("mongo:7.0")
         String defaultImage();

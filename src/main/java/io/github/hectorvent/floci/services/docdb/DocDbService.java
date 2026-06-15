@@ -25,6 +25,7 @@ public class DocDbService {
 
     private static final Logger LOG = Logger.getLogger(DocDbService.class);
     private static final String ENGINE_VERSION_DEFAULT = "5.0.0";
+    private static final int MONGO_PORT = 27017;
 
     private final StorageBackend<String, DocDbCluster> clusters;
     private final StorageBackend<String, DocDbInstance> instances;
@@ -56,37 +57,40 @@ public class DocDbService {
                     "DocDB cluster " + id + " already exists.", 400);
         }
 
-        String image = config.services().docdb().defaultImage();
-
-        LOG.infov("Creating DocDB cluster {0}, image={1}", id, image);
-
-        DocDbContainerHandle handle = containerManager.start(id, image, masterUsername, masterPassword);
-
         String region = regionResolver.getDefaultRegion();
 
         DocDbCluster cluster = new DocDbCluster();
         cluster.setDbClusterIdentifier(id);
         cluster.setStatus("available");
         cluster.setEngineVersion(engineVersion != null ? engineVersion : ENGINE_VERSION_DEFAULT);
-        cluster.setEndpoint(handle.getHost());
-        cluster.setReaderEndpoint(handle.getHost());
-        cluster.setPort(handle.getPort());
         cluster.setMasterUsername(masterUsername);
-        // The master password is passed to the mongo container above and is deliberately
-        // NOT stored on the cluster: it would otherwise be persisted to the storage
-        // backend (JSON) as a cleartext credential at rest. mongod is the auth authority.
         cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
         cluster.setDbClusterArn(regionResolver.buildArn("rds", region, "cluster:" + id));
         cluster.setDbClusterResourceId("cluster-" + UUID.randomUUID().toString()
                 .replace("-", "").substring(0, 24).toUpperCase());
         cluster.setCreatedAt(Instant.now());
         cluster.setDbClusterMembers(new ArrayList<>());
-        cluster.setContainerId(handle.getContainerId());
-        cluster.setContainerHost(handle.getHost());
-        cluster.setContainerPort(handle.getPort());
+
+        if (config.services().docdb().mock()) {
+            LOG.infov("Creating DocDB cluster {0} in mock mode (no container)", id);
+            cluster.setEndpoint("localhost");
+            cluster.setReaderEndpoint("localhost");
+            cluster.setPort(MONGO_PORT);
+        } else {
+            String image = config.services().docdb().defaultImage();
+            LOG.infov("Creating DocDB cluster {0}, image={1}", id, image);
+            DocDbContainerHandle handle = containerManager.start(id, image, masterUsername, masterPassword);
+            cluster.setEndpoint(handle.getHost());
+            cluster.setReaderEndpoint(handle.getHost());
+            cluster.setPort(handle.getPort());
+            cluster.setContainerId(handle.getContainerId());
+            cluster.setContainerHost(handle.getHost());
+            cluster.setContainerPort(handle.getPort());
+        }
 
         clusters.put(id, cluster);
-        LOG.infov("DocDB cluster {0} created, endpoint={1}:{2}", id, handle.getHost(), String.valueOf(handle.getPort()));
+        LOG.infov("DocDB cluster {0} created, endpoint={1}:{2}",
+                id, cluster.getEndpoint(), String.valueOf(cluster.getPort()));
         return cluster;
     }
 
