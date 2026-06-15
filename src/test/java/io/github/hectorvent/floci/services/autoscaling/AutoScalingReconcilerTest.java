@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
@@ -73,6 +74,8 @@ class AutoScalingReconcilerTest {
         version.setLatestVersionNumber("1");
         version.setImageId("ami-version-1");
         version.setInstanceType("t3.micro");
+        List<Tag> instanceTags = List.of(new Tag("io.iceguard.ClusterId", "development"));
+        version.setInstanceTags(instanceTags);
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
         when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("1")))
@@ -83,7 +86,7 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(List.of()), eq(null), eq(null))).thenReturn(reservation);
+                eq(instanceTags), eq(null), eq(null))).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -93,7 +96,7 @@ class AutoScalingReconcilerTest {
         assertEquals("1", asg.getInstances().getFirst().getLaunchTemplateVersion());
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(List.of()), eq(null), eq(null));
+                eq(instanceTags), eq(null), eq(null));
     }
 
     @Test
@@ -160,6 +163,77 @@ class AutoScalingReconcilerTest {
         assertEquals("i-stale", targets.getValue().getFirst().getId());
         verify(asgService).saveAutoScalingGroup(asg);
         verify(ec2Service, never()).terminateInstances(asg.getRegion(), List.of("i-active"));
+    }
+
+    @Test
+    void reconcileKeepsPendingInstancesWhileContainerLaunchIsStillInFlight() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(1);
+        asg.getInstances().add(instance("i-pending", "Pending"));
+
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-pending");
+        ec2Instance.setState(InstanceState.pending());
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.describeInstances("us-east-1", List.of("i-pending"), null))
+                .thenReturn(List.of(reservation));
+        when(ec2Service.isInstanceContainerRunning("i-pending")).thenReturn(false);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(1, asg.getInstances().size());
+        assertEquals("i-pending", asg.getInstances().getFirst().getInstanceId());
+        verify(ec2Service, never()).runInstances(
+                eq("us-east-1"),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void reconcilePrunesPendingInstancesWhenEc2InstanceIsTerminal() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-dead", "Pending"));
+
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-dead");
+        ec2Instance.setState(InstanceState.terminated());
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.describeInstances("us-east-1", List.of("i-dead"), null))
+                .thenReturn(List.of(reservation));
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(asgService).recordActivity(
+                eq("us-east-1"),
+                eq("app-asg"),
+                eq("Removing stale EC2 instance reference(s): [i-dead]"),
+                eq("Persisted Auto Scaling state referenced instance containers that are no longer running."),
+                eq("Successful"));
     }
 
     @Test

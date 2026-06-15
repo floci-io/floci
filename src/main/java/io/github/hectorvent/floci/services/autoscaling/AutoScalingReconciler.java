@@ -128,8 +128,7 @@ public class AutoScalingReconciler {
 
     private void removeStaleInstances(AutoScalingGroup asg) {
         List<AsgInstance> staleInstances = asg.getInstances().stream()
-                .filter(instance -> isActiveLifecycleState(instance.getLifecycleState()))
-                .filter(instance -> !ec2Service.isInstanceContainerRunning(instance.getInstanceId()))
+                .filter(instance -> isStaleInstance(asg, instance))
                 .collect(Collectors.toList());
         if (staleInstances.isEmpty()) {
             return;
@@ -146,6 +145,42 @@ public class AutoScalingReconciler {
                 "Successful");
         LOG.infov("ASG {0}: removed stale instance reference(s) {1}",
                 asg.getAutoScalingGroupName(), instanceIds);
+    }
+
+    private boolean isStaleInstance(AutoScalingGroup asg, AsgInstance instance) {
+        String lifecycleState = instance.getLifecycleState();
+        if ("InService".equals(lifecycleState)) {
+            return !ec2Service.isInstanceContainerRunning(instance.getInstanceId());
+        }
+        if ("Pending".equals(lifecycleState)) {
+            return isMissingOrTerminalEc2Instance(asg, instance);
+        }
+        return false;
+    }
+
+    private boolean isMissingOrTerminalEc2Instance(AutoScalingGroup asg, AsgInstance instance) {
+        try {
+            List<Instance> ec2Instances = ec2Service
+                    .describeInstances(asg.getRegion(), List.of(instance.getInstanceId()), null)
+                    .stream()
+                    .flatMap(r -> r.getInstances().stream())
+                    .collect(Collectors.toList());
+            if (ec2Instances.isEmpty()) {
+                return true;
+            }
+            String state = ec2Instances.getFirst().getState() != null
+                    ? ec2Instances.getFirst().getState().getName()
+                    : null;
+            return "shutting-down".equals(state)
+                    || "terminated".equals(state)
+                    || "stopping".equals(state)
+                    || "stopped".equals(state);
+        }
+        catch (Exception e) {
+            LOG.debugv("ASG {0}: keeping pending instance {1} during stale check: {2}",
+                    asg.getAutoScalingGroupName(), instance.getInstanceId(), e.getMessage());
+            return false;
+        }
     }
 
     private void removeOrphanedTargetRegistrations(AutoScalingGroup asg) {
@@ -356,7 +391,7 @@ public class AutoScalingReconciler {
                     version.getInstanceType(),
                     version.getKeyName(),
                     version.getSecurityGroupIds(),
-                    List.of(),
+                    version.getInstanceTags(),
                     version.getUserData(),
                     null,
                     asg.getLaunchTemplateId(),
