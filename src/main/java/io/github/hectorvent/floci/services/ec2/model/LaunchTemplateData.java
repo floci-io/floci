@@ -15,6 +15,7 @@ public class LaunchTemplateData {
     private String keyName;
     private String userData;
     private List<String> securityGroupIds = new ArrayList<>();
+    private List<Tag> instanceTags = new ArrayList<>();
 
     public LaunchTemplateData() {}
 
@@ -24,6 +25,7 @@ public class LaunchTemplateData {
         this.keyName = source.keyName;
         this.userData = source.userData;
         this.securityGroupIds = new ArrayList<>(source.securityGroupIds);
+        this.instanceTags = new ArrayList<>(source.instanceTags);
     }
 
     public String getImageId() { return imageId; }
@@ -41,5 +43,10 @@ public class LaunchTemplateData {
     public List<String> getSecurityGroupIds() { return securityGroupIds; }
     public void setSecurityGroupIds(List<String> securityGroupIds) {
         this.securityGroupIds = securityGroupIds != null ? new ArrayList<>(securityGroupIds) : new ArrayList<>();
+    }
+
+    public List<Tag> getInstanceTags() { return instanceTags; }
+    public void setInstanceTags(List<Tag> instanceTags) {
+        this.instanceTags = instanceTags != null ? new ArrayList<>(instanceTags) : new ArrayList<>();
     }
 }

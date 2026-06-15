@@ -287,6 +287,7 @@ public class AutoScalingQueryHandler {
             if (inst.getLaunchConfigurationName() != null) {
                 xml.elem("LaunchConfigurationName", inst.getLaunchConfigurationName());
             }
+            appendInstanceLaunchTemplateXml(xml, inst);
             if (inst.getInstanceType() != null) { xml.elem("InstanceType", inst.getInstanceType()); }
             xml.end("member");
         }
@@ -445,14 +446,32 @@ public class AutoScalingQueryHandler {
             if (inst.getLaunchConfigurationName() != null) {
                 xml.elem("LaunchConfigurationName", inst.getLaunchConfigurationName());
             }
+            appendInstanceLaunchTemplateXml(xml, inst);
             if (inst.getInstanceType() != null) { xml.elem("InstanceType", inst.getInstanceType()); }
             xml.end("member");
         }
         xml.end("AutoScalingInstances")
            .end("DescribeAutoScalingInstancesResult")
-           .raw(AwsQueryResponse.responseMetadata())
-           .end("DescribeAutoScalingInstancesResponse");
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("DescribeAutoScalingInstancesResponse");
         return ok(xml.build());
+    }
+
+    private static void appendInstanceLaunchTemplateXml(XmlBuilder xml, AsgInstance inst) {
+        if (inst.getLaunchTemplateId() == null && inst.getLaunchTemplateName() == null) {
+            return;
+        }
+        xml.start("LaunchTemplate");
+        if (inst.getLaunchTemplateId() != null) {
+            xml.elem("LaunchTemplateId", inst.getLaunchTemplateId());
+        }
+        if (inst.getLaunchTemplateName() != null) {
+            xml.elem("LaunchTemplateName", inst.getLaunchTemplateName());
+        }
+        if (inst.getLaunchTemplateVersion() != null) {
+            xml.elem("Version", inst.getLaunchTemplateVersion());
+        }
+        xml.end("LaunchTemplate");
     }
 
     private Response handleAttachInstances(MultivaluedMap<String, String> p, String region) {

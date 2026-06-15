@@ -45,7 +45,9 @@ Key pairs created with `CreateKeyPair` contain dummy private key material. Impor
 
 ## UserData
 
-`UserData` must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into `/tmp/user-data.sh` inside the container, and executes it with `sh` after SSH key injection. Output is captured and logged.
+`UserData` must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into `/tmp/user-data.sh` inside the container, and executes the script directly after SSH key injection so the script shebang selects the interpreter. Output is captured and logged.
+
+EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
 ## Instance Metadata Service (IMDS)
 
@@ -143,7 +145,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 `DescribeInstanceTypes` · `DescribeInstanceTypeOfferings`
 
 ### Launch Templates
-`CreateLaunchTemplate` · `DescribeLaunchTemplates` · `DeleteLaunchTemplate`
+`CreateLaunchTemplate` · `CreateLaunchTemplateVersion` · `DescribeLaunchTemplates` · `DescribeLaunchTemplateVersions` · `ModifyLaunchTemplate` · `DeleteLaunchTemplate`
+
+Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
 
 ### IAM Instance Profiles
 `DescribeIamInstanceProfileAssociations`

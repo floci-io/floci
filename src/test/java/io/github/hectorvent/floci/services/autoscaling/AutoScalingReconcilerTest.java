@@ -69,14 +69,14 @@ class AutoScalingReconcilerTest {
 
         LaunchTemplate launchTemplate = new LaunchTemplate();
         launchTemplate.setLaunchTemplateId("lt-123");
-        LaunchTemplate.LaunchTemplateVersion version = new LaunchTemplate.LaunchTemplateVersion();
-        version.setVersionNumber("1");
+        LaunchTemplate version = new LaunchTemplate();
+        version.setLatestVersionNumber("1");
         version.setImageId("ami-version-1");
         version.setInstanceType("t3.micro");
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
-        when(ec2Service.resolveLaunchTemplateVersion("us-east-1", "lt-123", null, "1"))
-                .thenReturn(version);
+        when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("1")))
+                .thenReturn(List.of(version));
         Instance ec2Instance = new Instance();
         ec2Instance.setInstanceId("i-launched");
         Reservation reservation = new Reservation();
@@ -94,6 +94,43 @@ class AutoScalingReconcilerTest {
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
                 eq(List.of()), eq(null), eq(null));
+    }
+
+    @Test
+    void scaleOutStoresResolvedLaunchTemplateVersionForAliases() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(1);
+        asg.setLaunchTemplateId("lt-123");
+        asg.setLaunchTemplateVersion("$Latest");
+
+        LaunchTemplate launchTemplate = new LaunchTemplate();
+        launchTemplate.setLaunchTemplateId("lt-123");
+        LaunchTemplate version = new LaunchTemplate();
+        version.setLatestVersionNumber("7");
+        version.setImageId("ami-version-7");
+        version.setInstanceType("t3.micro");
+        when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
+                .thenReturn(List.of(launchTemplate));
+        when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("$Latest")))
+                .thenReturn(List.of(version));
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-launched");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-7"), eq("t3.micro"),
+                eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
+                eq(List.of()), eq(null), eq(null))).thenReturn(reservation);
+
+        reconciler.reconcile(asg);
+
+        assertEquals("$Latest", asg.getLaunchTemplateVersion());
+        assertEquals("7", asg.getInstances().getFirst().getLaunchTemplateVersion());
     }
 
     @Test

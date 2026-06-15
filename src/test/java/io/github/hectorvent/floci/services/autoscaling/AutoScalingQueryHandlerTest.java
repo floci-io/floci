@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import jakarta.ws.rs.core.MultivaluedHashMap;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.Test;
@@ -76,5 +77,53 @@ class AutoScalingQueryHandlerTest {
         assertTrue(describeXml.contains("<Preferences>"));
         assertTrue(describeXml.contains("<MinHealthyPercentage>90</MinHealthyPercentage>"));
         assertTrue(describeXml.contains("<SkipMatching>true</SkipMatching>"));
+    }
+
+    @Test
+    void describeAutoScalingGroupsIncludesInstanceLaunchTemplateMetadata() {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.createAutoScalingGroup(REGION,
+                "query-asg",
+                null,
+                "lt-current",
+                null,
+                "$Latest",
+                0,
+                3,
+                1,
+                300,
+                List.of("us-east-1a"),
+                List.of(),
+                List.of(),
+                List.of(),
+                "EC2",
+                0,
+                List.of("Default"),
+                java.util.Map.of());
+        AsgInstance instance = new AsgInstance();
+        instance.setInstanceId("i-current");
+        instance.setAvailabilityZone("us-east-1a");
+        instance.setLifecycleState("InService");
+        instance.setHealthStatus("Healthy");
+        instance.setLaunchTemplateId("lt-current");
+        instance.setLaunchTemplateVersion("7");
+        service.describeAutoScalingGroups(REGION, List.of("query-asg"))
+                .getFirst()
+                .getInstances()
+                .add(instance);
+
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> params = new MultivaluedHashMap<>();
+        params.add("AutoScalingGroupNames.member.1", "query-asg");
+
+        Response response = handler.handle("DescribeAutoScalingGroups", params, REGION);
+
+        assertEquals(200, response.getStatus());
+        String xml = (String) response.getEntity();
+        assertTrue(xml.contains("<InstanceId>i-current</InstanceId>"));
+        assertTrue(xml.contains("<LaunchTemplate>"));
+        assertTrue(xml.contains("<LaunchTemplateId>lt-current</LaunchTemplateId>"));
+        assertTrue(xml.contains("<Version>7</Version>"));
     }
 }

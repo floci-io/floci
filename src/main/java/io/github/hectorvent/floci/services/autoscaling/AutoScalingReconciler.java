@@ -341,23 +341,27 @@ public class AutoScalingReconciler {
 
         LaunchTemplate launchTemplate = resolveLaunchTemplate(asg);
         if (launchTemplate != null) {
-            LaunchTemplate.LaunchTemplateVersion version = ec2Service.resolveLaunchTemplateVersion(
+            LaunchTemplate version = ec2Service.describeLaunchTemplateVersions(
                     asg.getRegion(),
                     launchTemplate.getLaunchTemplateId(),
                     null,
-                    asg.getLaunchTemplateVersion());
+                    asg.getLaunchTemplateVersion() == null ? List.of() : List.of(asg.getLaunchTemplateVersion()))
+                    .getFirst();
+            String resolvedVersion = version.getLatestVersionNumber() != null
+                    ? version.getLatestVersionNumber()
+                    : asg.getLaunchTemplateVersion();
             return new LaunchSource(
                     null,
                     version.getImageId(),
                     version.getInstanceType(),
                     version.getKeyName(),
                     version.getSecurityGroupIds(),
-                    version.getInstanceTags(),
+                    List.of(),
                     version.getUserData(),
                     null,
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
-                    asg.getLaunchTemplateVersion());
+                    resolvedVersion);
         }
 
         return null;
