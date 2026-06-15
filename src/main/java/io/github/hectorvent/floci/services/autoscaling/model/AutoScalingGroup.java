@@ -16,6 +16,7 @@ public class AutoScalingGroup {
     private String autoScalingGroupName;
     private String autoScalingGroupArn;
     private String launchConfigurationName;
+    private String launchTemplateId;
     private String launchTemplateName;
     private String launchTemplateVersion;
     private int minSize;
@@ -23,6 +24,7 @@ public class AutoScalingGroup {
     private int desiredCapacity;
     private int defaultCooldown = 300;
     private List<String> availabilityZones = new ArrayList<>();
+    private List<String> subnetIds = new ArrayList<>();
     private List<String> loadBalancerNames = new ArrayList<>();
     private List<String> targetGroupARNs = new ArrayList<>();
     private String healthCheckType = "EC2";
@@ -45,6 +47,9 @@ public class AutoScalingGroup {
     public String getLaunchConfigurationName() { return launchConfigurationName; }
     public void setLaunchConfigurationName(String v) { this.launchConfigurationName = v; }
 
+    public String getLaunchTemplateId() { return launchTemplateId; }
+    public void setLaunchTemplateId(String v) { this.launchTemplateId = v; }
+
     public String getLaunchTemplateName() { return launchTemplateName; }
     public void setLaunchTemplateName(String v) { this.launchTemplateName = v; }
 
@@ -65,6 +70,9 @@ public class AutoScalingGroup {
 
     public List<String> getAvailabilityZones() { return availabilityZones; }
     public void setAvailabilityZones(List<String> v) { this.availabilityZones = v; }
+
+    public List<String> getSubnetIds() { return subnetIds; }
+    public void setSubnetIds(List<String> v) { this.subnetIds = v; }
 
     public List<String> getLoadBalancerNames() { return loadBalancerNames; }
     public void setLoadBalancerNames(List<String> v) { this.loadBalancerNames = v; }
