@@ -111,6 +111,7 @@ public class AutoScalingService {
                                                     String launchConfigName,
                                                     String launchTemplateId, String launchTemplateName,
                                                     String launchTemplateVersion,
+                                                    MixedInstancesPolicy mixedInstancesPolicy,
                                                     int minSize, int maxSize, int desiredCapacity,
                                                     int defaultCooldown, List<String> availabilityZones,
                                                     List<String> subnetIds,
@@ -123,7 +124,9 @@ public class AutoScalingService {
             throw new AwsException("AlreadyExists",
                     "Auto Scaling group '" + name + "' already exists.", 400);
         }
-        if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null) {
+        validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+        if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null
+                && mixedInstancesPolicy == null) {
             throw new AwsException("ValidationError",
                     "Either LaunchConfigurationName or LaunchTemplate must be specified.", 400);
         }
@@ -137,6 +140,7 @@ public class AutoScalingService {
         asg.setLaunchTemplateId(launchTemplateId);
         asg.setLaunchTemplateName(launchTemplateName);
         asg.setLaunchTemplateVersion(launchTemplateVersion);
+        asg.setMixedInstancesPolicy(mixedInstancesPolicy);
         asg.setMinSize(minSize);
         asg.setMaxSize(maxSize);
         asg.setDesiredCapacity(desiredCapacity);
@@ -161,19 +165,34 @@ public class AutoScalingService {
                                         String launchConfigName,
                                         String launchTemplateId, String launchTemplateName,
                                         String launchTemplateVersion,
+                                        MixedInstancesPolicy mixedInstancesPolicy,
                                         Integer minSize, Integer maxSize, Integer desiredCapacity,
                                         Integer defaultCooldown, List<String> availabilityZones,
                                         List<String> subnetIds,
                                         String healthCheckType, Integer healthCheckGracePeriod,
                                         List<String> terminationPolicies) {
         AutoScalingGroup asg = requireGroup(region, name);
+        validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
         if (launchConfigName != null) {
             asg.setLaunchConfigurationName(launchConfigName);
+            asg.setLaunchTemplateId(null);
+            asg.setLaunchTemplateName(null);
+            asg.setLaunchTemplateVersion(null);
+            asg.setMixedInstancesPolicy(null);
         }
         if (launchTemplateId != null || launchTemplateName != null) {
+            asg.setLaunchConfigurationName(null);
             asg.setLaunchTemplateId(launchTemplateId);
             asg.setLaunchTemplateName(launchTemplateName);
             asg.setLaunchTemplateVersion(launchTemplateVersion);
+            asg.setMixedInstancesPolicy(null);
+        }
+        if (mixedInstancesPolicy != null) {
+            asg.setLaunchConfigurationName(null);
+            asg.setLaunchTemplateId(null);
+            asg.setLaunchTemplateName(null);
+            asg.setLaunchTemplateVersion(null);
+            asg.setMixedInstancesPolicy(mixedInstancesPolicy);
         }
         if (minSize != null) { asg.setMinSize(minSize); }
         if (maxSize != null) { asg.setMaxSize(maxSize); }
@@ -603,6 +622,26 @@ public class AutoScalingService {
 
     private static String policyKey(String region, String asgName, String policyName) {
         return region + "::" + asgName + "::" + policyName;
+    }
+
+    private static void validateLaunchSource(String launchConfigName,
+                                             String launchTemplateId,
+                                             String launchTemplateName,
+                                             MixedInstancesPolicy mixedInstancesPolicy) {
+        int sources = 0;
+        if (launchConfigName != null) {
+            sources++;
+        }
+        if (launchTemplateId != null || launchTemplateName != null) {
+            sources++;
+        }
+        if (mixedInstancesPolicy != null) {
+            sources++;
+        }
+        if (sources > 1) {
+            throw new AwsException("ValidationError",
+                    "LaunchConfigurationName, LaunchTemplate, and MixedInstancesPolicy are mutually exclusive.", 400);
+        }
     }
 
     private static String instanceRefreshKey(String region, String asgName, String refreshId) {

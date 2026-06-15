@@ -19,6 +19,7 @@ public class AutoScalingGroup {
     private String launchTemplateId;
     private String launchTemplateName;
     private String launchTemplateVersion;
+    private MixedInstancesPolicy mixedInstancesPolicy;
     private int minSize;
     private int maxSize;
     private int desiredCapacity;
@@ -55,6 +56,9 @@ public class AutoScalingGroup {
 
     public String getLaunchTemplateVersion() { return launchTemplateVersion; }
     public void setLaunchTemplateVersion(String v) { this.launchTemplateVersion = v; }
+
+    public MixedInstancesPolicy getMixedInstancesPolicy() { return mixedInstancesPolicy; }
+    public void setMixedInstancesPolicy(MixedInstancesPolicy v) { this.mixedInstancesPolicy = v; }
 
     public int getMinSize() { return minSize; }
     public void setMinSize(int v) { this.minSize = v; }

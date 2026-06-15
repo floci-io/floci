@@ -25,6 +25,7 @@ class AutoScalingQueryHandlerTest {
                 "lt-original",
                 null,
                 "1",
+                null,
                 0,
                 3,
                 1,
@@ -89,6 +90,7 @@ class AutoScalingQueryHandlerTest {
                 "lt-current",
                 null,
                 "$Latest",
+                null,
                 0,
                 3,
                 1,
@@ -137,6 +139,7 @@ class AutoScalingQueryHandlerTest {
                 "lt-current",
                 null,
                 "$Latest",
+                null,
                 0,
                 3,
                 1,
@@ -180,5 +183,49 @@ class AutoScalingQueryHandlerTest {
         assertTrue(xml.contains("<PredefinedMetricSpecification>"));
         assertTrue(xml.contains("<PredefinedMetricType>ASGAverageCPUUtilization</PredefinedMetricType>"));
         assertTrue(xml.contains("<TargetValue>55.5</TargetValue>"));
+    }
+
+    @Test
+    void createAutoScalingGroupWithMixedInstancesPolicyUsesAwsQueryXmlShape() {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+
+        MultivaluedHashMap<String, String> createParams = new MultivaluedHashMap<>();
+        createParams.add("AutoScalingGroupName", "mixed-asg");
+        createParams.add("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId",
+                "lt-mixed");
+        createParams.add("MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version", "3");
+        createParams.add("MixedInstancesPolicy.LaunchTemplate.Overrides.member.1.InstanceType", "t4g.medium");
+        createParams.add("MixedInstancesPolicy.LaunchTemplate.Overrides.member.2.InstanceType", "m7g.large");
+        createParams.add("MixedInstancesPolicy.InstancesDistribution.OnDemandBaseCapacity", "1");
+        createParams.add("MixedInstancesPolicy.InstancesDistribution.OnDemandPercentageAboveBaseCapacity", "25");
+        createParams.add("MixedInstancesPolicy.InstancesDistribution.SpotAllocationStrategy", "capacity-optimized");
+        createParams.add("MinSize", "0");
+        createParams.add("MaxSize", "4");
+        createParams.add("DesiredCapacity", "1");
+        createParams.add("AvailabilityZones.member.1", "us-east-1a");
+
+        Response createResponse = handler.handle("CreateAutoScalingGroup", createParams, REGION);
+
+        assertEquals(200, createResponse.getStatus());
+
+        MultivaluedHashMap<String, String> describeParams = new MultivaluedHashMap<>();
+        describeParams.add("AutoScalingGroupNames.member.1", "mixed-asg");
+
+        Response describeResponse = handler.handle("DescribeAutoScalingGroups", describeParams, REGION);
+
+        assertEquals(200, describeResponse.getStatus());
+        String xml = (String) describeResponse.getEntity();
+        assertTrue(xml.contains("<MixedInstancesPolicy>"));
+        assertTrue(xml.contains("<LaunchTemplateSpecification>"));
+        assertTrue(xml.contains("<LaunchTemplateId>lt-mixed</LaunchTemplateId>"));
+        assertTrue(xml.contains("<Version>3</Version>"));
+        assertTrue(xml.contains("<Overrides>"));
+        assertTrue(xml.contains("<InstanceType>t4g.medium</InstanceType>"));
+        assertTrue(xml.contains("<InstanceType>m7g.large</InstanceType>"));
+        assertTrue(xml.contains("<OnDemandBaseCapacity>1</OnDemandBaseCapacity>"));
+        assertTrue(xml.contains("<OnDemandPercentageAboveBaseCapacity>25</OnDemandPercentageAboveBaseCapacity>"));
+        assertTrue(xml.contains("<SpotAllocationStrategy>capacity-optimized</SpotAllocationStrategy>"));
     }
 }

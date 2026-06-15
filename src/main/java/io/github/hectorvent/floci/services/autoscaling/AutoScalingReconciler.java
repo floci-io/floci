@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.autoscaling;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
 import io.github.hectorvent.floci.services.autoscaling.model.LaunchConfiguration;
+import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
@@ -399,6 +400,38 @@ public class AutoScalingReconciler {
                     resolvedVersion);
         }
 
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                mixedInstancesLaunchTemplateSpecification(asg);
+        if (specification != null) {
+            LaunchTemplate mixedLaunchTemplate = resolveMixedInstancesLaunchTemplate(asg, specification);
+            if (mixedLaunchTemplate != null) {
+                LaunchTemplate version = ec2Service.describeLaunchTemplateVersions(
+                        asg.getRegion(),
+                        mixedLaunchTemplate.getLaunchTemplateId(),
+                        null,
+                        specification.getVersion() == null ? List.of() : List.of(specification.getVersion()))
+                        .getFirst();
+                String resolvedVersion = version.getLatestVersionNumber() != null
+                        ? version.getLatestVersionNumber()
+                        : specification.getVersion();
+                String instanceType = mixedInstancesInstanceType(asg, version);
+                return new LaunchSource(
+                        null,
+                        version.getImageId(),
+                        instanceType,
+                        version.getKeyName(),
+                        version.getSecurityGroupIds(),
+                        version.getInstanceTags(),
+                        version.getUserData(),
+                        null,
+                        specification.getLaunchTemplateId() == null
+                                ? mixedLaunchTemplate.getLaunchTemplateId()
+                                : specification.getLaunchTemplateId(),
+                        specification.getLaunchTemplateName(),
+                        resolvedVersion);
+            }
+        }
+
         return null;
     }
 
@@ -424,6 +457,53 @@ public class AutoScalingReconciler {
                 ltName == null || ltName.isBlank() ? List.of() : List.of(ltName),
                 Map.of());
         return launchTemplates.isEmpty() ? null : launchTemplates.get(0);
+    }
+
+    private MixedInstancesPolicy.LaunchTemplateSpecification mixedInstancesLaunchTemplateSpecification(
+            AutoScalingGroup asg) {
+        MixedInstancesPolicy policy = asg.getMixedInstancesPolicy();
+        if (policy == null || policy.getLaunchTemplate() == null) {
+            return null;
+        }
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                policy.getLaunchTemplate().getLaunchTemplateSpecification();
+        if (specification == null) {
+            return null;
+        }
+        String ltId = specification.getLaunchTemplateId();
+        String ltName = specification.getLaunchTemplateName();
+        if ((ltId == null || ltId.isBlank()) && (ltName == null || ltName.isBlank())) {
+            return null;
+        }
+        return specification;
+    }
+
+    private LaunchTemplate resolveMixedInstancesLaunchTemplate(
+            AutoScalingGroup asg, MixedInstancesPolicy.LaunchTemplateSpecification specification) {
+        String ltId = specification.getLaunchTemplateId();
+        String ltName = specification.getLaunchTemplateName();
+        List<LaunchTemplate> launchTemplates = ec2Service.describeLaunchTemplates(
+                asg.getRegion(),
+                ltId == null || ltId.isBlank() ? List.of() : List.of(ltId),
+                ltName == null || ltName.isBlank() ? List.of() : List.of(ltName),
+                Map.of());
+        return launchTemplates.isEmpty() ? null : launchTemplates.get(0);
+    }
+
+    private String mixedInstancesInstanceType(AutoScalingGroup asg, LaunchTemplate version) {
+        MixedInstancesPolicy policy = asg.getMixedInstancesPolicy();
+        if (policy != null && policy.getLaunchTemplate() != null) {
+            List<MixedInstancesPolicy.LaunchTemplateOverride> overrides =
+                    policy.getLaunchTemplate().getOverrides();
+            if (overrides != null) {
+                for (MixedInstancesPolicy.LaunchTemplateOverride override : overrides) {
+                    if (override.getInstanceType() != null && !override.getInstanceType().isBlank()) {
+                        return override.getInstanceType();
+                    }
+                }
+            }
+        }
+        return version.getInstanceType();
     }
 
     private record LaunchSource(

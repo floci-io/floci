@@ -30,6 +30,7 @@ class AutoScalingServiceTest {
                 "lt-original",
                 null,
                 "1",
+                null,
                 0,
                 3,
                 1,

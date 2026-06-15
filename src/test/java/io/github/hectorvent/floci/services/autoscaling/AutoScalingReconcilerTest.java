@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.autoscaling;
 
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.AutoScalingGroup;
+import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceState;
@@ -74,7 +75,7 @@ class AutoScalingReconcilerTest {
         version.setLatestVersionNumber("1");
         version.setImageId("ami-version-1");
         version.setInstanceType("t3.micro");
-        List<Tag> instanceTags = List.of(new Tag("io.iceguard.ClusterId", "development"));
+        List<Tag> instanceTags = List.of(new Tag("app.ClusterId", "development"));
         version.setInstanceTags(instanceTags);
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
                 .thenReturn(List.of(launchTemplate));
@@ -134,6 +135,61 @@ class AutoScalingReconcilerTest {
 
         assertEquals("$Latest", asg.getLaunchTemplateVersion());
         assertEquals("7", asg.getInstances().getFirst().getLaunchTemplateVersion());
+    }
+
+    @Test
+    void scaleOutUsesMixedInstancesLaunchTemplateSpecification() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(asgService, ec2Service, elbV2Service);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(1);
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+        MixedInstancesPolicy.LaunchTemplate launchTemplatePolicy =
+                new MixedInstancesPolicy.LaunchTemplate();
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                new MixedInstancesPolicy.LaunchTemplateSpecification();
+        specification.setLaunchTemplateId("lt-123");
+        specification.setVersion("3");
+        launchTemplatePolicy.setLaunchTemplateSpecification(specification);
+        MixedInstancesPolicy.LaunchTemplateOverride override =
+                new MixedInstancesPolicy.LaunchTemplateOverride();
+        override.setInstanceType("t3.small");
+        launchTemplatePolicy.setOverrides(List.of(override));
+        policy.setLaunchTemplate(launchTemplatePolicy);
+        asg.setMixedInstancesPolicy(policy);
+
+        LaunchTemplate launchTemplate = new LaunchTemplate();
+        launchTemplate.setLaunchTemplateId("lt-123");
+        LaunchTemplate version = new LaunchTemplate();
+        version.setLatestVersionNumber("3");
+        version.setImageId("ami-version-3");
+        version.setInstanceType("t3.micro");
+        when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
+                .thenReturn(List.of(launchTemplate));
+        when(ec2Service.describeLaunchTemplateVersions("us-east-1", "lt-123", null, List.of("3")))
+                .thenReturn(List.of(version));
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-launched");
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
+                eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
+                eq(List.of()), eq(null), eq(null))).thenReturn(reservation);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(1, asg.getInstances().size());
+        assertEquals("i-launched", asg.getInstances().getFirst().getInstanceId());
+        assertEquals("lt-123", asg.getInstances().getFirst().getLaunchTemplateId());
+        assertEquals("3", asg.getInstances().getFirst().getLaunchTemplateVersion());
+        assertEquals("t3.small", asg.getInstances().getFirst().getInstanceType());
+        verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-3"), eq("t3.small"),
+                eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
+                eq(List.of()), eq(null), eq(null));
     }
 
     @Test
