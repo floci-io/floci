@@ -47,8 +47,12 @@ public class DocDbQueryHandler {
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         } catch (Exception e) {
+            // Keep the full detail in the logs; return a generic AWS-style error envelope so
+            // SDK callers get a consistent, parseable error shape and no internal details leak.
             LOG.errorv(e, "Unexpected error in DocDB {0}", action);
-            return Response.serverError().entity("Unexpected error: " + e.getMessage()).build();
+            return AwsQueryResponse.error("InternalFailure",
+                    "An internal error occurred while processing the request.",
+                    AwsNamespaces.RDS, 500);
         }
     }
 
