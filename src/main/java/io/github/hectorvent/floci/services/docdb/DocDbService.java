@@ -72,7 +72,9 @@ public class DocDbService {
         cluster.setReaderEndpoint(handle.getHost());
         cluster.setPort(handle.getPort());
         cluster.setMasterUsername(masterUsername);
-        cluster.setMasterUserPassword(masterPassword);
+        // The master password is passed to the mongo container above and is deliberately
+        // NOT stored on the cluster: it would otherwise be persisted to the storage
+        // backend (JSON) as a cleartext credential at rest. mongod is the auth authority.
         cluster.setIamDatabaseAuthenticationEnabled(iamEnabled);
         cluster.setDbClusterArn(regionResolver.buildArn("rds", region, "cluster:" + id));
         cluster.setDbClusterResourceId("cluster-" + UUID.randomUUID().toString()

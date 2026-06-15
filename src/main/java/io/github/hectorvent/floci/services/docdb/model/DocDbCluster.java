@@ -9,7 +9,6 @@ import java.util.List;
 @RegisterForReflection
 public class DocDbCluster {
     private String masterUsername;
-    private String masterUserPassword;
 
     private String dbClusterIdentifier;
     private String status;
@@ -32,9 +31,6 @@ public class DocDbCluster {
 
     public String getMasterUsername(){return masterUsername;}
     public void setMasterUsername(String masterUsername){this.masterUsername = masterUsername;}
-
-    public String getMasterUserPassword(){return masterUserPassword;}
-    public void setMasterUserPassword(String masterUserPassword){this.masterUserPassword = masterUserPassword;}
 
     public String getDbClusterIdentifier() { return dbClusterIdentifier; }
     public void setDbClusterIdentifier(String dbClusterIdentifier) { this.dbClusterIdentifier = dbClusterIdentifier; }
