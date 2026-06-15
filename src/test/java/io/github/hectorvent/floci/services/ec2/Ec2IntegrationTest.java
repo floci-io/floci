@@ -2249,4 +2249,82 @@ class Ec2IntegrationTest {
         .when()
             .post("/");
     }
+
+    @Test
+    @Order(150)
+    void spotInstanceLifecycle() {
+        // 1. Request Spot Instance
+        String spotRequestId = given()
+            .formParam("Action", "RequestSpotInstances")
+            .formParam("SpotPrice", "0.05")
+            .formParam("InstanceCount", "1")
+            .formParam("Type", "one-time")
+            .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchSpecification.InstanceType", "t2.micro")
+            .formParam("TagSpecification.1.ResourceType", "spot-instances-request")
+            .formParam("TagSpecification.1.Tag.1.Key", "SpotKey")
+            .formParam("TagSpecification.1.Tag.1.Value", "SpotValue")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", startsWith("sir-"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotPrice", equalTo("0.05"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].state", equalTo("active"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].status.code", equalTo("fulfilled"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].launchSpecification.imageId", equalTo("ami-0abcdef1234567890"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].productDescription", equalTo("Linux/UNIX"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].key", equalTo("SpotKey"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo("SpotValue"))
+            .extract().path("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId");
+
+        // 2. Describe Spot Instance Request by ID
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId))
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("active"));
+
+        // 3. Describe Spot Instance Request using tag filter
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("Filter.1.Name", "tag:SpotKey")
+            .formParam("Filter.1.Value.1", "SpotValue")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId));
+
+        // 4. Cancel Spot Instance Request
+        given()
+            .formParam("Action", "CancelSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CancelSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId))
+            .body("CancelSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("cancelled"));
+
+        // 5. Describe Spot Instance Request to verify state is cancelled
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("cancelled"));
+    }
 }
