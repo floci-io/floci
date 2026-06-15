@@ -6,6 +6,8 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
 import io.github.hectorvent.floci.services.rds.model.DbCluster;
 import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
@@ -22,11 +24,15 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
+import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
@@ -38,6 +44,7 @@ class RdsServiceTest {
     private RdsService rdsService;
     private RdsContainerManager containerManager;
     private RdsProxyManager proxyManager;
+    private Ec2Service ec2Service;
     private RegionResolver regionResolver;
     private EmulatorConfig config;
 
@@ -45,6 +52,7 @@ class RdsServiceTest {
     void setUp() {
         containerManager = mock(RdsContainerManager.class);
         proxyManager = mock(RdsProxyManager.class);
+        ec2Service = mock(Ec2Service.class);
         regionResolver = new RegionResolver("us-east-1", "123456789012");
         config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig servicesConfig = mock(EmulatorConfig.ServicesConfig.class);
@@ -60,17 +68,31 @@ class RdsServiceTest {
 
         rdsService = newService(containerManager, proxyManager,
                 new InMemoryStorage<>(), new InMemoryStorage<>(),
-                new InMemoryStorage<>(), new InMemoryStorage<>());
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>());
 
         when(containerManager.start(any(), any(), any(), any(), any(), any(), any()))
                 .thenReturn(new RdsContainerHandle("cont-id", "id", "localhost", 5432));
+        when(ec2Service.describeSubnets(eq("us-east-1"), anyList(), any()))
+                .thenAnswer(invocation -> {
+                    @SuppressWarnings("unchecked")
+                    List<String> subnetIds = invocation.getArgument(1, List.class);
+                    if (subnetIds == null || subnetIds.isEmpty()) {
+                        return defaultSubnets();
+                    }
+                    Map<String, Subnet> byId = defaultSubnets().stream()
+                            .collect(Collectors.toMap(Subnet::getSubnetId, subnet -> subnet));
+                    return subnetIds.stream()
+                            .map(byId::get)
+                            .filter(java.util.Objects::nonNull)
+                            .toList();
+                });
     }
 
     @Test
     void createDbInstanceGeneratesMissingFields() {
         DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
-                20, false, null, null, null);
+                20, false, null, null, null, null, false);
 
         assertEquals("mydb", instance.getDbInstanceIdentifier());
         assertNotNull(instance.getDbiResourceId());
@@ -123,7 +145,7 @@ class RdsServiceTest {
     void dbInstanceEndpointUsesResolvedProxyHost() {
         DockerHostResolver dockerHostResolver = mock(DockerHostResolver.class);
         when(dockerHostResolver.resolve()).thenReturn("floci.local");
-        RdsService service = new RdsService(containerManager, proxyManager, regionResolver, config,
+        RdsService service = new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
                 new InMemoryStorage<>(), new InMemoryStorage<>(), null, dockerHostResolver);
 
@@ -169,7 +191,7 @@ class RdsServiceTest {
     void listDbInstancesIsCaseInsensitive() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
-                20, false, null, null, null);
+                20, false, null, null, null, null, false);
 
         Collection<DbInstance> result = rdsService.listDbInstances("MYDB");
         assertEquals(1, result.size());
@@ -189,7 +211,7 @@ class RdsServiceTest {
     void modifyDbInstanceBlankPasswordDoesNotOverwriteExistingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",
-                20, false, null, null, null);
+                20, false, null, null, null, null, false);
 
         DbInstance modified = rdsService.modifyDbInstance("mydb", "   ", null, null);
 
@@ -201,7 +223,7 @@ class RdsServiceTest {
     void modifyDbInstanceCanToggleIamWithoutChangingPassword() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "original-password", "dbname", "db.t3.micro",
-                20, false, null, null, null);
+                20, false, null, null, null, null, false);
 
         DbInstance modified = rdsService.modifyDbInstance("mydb", null, true, null);
 
@@ -224,10 +246,10 @@ class RdsServiceTest {
     @Test
     void dbSubnetGroupRoundTrip() {
         DbSubnetGroup group = rdsService.createDbSubnetGroup(
-                "sample-db-subnets", "test", java.util.List.of("subnet-aaa", "subnet-bbb"));
+                "sample-db-subnets", "test", java.util.List.of("subnet-default-a", "subnet-default-b"));
 
         assertEquals("sample-db-subnets", group.getDbSubnetGroupName());
-        assertEquals(java.util.List.of("subnet-aaa", "subnet-bbb"), group.getSubnetIds());
+        assertEquals(java.util.List.of("subnet-default-a", "subnet-default-b"), group.getSubnetIds());
         assertEquals(1, rdsService.listDbSubnetGroups("sample-db-subnets").size());
 
         rdsService.deleteDbSubnetGroup("sample-db-subnets");
@@ -261,7 +283,7 @@ class RdsServiceTest {
     @Test
     void deleteDbClusterFailsWhenMembersRemain() {
         DbCluster cluster = rdsService.createDbCluster("cluster1", "postgres", "13",
-                "admin", "password", "dbname", false, null);
+                "admin", "password", "dbname", false, null, null, null, false);
         cluster.getDbClusterMembers().add("instance-1");
 
         AwsException exception = assertThrows(AwsException.class,
@@ -294,6 +316,50 @@ class RdsServiceTest {
                 rdsService.createDbClusterParameterGroup("cpg1", "aurora-postgresql16", "desc"));
 
         assertEquals("DBParameterGroupAlreadyExists", exception.getErrorCode());
+    }
+
+    @Test
+    void createDbSubnetGroupRejectsDuplicateWithModelCode() {
+        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b"));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b")));
+
+        assertEquals("DBSubnetGroupAlreadyExists", exception.getErrorCode());
+    }
+
+    @Test
+    void createDbSubnetGroupPopulatesArn() {
+        DbSubnetGroup group = rdsService.createDbSubnetGroup("my-subnet-group", "desc",
+                List.of("subnet-default-a", "subnet-default-b"));
+
+        assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group", group.getDbSubnetGroupArn());
+    }
+
+    @Test
+    void createDbSubnetGroupRequiresSubnetIdsWithMissingParameter() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of()));
+
+        assertEquals("MissingParameter", exception.getErrorCode());
+    }
+
+    @Test
+    void resolveDbSubnetGroupViewReturnsStoredCustomGroup() {
+        rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b"));
+
+        DbSubnetGroup group = rdsService.resolveDbSubnetGroupView("my-subnet-group");
+
+        assertEquals("my-subnet-group", group.getDbSubnetGroupName());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:my-subnet-group", group.getDbSubnetGroupArn());
+    }
+
+    @Test
+    void resolveDbSubnetGroupViewReturnsDefaultGroupForBlankName() {
+        DbSubnetGroup group = rdsService.resolveDbSubnetGroupView(null);
+
+        assertEquals("default", group.getDbSubnetGroupName());
+        assertEquals("arn:aws:rds:us-east-1:123456789012:subgrp:default", group.getDbSubnetGroupArn());
     }
 
     @Test
@@ -334,10 +400,10 @@ class RdsServiceTest {
                 .thenReturn(new RdsContainerHandle("initial-container", "mydb", "localhost", 5432));
 
         RdsService initialService = newService(containerManager, proxyManager,
-                instances, clusters, parameterGroups, clusterParameterGroups);
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>());
         DbInstance created = initialService.createDbInstance("mydb", "postgres", "16.3",
                 "admin", "secret", "app", "db.t3.micro",
-                20, false, null, null, null);
+                20, false, null, null, null, null, false);
 
         String persistedVolumeId = created.getVolumeId();
         int persistedProxyPort = created.getProxyPort();
@@ -348,7 +414,7 @@ class RdsServiceTest {
                 .thenReturn(new RdsContainerHandle("restored-container", "mydb", "127.0.0.1", 15432));
 
         RdsService restoredService = newService(restoredContainerManager, restoredProxyManager,
-                instances, clusters, parameterGroups, clusterParameterGroups);
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>());
         restoredService.restorePersistedRuntime();
 
         DbInstance restored = restoredService.getDbInstance("mydb");
@@ -378,12 +444,12 @@ class RdsServiceTest {
                 .thenReturn(new RdsContainerHandle("initial-cluster-container", "cluster1", "localhost", 5432));
 
         RdsService initialService = newService(containerManager, proxyManager,
-                instances, clusters, parameterGroups, clusterParameterGroups);
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>());
         DbCluster cluster = initialService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
-                "admin", "secret", "app", false, null);
+                "admin", "secret", "app", false, null, null, null, false);
         DbInstance member = initialService.createDbInstance("member1", "aurora-postgresql", "16.3",
                 "admin", "secret", "app", "db.t3.medium",
-                20, false, null, null, "cluster1");
+                20, false, null, null, "cluster1", null, false);
 
         RdsContainerManager restoredContainerManager = mock(RdsContainerManager.class);
         RdsProxyManager restoredProxyManager = mock(RdsProxyManager.class);
@@ -391,7 +457,7 @@ class RdsServiceTest {
                 .thenReturn(new RdsContainerHandle("restored-cluster-container", "cluster1", "127.0.0.1", 15432));
 
         RdsService restoredService = newService(restoredContainerManager, restoredProxyManager,
-                instances, clusters, parameterGroups, clusterParameterGroups);
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>());
         restoredService.restorePersistedRuntime();
 
         DbCluster restoredCluster = restoredService.getDbCluster("cluster1");
@@ -420,8 +486,10 @@ class RdsServiceTest {
                                   StorageBackend<String, DbInstance> instances,
                                   StorageBackend<String, DbCluster> clusters,
                                   StorageBackend<String, DbParameterGroup> parameterGroups,
-                                  StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups) {
-        return newService(containerManager, proxyManager, instances, clusters, parameterGroups, clusterParameterGroups, null);
+                                  StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
+                                  StorageBackend<String, DbSubnetGroup> subnetGroups) {
+        return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups);
     }
 
     private RdsService newService(RdsContainerManager containerManager,
@@ -431,7 +499,22 @@ class RdsServiceTest {
                                   StorageBackend<String, DbParameterGroup> parameterGroups,
                                   StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
                                   SecretsManagerService secretsManager) {
-        return new RdsService(containerManager, proxyManager, regionResolver, config,
-                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(), secretsManager);
+        return new RdsService(containerManager, proxyManager, ec2Service, regionResolver, config,
+                instances, clusters, parameterGroups, clusterParameterGroups, new InMemoryStorage<>(),
+                secretsManager, null);
+    }
+
+    private static List<Subnet> defaultSubnets() {
+        Subnet subnetA = new Subnet();
+        subnetA.setSubnetId("subnet-default-a");
+        subnetA.setVpcId("vpc-default");
+        subnetA.setAvailabilityZone("us-east-1a");
+
+        Subnet subnetB = new Subnet();
+        subnetB.setSubnetId("subnet-default-b");
+        subnetB.setVpcId("vpc-default");
+        subnetB.setAvailabilityZone("us-east-1b");
+
+        return List.of(subnetA, subnetB);
     }
 }
