@@ -192,6 +192,7 @@ public class RdsService {
         if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
             getDbSubnetGroup(dbSubnetGroupName);
         }
+        validateInstanceParameterGroup(paramGroupName, engineParam, engineVersion);
         int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
@@ -482,6 +483,7 @@ public class RdsService {
         }
 
         DatabaseEngine engine = resolveEngine(engineParam);
+        validateClusterParameterGroup(paramGroupName, engineParam, engineVersion);
         int proxyPort = allocateProxyPort();
         String image = imageForEngine(engine, engineVersion);
         String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
@@ -578,7 +580,7 @@ public class RdsService {
     public DbParameterGroup getDbParameterGroup(String name) {
         return parameterGroups.get(name).orElseThrow(() ->
                 new AwsException("DBParameterGroupNotFound",
-                        "DB parameter group " + name + " not found.", 404));
+                        "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404));
     }
 
     public Collection<DbParameterGroup> listDbParameterGroups(String filterName) {
@@ -591,7 +593,7 @@ public class RdsService {
     public void deleteDbParameterGroup(String name) {
         if (parameterGroups.get(name).isEmpty()) {
             throw new AwsException("DBParameterGroupNotFound",
-                    "DB parameter group " + name + " not found.", 404);
+                    "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404);
         }
         parameterGroups.delete(name);
     }
@@ -666,8 +668,8 @@ public class RdsService {
 
     public DbClusterParameterGroup getDbClusterParameterGroup(String name) {
         return clusterParameterGroups.get(name).orElseThrow(() ->
-                new AwsException("DBParameterGroupNotFound",
-                        "DB cluster parameter group " + name + " not found.", 404));
+                new AwsException("DBClusterParameterGroupNotFound",
+                        "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404));
     }
 
     public Collection<DbClusterParameterGroup> listDbClusterParameterGroups(String filterName) {
@@ -679,8 +681,8 @@ public class RdsService {
 
     public void deleteDbClusterParameterGroup(String name) {
         if (clusterParameterGroups.get(name).isEmpty()) {
-            throw new AwsException("DBParameterGroupNotFound",
-                    "DB cluster parameter group " + name + " not found.", 404);
+            throw new AwsException("DBClusterParameterGroupNotFound",
+                    "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
         }
         clusterParameterGroups.delete(name);
     }
@@ -729,8 +731,7 @@ public class RdsService {
             case "postgres", "aurora-postgresql" -> DatabaseEngine.POSTGRES;
             case "mysql", "aurora-mysql", "aurora" -> DatabaseEngine.MYSQL;
             case "mariadb" -> DatabaseEngine.MARIADB;
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Unsupported engine: " + engineParam + ". Supported: postgres, mysql, mariadb.", 400);
+            default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
     }
 
@@ -741,6 +742,54 @@ public class RdsService {
             case MARIADB -> config.services().rds().defaultMariadbImage();
         };
         return imageForRequestedVersion(defaultImage, engineVersion);
+    }
+
+    private void validateInstanceParameterGroup(String paramGroupName, String engineParam, String engineVersion) {
+        if (paramGroupName == null || paramGroupName.isBlank()) {
+            return;
+        }
+        DbParameterGroup group = getDbParameterGroup(paramGroupName);
+        validateParameterGroupFamily(paramGroupName, group.getDbParameterGroupFamily(), engineParam, engineVersion);
+    }
+
+    private void validateClusterParameterGroup(String paramGroupName, String engineParam, String engineVersion) {
+        if (paramGroupName == null || paramGroupName.isBlank()) {
+            return;
+        }
+        DbClusterParameterGroup group = getDbClusterParameterGroup(paramGroupName);
+        validateParameterGroupFamily(paramGroupName, group.getDbParameterGroupFamily(), engineParam, engineVersion);
+    }
+
+    private void validateParameterGroupFamily(String groupName, String family, String engineParam, String engineVersion) {
+        String normalizedFamily = family == null ? "" : family.toLowerCase();
+        String expectedPrefix = expectedFamilyPrefix(engineParam);
+        if (!normalizedFamily.startsWith(expectedPrefix)) {
+            throw new AwsException("InvalidParameterCombination", invalidParameterCombinationMessage(), 400);
+        }
+    }
+
+    private String expectedFamilyPrefix(String engineParam) {
+        String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
+        return switch (normalizedEngine) {
+            case "postgres" -> "postgres";
+            case "aurora-postgresql" -> "aurora-postgresql";
+            case "mysql" -> "mysql";
+            case "aurora", "aurora-mysql" -> "aurora-mysql";
+            case "mariadb" -> "mariadb";
+            default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        };
+    }
+
+    private String effectiveEngineName(String engineParam) {
+        return engineParam == null || engineParam.isBlank() ? "postgres" : engineParam;
+    }
+
+    private String invalidParameterValueMessage() {
+        return "A value that you provided for a parameter isn't valid. Check the parameter constraints and try again.";
+    }
+
+    private String invalidParameterCombinationMessage() {
+        return "Parameters that must not be used together were used together. Remove one of the conflicting parameters and try again.";
     }
 
     static String imageForRequestedVersion(String defaultImage, String engineVersion) {
