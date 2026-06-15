@@ -259,6 +259,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void describeOrderableDbInstanceOptionsIncludesModernGravitonPostgresClasses() {
+        var flociPinned = rdsService.describeOrderableDbInstanceOptions(
+                "postgres", "18.1", "db.m8g.large");
+        var awsEquivalent = rdsService.describeOrderableDbInstanceOptions(
+                "postgres", "18.4", "db.m8g.large");
+
+        assertEquals(1, flociPinned.size());
+        assertEquals("db.m8g.large", flociPinned.getFirst().get("dbInstanceClass"));
+        assertEquals("18.1", flociPinned.getFirst().get("engineVersion"));
+        assertEquals(1, awsEquivalent.size());
+        assertEquals("db.m8g.large", awsEquivalent.getFirst().get("dbInstanceClass"));
+        assertEquals("18.4", awsEquivalent.getFirst().get("engineVersion"));
+    }
+
+    @Test
+    void describeOrderableDbInstanceOptionsIncludesCurrentSmallGravitonPostgresClass() {
+        var result = rdsService.describeOrderableDbInstanceOptions(
+                "postgres", "16.14", "db.t4g.small");
+
+        assertEquals(1, result.size());
+        assertEquals("db.t4g.small", result.getFirst().get("dbInstanceClass"));
+        assertEquals("16.14", result.getFirst().get("engineVersion"));
+    }
+
+    @Test
     void deleteDbClusterFailsWhenMembersRemain() {
         DbCluster cluster = rdsService.createDbCluster("cluster1", "postgres", "13",
                 "admin", "password", "dbname", false, null);
