@@ -207,10 +207,11 @@ public class EcsJsonHandler {
         String memory = req.has("memory") ? req.path("memory").asText() : null;
         String taskRoleArn = req.hasNonNull("taskRoleArn") ? req.path("taskRoleArn").asText() : null;
         String executionRoleArn = req.hasNonNull("executionRoleArn") ? req.path("executionRoleArn").asText() : null;
+        List<String> requiresCompatibilities = jsonArrayToList(req.path("requiresCompatibilities"));
         Map<String, String> tags = parseTagMap(req.path("tags"));
 
         TaskDefinition td = service.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, tags, region);
+                taskRoleArn, executionRoleArn, requiresCompatibilities, tags, region);
         // Task-level volumes are not part of registerTaskDefinition's signature; set them on the
         // returned (and stored) task definition so they round-trip and reach RunTask launches.
         td.setVolumes(parseVolumes(req.path("volumes")));
@@ -922,6 +923,16 @@ public class EcsJsonHandler {
         if (td.getMemory() != null) { n.put("memory", td.getMemory()); }
         if (td.getTaskRoleArn() != null) { n.put("taskRoleArn", td.getTaskRoleArn()); }
         if (td.getExecutionRoleArn() != null) { n.put("executionRoleArn", td.getExecutionRoleArn()); }
+        if (td.getRequiresCompatibilities() != null && !td.getRequiresCompatibilities().isEmpty()) {
+            ArrayNode arr = objectMapper.createArrayNode();
+            td.getRequiresCompatibilities().forEach(arr::add);
+            n.set("requiresCompatibilities", arr);
+        }
+        if (td.getCompatibilities() != null && !td.getCompatibilities().isEmpty()) {
+            ArrayNode arr = objectMapper.createArrayNode();
+            td.getCompatibilities().forEach(arr::add);
+            n.set("compatibilities", arr);
+        }
 
         ArrayNode containers = objectMapper.createArrayNode();
         if (td.getContainerDefinitions() != null) {

@@ -241,4 +241,45 @@ class RdsSigV4ValidatorTest {
 
         assertFalse(validator.validate(withoutSignature, "admin"));
     }
+
+    @Test
+    void validateAcceptsTokenSignedWithStsSessionCredentials() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        String secretAccessKey = "sts-generated-secret-key";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, secretAccessKey);
+
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local",
+                5432,
+                "admin",
+                accessKeyId,
+                secretAccessKey,
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertTrue(validator.validate(token, "admin"),
+                "Validator must accept RDS IAM tokens signed with STS session credentials (ASIA… keys)");
+    }
+
+    @Test
+    void validateRejectsStsTokenWithWrongSecret() throws Exception {
+        String accessKeyId = "ASIAIOSFODNN7EXAMPLE";
+        IamService iamService = IamServiceTestHelper.iamServiceWithSessionCredential(accessKeyId, "correct-secret");
+
+        RdsSigV4Validator validator = new RdsSigV4Validator(iamService);
+        String token = SigV4TokenTestHelper.createRdsToken(
+                "db.example.local",
+                5432,
+                "admin",
+                accessKeyId,
+                "wrong-secret",
+                Instant.now().minusSeconds(60),
+                900
+        );
+
+        assertFalse(validator.validate(token, "admin"),
+                "Validator must reject STS token signed with wrong secret");
+    }
 }

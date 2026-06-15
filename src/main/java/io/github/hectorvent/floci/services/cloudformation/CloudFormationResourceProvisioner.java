@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.cloudformation;
 
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
+import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.SqsParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -14,6 +16,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -36,7 +39,9 @@ import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
 import io.github.hectorvent.floci.services.iam.IamService;
 import io.github.hectorvent.floci.services.kms.KmsService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.lambda.model.LambdaLayerVersion;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.pipes.model.DesiredState;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -53,7 +58,14 @@ import io.github.hectorvent.floci.services.cognito.CognitoService;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.JsonNodeFactory;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -62,7 +74,9 @@ import io.github.hectorvent.floci.services.s3.model.S3Object;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import java.util.*;
+import java.util.concurrent.TimeoutException;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -83,6 +97,16 @@ public class CloudFormationResourceProvisioner {
     private static final int LAMBDA_DEFAULT_EPHEMERAL_STORAGE_MB = 512;
     private static final String LAMBDA_DEFAULT_TRACING_MODE = "PassThrough";
 
+    /** Reserved attribute keys used to carry custom-resource state to the later Delete invocation. */
+    private static final String CR_SERVICE_TOKEN_ATTR = "__FlociServiceToken";
+    private static final String CR_PROPERTIES_ATTR = "__FlociResourceProperties";
+    /**
+     * How long to wait for the Lambda's ResponseURL callback after the synchronous invoke returns.
+     * The invoke already blocks until the handler finishes, so this only covers a PUT that lands
+     * fractionally after the container returns control.
+     */
+    private static final Duration CR_RESPONSE_TIMEOUT = Duration.ofSeconds(10);
+
     private final S3Service s3Service;
     private final SqsService sqsService;
     private final SnsService snsService;
@@ -98,9 +122,15 @@ public class CloudFormationResourceProvisioner {
     private final EcrService ecrService;
     private final PipesService pipesService;
     private final CognitoService cognitoService;
+    private final LambdaLayerService lambdaLayerService;
+    private final ObjectMapper objectMapper;
+    private final CustomResourceResponseStore customResourceResponseStore;
+    private final ContainerReachableEndpoint reachableEndpoint;
     private final EcsService ecsService;
     private final ElbV2Service elbV2Service;
     private final StepFunctionsService stepFunctionsService;
+    private final BatchService batchService;
+    private final Ec2Service ec2Service;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -114,9 +144,15 @@ public class CloudFormationResourceProvisioner {
                                              EcrService ecrService,
                                              PipesService pipesService,
                                              CognitoService cognitoService,
+                                             LambdaLayerService lambdaLayerService,
+                                             ObjectMapper objectMapper,
+                                             CustomResourceResponseStore customResourceResponseStore,
+                                             ContainerReachableEndpoint reachableEndpoint,
                                              EcsService ecsService,
                                              ElbV2Service elbV2Service,
-                                             StepFunctionsService stepFunctionsService) {
+                                             StepFunctionsService stepFunctionsService,
+                                             BatchService batchService,
+                                             Ec2Service ec2Service) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -132,9 +168,15 @@ public class CloudFormationResourceProvisioner {
         this.ecrService = ecrService;
         this.pipesService = pipesService;
         this.cognitoService = cognitoService;
+        this.lambdaLayerService = lambdaLayerService;
+        this.objectMapper = objectMapper;
+        this.customResourceResponseStore = customResourceResponseStore;
+        this.reachableEndpoint = reachableEndpoint;
         this.ecsService = ecsService;
         this.elbV2Service = elbV2Service;
         this.stepFunctionsService = stepFunctionsService;
+        this.batchService = batchService;
+        this.ec2Service = ec2Service;
     }
 
     /**
@@ -173,6 +215,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::DynamoDB::Table", "AWS::DynamoDB::GlobalTable" ->
                         provisionDynamoTable(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Lambda::Function" -> provisionLambda(resource, properties, engine, region, accountId, stackName);
+                case "AWS::Lambda::LayerVersion" ->
+                        provisionLambdaLayerVersion(resource, properties, engine, region, stackName);
                 case "AWS::IAM::Role" -> provisionIamRole(resource, properties, engine, accountId, stackName);
                 case "AWS::IAM::User" -> provisionIamUser(resource, properties, engine, stackName);
                 case "AWS::IAM::AccessKey" -> provisionIamAccessKey(resource, properties, engine);
@@ -210,6 +254,8 @@ public class CloudFormationResourceProvisioner {
                         provisionCognitoUserPool(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Cognito::UserPoolClient" ->
                         provisionCognitoUserPoolClient(resource, properties, engine, region, accountId, stackName);
+                case "AWS::CloudFormation::CustomResource" ->
+                        provisionCustomResource(resource, properties, engine, region, accountId, stackName);
                 case "AWS::ECS::Cluster" -> provisionEcsCluster(resource, properties, engine, region, stackName);
                 case "AWS::ECS::TaskDefinition" -> provisionEcsTaskDefinition(resource, properties, engine, region, stackName);
                 case "AWS::ECS::Service" -> provisionEcsService(resource, properties, engine, region, stackName);
@@ -221,10 +267,33 @@ public class CloudFormationResourceProvisioner {
                         provisionListener(resource, properties, engine, region);
                 case "AWS::ElasticLoadBalancingV2::ListenerRule" ->
                         provisionListenerRule(resource, properties, engine, region);
+                case "AWS::Batch::ComputeEnvironment" ->
+                        provisionBatchComputeEnvironment(resource, properties, engine, region, stackName);
+                case "AWS::Batch::JobQueue" ->
+                        provisionBatchJobQueue(resource, properties, engine, region, stackName);
+                case "AWS::Batch::JobDefinition" ->
+                        provisionBatchJobDefinition(resource, properties, engine, region, stackName);
+                // EC2 networking. These delegate to Ec2Service so the resources actually exist
+                // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
+                // fake physical id. Topological ordering guarantees parents are provisioned first.
+                case "AWS::EC2::VPC" -> provisionVpc(resource, properties, engine, region);
+                case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
+                case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
+                case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
+                case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
+                case "AWS::EC2::SubnetRouteTableAssociation" ->
+                        provisionSubnetRouteTableAssociation(resource, properties, engine, region);
+                case "AWS::EC2::Route" -> provisionRoute(resource, properties, engine, region);
+                case "AWS::EC2::NatGateway" -> provisionNatGateway(resource, properties, engine, region);
+                case "AWS::EC2::EIP" -> provisionEip(resource, region);
                 default -> {
-                    LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
-                    resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
-                    resource.getAttributes().put("Arn", "arn:aws:stub:::" + logicalId);
+                    if (resourceType != null && resourceType.startsWith("Custom::")) {
+                        provisionCustomResource(resource, properties, engine, region, accountId, stackName);
+                    } else {
+                        LOG.debugv("Stubbing unsupported resource type: {0} ({1})", resourceType, logicalId);
+                        resource.setPhysicalId(logicalId + "-" + UUID.randomUUID().toString().substring(0, 8));
+                        resource.getAttributes().put("Arn", "arn:aws:stub:::" + logicalId);
+                    }
                 }
             }
             resource.setStatus("CREATE_COMPLETE");
@@ -234,6 +303,22 @@ public class CloudFormationResourceProvisioner {
             resource.setStatusReason(e.getMessage());
         }
         return resource;
+    }
+
+    /**
+     * Deletes a provisioned resource. Custom resources are re-invoked with {@code RequestType=Delete}
+     * (using the ServiceToken + properties stashed at create time); everything else delegates to the
+     * type-keyed {@link #delete(String, String, String)}.
+     */
+    public void delete(StackResource resource, String region) {
+        String resourceType = resource.getResourceType();
+        boolean custom = "AWS::CloudFormation::CustomResource".equals(resourceType)
+                || (resourceType != null && resourceType.startsWith("Custom::"));
+        if (custom) {
+            deleteCustomResource(resource, region);
+            return;
+        }
+        delete(resourceType, resource.getPhysicalId(), region);
     }
 
     public void delete(String resourceType, String physicalId, String region) {
@@ -262,6 +347,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Pipes::Pipe" -> pipesService.deletePipe(physicalId, region);
                 case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
                 case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
+                case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
                 case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
                 case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
                 case "AWS::ECS::Cluster" -> ecsService.deleteCluster(physicalId, region);
@@ -321,6 +407,101 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("Arn", queueArn);
         r.getAttributes().put("QueueName", queueName);
         r.getAttributes().put("QueueUrl", queue.getQueueUrl());
+    }
+
+    // ── EC2 networking ─────────────────────────────────────────────────────────
+    // Each method delegates to Ec2Service so the resource really exists (describe-subnets,
+    // ELBv2 create-load-balancer, etc. resolve it). physicalId is set to the real EC2 id so
+    // Ref/exports resolve to a real vpc-/subnet-/... id rather than a stub.
+
+    private void provisionVpc(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String cidr = resolveOptional(props, "CidrBlock", engine);
+        var vpc = ec2Service.createVpc(region, cidr, false);
+        r.setPhysicalId(vpc.getVpcId());
+        r.getAttributes().put("VpcId", vpc.getVpcId());
+        if (vpc.getCidrBlock() != null) {
+            r.getAttributes().put("CidrBlock", vpc.getCidrBlock());
+        }
+    }
+
+    private void provisionSubnet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        String cidr = resolveOptional(props, "CidrBlock", engine);
+        String az = resolveOptional(props, "AvailabilityZone", engine);
+        var subnet = ec2Service.createSubnet(region, vpcId, cidr, az);
+        r.setPhysicalId(subnet.getSubnetId());
+        r.getAttributes().put("SubnetId", subnet.getSubnetId());
+        r.getAttributes().put("VpcId", subnet.getVpcId());
+        r.getAttributes().put("AvailabilityZone", subnet.getAvailabilityZone());
+    }
+
+    private void provisionSecurityGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                        String region, String stackName) {
+        String groupName = resolveOptional(props, "GroupName", engine);
+        if (groupName == null || groupName.isBlank()) {
+            groupName = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        String description = resolveOptional(props, "GroupDescription", engine);
+        if (description == null || description.isBlank()) {
+            description = "Managed by CloudFormation";
+        }
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        var sg = ec2Service.createSecurityGroup(region, groupName, description, vpcId);
+        // Ref on AWS::EC2::SecurityGroup returns the group id for VPC security groups.
+        r.setPhysicalId(sg.getGroupId());
+        r.getAttributes().put("GroupId", sg.getGroupId());
+        if (sg.getVpcId() != null) {
+            r.getAttributes().put("VpcId", sg.getVpcId());
+        }
+    }
+
+    private void provisionInternetGateway(StackResource r, String region) {
+        var igw = ec2Service.createInternetGateway(region);
+        r.setPhysicalId(igw.getInternetGatewayId());
+        r.getAttributes().put("InternetGatewayId", igw.getInternetGatewayId());
+    }
+
+    private void provisionRouteTable(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        var rt = ec2Service.createRouteTable(region, vpcId);
+        r.setPhysicalId(rt.getRouteTableId());
+        r.getAttributes().put("RouteTableId", rt.getRouteTableId());
+    }
+
+    private void provisionSubnetRouteTableAssociation(StackResource r, JsonNode props,
+                                                      CloudFormationTemplateEngine engine, String region) {
+        String routeTableId = resolveOptional(props, "RouteTableId", engine);
+        String subnetId = resolveOptional(props, "SubnetId", engine);
+        var assoc = ec2Service.associateRouteTable(region, routeTableId, subnetId);
+        r.setPhysicalId(assoc.getRouteTableAssociationId());
+        r.getAttributes().put("Id", assoc.getRouteTableAssociationId());
+    }
+
+    private void provisionRoute(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String routeTableId = resolveOptional(props, "RouteTableId", engine);
+        String destinationCidr = resolveOptional(props, "DestinationCidrBlock", engine);
+        String gatewayId = resolveOptional(props, "GatewayId", engine);
+        if (gatewayId == null || gatewayId.isBlank()) {
+            gatewayId = resolveOptional(props, "NatGatewayId", engine);
+        }
+        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId);
+        r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
+    }
+
+    private void provisionNatGateway(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String subnetId = resolveOptional(props, "SubnetId", engine);
+        String allocationId = resolveOptional(props, "AllocationId", engine);
+        var nat = ec2Service.createNatGateway(region, subnetId, allocationId, "public", List.of());
+        r.setPhysicalId(nat.getNatGatewayId());
+        r.getAttributes().put("NatGatewayId", nat.getNatGatewayId());
+    }
+
+    private void provisionEip(StackResource r, String region) {
+        var addr = ec2Service.allocateAddress(region);
+        // Ref on AWS::EC2::EIP returns the public IP; AllocationId is exposed via Fn::GetAtt.
+        r.setPhysicalId(addr.getPublicIp());
+        r.getAttributes().put("AllocationId", addr.getAllocationId());
+        r.getAttributes().put("PublicIp", addr.getPublicIp());
     }
 
     // ── SNS ───────────────────────────────────────────────────────────────────
@@ -1277,6 +1458,20 @@ public class CloudFormationResourceProvisioner {
                             target.setSqsParameters(sqsParameters);
                         }
                     }
+                    JsonNode batchParamsNode = resolved.path("BatchParameters");
+                    if (!batchParamsNode.isMissingNode() && batchParamsNode.isObject()) {
+                        JsonNode arrayProperties = batchParamsNode.path("ArrayProperties");
+                        BatchParameters batchParameters = new BatchParameters();
+                        batchParameters.setJobDefinition(batchParamsNode.path("JobDefinition").asText(null));
+                        batchParameters.setJobName(batchParamsNode.path("JobName").asText(null));
+                        if (arrayProperties.isObject()) {
+                            batchParameters.setArrayProperties(jsonObjectToMap(arrayProperties));
+                        }
+                        if (batchParamsNode.has("RetryStrategy")) {
+                            batchParameters.setRetryStrategy(batchParamsNode.get("RetryStrategy"));
+                        }
+                        target.setBatchParameters(batchParameters);
+                    }
                     targets.add(target);
                 }
             }
@@ -1297,6 +1492,216 @@ public class CloudFormationResourceProvisioner {
             eventBridgeService.deleteRule(ruleName, null, region);
         } catch (Exception e) {
             LOG.debugv("Could not delete EventBridge rule {0}: {1}", ruleName, e.getMessage());
+        }
+    }
+
+    // ── Batch ────────────────────────────────────────────────────────────────
+
+    private void provisionBatchComputeEnvironment(StackResource r, JsonNode props,
+                                                  CloudFormationTemplateEngine engine,
+                                                  String region, String stackName) {
+        String name = resolveOptional(props, "ComputeEnvironmentName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.put("computeEnvironmentName", name);
+        putResolvedText(req, "type", props, "Type", engine);
+        putResolvedText(req, "state", props, "State", engine);
+        putResolvedText(req, "serviceRole", props, "ServiceRole", engine);
+        putResolvedObject(req, "computeResources", props, "ComputeResources", engine);
+        putTagsObject(req, props, engine);
+
+        ObjectNode response = batchService.createComputeEnvironment(req, region);
+        String arn = response.path("computeEnvironmentArn").asText();
+        r.setPhysicalId(arn);
+        r.getAttributes().put("Arn", arn);
+        r.getAttributes().put("ComputeEnvironmentArn", arn);
+        r.getAttributes().put("ComputeEnvironmentName", name);
+    }
+
+    private void provisionBatchJobQueue(StackResource r, JsonNode props,
+                                        CloudFormationTemplateEngine engine,
+                                        String region, String stackName) {
+        String name = resolveOptional(props, "JobQueueName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.put("jobQueueName", name);
+        String priority = resolveOptional(props, "Priority", engine);
+        req.put("priority", priority != null ? Integer.parseInt(priority) : 1);
+        putResolvedText(req, "state", props, "State", engine);
+        putResolvedText(req, "jobQueueType", props, "JobQueueType", engine);
+        req.set("computeEnvironmentOrder", batchComputeEnvironmentOrder(props, engine));
+        putTagsObject(req, props, engine);
+
+        ObjectNode response = batchService.createJobQueue(req, region);
+        String arn = response.path("jobQueueArn").asText();
+        r.setPhysicalId(arn);
+        r.getAttributes().put("Arn", arn);
+        r.getAttributes().put("JobQueueArn", arn);
+        r.getAttributes().put("JobQueueName", name);
+    }
+
+    private void provisionBatchJobDefinition(StackResource r, JsonNode props,
+                                             CloudFormationTemplateEngine engine,
+                                             String region, String stackName) {
+        String name = resolveOptional(props, "JobDefinitionName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+
+        ObjectNode req = JsonNodeFactory.instance.objectNode();
+        req.put("jobDefinitionName", name);
+        req.put("type", resolveOrDefault(props, "Type", engine, "container"));
+        putResolvedArray(req, "platformCapabilities", props, "PlatformCapabilities", engine);
+        if (props != null && props.has("ContainerProperties")) {
+            req.set("containerProperties", batchContainerProperties(
+                    engine.resolveNode(props.get("ContainerProperties")), engine));
+        }
+        putStringMapFromObject(req, "parameters", props, "Parameters", engine);
+        if (props != null && props.has("RetryStrategy")) {
+            req.set("retryStrategy", batchRetryStrategy(engine.resolveNode(props.get("RetryStrategy"))));
+        }
+        if (props != null && props.has("Timeout")) {
+            ObjectNode timeout = JsonNodeFactory.instance.objectNode();
+            JsonNode resolved = engine.resolveNode(props.get("Timeout"));
+            if (resolved.has("AttemptDurationSeconds")) {
+                timeout.set("attemptDurationSeconds", resolved.get("AttemptDurationSeconds"));
+            }
+            req.set("timeout", timeout);
+        }
+        putTagsObject(req, props, engine);
+
+        ObjectNode response = batchService.registerJobDefinition(req, region);
+        String arn = response.path("jobDefinitionArn").asText();
+        r.setPhysicalId(arn);
+        r.getAttributes().put("Arn", arn);
+        r.getAttributes().put("JobDefinitionArn", arn);
+        r.getAttributes().put("JobDefinitionName", name);
+        r.getAttributes().put("Revision", response.path("revision").asText());
+    }
+
+    private ArrayNode batchComputeEnvironmentOrder(JsonNode props, CloudFormationTemplateEngine engine) {
+        ArrayNode out = JsonNodeFactory.instance.arrayNode();
+        if (props == null || !props.has("ComputeEnvironmentOrder")) {
+            return out;
+        }
+        JsonNode resolved = engine.resolveNode(props.get("ComputeEnvironmentOrder"));
+        if (!resolved.isArray()) {
+            return out;
+        }
+        for (JsonNode item : resolved) {
+            ObjectNode order = out.addObject();
+            order.put("order", item.path("Order").asInt());
+            order.put("computeEnvironment", item.path("ComputeEnvironment").asText(null));
+        }
+        return out;
+    }
+
+    private ObjectNode batchContainerProperties(JsonNode resolved, CloudFormationTemplateEngine engine) {
+        ObjectNode container = JsonNodeFactory.instance.objectNode();
+        if (resolved == null || !resolved.isObject()) {
+            return container;
+        }
+        copyIfPresent(container, "image", resolved, "Image");
+        copyIfPresent(container, "command", resolved, "Command");
+        copyIfPresent(container, "jobRoleArn", resolved, "JobRoleArn");
+        copyIfPresent(container, "executionRoleArn", resolved, "ExecutionRoleArn");
+        copyIfPresent(container, "logConfiguration", resolved, "LogConfiguration");
+        copyIfPresent(container, "networkConfiguration", resolved, "NetworkConfiguration");
+        copyIfPresent(container, "ephemeralStorage", resolved, "EphemeralStorage");
+        if (resolved.has("ResourceRequirements") && resolved.get("ResourceRequirements").isArray()) {
+            ArrayNode resources = container.putArray("resourceRequirements");
+            for (JsonNode item : resolved.get("ResourceRequirements")) {
+                ObjectNode requirement = resources.addObject();
+                requirement.put("type", item.path("Type").asText(null));
+                requirement.put("value", item.path("Value").asText(null));
+            }
+        }
+        if (resolved.has("Environment") && resolved.get("Environment").isArray()) {
+            ArrayNode env = container.putArray("environment");
+            for (JsonNode item : resolved.get("Environment")) {
+                ObjectNode entry = env.addObject();
+                entry.put("name", item.path("Name").asText(null));
+                entry.put("value", item.path("Value").asText(null));
+            }
+        }
+        return container;
+    }
+
+    private ObjectNode batchRetryStrategy(JsonNode resolved) {
+        ObjectNode retry = JsonNodeFactory.instance.objectNode();
+        if (resolved == null || !resolved.isObject()) {
+            return retry;
+        }
+        if (resolved.has("Attempts")) {
+            retry.set("attempts", resolved.get("Attempts"));
+        }
+        if (resolved.has("EvaluateOnExit")) {
+            retry.set("evaluateOnExit", resolved.get("EvaluateOnExit"));
+        }
+        return retry;
+    }
+
+    private void putResolvedText(ObjectNode req, String target, JsonNode props, String source,
+                                 CloudFormationTemplateEngine engine) {
+        String value = resolveOptional(props, source, engine);
+        if (value != null) {
+            req.put(target, value);
+        }
+    }
+
+    private void putResolvedObject(ObjectNode req, String target, JsonNode props, String source,
+                                   CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved != null && resolved.isObject()) {
+            req.set(target, resolved);
+        }
+    }
+
+    private void putResolvedArray(ObjectNode req, String target, JsonNode props, String source,
+                                  CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved != null && resolved.isArray()) {
+            req.set(target, resolved);
+        }
+    }
+
+    private void putStringMapFromObject(ObjectNode req, String target, JsonNode props, String source,
+                                        CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (!resolved.isObject()) {
+            return;
+        }
+        ObjectNode out = JsonNodeFactory.instance.objectNode();
+        resolved.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        req.set(target, out);
+    }
+
+    private void putTagsObject(ObjectNode req, JsonNode props, CloudFormationTemplateEngine engine) {
+        Map<String, String> tags = parseCfnTags(props != null ? props.get("Tags") : null, engine);
+        if (!tags.isEmpty()) {
+            ObjectNode tagNode = req.putObject("tags");
+            tags.forEach(tagNode::put);
+        }
+    }
+
+    private void copyIfPresent(ObjectNode target, String targetName, JsonNode source, String sourceName) {
+        if (source.has(sourceName) && !source.get(sourceName).isNull()) {
+            target.set(targetName, source.get(sourceName));
         }
     }
 
@@ -1837,6 +2242,251 @@ public class CloudFormationResourceProvisioner {
         }
     }
 
+    // ── Lambda LayerVersion ──────────────────────────────────────────────────
+    //
+    // Without this, layer versions (e.g. CDK's AwsCliLayer) fall through to the stub, so the
+    // function's Layers ARN can't be resolved and the layer content is never copied into /opt.
+
+    private void provisionLambdaLayerVersion(StackResource r, JsonNode props,
+                                             CloudFormationTemplateEngine engine, String region,
+                                             String stackName) {
+        if (props == null || !props.has("Content")) {
+            throw new AwsException("ValidationError",
+                    "Lambda LayerVersion " + r.getLogicalId() + " is missing Content", 400);
+        }
+        String layerName = resolveOptional(props, "LayerName", engine);
+        if (layerName == null || layerName.isBlank()) {
+            layerName = generatePhysicalName(stackName, r.getLogicalId(), 140, false);
+        }
+
+        Map<String, Object> request = new HashMap<>();
+        request.put("Content", jsonObjectToMap(engine.resolveNode(props.get("Content"))));
+        String description = resolveOptional(props, "Description", engine);
+        if (description != null) {
+            request.put("Description", description);
+        }
+        String licenseInfo = resolveOptional(props, "LicenseInfo", engine);
+        if (licenseInfo != null) {
+            request.put("LicenseInfo", licenseInfo);
+        }
+        List<String> runtimes = resolveStringListOrEmpty(props, "CompatibleRuntimes", engine);
+        if (!runtimes.isEmpty()) {
+            request.put("CompatibleRuntimes", runtimes);
+        }
+        List<String> architectures = resolveStringListOrEmpty(props, "CompatibleArchitectures", engine);
+        if (!architectures.isEmpty()) {
+            request.put("CompatibleArchitectures", architectures);
+        }
+
+        LambdaLayerVersion layer = lambdaLayerService.publishLayerVersion(region, layerName, request);
+        // CloudFormation Ref on a LayerVersion returns the version ARN; the Lambda's Layers list
+        // references it, and ContainerLauncher resolves it back to disk via resolveLayerByArn.
+        r.setPhysicalId(layer.getLayerVersionArn());
+        r.getAttributes().put("Arn", layer.getLayerVersionArn());
+        r.getAttributes().put("LayerVersionArn", layer.getLayerVersionArn());
+    }
+
+    private void deleteLambdaLayerVersion(String physicalId, String region) {
+        LambdaLayerVersion layer = lambdaLayerService.resolveLayerByArn(physicalId);
+        if (layer != null) {
+            lambdaLayerService.deleteLayerVersion(region, layer.getLayerName(), layer.getVersion());
+        }
+    }
+
+    // ── CloudFormation Custom Resources ──────────────────────────────────────
+    //
+    // A Custom::* / AWS::CloudFormation::CustomResource is backed by a Lambda named by its
+    // ServiceToken. CloudFormation invokes that Lambda with a request event and the Lambda PUTs its
+    // result to the event's ResponseURL (it does NOT return it). Floci points ResponseURL at
+    // CfnResponseController and, because the invoke is synchronous, reads the captured response as
+    // soon as the handler returns. Pattern 1 only — single-Lambda synchronous handlers (e.g. CDK
+    // BucketDeployment). The async Provider framework (onEvent/isComplete polling) is not emulated.
+
+    private void provisionCustomResource(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                         String region, String accountId, String stackName) {
+        if (props == null || !props.has("ServiceToken")) {
+            throw new AwsException("ValidationError",
+                    "Custom resource " + r.getLogicalId() + " is missing ServiceToken", 400);
+        }
+        String serviceToken = engine.resolve(props.get("ServiceToken"));
+        if (serviceToken == null || serviceToken.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Custom resource " + r.getLogicalId() + " has an unresolved ServiceToken", 400);
+        }
+
+        // Resolve intrinsics to concrete values. CloudFormation keeps ServiceToken inside
+        // ResourceProperties (and also surfaces it at the top level of the event), so we leave it
+        // in place here. CloudFormation stringifies every scalar in ResourceProperties
+        // (true -> "true", 5 -> "5") while preserving list/map structure; handlers (e.g. CDK's)
+        // rely on this and call String methods on the values, so we must match it.
+        JsonNode resolvedProps = engine.resolveNode(props);
+        ObjectNode resolved = resolvedProps.isObject()
+                ? ((ObjectNode) resolvedProps).deepCopy()
+                : objectMapper.createObjectNode();
+        ObjectNode resourceProperties = (ObjectNode) stringifyScalars(resolved);
+
+        boolean isUpdate = r.getPhysicalId() != null;
+        String requestType = isUpdate ? "Update" : "Create";
+        String priorPhysicalId = isUpdate ? r.getPhysicalId() : null;
+
+        // On Update, CloudFormation includes the previous ResourceProperties so the handler can diff.
+        // The prior values were stashed at the last create/update; read them before we overwrite below.
+        ObjectNode oldResourceProperties = isUpdate ? readStashedProperties(r) : null;
+
+        JsonNode response = invokeCustomResourceHandler(serviceToken, requestType, r.getLogicalId(),
+                r.getResourceType(), priorPhysicalId, resourceProperties, oldResourceProperties,
+                region, accountId, stackName);
+
+        String status = response.path("Status").asText("FAILED");
+        if (!"SUCCESS".equals(status)) {
+            throw new AwsException("CustomResourceFailed",
+                    "Custom resource handler reported FAILED: "
+                            + response.path("Reason").asText("(no reason given)"), 400);
+        }
+
+        String returnedPhysicalId = response.path("PhysicalResourceId").asText(null);
+        if (returnedPhysicalId != null && !returnedPhysicalId.isBlank()) {
+            r.setPhysicalId(returnedPhysicalId);
+        } else if (priorPhysicalId != null) {
+            r.setPhysicalId(priorPhysicalId);
+        } else {
+            r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 12));
+        }
+
+        // Data.* become Fn::GetAtt attributes on the custom resource.
+        JsonNode data = response.path("Data");
+        if (data.isObject()) {
+            data.fields().forEachRemaining(e ->
+                    r.getAttributes().put(e.getKey(), nodeToAttributeValue(e.getValue())));
+        }
+
+        // Stash what a later Delete invocation needs (delete() only gets the StackResource).
+        r.getAttributes().put(CR_SERVICE_TOKEN_ATTR, serviceToken);
+        r.getAttributes().put(CR_PROPERTIES_ATTR, resourceProperties.toString());
+    }
+
+    private void deleteCustomResource(StackResource r, String region) {
+        String serviceToken = r.getAttributes().get(CR_SERVICE_TOKEN_ATTR);
+        if (serviceToken == null || serviceToken.isBlank()) {
+            LOG.debugv("Custom resource {0} has no stored ServiceToken; skipping Delete", r.getLogicalId());
+            return;
+        }
+        ObjectNode stashed = readStashedProperties(r);
+        ObjectNode resourceProperties = stashed != null ? stashed : objectMapper.createObjectNode();
+        try {
+            JsonNode response = invokeCustomResourceHandler(serviceToken, "Delete", r.getLogicalId(),
+                    r.getResourceType(), r.getPhysicalId(), resourceProperties, null, region,
+                    accountFromArn(serviceToken), "");
+            if (!"SUCCESS".equals(response.path("Status").asText("FAILED"))) {
+                LOG.warnv("Custom resource {0} Delete reported FAILED: {1}",
+                        r.getLogicalId(), response.path("Reason").asText("(no reason given)"));
+            }
+        } catch (Exception e) {
+            // Best-effort, consistent with the rest of delete().
+            LOG.debugv("Custom resource {0} Delete invocation failed: {1}", r.getLogicalId(), e.getMessage());
+        }
+    }
+
+    // Reads the ResourceProperties stashed at the last create/update (CR_PROPERTIES_ATTR).
+    // Returns null when nothing is stashed or it cannot be parsed.
+    private ObjectNode readStashedProperties(StackResource r) {
+        String stored = r.getAttributes().get(CR_PROPERTIES_ATTR);
+        if (stored == null) {
+            return null;
+        }
+        try {
+            JsonNode parsed = objectMapper.readTree(stored);
+            return parsed.isObject() ? (ObjectNode) parsed : null;
+        } catch (Exception e) {
+            LOG.debugv("Could not parse stored properties for custom resource {0}: {1}",
+                    r.getLogicalId(), e.getMessage());
+            return null;
+        }
+    }
+
+    private JsonNode invokeCustomResourceHandler(String serviceToken, String requestType, String logicalId,
+                                                 String resourceType, String physicalId,
+                                                 ObjectNode resourceProperties, ObjectNode oldResourceProperties,
+                                                 String region, String accountId, String stackName) {
+        String token = customResourceResponseStore.register();
+        try {
+            ObjectNode event = objectMapper.createObjectNode();
+            event.put("RequestType", requestType);
+            event.put("ResponseURL", reachableEndpoint.baseUrl() + "/cfn-response/" + token);
+            event.put("StackId", "arn:aws:cloudformation:" + region + ":" + accountId + ":stack/"
+                    + (stackName == null ? "" : stackName) + "/" + UUID.randomUUID());
+            event.put("RequestId", UUID.randomUUID().toString());
+            event.put("ResourceType", resourceType);
+            event.put("LogicalResourceId", logicalId);
+            if (physicalId != null) {
+                event.put("PhysicalResourceId", physicalId);
+            }
+            event.put("ServiceToken", serviceToken);
+            event.set("ResourceProperties", resourceProperties);
+            if (oldResourceProperties != null) {
+                event.set("OldResourceProperties", oldResourceProperties);
+            }
+
+            byte[] payload = objectMapper.writeValueAsBytes(event);
+            InvokeResult result = lambdaService.invoke(region, serviceToken, payload,
+                    InvocationType.RequestResponse);
+            if (result.getFunctionError() != null) {
+                String body = result.getPayload() != null
+                        ? new String(result.getPayload(), StandardCharsets.UTF_8) : "";
+                throw new AwsException("CustomResourceFailed",
+                        "Custom resource handler errored (" + result.getFunctionError() + "): " + body, 400);
+            }
+
+            return customResourceResponseStore.await(token, CR_RESPONSE_TIMEOUT);
+        } catch (AwsException e) {
+            throw e;
+        } catch (TimeoutException e) {
+            throw new AwsException("CustomResourceTimeout",
+                    "Timed out waiting for custom resource " + logicalId
+                            + " to PUT its response to ResponseURL", 504);
+        } catch (Exception e) {
+            throw new AwsException("CustomResourceFailed",
+                    "Failed to invoke custom resource " + logicalId + ": " + e.getMessage(), 500);
+        }
+    }
+
+    private static String nodeToAttributeValue(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return "";
+        }
+        return node.isValueNode() ? node.asText() : node.toString();
+    }
+
+    /**
+     * Mirrors CloudFormation's stringification of custom-resource ResourceProperties: every scalar
+     * (boolean, number, text) becomes a string, while object and array structure is preserved.
+     * Null is left as-is.
+     */
+    private JsonNode stringifyScalars(JsonNode node) {
+        if (node == null || node.isNull()) {
+            return node;
+        }
+        if (node.isObject()) {
+            ObjectNode out = objectMapper.createObjectNode();
+            node.fields().forEachRemaining(e -> out.set(e.getKey(), stringifyScalars(e.getValue())));
+            return out;
+        }
+        if (node.isArray()) {
+            var out = objectMapper.createArrayNode();
+            node.forEach(e -> out.add(stringifyScalars(e)));
+            return out;
+        }
+        return objectMapper.getNodeFactory().textNode(node.asText());
+    }
+
+    private static String accountFromArn(String arn) {
+        if (arn == null) {
+            return "000000000000";
+        }
+        String[] parts = arn.split(":");
+        return parts.length >= 5 && parts[4].matches("\\d{12}") ? parts[4] : "000000000000";
+    }
+
     // ── ECS ──────────────────────────────────────────────────────────────────
 
     private void provisionEcsCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -1864,10 +2514,11 @@ public class CloudFormationResourceProvisioner {
         String memory = resolveOptional(props, "Memory", engine);
         String taskRoleArn = resolveOptional(props, "TaskRoleArn", engine);
         String executionRoleArn = resolveOptional(props, "ExecutionRoleArn", engine);
+        List<String> requiresCompatibilities = resolveStringListOrEmpty(props, "RequiresCompatibilities", engine);
 
         // Task definitions are immutable; each CFN update registers a fresh revision.
         TaskDefinition td = ecsService.registerTaskDefinition(family, containerDefs, networkMode, cpu, memory,
-                taskRoleArn, executionRoleArn, region);
+                taskRoleArn, executionRoleArn, requiresCompatibilities, region);
 
         r.setPhysicalId(td.getTaskDefinitionArn());
         r.getAttributes().put("TaskDefinitionArn", td.getTaskDefinitionArn());

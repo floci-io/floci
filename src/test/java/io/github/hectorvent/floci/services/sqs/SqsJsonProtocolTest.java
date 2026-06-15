@@ -178,9 +178,9 @@ class SqsJsonProtocolTest {
     @Test
     @Order(6)
     void sendMessageBatchExceedingQueueMaximumMessageSizeReturnsBatchRequestTooLong() {
-        // Default queue MaximumMessageSize is 262144 bytes. Each entry is well under the
+        // Default queue MaximumMessageSize is 1048576 bytes. Each entry is well under the
         // per-message limit; the sum is what trips the batch-level check.
-        String bigBody = "x".repeat(100_000);
+        String bigBody = "x".repeat(400_000);
         String body = "{\"QueueUrl\":\"" + queueUrl + "\","
                 + "\"Entries\":["
                 + "{\"Id\":\"a\",\"MessageBody\":\"" + bigBody + "\"},"

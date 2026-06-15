@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.25] - 2026-06-15
+
+### Added
+
+- **batch:** AWS Batch service support ([#1332](https://github.com/floci-io/floci/pull/1332))
+- **wafv2:** AWS WAF v2 management API (Phase 1) ([#1327](https://github.com/floci-io/floci/pull/1327))
+- **emr:** Amazon EMR management API (Phase 1) ([#1321](https://github.com/floci-io/floci/pull/1321))
+- **rds-data:** RDS Data API support ([#1262](https://github.com/floci-io/floci/pull/1262))
+- **rds:** provisioning support ([#1253](https://github.com/floci-io/floci/pull/1253))
+- **cloudformation:** provision Lambda-backed custom resources and layer versions ([#1146](https://github.com/floci-io/floci/pull/1146))
+- **glue:** support partition APIs ([#1315](https://github.com/floci-io/floci/pull/1315)); support column statistics ([#1309](https://github.com/floci-io/floci/pull/1309)); support table statistics deletion ([#1324](https://github.com/floci-io/floci/pull/1324))
+
+### Fixed
+
+- **cloudformation:** provision `AWS::EC2::VPC`/`Subnet` (and related networking) resources instead of stubbing, so exported subnet ids resolve in EC2 and ELBv2 ([#1342](https://github.com/floci-io/floci/pull/1342))
+- **sqs:** raise the max message size to 1 MiB ([#1339](https://github.com/floci-io/floci/pull/1339)); release in-flight `ReceiveMessage` long polls when their queue is deleted ([#1286](https://github.com/floci-io/floci/pull/1286)); report `ApproximateNumberOfMessagesDelayed` in `GetQueueAttributes` ([#1285](https://github.com/floci-io/floci/pull/1285))
+- **ses:** omit unknown identities from `GetIdentityNotificationAttributes` ([#1338](https://github.com/floci-io/floci/pull/1338)); align `MailFromAttributes` presence with MAIL FROM configuration ([#1310](https://github.com/floci-io/floci/pull/1310), [#1273](https://github.com/floci-io/floci/pull/1273)); persist inline options on v2 `CreateConfigurationSet` ([#1307](https://github.com/floci-io/floci/pull/1307))
+- **glue:** return partitions in a deterministic order from `GetPartitions` ([#1335](https://github.com/floci-io/floci/pull/1335)); reject deletes of missing tables ([#1323](https://github.com/floci-io/floci/pull/1323))
+- **sts:** persist the session secret key so RDS/ElastiCache IAM tokens validate ([#1266](https://github.com/floci-io/floci/pull/1266))
+- **s3:** make conditional puts atomic ([#1329](https://github.com/floci-io/floci/pull/1329)); return `BadRequest` for dot-dot object keys ([#1325](https://github.com/floci-io/floci/pull/1325))
+- **elbv2:** enforce ALB subnet availability-zone rules ([#1247](https://github.com/floci-io/floci/pull/1247)); improve target resolution and persistence ([#1254](https://github.com/floci-io/floci/pull/1254))
+- **ec2:** embed the image catalog in the native image and load it lazily ([#1308](https://github.com/floci-io/floci/pull/1308))
+- **ecs:** validate network mode and resources for Fargate task definitions ([#1274](https://github.com/floci-io/floci/pull/1274))
+- **cognito:** include `USERNAME` in the SRP `PASSWORD_VERIFIER` challenge ([#1316](https://github.com/floci-io/floci/pull/1316))
+- **appconfig:** stop AppConfig from hijacking the S3 bucket named `configuration` ([#1317](https://github.com/floci-io/floci/pull/1317))
+- **athena:** align `GetWorkGroup` with AWS behavior ([#1301](https://github.com/floci-io/floci/pull/1301))
+- **msk:** populate `currentBrokerSoftwareInfo` in the cluster describe response ([#1238](https://github.com/floci-io/floci/pull/1238))
+- **parity:** pre-create LocalStack/Floci init-hook directories ([#1337](https://github.com/floci-io/floci/pull/1337))
+
+### Documentation
+
+- **lambda:** document Podman rootless support and the Runtime API host override ([#1340](https://github.com/floci-io/floci/pull/1340))
+
 ## [1.5.24] - 2026-06-11
 
 ### Added
@@ -927,7 +960,10 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.22...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.25...HEAD
+[1.5.25]: https://github.com/floci-io/floci/compare/1.5.24...1.5.25
+[1.5.24]: https://github.com/floci-io/floci/compare/1.5.23...1.5.24
+[1.5.23]: https://github.com/floci-io/floci/compare/1.5.22...1.5.23
 [1.5.22]: https://github.com/floci-io/floci/compare/1.5.21...1.5.22
 [1.5.21]: https://github.com/floci-io/floci/compare/1.5.20...1.5.21
 [1.5.20]: https://github.com/floci-io/floci/compare/1.5.19...1.5.20

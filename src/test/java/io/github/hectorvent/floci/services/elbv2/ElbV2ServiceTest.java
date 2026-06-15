@@ -44,6 +44,9 @@ class ElbV2ServiceTest {
 
     private static final String REGION = "us-west-2";
 
+    // Application Load Balancers require subnets in at least two Availability Zones.
+    private static final List<String> ALB_SUBNETS = List.of("subnet-a", "subnet-b");
+
     @Mock
     ElbV2DataPlane dataPlane;
 
@@ -62,14 +65,14 @@ class ElbV2ServiceTest {
         service.healthChecker = healthChecker;
         service.regionResolver = new RegionResolver(REGION, "000000000000");
         service.ec2Service = ec2Service;
-        stubSubnet(ec2Service, "subnet-a", REGION + "a");
+        stubAlbSubnets(ec2Service);
     }
 
     @Test
     void modifyListenerDefaultActionsRecompilesRulesWithoutRestartingListener() {
         String lbArn = service.createLoadBalancer(
                 REGION, "sample-lb", "internal", "application", "ipv4",
-                List.of("subnet-a"), List.of("sg-a"), Map.of()).getLoadBalancerArn();
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
         String oldTgArn = createTargetGroup("sample-old-tg");
         String newTgArn = createTargetGroup("sample-new-tg");
         String listenerArn = service.createListener(
@@ -103,7 +106,7 @@ class ElbV2ServiceTest {
     void modifyListenerPortRestartsListener() {
         String lbArn = service.createLoadBalancer(
                 REGION, "sample-lb", "internal", "application", "ipv4",
-                List.of("subnet-a"), List.of("sg-a"), Map.of()).getLoadBalancerArn();
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
         String tgArn = createTargetGroup("sample-tg");
         String listenerArn = service.createListener(
                 REGION, lbArn, "HTTP", 9999, null, List.of(),
@@ -125,7 +128,7 @@ class ElbV2ServiceTest {
         ElbV2Service first = serviceWithStorage(storageFactory, firstDataPlane, firstHealthChecker);
         String lbArn = first.createLoadBalancer(
                 REGION, "persisted-lb", "internal", "application", "ipv4",
-                List.of("subnet-a"), List.of("sg-a"), Map.of("owner", "platform")).getLoadBalancerArn();
+                ALB_SUBNETS, List.of("sg-a"), Map.of("owner", "platform")).getLoadBalancerArn();
         String tgArn = first.createTargetGroup(
                 REGION, "persisted-tg", "HTTP", "HTTP1", 8080, "vpc-a", "instance",
                 "HTTP", "traffic-port", true, "/health", 15, 5, 3, 2, "200",
@@ -179,7 +182,7 @@ class ElbV2ServiceTest {
         ElbV2Service first = serviceWithStorage(storageFactory, mock(ElbV2DataPlane.class), mock(ElbV2HealthChecker.class));
         String lbArn = first.createLoadBalancer(
                 REGION, "listener-only-lb", "internal", "application", "ipv4",
-                List.of("subnet-a"), List.of("sg-a"), Map.of()).getLoadBalancerArn();
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getLoadBalancerArn();
         String listenerArn = first.createListener(
                 REGION, lbArn, "HTTP", 8080, null, List.of(),
                 List.of(), List.of(), Map.of()).getListenerArn();
@@ -218,7 +221,7 @@ class ElbV2ServiceTest {
                                                    ElbV2DataPlane dataPlane,
                                                    ElbV2HealthChecker healthChecker) {
         Ec2Service ec2Service = mock(Ec2Service.class);
-        stubSubnet(ec2Service, "subnet-a", REGION + "a");
+        stubAlbSubnets(ec2Service);
         return serviceWithStorage(storageFactory, dataPlane, healthChecker, ec2Service);
     }
 
@@ -236,14 +239,21 @@ class ElbV2ServiceTest {
         return service;
     }
 
-    private static void stubSubnet(Ec2Service ec2Service, String subnetId, String availabilityZone) {
+    private static void stubAlbSubnets(Ec2Service ec2Service) {
+        Subnet subnetA = subnet("subnet-a", REGION + "a");
+        Subnet subnetB = subnet("subnet-b", REGION + "b");
+        lenient().when(ec2Service.requireSubnet(REGION, "subnet-a")).thenReturn(subnetA);
+        lenient().when(ec2Service.requireSubnet(REGION, "subnet-b")).thenReturn(subnetB);
+        lenient().when(ec2Service.describeSubnets(eq(REGION), eq(ALB_SUBNETS), eq(Map.of())))
+                .thenReturn(List.of(subnetA, subnetB));
+    }
+
+    private static Subnet subnet(String subnetId, String availabilityZone) {
         Subnet subnet = new Subnet();
         subnet.setSubnetId(subnetId);
         subnet.setAvailabilityZone(availabilityZone);
         subnet.setVpcId("vpc-a");
-        lenient().when(ec2Service.requireSubnet(REGION, subnetId)).thenReturn(subnet);
-        lenient().when(ec2Service.describeSubnets(eq(REGION), eq(List.of(subnetId)), eq(Map.of())))
-                .thenReturn(List.of(subnet));
+        return subnet;
     }
 
     private static final class SharedStorageFactory extends StorageFactory {

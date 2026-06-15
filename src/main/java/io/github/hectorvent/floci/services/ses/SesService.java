@@ -474,7 +474,9 @@ public class SesService {
                         "Identity <" + identityValue + "> does not exist.", 400));
         identity.setMailFromDomain(clearing ? null : mailFromDomain);
         identity.setMailFromDomainStatus(clearing ? "Pending" : "Success");
-        if (normalizedBehavior != null) {
+        if (clearing) {
+            identity.setBehaviorOnMxFailure("UseDefaultValue");
+        } else if (normalizedBehavior != null) {
             identity.setBehaviorOnMxFailure(normalizedBehavior);
         }
         identityStore.put(key, identity);
@@ -624,6 +626,23 @@ public class SesService {
         if (configSet.getTags() != null) {
             for (Tag tag : configSet.getTags()) {
                 validateTag(tag);
+            }
+        }
+        if (configSet.getSuppressionOptions() != null
+                && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
+            for (String reason : configSet.getSuppressionOptions().getSuppressedReasons()) {
+                if (reason == null) {
+                    throw new AwsException("BadRequestException",
+                            invalidSuppressionReasonMessage(null), 400);
+                }
+                if (!isValidConfigSetSuppressionReason(reason)) {
+                    throw new AwsException("BadRequestException",
+                            "1 validation error detected: Value at "
+                                    + "'suppressionOptions.suppressedReasons' failed to satisfy "
+                                    + "constraint: Member must satisfy constraint: "
+                                    + "[Member must satisfy enum value set: [BOUNCE, COMPLAINT]]",
+                            400);
+                }
             }
         }
         if (configSetStore.get(key).isPresent()) {
@@ -1336,13 +1355,24 @@ public class SesService {
      * V2 SES uses a different, simpler natural-language sentence on this
      * endpoint than on the three older suppression APIs above:
      *   "Reason <X> is invalid, must be one of [BOUNCE, COMPLAINT]."
-     * (Verified against real AWS V2 SES on 2026-06-03.)
+     * (Verified against real AWS V2 SES on 2026-06-03.) CreateConfigurationSet
+     * reports the constraint-style validation message for invalid non-null
+     * values but falls back to this sentence for null elements, matching AWS
+     * (verified 2026-06-13); see {@link #createConfigurationSet}.
      */
     private static void validateConfigSetSuppressionReason(String reason) {
-        if (reason == null || (!"BOUNCE".equals(reason) && !"COMPLAINT".equals(reason))) {
+        if (!isValidConfigSetSuppressionReason(reason)) {
             throw new AwsException("BadRequestException",
-                    "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].", 400);
+                    invalidSuppressionReasonMessage(reason), 400);
         }
+    }
+
+    private static boolean isValidConfigSetSuppressionReason(String reason) {
+        return "BOUNCE".equals(reason) || "COMPLAINT".equals(reason);
+    }
+
+    private static String invalidSuppressionReasonMessage(String reason) {
+        return "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].";
     }
 
     static void validateTag(Tag tag) {

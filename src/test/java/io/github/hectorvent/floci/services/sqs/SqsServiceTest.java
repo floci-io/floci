@@ -27,7 +27,7 @@ class SqsServiceTest {
 
     @BeforeEach
     void setUp() {
-        sqsService = new SqsService(new InMemoryStorage<>(), 30, 262144, BASE_URL);
+        sqsService = new SqsService(new InMemoryStorage<>(), 30, 1048576, BASE_URL);
     }
 
     @Test
@@ -468,7 +468,7 @@ class SqsServiceTest {
         String region = "eu-west-1";
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
+                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
         final var queue = service.createQueue("dedup-clear.fifo", Map.of("ContentBasedDeduplication", "true"), region);
 
@@ -524,7 +524,7 @@ class SqsServiceTest {
         final var dedupStore = new InMemoryStorage<String, Map<String, Long>>();
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), dedupStore,
-                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
+                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, null);
 
         final var queue = service.createQueue("dedup-store-clear.fifo",
                 Map.of("ContentBasedDeduplication", "true"), region);
@@ -882,9 +882,9 @@ class SqsServiceTest {
     void validateBatchPayloadSize_overQueueLimit_throwsBatchRequestTooLong() {
         Queue queue = sqsService.createQueue("batch-q", null, "us-east-1");
         AwsException ex = assertThrows(AwsException.class, () ->
-                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 300_000));
+                sqsService.validateBatchPayloadSize(queue.getQueueUrl(), "us-east-1", 1_100_000));
         assertEquals("BatchRequestTooLong", ex.getErrorCode());
-        assertTrue(ex.getMessage().contains("262144"));
+        assertTrue(ex.getMessage().contains("1048576"));
     }
 
     @Test
@@ -913,7 +913,7 @@ class SqsServiceTest {
         final var sns = mock(SnsService.class);
         final var service = new SqsService(
                 new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 262144, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, sns);
+                30, 1048576, BASE_URL, new RegionResolver("us-east-1", "000000000000"), true, sns);
         final var queue = service.createQueue("sns-dedup-delegate.fifo", Map.of("FifoQueue", "true"),region);
         service.purgeQueue(queue.getQueueUrl(), region);
         verify(sns).clearFifoDeduplicationCacheForSqsQueueSubscriptions(

@@ -4,10 +4,13 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
@@ -28,11 +31,16 @@ public class StsQueryHandler {
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     private final IamService iamService;
+    private final AccountResolver accountResolver;
     private final RegionResolver regionResolver;
 
+    @Context
+    HttpHeaders headers;
+
     @Inject
-    public StsQueryHandler(IamService iamService, RegionResolver regionResolver) {
+    public StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver) {
         this.iamService = iamService;
+        this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
     }
 
@@ -73,9 +81,10 @@ public class StsQueryHandler {
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        // Register session so IAM enforcement can resolve the role's policies
+        // Register session so IAM enforcement can resolve the role's policies and so that
+        // RDS/ElastiCache IAM token validation can find the temporary secret key.
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, roleArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -90,10 +99,14 @@ public class StsQueryHandler {
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
+        String authorization = headers == null ? null : headers.getHeaderString("Authorization");
+        String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
+        String arn = iamService.resolveCallerArn(accessKeyId)
+                .orElse(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         String result = new XmlBuilder()
                 .elem("UserId", accountId)
                 .elem("Account", accountId)
-                .elem("Arn", AwsArnUtils.Arn.of("iam", "", accountId, "root").toString())
+                .elem("Arn", arn)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GetCallerIdentity", AwsNamespaces.STS, result)).build();
     }
@@ -106,6 +119,7 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
+        iamService.registerSession(accessKeyId, secretKey, null, expiration, null);
         return Response.ok(AwsQueryResponse.envelope("GetSessionToken", AwsNamespaces.STS, result)).build();
     }
 
@@ -131,7 +145,7 @@ public class StsQueryHandler {
         String provider = providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com";
 
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, roleArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -166,7 +180,7 @@ public class StsQueryHandler {
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        iamService.registerSession(accessKeyId, roleArn, expiration, null);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, null);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -202,7 +216,7 @@ public class StsQueryHandler {
 
         String sessionPolicy = getParam(params, "Policy");
         // Register federation token so enforcement can scope its policies via session policy
-        iamService.registerSession(accessKeyId, federatedUserArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, federatedUserArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))

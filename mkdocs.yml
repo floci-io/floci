@@ -114,6 +114,7 @@ nav:
     - ELB v2: services/elb.md
     - Auto Scaling: services/autoscaling.md
     - CodeBuild: services/codebuild.md
+    - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
     - AWS Backup: services/backup.md
     - CloudFront: services/cloudfront.md

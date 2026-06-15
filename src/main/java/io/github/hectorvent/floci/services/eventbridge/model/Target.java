@@ -13,6 +13,7 @@ public class Target {
     private String inputPath;
     private InputTransformer inputTransformer;
     private SqsParameters sqsParameters;
+    private BatchParameters batchParameters;
 
     public Target() {}
 
@@ -40,4 +41,7 @@ public class Target {
 
     public SqsParameters getSqsParameters() { return sqsParameters; }
     public void setSqsParameters(SqsParameters sqsParameters) { this.sqsParameters = sqsParameters; }
+
+    public BatchParameters getBatchParameters() { return batchParameters; }
+    public void setBatchParameters(BatchParameters batchParameters) { this.batchParameters = batchParameters; }
 }

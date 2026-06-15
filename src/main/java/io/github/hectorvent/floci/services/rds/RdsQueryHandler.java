@@ -11,6 +11,7 @@ import io.github.hectorvent.floci.services.rds.model.DbEndpoint;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
 import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
+import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -19,6 +20,8 @@ import org.jboss.logging.Logger;
 
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -47,6 +50,11 @@ public class RdsQueryHandler {
                 case "DeleteDBInstance" -> handleDeleteDbInstance(params);
                 case "ModifyDBInstance" -> handleModifyDbInstance(params);
                 case "RebootDBInstance" -> handleRebootDbInstance(params);
+                case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
+                case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params);
+                case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params);
+                case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params);
+                case "DeleteDBSubnetGroup" -> handleDeleteDbSubnetGroup(params);
                 case "CreateDBCluster" -> handleCreateDbCluster(params);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DeleteDBCluster" -> handleDeleteDbCluster(params);
@@ -61,6 +69,9 @@ public class RdsQueryHandler {
                 case "DeleteDBClusterParameterGroup" -> handleDeleteDbClusterParameterGroup(params);
                 case "ModifyDBClusterParameterGroup" -> handleModifyDbClusterParameterGroup(params);
                 case "DescribeDBClusterParameters" -> handleDescribeDbClusterParameters(params);
+                case "AddTagsToResource" -> handleAddTagsToResource(params);
+                case "ListTagsForResource" -> handleListTagsForResource(params);
+                case "RemoveTagsFromResource" -> handleRemoveTagsFromResource(params);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", AwsNamespaces.RDS, 400);
             };
@@ -91,7 +102,11 @@ public class RdsQueryHandler {
         int allocatedStorage = allocatedStorageStr != null ? parseIntSafe(allocatedStorageStr, 20) : 20;
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
         String paramGroupName = params.getFirst("DBParameterGroupName");
+        String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         String dbClusterIdentifier = params.getFirst("DBClusterIdentifier");
+        boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
+        String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
+        Map<String, String> tags = parseTags(params);
 
         if (dbInstanceClass == null) {
             dbInstanceClass = "db.t3.micro";
@@ -103,7 +118,8 @@ public class RdsQueryHandler {
         try {
             DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
-                    paramGroupName, dbClusterIdentifier);
+                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier,
+                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -152,10 +168,129 @@ public class RdsQueryHandler {
         String newPassword = params.getFirst("MasterUserPassword");
         String iamStr = params.getFirst("EnableIAMDatabaseAuthentication");
         Boolean iamEnabled = iamStr != null ? Boolean.parseBoolean(iamStr) : null;
+        String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
         try {
-            DbInstance instance = service.modifyDbInstance(id, newPassword, iamEnabled);
+            DbInstance instance = service.modifyDbInstance(id, newPassword, iamEnabled, dbSubnetGroupName);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBInstance", AwsNamespaces.RDS, result)).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeOrderableDbInstanceOptions(MultivaluedMap<String, String> params) {
+        Collection<Map<String, String>> options = service.describeOrderableDbInstanceOptions(
+                params.getFirst("Engine"),
+                params.getFirst("EngineVersion"),
+                params.getFirst("DBInstanceClass"));
+        XmlBuilder xml = new XmlBuilder().start("OrderableDBInstanceOptions");
+        for (Map<String, String> option : options) {
+            xml.start("OrderableDBInstanceOption")
+               .elem("Engine", option.get("engine"))
+               .elem("EngineVersion", option.get("engineVersion"))
+               .elem("DBInstanceClass", option.get("dbInstanceClass"))
+               .elem("LicenseModel", "postgresql-license")
+               .start("AvailabilityZones")
+                 .start("AvailabilityZone")
+                   .elem("Name", config.defaultAvailabilityZone())
+                 .end("AvailabilityZone")
+               .end("AvailabilityZones")
+               .end("OrderableDBInstanceOption");
+        }
+        xml.end("OrderableDBInstanceOptions").start("Marker").end("Marker");
+        return Response.ok(AwsQueryResponse.envelope("DescribeOrderableDBInstanceOptions",
+                AwsNamespaces.RDS, xml.build())).build();
+    }
+
+    private Response handleAddTagsToResource(MultivaluedMap<String, String> params) {
+        String resourceName = params.getFirst("ResourceName");
+        try {
+            service.addTagsToResource(resourceName, parseTags(params));
+            return Response.ok(AwsQueryResponse.envelope("AddTagsToResource", AwsNamespaces.RDS, "")).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleListTagsForResource(MultivaluedMap<String, String> params) {
+        String resourceName = params.getFirst("ResourceName");
+        try {
+            XmlBuilder xml = new XmlBuilder().start("TagList");
+            writeTags(xml, service.listTagsForResource(resourceName));
+            xml.end("TagList");
+            return Response.ok(AwsQueryResponse.envelope("ListTagsForResource", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleRemoveTagsFromResource(MultivaluedMap<String, String> params) {
+        String resourceName = params.getFirst("ResourceName");
+        try {
+            service.removeTagsFromResource(resourceName, memberList(params, "TagKeys"));
+            return Response.ok(AwsQueryResponse.envelope("RemoveTagsFromResource", AwsNamespaces.RDS, "")).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleCreateDbSubnetGroup(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBSubnetGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "DBSubnetGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        String description = params.getFirst("DBSubnetGroupDescription");
+        List<String> subnetIds = memberList(params, "SubnetIds");
+        try {
+            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds);
+            return Response.ok(AwsQueryResponse.envelope("CreateDBSubnetGroup",
+                    AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDescribeDbSubnetGroups(MultivaluedMap<String, String> params) {
+        String filterName = params.getFirst("DBSubnetGroupName");
+        try {
+            Collection<DbSubnetGroup> result = service.listDbSubnetGroups(filterName);
+            XmlBuilder xml = new XmlBuilder().start("DBSubnetGroups");
+            for (DbSubnetGroup group : result) {
+                xml.start("DBSubnetGroup").raw(dbSubnetGroupInnerXml(group)).end("DBSubnetGroup");
+            }
+            xml.end("DBSubnetGroups").start("Marker").end("Marker");
+            return Response.ok(AwsQueryResponse.envelope("DescribeDBSubnetGroups", AwsNamespaces.RDS, xml.build())).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleModifyDbSubnetGroup(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBSubnetGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "DBSubnetGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        List<String> subnetIds = memberList(params, "SubnetIds");
+        try {
+            DbSubnetGroup group = service.modifyDbSubnetGroup(name, subnetIds);
+            return Response.ok(AwsQueryResponse.envelope("ModifyDBSubnetGroup",
+                    AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
+        }
+    }
+
+    private Response handleDeleteDbSubnetGroup(MultivaluedMap<String, String> params) {
+        String name = params.getFirst("DBSubnetGroupName");
+        if (name == null || name.isBlank()) {
+            return AwsQueryResponse.error("InvalidParameterValue",
+                    "DBSubnetGroupName is required.", AwsNamespaces.RDS, 400);
+        }
+        try {
+            service.deleteDbSubnetGroup(name);
+            return Response.ok(AwsQueryResponse.envelope("DeleteDBSubnetGroup", AwsNamespaces.RDS, "")).build();
         } catch (AwsException e) {
             return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.RDS, e.getHttpStatus());
         }
@@ -486,26 +621,71 @@ public class RdsQueryHandler {
                .elem("Status", "active")
              .end("VpcSecurityGroupMembership")
            .end("VpcSecurityGroups")
-           .start("DBSubnetGroup")
-             .elem("DBSubnetGroupName", "default")
-             .elem("VpcId", "vpc-00000000")
-             .elem("SubnetGroupStatus", "Complete")
-             .start("Subnets")
-               .start("member")
-                 .elem("SubnetIdentifier", "subnet-00000000")
-                 .start("SubnetAvailabilityZone")
-                   .elem("Name", config.defaultAvailabilityZone())
-                 .end("SubnetAvailabilityZone")
-                 .elem("SubnetStatus", "Active")
-               .end("member")
-             .end("Subnets")
-           .end("DBSubnetGroup")
+           .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
            .elem("DBInstanceArn", i.getDbInstanceArn());
+        if (i.getMasterUserSecretArn() != null && !i.getMasterUserSecretArn().isBlank()) {
+            xml.start("MasterUserSecret")
+                    .elem("SecretArn", i.getMasterUserSecretArn())
+                    .elem("SecretStatus", i.getMasterUserSecretStatus() == null ? "active" : i.getMasterUserSecretStatus());
+            if (i.getMasterUserSecretKmsKeyId() != null && !i.getMasterUserSecretKmsKeyId().isBlank()) {
+                xml.elem("KmsKeyId", i.getMasterUserSecretKmsKeyId());
+            }
+            xml.end("MasterUserSecret");
+        }
         if (i.getDbClusterIdentifier() != null && !i.getDbClusterIdentifier().isBlank()) {
             xml.elem("DBClusterIdentifier", i.getDbClusterIdentifier());
         }
+        xml.start("TagList");
+        writeTags(xml, i.getTags());
+        xml.end("TagList");
         return xml.build();
+    }
+
+    private static void writeTags(XmlBuilder xml, Map<String, String> tags) {
+        if (tags == null) {
+            return;
+        }
+        tags.forEach((key, value) -> xml.start("Tag")
+                .elem("Key", key)
+                .elem("Value", value)
+                .end("Tag"));
+    }
+
+    private String dbSubnetGroupXml(DbSubnetGroup group) {
+        return new XmlBuilder().start("DBSubnetGroup").raw(dbSubnetGroupInnerXml(group)).end("DBSubnetGroup").build();
+    }
+
+    private String dbSubnetGroupInnerXml(DbSubnetGroup group) {
+        XmlBuilder xml = new XmlBuilder()
+           .elem("DBSubnetGroupName", group.getDbSubnetGroupName())
+           .elem("DBSubnetGroupDescription", group.getDbSubnetGroupDescription())
+           .elem("VpcId", group.getVpcId() != null ? group.getVpcId() : "vpc-00000000")
+           .elem("SubnetGroupStatus", "Complete")
+           .start("Subnets");
+        for (String subnetId : group.getSubnetIds()) {
+            xml.start("Subnet")
+               .elem("SubnetIdentifier", subnetId)
+               .start("SubnetAvailabilityZone")
+                 .elem("Name", config.defaultAvailabilityZone())
+               .end("SubnetAvailabilityZone")
+               .elem("SubnetStatus", "Active")
+               .end("Subnet");
+        }
+        return xml.end("Subnets").build();
+    }
+
+    private DbSubnetGroup dbSubnetGroupForInstance(DbInstance instance) {
+        String groupName = instance.getDbSubnetGroupName();
+        if (groupName != null && !groupName.isBlank()) {
+            try {
+                return service.getDbSubnetGroup(groupName);
+            } catch (AwsException ignored) {
+                return new DbSubnetGroup(groupName, "DB subnet group " + groupName,
+                        "vpc-00000000", List.of("subnet-00000000"));
+            }
+        }
+        return new DbSubnetGroup("default", "default", "vpc-00000000", List.of("subnet-00000000"));
     }
 
     private String dbClusterXml(DbCluster c) {
@@ -611,6 +791,46 @@ public class RdsQueryHandler {
             }
         }
         return null;
+    }
+
+    private static List<String> memberList(MultivaluedMap<String, String> params, String baseName) {
+        return params.keySet().stream()
+                .filter(key -> key.matches(java.util.regex.Pattern.quote(baseName)
+                        + "(\\.member|\\.SubnetIdentifier)?\\.\\d+"))
+                .sorted(java.util.Comparator.comparingInt(RdsQueryHandler::numericSuffix))
+                .map(params::getFirst)
+                .filter(value -> value != null && !value.isBlank())
+                .toList();
+    }
+
+    private static int numericSuffix(String key) {
+        int dot = key.lastIndexOf('.');
+        if (dot < 0 || dot == key.length() - 1) {
+            return Integer.MAX_VALUE;
+        }
+        try {
+            return Integer.parseInt(key.substring(dot + 1));
+        } catch (NumberFormatException e) {
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    private static Map<String, String> parseTags(MultivaluedMap<String, String> params) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        readTags(params, "Tags.member", tags);
+        readTags(params, "Tags.Tag", tags);
+        readTags(params, "Tag", tags);
+        return tags;
+    }
+
+    private static void readTags(MultivaluedMap<String, String> params, String prefix, Map<String, String> tags) {
+        for (int i = 1; ; i++) {
+            String key = params.getFirst(prefix + "." + i + ".Key");
+            if (key == null) {
+                break;
+            }
+            tags.put(key, params.getFirst(prefix + "." + i + ".Value"));
+        }
     }
 
     private static int parseIntSafe(String value, int defaultValue) {

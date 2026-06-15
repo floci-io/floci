@@ -103,7 +103,8 @@ public class AwsQueryController {
             "TagPolicy", "UntagPolicy", "ListPolicyTags",
             "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
             "GenerateCredentialReport", "GetCredentialReport",
-            "GetAccountSummary", "GetAccountAuthorizationDetails"
+            "GetAccountSummary", "GetAccountAuthorizationDetails",
+            "SimulatePrincipalPolicy"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
@@ -309,6 +310,9 @@ public class AwsQueryController {
     private static final Set<String> RDS_ACTIONS = Set.of(
             "CreateDBInstance", "DescribeDBInstances", "DeleteDBInstance",
             "ModifyDBInstance", "RebootDBInstance",
+            "DescribeOrderableDBInstanceOptions",
+            "CreateDBSubnetGroup", "DescribeDBSubnetGroups", "ModifyDBSubnetGroup", "DeleteDBSubnetGroup",
+            "AddTagsToResource", "ListTagsForResource", "RemoveTagsFromResource",
             "CreateDBCluster", "DescribeDBClusters", "DeleteDBCluster", "ModifyDBCluster",
             "CreateDBParameterGroup", "DescribeDBParameterGroups",
             "DeleteDBParameterGroup", "ModifyDBParameterGroup", "DescribeDBParameters"

@@ -8,6 +8,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -326,5 +327,43 @@ class SesIdentityAttributesV1IntegrationTest {
             .body(containsString("<HeadersInBounceNotificationsEnabled>true</HeadersInBounceNotificationsEnabled>"))
             .body(containsString("<HeadersInComplaintNotificationsEnabled>false</HeadersInComplaintNotificationsEnabled>"))
             .body(containsString("<HeadersInDeliveryNotificationsEnabled>false</HeadersInDeliveryNotificationsEnabled>"));
+    }
+
+    @Test
+    @Order(22)
+    void getIdentityNotificationAttributes_unknownIdentity_omittedFromMap() {
+        // Real AWS returns an empty NotificationAttributes map for an identity
+        // that doesn't exist, rather than an entry with empty values
+        // (verified against real AWS SES on 2026-06-13).
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityNotificationAttributes")
+            .formParam("Identities.member.1", "ghost-notif.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("GetIdentityNotificationAttributesResponse"))
+            .body(containsString("<NotificationAttributes></NotificationAttributes>"))
+            .body(not(containsString("ghost-notif.floci.test")));
+    }
+
+    @Test
+    @Order(23)
+    void getIdentityNotificationAttributes_mixedKnownAndUnknown_returnsOnlyKnown() {
+        // The unknown identity is dropped from the map; the known one stays.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "GetIdentityNotificationAttributes")
+            .formParam("Identities.member.1", "v1-attrs.floci.test")
+            .formParam("Identities.member.2", "ghost-notif2.floci.test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<key>v1-attrs.floci.test</key>"))
+            .body(not(containsString("ghost-notif2.floci.test")));
     }
 }

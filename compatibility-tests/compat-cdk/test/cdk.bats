@@ -183,3 +183,41 @@ setup() {
     repos=$(echo "$output" | jq -r '.repositories[].repositoryName')
     [[ "$repos" == *"cdk-hnb659fds-container-assets"* ]]
 }
+
+# --- VPC + ALB (regression: issue #1297) ---
+#
+# CloudFormation must create the CDK-generated AWS::EC2::VPC/Subnet resources for
+# real (in EC2). Before the fix they were stubbed, so describe-subnets did not
+# return them and the ALB referencing them failed with "The subnet ID '...' does
+# not exist". https://github.com/floci-io/floci/issues/1297
+
+@test "CDK: VPC subnets were created in EC2" {
+    run aws_cmd ec2 describe-subnets
+    assert_success
+    # The CDK VPC adds 4 subnets (2 public + 2 isolated) on top of the defaults.
+    custom_subnets=$(echo "$output" | jq '[.Subnets[] | select(.DefaultForAz != true)] | length')
+    [ "$custom_subnets" -ge 4 ]
+}
+
+@test "CDK: internal ALB is active" {
+    run aws_cmd elbv2 describe-load-balancers --names floci-cdk-alb
+    assert_success
+    state=$(json_get "$output" '.LoadBalancers[0].State.Code')
+    [ "$state" = "active" ]
+    scheme=$(json_get "$output" '.LoadBalancers[0].Scheme')
+    [ "$scheme" = "internal" ]
+}
+
+@test "CDK: ALB subnets exist in EC2" {
+    run aws_cmd elbv2 describe-load-balancers --names floci-cdk-alb
+    assert_success
+    s1=$(json_get "$output" '.LoadBalancers[0].AvailabilityZones[0].SubnetId')
+    s2=$(json_get "$output" '.LoadBalancers[0].AvailabilityZones[1].SubnetId')
+    [[ "$s1" == subnet-* ]]
+    [[ "$s2" == subnet-* ]]
+
+    run aws_cmd ec2 describe-subnets --subnet-ids "$s1" "$s2"
+    assert_success
+    count=$(json_get "$output" '.Subnets | length')
+    [ "$count" -eq 2 ]
+}

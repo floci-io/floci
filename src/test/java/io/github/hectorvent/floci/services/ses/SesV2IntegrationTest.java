@@ -1189,7 +1189,9 @@ class SesV2IntegrationTest {
             .body("DkimAttributes", notNullValue())
             .body("DkimAttributes.SigningEnabled", notNullValue())
             .body("DkimAttributes.Status", notNullValue())
-            .body("MailFromAttributes", nullValue())
+            .body("MailFromAttributes.BehaviorOnMxFailure", equalTo("USE_DEFAULT_VALUE"))
+            .body("MailFromAttributes.MailFromDomain", nullValue())
+            .body("MailFromAttributes.MailFromDomainStatus", nullValue())
             .body("Policies", notNullValue())
             .body("Tags", notNullValue());
     }

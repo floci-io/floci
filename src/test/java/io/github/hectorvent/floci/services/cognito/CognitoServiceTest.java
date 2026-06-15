@@ -720,6 +720,9 @@ class CognitoServiceTest {
         assertNotNull(params.get("SRP_B"));
         assertNotNull(params.get("SECRET_BLOCK"));
         assertEquals("bob", params.get("USER_ID_FOR_SRP"));
+        // Real AWS Cognito returns USERNAME alongside USER_ID_FOR_SRP; the .NET
+        // Amazon.Extensions.CognitoAuthentication SRP client requires it (issue #1305).
+        assertEquals("bob", params.get("USERNAME"));
     }
 
     @Test

@@ -123,3 +123,80 @@ EOF
     resource_status=$(json_get "$output" '.StackResources[0].ResourceStatus')
     [ "$resource_status" = "CREATE_COMPLETE" ]
 }
+
+# ── EC2 VPC/Subnet provisioning (regression: issue #1297) ─────────────────────
+#
+# CloudFormation must create AWS::EC2::VPC / AWS::EC2::Subnet resources for real
+# (in EC2), not stub them. Before the fix, describe-stacks reported CREATE_COMPLETE
+# and exported the subnet ids, but ec2 describe-subnets did not return them and
+# elbv2 create-load-balancer failed with "The subnet ID '...' does not exist".
+# https://github.com/floci-io/floci/issues/1297
+
+@test "CloudFormation: VPC/subnet stack exports subnet ids that EC2 and ELBv2 can use" {
+    cat > "$TEMPLATE_FILE" << 'EOF'
+{
+  "Resources": {
+    "Vpc": {
+      "Type": "AWS::EC2::VPC",
+      "Properties": {"CidrBlock": "10.20.0.0/16"}
+    },
+    "Subnet1": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {"Ref": "Vpc"},
+        "CidrBlock": "10.20.1.0/24",
+        "AvailabilityZone": "us-east-1a"
+      }
+    },
+    "Subnet2": {
+      "Type": "AWS::EC2::Subnet",
+      "Properties": {
+        "VpcId": {"Ref": "Vpc"},
+        "CidrBlock": "10.20.2.0/24",
+        "AvailabilityZone": "us-east-1b"
+      }
+    }
+  },
+  "Outputs": {
+    "Subnet1Id": {"Value": {"Ref": "Subnet1"}},
+    "Subnet2Id": {"Value": {"Ref": "Subnet2"}}
+  }
+}
+EOF
+    run aws_cmd cloudformation create-stack \
+        --stack-name "$STACK_NAME" \
+        --template-body "file://$TEMPLATE_FILE"
+    assert_success
+
+    run aws_cmd cloudformation describe-stacks --stack-name "$STACK_NAME"
+    assert_success
+    local stack_status
+    stack_status=$(json_get "$output" '.Stacks[0].StackStatus')
+    [ "$stack_status" = "CREATE_COMPLETE" ]
+
+    # The exported subnet ids must be real subnet-xxxx ids (not the old stub shape).
+    local subnet1 subnet2
+    subnet1=$(json_get "$output" '.Stacks[0].Outputs[] | select(.OutputKey=="Subnet1Id") | .OutputValue')
+    subnet2=$(json_get "$output" '.Stacks[0].Outputs[] | select(.OutputKey=="Subnet2Id") | .OutputValue')
+    [[ "$subnet1" == subnet-* ]]
+    [[ "$subnet2" == subnet-* ]]
+
+    # describe-subnets must return the exact subnet ids CloudFormation exported.
+    run aws_cmd ec2 describe-subnets --subnet-ids "$subnet1" "$subnet2"
+    assert_success
+    local count
+    count=$(json_get "$output" '.Subnets | length')
+    [ "$count" -eq 2 ]
+
+    # ELBv2 create-load-balancer must accept the exported subnets (no SubnetNotFound).
+    run aws_cmd elbv2 create-load-balancer \
+        --name "bats-vpc-alb-${RANDOM}" \
+        --type application \
+        --scheme internal \
+        --subnets "$subnet1" "$subnet2"
+    assert_success
+    local lb_arn
+    lb_arn=$(json_get "$output" '.LoadBalancers[0].LoadBalancerArn')
+    [ -n "$lb_arn" ]
+    [[ "$lb_arn" == *":loadbalancer/"* ]]
+}

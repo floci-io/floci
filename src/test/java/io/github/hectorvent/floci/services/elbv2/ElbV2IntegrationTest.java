@@ -39,6 +39,7 @@ class ElbV2IntegrationTest {
                 .formParam("Scheme", "internet-facing")
                 .formParam("IpAddressType", "ipv4")
                 .formParam("Subnets.member.1", "subnet-default-a")
+                .formParam("Subnets.member.2", "subnet-default-b")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -54,7 +55,7 @@ class ElbV2IntegrationTest {
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.State.Code",
                         equalTo("provisioning"))
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
-                        equalTo("subnet-default-a"))
+                        hasItems("subnet-default-a", "subnet-default-b"))
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.DNSName",
                         containsString(".elb.localhost"))
                 .extract()
@@ -77,7 +78,7 @@ class ElbV2IntegrationTest {
                 .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.State.Code",
                         equalTo("active"))
                 .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
-                        equalTo("subnet-default-a"));
+                        hasItems("subnet-default-a", "subnet-default-b"));
     }
 
     @Test

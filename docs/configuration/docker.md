@@ -120,6 +120,52 @@ Individual services can override the network with their own `docker-network` set
 !!! tip
     In Docker Compose, the default network name is `<project-name>_default`. If your compose file is in a directory named `myapp`, the network is `myapp_default`.
 
+## Running on Podman (rootless)
+
+Floci runs under rootless Podman, but Podman's network topology needs a few
+explicit settings that Docker handles automatically. The following configuration
+is known to work:
+
+```bash
+podman network create floci-net
+
+podman run -d --name floci \
+  --network floci-net \
+  -p 4566:4566 \
+  -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock:Z \
+  -e FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK=floci-net \
+  -e FLOCI_HOSTNAME=floci \
+  floci/floci
+```
+
+What each setting does and why it is needed:
+
+- **Named network (`floci-net`)** — the rootless default bridge does not assign
+  reachable IPs between containers, so spawned Lambda containers cannot reach
+  Floci. Create a named network and put both Floci and its Lambda containers on it.
+- **`FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK=floci-net`** — makes Floci attach the
+  Lambda containers it spawns to that same named network.
+- **`FLOCI_HOSTNAME=floci`** — gives Floci a stable name that Lambda containers
+  resolve when calling back to the Runtime API.
+- **`:Z` on the socket mount** — relabels the Podman socket for SELinux. Without
+  it, Floci fails to talk to the Podman socket and Lambda container creation
+  errors with `java.io.IOException: Broken pipe`.
+
+!!! tip "When the Runtime API address is still unreachable"
+    On some Podman network topologies the auto-detected Runtime API address
+    (the host/IP Lambda containers use to call back into Floci) is still wrong,
+    and invocations fail with `connect ECONNREFUSED <ip>:9200`. Set the address
+    explicitly to bypass auto-detection:
+
+    ```bash
+    FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE=floci
+    ```
+
+    This forces every spawned Lambda container to reach the Runtime API at the
+    given host (here the `FLOCI_HOSTNAME` value), skipping Floci's
+    auto-detection entirely. See the [Lambda docs](../services/lambda.md#configuration)
+    for details.
+
 ## Full Reference
 
 | Environment variable | Default | Description |
