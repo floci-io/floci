@@ -375,6 +375,50 @@ public class CognitoService {
                                                Boolean allowedOAuthFlowsUserPoolClient,
                                                List<String> allowedOAuthFlows,
                                                List<String> allowedOAuthScopes) {
+        return updateUserPoolClient(
+                userPoolId,
+                clientId,
+                clientName,
+                allowedOAuthFlowsUserPoolClient,
+                allowedOAuthFlows,
+                allowedOAuthScopes,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    public UserPoolClient updateUserPoolClient(String userPoolId, String clientId, String clientName,
+                                               Boolean allowedOAuthFlowsUserPoolClient,
+                                               List<String> allowedOAuthFlows,
+                                               List<String> allowedOAuthScopes,
+                                               Map<String, Object> analyticsConfiguration,
+                                               List<String> callbackURLs,
+                                               String defaultRedirectURI,
+                                               List<String> explicitAuthFlows,
+                                               Integer accessTokenValidity,
+                                               Integer idTokenValidity,
+                                               List<String> logoutURLs,
+                                               String preventUserExistenceErrors,
+                                               List<String> readAttributes,
+                                               Integer refreshTokenValidity,
+                                               List<String> supportedIdentityProviders,
+                                               Map<String, String> tokenValidityUnits,
+                                               List<String> writeAttributes,
+                                               Map<String, Object> refreshTokenRotation,
+                                               Boolean enableTokenRevocation) {
         UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
         if (clientName != null) client.setClientName(clientName);
         if (allowedOAuthFlowsUserPoolClient != null) {
@@ -385,6 +429,51 @@ public class CognitoService {
         }
         if (allowedOAuthScopes != null) {
             client.setAllowedOAuthScopes(normalizeStringList(allowedOAuthScopes));
+        }
+        if (analyticsConfiguration != null) {
+            client.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
+        }
+        if (callbackURLs != null) {
+            client.setCallbackURLs(normalizeStringList(callbackURLs));
+        }
+        if (defaultRedirectURI != null) {
+            client.setDefaultRedirectURI(defaultRedirectURI);
+        }
+        if (explicitAuthFlows != null) {
+            client.setExplicitAuthFlows(normalizeStringList(explicitAuthFlows));
+        }
+        if (accessTokenValidity != null) {
+            client.setAccessTokenValidity(accessTokenValidity);
+        }
+        if (idTokenValidity != null) {
+            client.setIdTokenValidity(idTokenValidity);
+        }
+        if (logoutURLs != null) {
+            client.setLogoutURLs(normalizeStringList(logoutURLs));
+        }
+        if (preventUserExistenceErrors != null) {
+            client.setPreventUserExistenceErrors(preventUserExistenceErrors);
+        }
+        if (readAttributes != null) {
+            client.setReadAttributes(normalizeStringList(readAttributes));
+        }
+        if (refreshTokenValidity != null) {
+            client.setRefreshTokenValidity(refreshTokenValidity);
+        }
+        if (supportedIdentityProviders != null) {
+            client.setSupportedIdentityProviders(normalizeStringList(supportedIdentityProviders));
+        }
+        if (tokenValidityUnits != null) {
+            client.setTokenValidityUnits(copyStringMap(tokenValidityUnits));
+        }
+        if (writeAttributes != null) {
+            client.setWriteAttributes(normalizeStringList(writeAttributes));
+        }
+        if (refreshTokenRotation != null) {
+            client.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
+        }
+        if (enableTokenRevocation != null) {
+            client.setEnableTokenRevocation(enableTokenRevocation);
         }
 
         client.setLastModifiedDate(System.currentTimeMillis() / 1000L);

@@ -253,8 +253,32 @@ public class CognitoJsonHandler {
                 request.path("ClientId").asText(),
                 request.has("ClientName") ? request.path("ClientName").asText() : null,
                 request.has("AllowedOAuthFlowsUserPoolClient") ? request.path("AllowedOAuthFlowsUserPoolClient").asBoolean() : null,
-                readStringList(request.path("AllowedOAuthFlows")),
-                readStringList(request.path("AllowedOAuthScopes"))
+                request.has("AllowedOAuthFlows") ? readStringList(request.path("AllowedOAuthFlows")) : null,
+                request.has("AllowedOAuthScopes") ? readStringList(request.path("AllowedOAuthScopes")) : null,
+                request.path("AnalyticsConfiguration").isObject()
+                        ? objectMapper.convertValue(request.path("AnalyticsConfiguration"),
+                        new TypeReference<Map<String, Object>>() {})
+                        : null,
+                request.has("CallbackURLs") ? readStringList(request.path("CallbackURLs")) : null,
+                request.has("DefaultRedirectURI") ? request.path("DefaultRedirectURI").asText(null) : null,
+                request.has("ExplicitAuthFlows") ? readStringList(request.path("ExplicitAuthFlows")) : null,
+                request.has("AccessTokenValidity") ? request.path("AccessTokenValidity").asInt() : null,
+                request.has("IdTokenValidity") ? request.path("IdTokenValidity").asInt() : null,
+                request.has("LogoutURLs") ? readStringList(request.path("LogoutURLs")) : null,
+                request.has("PreventUserExistenceErrors") ? request.path("PreventUserExistenceErrors").asText(null) : null,
+                request.has("ReadAttributes") ? readStringList(request.path("ReadAttributes")) : null,
+                request.has("RefreshTokenValidity") ? request.path("RefreshTokenValidity").asInt() : null,
+                request.has("SupportedIdentityProviders") ? readStringList(request.path("SupportedIdentityProviders")) : null,
+                request.path("TokenValidityUnits").isObject()
+                        ? objectMapper.convertValue(request.path("TokenValidityUnits"),
+                        new TypeReference<Map<String, String>>() {})
+                        : null,
+                request.has("WriteAttributes") ? readStringList(request.path("WriteAttributes")) : null,
+                request.path("RefreshTokenRotation").isObject()
+                        ? objectMapper.convertValue(request.path("RefreshTokenRotation"),
+                        new TypeReference<Map<String, Object>>() {})
+                        : null,
+                request.has("EnableTokenRevocation") ? request.path("EnableTokenRevocation").asBoolean() : null
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPoolClient", clientToNode(client));

@@ -246,6 +246,67 @@ class CognitoServiceTest {
     }
 
     @Test
+    void updateUserPoolClientAllowsClearingListFieldsWithEmptyArrays() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "client",
+                false,
+                false,
+                List.of(),
+                List.of(),
+                null,
+                List.of("https://example.com"),
+                "https://example.com",
+                List.of("ALLOW_USER_AUTH"),
+                null,
+                null,
+                List.of("https://example.com/logout"),
+                null,
+                List.of("email"),
+                null,
+                List.of("COGNITO", "Google"),
+                null,
+                List.of("family_name"),
+                null,
+                null
+        );
+
+        service.updateUserPoolClient(
+                pool.getId(),
+                client.getClientId(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null
+        );
+
+        UserPoolClient updated = service.describeUserPoolClient(pool.getId(), client.getClientId());
+        assertEquals(List.of(), updated.getCallbackURLs());
+        assertEquals(List.of(), updated.getExplicitAuthFlows());
+        assertEquals(List.of(), updated.getLogoutURLs());
+        assertEquals(List.of(), updated.getReadAttributes());
+        assertEquals(List.of(), updated.getSupportedIdentityProviders());
+        assertEquals(List.of(), updated.getWriteAttributes());
+    }
+
+    @Test
     void createUserPoolWithBlankOverrideIdThrowsValidation() {
         AwsException exception = assertThrows(
                 AwsException.class,
