@@ -302,6 +302,8 @@ floci:
       enabled: true
     autoscaling:
       enabled: true
+    elasticbeanstalk:
+      enabled: true
     backup:
       enabled: true
       job-completion-delay-seconds: 3

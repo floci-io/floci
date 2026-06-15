@@ -12,7 +12,7 @@ Floci is a fast, free, and open-source local AWS service emulator built for deve
 
 ## Supported Services
 
-Floci emulates 55 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
+Floci emulates 56 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
 
 | Service | Protocol |
 |---|---|
@@ -57,6 +57,7 @@ Floci emulates 55 AWS services. See the [Services Overview](services/index.md) f
 | EKS | REST JSON |
 | ELB v2 | Query |
 | Auto Scaling | Query |
+| Elastic Beanstalk | Query |
 | CodeBuild | JSON 1.1 |
 | CodeDeploy | JSON 1.1 |
 | AWS Backup | REST JSON |
