@@ -16,10 +16,8 @@ import org.jboss.logging.Logger;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -126,34 +124,26 @@ public class DocDbContainerManager {
     }
 
     /**
-     * Probes the Gremlin Server HTTP endpoint. Gremlin Server responds to a plain HTTP GET
-     * on /gremlin with HTTP 400 (not a WebSocket upgrade), confirming the server is listening.
+     * Probes the MongoDB endpoint with a TCP connect. A successful connection means
+     * {@code mongod} has bound its listening socket and is accepting connections on the
+     * published port. The MongoDB wire protocol passes straight through, so no proxy or
+     * protocol handshake is involved — a plain TCP connect is the correct readiness signal.
      */
     private static void waitForBackendReady(String clusterId, String host, int port) {
-        byte[] probe = "GET /gremlin HTTP/1.1\r\nHost: floci\r\n\r\n"
-                .getBytes(StandardCharsets.UTF_8);
         long deadline = System.currentTimeMillis() + BACKEND_READY_DEADLINE_MS;
         int attempt = 0;
         while (System.currentTimeMillis() < deadline) {
             attempt++;
             try (Socket s = new Socket()) {
                 s.connect(new InetSocketAddress(host, port), BACKEND_PROBE_CONNECT_MS);
-                s.setSoTimeout(BACKEND_PROBE_CONNECT_MS);
-                OutputStream out = s.getOutputStream();
-                out.write(probe);
-                out.flush();
-                byte[] buf = new byte[32];
-                int n = s.getInputStream().read(buf);
-                if (n > 0) {
-                    if (attempt > 1) {
-                        LOG.infov("Gremlin backend ready for cluster {0} after {1} probe attempt(s)",
-                                clusterId, attempt);
-                    }
-                    return;
+                if (attempt > 1) {
+                    LOG.infov("MongoDB backend ready for cluster {0} after {1} probe attempt(s)",
+                            clusterId, attempt);
                 }
+                return;
             } catch (IOException e) {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debugv("Gremlin probe for cluster {0} attempt {1}: {2}",
+                    LOG.debugv("MongoDB probe for cluster {0} attempt {1}: {2}",
                             clusterId, attempt, e.getMessage());
                 }
             }
@@ -162,11 +152,11 @@ public class DocDbContainerManager {
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(
-                        "Interrupted while waiting for Gremlin backend " + clusterId, ie);
+                        "Interrupted while waiting for MongoDB backend " + clusterId, ie);
             }
         }
         throw new RuntimeException(
-                "Gremlin backend for cluster " + clusterId + " did not become ready on "
+                "MongoDB backend for cluster " + clusterId + " did not become ready on "
                         + host + ":" + port + " within " + BACKEND_READY_DEADLINE_MS + "ms");
     }
 }
