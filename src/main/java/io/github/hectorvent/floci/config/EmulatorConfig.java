@@ -662,6 +662,15 @@ public interface EmulatorConfig {
 
         @WithDefault("10000")
         int maxEventsPerQuery();
+
+        /**
+         * Artificial Logs Insights query completion delay, in milliseconds. With the default 0,
+         * queries complete immediately (fast local dev). A positive value emulates the real
+         * asynchronous lifecycle — StartQuery → Running → Complete after this delay — which also
+         * makes StopQuery on a still-running query return {@code success=true}.
+         */
+        @WithDefault("0")
+        long queryCompletionDelayMs();
     }
 
     interface CloudWatchMetricsServiceConfig {

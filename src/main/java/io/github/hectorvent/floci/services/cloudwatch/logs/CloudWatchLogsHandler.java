@@ -15,6 +15,7 @@ import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -52,6 +53,9 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "StartQuery" -> handleStartQuery(request, region);
+            case "GetQueryResults" -> handleGetQueryResults(request, region);
+            case "StopQuery" -> handleStopQuery(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -192,6 +196,62 @@ public class CloudWatchLogsHandler {
         if (result.nextToken() != null) {
             response.put("nextToken", result.nextToken());
         }
+        return Response.ok(response).build();
+    }
+
+    // ──────────────────────────── Logs Insights Queries ────────────────────────────
+
+    private Response handleStartQuery(JsonNode request, String region) {
+        List<String> logGroupNames = new ArrayList<>();
+        request.path("logGroupNames").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
+        if (request.has("logGroupName")) {
+            logGroupNames.add(extractLogGroupNameFromArn(request.path("logGroupName").asText()));
+        }
+        request.path("logGroupIdentifiers").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
+
+        long startTime = request.path("startTime").asLong();
+        long endTime = request.path("endTime").asLong();
+        String queryString = request.path("queryString").asText("");
+        Integer limit = request.has("limit") ? request.path("limit").asInt() : null;
+
+        String queryId = logsService.startQuery(logGroupNames, startTime, endTime, queryString, limit, region);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("queryId", queryId);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetQueryResults(JsonNode request, String region) {
+        String queryId = request.path("queryId").asText();
+        CloudWatchLogsService.QueryState state = logsService.getQueryResults(queryId);
+
+        ArrayNode results = objectMapper.createArrayNode();
+        for (LinkedHashMap<String, String> row : state.rows()) {
+            ArrayNode rowArray = objectMapper.createArrayNode();
+            row.forEach((field, value) -> {
+                ObjectNode fieldNode = objectMapper.createObjectNode();
+                fieldNode.put("field", field);
+                fieldNode.put("value", value);
+                rowArray.add(fieldNode);
+            });
+            results.add(rowArray);
+        }
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.set("results", results);
+        response.put("status", state.status());
+        ObjectNode statistics = objectMapper.createObjectNode();
+        statistics.put("recordsMatched", (double) state.recordsMatched());
+        statistics.put("recordsScanned", (double) state.recordsScanned());
+        statistics.put("bytesScanned", 0.0);
+        response.set("statistics", statistics);
+        return Response.ok(response).build();
+    }
+
+    private Response handleStopQuery(JsonNode request, String region) {
+        String queryId = request.path("queryId").asText();
+        boolean success = logsService.stopQuery(queryId);
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("success", success);
         return Response.ok(response).build();
     }
 
