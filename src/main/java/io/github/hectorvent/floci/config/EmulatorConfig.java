@@ -365,6 +365,7 @@ public interface EmulatorConfig {
         AutoScalingServiceConfig autoscaling();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
+        DocDbServiceConfig docdb();
         Route53ServiceConfig route53();
         TransferServiceConfig transfer();
         TextractServiceConfig textract();
@@ -576,6 +577,19 @@ public interface EmulatorConfig {
         int proxyMaxPort();
 
         @WithDefault("tinkerpop/gremlin-server:3.7.3")
+        String defaultImage();
+
+        Optional<String> dockerNetwork();
+    }
+
+    interface DocDbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean mock();
+
+        @WithDefault("mongo:7.0")
         String defaultImage();
 
         Optional<String> dockerNetwork();

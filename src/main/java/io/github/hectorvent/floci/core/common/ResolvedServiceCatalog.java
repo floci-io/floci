@@ -101,6 +101,12 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("neptune"), Set.of(), Set.of()),
+                descriptor("docdb", "docdb", config.services().docdb().enabled(), true,
+                        "docdb", config.storage().mode(),                        
+                        5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
+                        protocols(ServiceProtocol.QUERY),
+                        Set.of(), Set.of("docdb"), Set.of(), Set.of()),
+                
                 descriptor("events", "eventbridge", config.services().eventbridge().enabled(), true,
                         "eventbridge", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
