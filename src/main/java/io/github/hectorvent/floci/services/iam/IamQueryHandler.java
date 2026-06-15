@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
 import io.github.hectorvent.floci.services.iam.model.InstanceProfile;
 import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
+import io.github.hectorvent.floci.services.iam.model.CallerContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -33,10 +34,12 @@ public class IamQueryHandler {
     private static final Logger LOG = Logger.getLogger(IamQueryHandler.class);
 
     private final IamService iamService;
+    private final IamPolicyEvaluator policyEvaluator;
 
     @Inject
-    public IamQueryHandler(IamService iamService) {
+    public IamQueryHandler(IamService iamService, IamPolicyEvaluator policyEvaluator) {
         this.iamService = iamService;
+        this.policyEvaluator = policyEvaluator;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -141,6 +144,9 @@ public class IamQueryHandler {
             case "DeleteUserPermissionsBoundary" -> handleDeleteUserPermissionsBoundary(params);
             case "PutRolePermissionsBoundary"    -> handlePutRolePermissionsBoundary(params);
             case "DeleteRolePermissionsBoundary" -> handleDeleteRolePermissionsBoundary(params);
+
+            // Policy Simulation
+            case "SimulatePrincipalPolicy" -> handleSimulatePrincipalPolicy(params);
 
             default -> AwsQueryResponse.error("UnsupportedOperation",
                     "Operation " + action + " is not supported.", AwsNamespaces.IAM, 400);
@@ -711,6 +717,39 @@ public class IamQueryHandler {
         return Response.ok(AwsQueryResponse.envelope("DeleteRolePermissionsBoundary", AwsNamespaces.IAM, "")).build();
     }
 
+    private Response handleSimulatePrincipalPolicy(MultivaluedMap<String, String> params) {
+        String policySourceArn = getParam(params, "PolicySourceArn");
+        CallerContext caller = iamService.resolvePrincipalContext(policySourceArn);
+        List<String> actionNames = extractIndexedValues(params, "ActionNames.member");
+        if (actionNames.isEmpty()) {
+            throw new AwsException("ValidationError", "At least one ActionNames member is required.", 400);
+        }
+        List<String> resourceArns = extractIndexedValues(params, "ResourceArns.member");
+        if (resourceArns.isEmpty()) {
+            resourceArns = List.of("*");
+        }
+        Map<String, String> context = extractContextEntries(params);
+
+        XmlBuilder results = new XmlBuilder().start("EvaluationResults");
+        for (String actionName : actionNames) {
+            for (String resourceArn : resourceArns) {
+                IamPolicyEvaluator.SimulationDecision decision =
+                        policyEvaluator.simulatePrincipalPolicy(caller, actionName, resourceArn, context);
+                results.start("member")
+                        .elem("EvalActionName", actionName)
+                        .elem("EvalResourceName", resourceArn)
+                        .elem("EvalDecision", decision.awsValue())
+                        .start("MatchedStatements").end("MatchedStatements")
+                        .start("MissingContextValues").end("MissingContextValues")
+                        .end("member");
+            }
+        }
+        String result = results.end("EvaluationResults")
+                .elem("IsTruncated", false)
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("SimulatePrincipalPolicy", AwsNamespaces.IAM, result)).build();
+    }
+
     // =========================================================================
     // XML serialization helpers
     // =========================================================================
@@ -852,6 +891,29 @@ public class IamQueryHandler {
             keys.add(key);
         }
         return keys;
+    }
+
+    private List<String> extractIndexedValues(MultivaluedMap<String, String> params, String prefix) {
+        List<String> values = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String value = params.getFirst(prefix + "." + i);
+            if (value == null) break;
+            values.add(value);
+        }
+        return values;
+    }
+
+    private Map<String, String> extractContextEntries(MultivaluedMap<String, String> params) {
+        Map<String, String> context = new HashMap<>();
+        for (int i = 1; ; i++) {
+            String name = params.getFirst("ContextEntries.member." + i + ".ContextKeyName");
+            if (name == null) break;
+            String value = params.getFirst("ContextEntries.member." + i + ".ContextKeyValues.member.1");
+            if (value != null) {
+                context.put(name, value);
+            }
+        }
+        return context;
     }
 
     private String getParam(MultivaluedMap<String, String> params, String name) {

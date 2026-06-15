@@ -6,6 +6,7 @@ import org.junit.jupiter.api.Test;
 
 import jakarta.inject.Inject;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -117,6 +118,22 @@ class IamEnforcementIntegrationTest {
         // Should not throw; malformed doc is silently ignored
         assertEquals(Decision.DENY,
                 evaluator.evaluate(List.of("not-json"), "s3:GetObject", "*"));
+    }
+
+    @Test
+    void conditionContextKeysAreCaseInsensitive() {
+        String policy = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:GetObject","Resource":"*",
+               "Condition":{"StringEquals":{"aws:SourceIp":"127.0.0.1"}}}
+            ]}""";
+
+        assertEquals(Decision.ALLOW,
+                evaluator.simulateCustomPolicy(
+                        List.of(policy),
+                        "s3:GetObject",
+                        "arn:aws:s3:::bucket/key",
+                        Map.of("AWS:SourceIP", "127.0.0.1")));
     }
 
     // =========================================================================

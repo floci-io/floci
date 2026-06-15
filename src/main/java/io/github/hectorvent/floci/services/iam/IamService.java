@@ -37,6 +37,9 @@ public class IamService {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
+    private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
+    private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
 
     private final StorageBackend<String, IamUser> users;
     private final StorageBackend<String, IamGroup> groups;
@@ -80,6 +83,11 @@ public class IamService {
     }
 
     @PostConstruct
+    void seedDefaults() {
+        seedAwsManagedPolicies();
+        seedDefaultDeployerPrincipal();
+    }
+
     void seedAwsManagedPolicies() {
         int seeded = 0;
         for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
@@ -95,6 +103,30 @@ public class IamService {
         }
         if (seeded > 0) {
             LOG.infov("Seeded {0} AWS managed policies", seeded);
+        }
+    }
+
+    private void seedDefaultDeployerPrincipal() {
+        String adminPolicyArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        IamUser user = users.get(DEFAULT_DEPLOYER_USER)
+                .orElseGet(() -> {
+                    String userId = "AIDA" + randomId(16);
+                    String arn = iamArn("user", "/", DEFAULT_DEPLOYER_USER);
+                    IamUser seededUser = new IamUser(userId, DEFAULT_DEPLOYER_USER, "/", arn);
+                    users.put(DEFAULT_DEPLOYER_USER, seededUser);
+                    LOG.infov("Seeded default IAM deployer user: {0}", DEFAULT_DEPLOYER_USER);
+                    return seededUser;
+                });
+        if (!user.getAttachedPolicyArns().contains(adminPolicyArn)) {
+            user.getAttachedPolicyArns().add(adminPolicyArn);
+            users.put(DEFAULT_DEPLOYER_USER, user);
+        }
+        if (accessKeys.get(DEFAULT_DEPLOYER_ACCESS_KEY_ID).isEmpty()) {
+            accessKeys.put(DEFAULT_DEPLOYER_ACCESS_KEY_ID, new AccessKey(
+                    DEFAULT_DEPLOYER_ACCESS_KEY_ID,
+                    DEFAULT_DEPLOYER_SECRET_ACCESS_KEY,
+                    DEFAULT_DEPLOYER_USER));
+            LOG.infov("Seeded default IAM deployer access key: {0}", DEFAULT_DEPLOYER_ACCESS_KEY_ID);
         }
     }
 
@@ -891,6 +923,56 @@ public class IamService {
     public List<String> resolveCallerPolicies(String accessKeyId) {
         CallerContext ctx = resolveCallerContext(accessKeyId);
         return ctx == null ? null : ctx.identityPolicies();
+    }
+
+    public Optional<String> resolveCallerArn(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+
+        Optional<AccessKey> akOpt = accessKeys.get(accessKeyId);
+        if (akOpt.isPresent()) {
+            String userName = akOpt.get().getUserName();
+            return users.get(userName).map(IamUser::getArn);
+        }
+
+        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        if (sessionOpt.isPresent()) {
+            SessionCredential session = sessionOpt.get();
+            if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
+                sessions.delete(accessKeyId);
+                return Optional.empty();
+            }
+            String roleArn = session.getRoleArn();
+            String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
+            String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+            return Optional.of(AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/floci-session").toString());
+        }
+
+        return Optional.empty();
+    }
+
+    public CallerContext resolvePrincipalContext(String principalArn) {
+        if (principalArn == null || principalArn.isBlank()) {
+            throw new AwsException("ValidationError", "PolicySourceArn is required.", 400);
+        }
+        if (principalArn.contains(":user/")) {
+            String userName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
+            List<String> identityPolicies = collectUserPolicies(userName);
+            if (identityPolicies == null) {
+                throw new AwsException("NoSuchEntity", "User " + userName + " cannot be found.", 404);
+            }
+            return new CallerContext(identityPolicies, null, resolveUserBoundaryDocument(userName));
+        }
+        if (principalArn.contains(":role/")) {
+            String roleName = principalArn.substring(principalArn.lastIndexOf('/') + 1);
+            List<String> identityPolicies = collectRolePolicies(principalArn);
+            if (identityPolicies == null) {
+                throw new AwsException("NoSuchEntity", "Role " + roleName + " cannot be found.", 404);
+            }
+            return new CallerContext(identityPolicies, null, resolveRoleBoundaryDocument(principalArn));
+        }
+        throw new AwsException("InvalidInput", "PolicySourceArn must identify an IAM user or role.", 400);
     }
 
     private String resolveUserBoundaryDocument(String userName) {

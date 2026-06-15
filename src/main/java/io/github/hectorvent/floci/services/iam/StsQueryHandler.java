@@ -4,10 +4,13 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
 import io.github.hectorvent.floci.core.common.AwsQueryResponse;
+import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.Context;
+import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
@@ -28,11 +31,16 @@ public class StsQueryHandler {
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     private final IamService iamService;
+    private final AccountResolver accountResolver;
     private final RegionResolver regionResolver;
 
+    @Context
+    HttpHeaders headers;
+
     @Inject
-    public StsQueryHandler(IamService iamService, RegionResolver regionResolver) {
+    public StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver) {
         this.iamService = iamService;
+        this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
     }
 
@@ -91,10 +99,14 @@ public class StsQueryHandler {
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
         String accountId = regionResolver.getAccountId();
+        String authorization = headers == null ? null : headers.getHeaderString("Authorization");
+        String accessKeyId = authorization == null ? null : accountResolver.extractAccessKeyId(authorization);
+        String arn = iamService.resolveCallerArn(accessKeyId)
+                .orElse(AwsArnUtils.Arn.of("iam", "", accountId, "root").toString());
         String result = new XmlBuilder()
                 .elem("UserId", accountId)
                 .elem("Account", accountId)
-                .elem("Arn", AwsArnUtils.Arn.of("iam", "", accountId, "root").toString())
+                .elem("Arn", arn)
                 .build();
         return Response.ok(AwsQueryResponse.envelope("GetCallerIdentity", AwsNamespaces.STS, result)).build();
     }
