@@ -232,6 +232,10 @@ public class Ec2ContainerManager {
         });
     }
 
+    boolean isContainerRunning(String containerId) {
+        return containerId != null && !containerId.isBlank() && lifecycleManager.isContainerRunning(containerId);
+    }
+
     /**
      * Terminates an instance: forcefully removes the container.
      * Updates state through shutting-down → terminated.

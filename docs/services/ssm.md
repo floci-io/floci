@@ -1,9 +1,11 @@
-# SSM Parameter Store
+# SSM
 
 **Protocol:** JSON 1.1 (`X-Amz-Target: AmazonSSM.*`)
 **Endpoint:** `POST http://localhost:4566/`
 
 ## Supported Actions
+
+### Parameter Store
 
 | Action | Description |
 |---|---|
@@ -19,6 +21,34 @@
 | `AddTagsToResource` | Tag a parameter |
 | `ListTagsForResource` | List tags on a parameter |
 | `RemoveTagsFromResource` | Remove tags from a parameter |
+
+### Run Command
+
+| Action | Description |
+|---|---|
+| `UpdateInstanceInformation` | Register or update an SSM agent record for an instance |
+| `DescribeInstanceInformation` | List registered SSM managed instances |
+| `SendCommand` | Create command invocations for target instances |
+| `GetCommandInvocation` | Return a command invocation result |
+| `ListCommands` | List command records |
+| `ListCommandInvocations` | List command invocation records |
+| `CancelCommand` | Cancel pending or in-progress command invocations |
+
+### ec2messages Agent Protocol
+
+| Action | Description |
+|---|---|
+| `GetMessages` | Agent polls for pending command messages |
+| `AcknowledgeMessage` | Agent acknowledges receipt of a command message |
+| `SendReply` | Agent reports command output and status |
+
+## Run Command Execution
+
+`SendCommand` supports the `AWS-RunShellScript` document. For EC2 instances launched by Floci in real Docker mode, Floci creates the command invocation, returns the command response, and then runs the script asynchronously inside the target instance container. Callers observe completion through `GetCommandInvocation`. `stdout`, `stderr`, response code, start time, and end time are recorded on the invocation.
+
+If the target is not a Floci EC2 container, or if the document is not supported for direct execution, Floci falls back to the SSM agent polling flow. In that mode, `SendCommand` queues an ec2messages payload and the invocation completes after an agent calls `SendReply`.
+
+Direct command output follows the AWS inline output limits: first 24,000 characters of stdout and first 8,000 characters of stderr. Commands that exceed `TimeoutSeconds` are constrained inside the target container when the container has the `timeout` command available, and terminal timeout results are marked `TimedOut` with `StatusDetails` set to `Execution Timed Out`; commands with nonzero exit codes are marked `Failed`.
 
 ## Configuration
 
@@ -51,6 +81,12 @@ aws ssm get-parameters-by-path --endpoint-url $AWS_ENDPOINT_URL \
 # Delete
 aws ssm delete-parameter --endpoint-url $AWS_ENDPOINT_URL \
   --name /app/db/host
+
+# Run a shell command on a Floci EC2 instance
+aws ssm send-command --endpoint-url $AWS_ENDPOINT_URL \
+  --instance-ids i-0123456789abcdef0 \
+  --document-name AWS-RunShellScript \
+  --parameters commands='["echo hello"]'
 ```
 
 ## Parameter Types

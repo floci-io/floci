@@ -236,7 +236,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Service | How it works | Notable features |
 |---|---|---|
 | SSM Parameter Store | In-process | Version history, labels, SecureString, tagging |
-| SSM Run Command | In-process | SendCommand, GetCommandInvocation, ListCommands, CancelCommand, agent polling via ec2messages |
+| SSM Run Command | In-process + EC2 containers | SendCommand, GetCommandInvocation, ListCommands, CancelCommand, direct EC2 container execution, agent polling via ec2messages |
 | SQS | In-process | Standard and FIFO queues, DLQ, visibility timeout, batch operations, tagging |
 | SNS | In-process | Topics, subscriptions, SQS, Lambda and HTTP delivery, tagging |
 | S3 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |

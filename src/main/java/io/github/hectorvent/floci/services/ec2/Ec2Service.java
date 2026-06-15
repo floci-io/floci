@@ -1068,6 +1068,11 @@ public class Ec2Service {
                 .orElse(null);
     }
 
+    public boolean isInstanceContainerRunning(String instanceId) {
+        Instance instance = findInstanceById(instanceId);
+        return instance != null && containerManager.isContainerRunning(instance.getDockerContainerId());
+    }
+
     public KeyPair findKeyPair(String region, String keyName) {
         if (keyName == null) {
             return null;
