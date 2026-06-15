@@ -112,6 +112,7 @@ public class Ec2ContainerManager {
                 ContainerSpec spec = containerBuilder.newContainer(dockerImage)
                         .withName(containerName)
                         .withEnv("AWS_EC2_METADATA_SERVICE_ENDPOINT", imdsEndpoint)
+                        .withEmbeddedDns()
                         .withEnv("AWS_EC2_INSTANCE_ID", instanceId)
                         .withEnv("AWS_DEFAULT_REGION", region)
                         .withPortBinding(22, sshHostPort)
