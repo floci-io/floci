@@ -678,7 +678,9 @@ public class AutoScalingQueryHandler {
                 p.getFirst("PolicyType"),
                 p.getFirst("AdjustmentType"),
                 intParam(p, "ScalingAdjustment", 0),
-                intParam(p, "Cooldown", 300));
+                intParam(p, "Cooldown", 300),
+                nullableIntParam(p, "EstimatedInstanceWarmup"),
+                parseTargetTrackingConfiguration(p));
         return ok(new XmlBuilder()
                 .start("PutScalingPolicyResponse", NS)
                   .start("PutScalingPolicyResult")
@@ -713,6 +715,10 @@ public class AutoScalingQueryHandler {
                .elem("ScalingAdjustment", String.valueOf(policy.getScalingAdjustment()))
                .elem("Cooldown", String.valueOf(policy.getCooldown()));
             if (policy.getAdjustmentType() != null) { xml.elem("AdjustmentType", policy.getAdjustmentType()); }
+            if (policy.getEstimatedInstanceWarmup() != null) {
+                xml.elem("EstimatedInstanceWarmup", String.valueOf(policy.getEstimatedInstanceWarmup()));
+            }
+            appendTargetTrackingConfigurationXml(xml, policy.getTargetTrackingConfiguration());
             xml.end("member");
         }
         xml.end("ScalingPolicies")
@@ -720,6 +726,44 @@ public class AutoScalingQueryHandler {
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribePoliciesResponse");
         return ok(xml.build());
+    }
+
+    private static ScalingPolicy.TargetTrackingConfiguration parseTargetTrackingConfiguration(MultivaluedMap<String, String> p) {
+        String predefinedMetricType = p.getFirst("TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType");
+        Double targetValue = nullableDoubleParam(p, "TargetTrackingConfiguration.TargetValue");
+        if (predefinedMetricType == null && targetValue == null) {
+            return null;
+        }
+        ScalingPolicy.TargetTrackingConfiguration configuration = new ScalingPolicy.TargetTrackingConfiguration();
+        if (predefinedMetricType != null) {
+            ScalingPolicy.PredefinedMetricSpecification specification =
+                    new ScalingPolicy.PredefinedMetricSpecification();
+            specification.setPredefinedMetricType(predefinedMetricType);
+            configuration.setPredefinedMetricSpecification(specification);
+        }
+        configuration.setTargetValue(targetValue);
+        return configuration;
+    }
+
+    private static void appendTargetTrackingConfigurationXml(
+            XmlBuilder xml, ScalingPolicy.TargetTrackingConfiguration configuration) {
+        if (configuration == null) {
+            return;
+        }
+        xml.start("TargetTrackingConfiguration");
+        ScalingPolicy.PredefinedMetricSpecification predefinedMetric =
+                configuration.getPredefinedMetricSpecification();
+        if (predefinedMetric != null) {
+            xml.start("PredefinedMetricSpecification");
+            if (predefinedMetric.getPredefinedMetricType() != null) {
+                xml.elem("PredefinedMetricType", predefinedMetric.getPredefinedMetricType());
+            }
+            xml.end("PredefinedMetricSpecification");
+        }
+        if (configuration.getTargetValue() != null) {
+            xml.elem("TargetValue", String.valueOf(configuration.getTargetValue()));
+        }
+        xml.end("TargetTrackingConfiguration");
     }
 
     // ── Activities ────────────────────────────────────────────────────────────
@@ -932,6 +976,12 @@ public class AutoScalingQueryHandler {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) { return null; }
         try { return Integer.parseInt(val); } catch (NumberFormatException e) { return null; }
+    }
+
+    private static Double nullableDoubleParam(MultivaluedMap<String, String> p, String key) {
+        String val = p.getFirst(key);
+        if (val == null || val.isBlank()) { return null; }
+        try { return Double.parseDouble(val); } catch (NumberFormatException e) { return null; }
     }
 
     private Boolean nullableBoolParam(MultivaluedMap<String, String> p, String key) {

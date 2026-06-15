@@ -332,10 +332,51 @@ class AutoScalingIntegrationTest {
                 .body(not(containsString("scale-out")));
     }
 
+    @Test
+    @Order(17)
+    void putTargetTrackingScalingPolicy() {
+        given()
+                .formParam("Action", "PutScalingPolicy")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("PolicyName", "cpu-target")
+                .formParam("PolicyType", "TargetTrackingScaling")
+                .formParam("EstimatedInstanceWarmup", "180")
+                .formParam("TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType",
+                        "ASGAverageCPUUtilization")
+                .formParam("TargetTrackingConfiguration.TargetValue", "55.5")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("PolicyARN"));
+    }
+
+    @Test
+    @Order(18)
+    void describeTargetTrackingScalingPolicy() {
+        given()
+                .formParam("Action", "DescribePolicies")
+                .formParam("AutoScalingGroupName", "my-asg")
+                .formParam("PolicyNames.member.1", "cpu-target")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<PolicyName>cpu-target</PolicyName>"))
+                .body(containsString("<PolicyType>TargetTrackingScaling</PolicyType>"))
+                .body(containsString("<EstimatedInstanceWarmup>180</EstimatedInstanceWarmup>"))
+                .body(containsString("<TargetTrackingConfiguration>"))
+                .body(containsString("<PredefinedMetricSpecification>"))
+                .body(containsString("<PredefinedMetricType>ASGAverageCPUUtilization</PredefinedMetricType>"))
+                .body(containsString("<TargetValue>55.5</TargetValue>"));
+    }
+
     // ── Metadata ──────────────────────────────────────────────────────────────
 
     @Test
-    @Order(17)
+    @Order(19)
     void describeTerminationPolicyTypes() {
         given()
                 .formParam("Action", "DescribeTerminationPolicyTypes")
@@ -349,7 +390,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(18)
+    @Order(20)
     void describeAccountLimits() {
         given()
                 .formParam("Action", "DescribeAccountLimits")
@@ -362,7 +403,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(21)
     void describeLifecycleHookTypes() {
         given()
                 .formParam("Action", "DescribeLifecycleHookTypes")
@@ -376,7 +417,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(20)
+    @Order(22)
     void describeScalingActivities() {
         given()
                 .formParam("Action", "DescribeScalingActivities")
@@ -390,7 +431,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(21)
+    @Order(23)
     void createAutoScalingGroupWithLaunchTemplateId() {
         given()
                 .formParam("Action", "CreateAutoScalingGroup")
@@ -425,7 +466,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(22)
+    @Order(24)
     void describeAutoScalingGroupWithLaunchTemplateId() {
         given()
                 .formParam("Action", "DescribeAutoScalingGroups")
@@ -466,7 +507,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(23)
+    @Order(25)
     void startInstanceRefresh() {
         instanceRefreshId = given()
                 .formParam("Action", "StartInstanceRefresh")
@@ -495,7 +536,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(24)
+    @Order(26)
     void describeInstanceRefreshes() {
         String body = given()
                 .formParam("Action", "DescribeInstanceRefreshes")
@@ -537,7 +578,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(25)
+    @Order(27)
     void describeInstanceRefreshesPaginatesNewestFirst() {
         pagedInstanceRefreshId = given()
                 .formParam("Action", "StartInstanceRefresh")
@@ -581,7 +622,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(26)
+    @Order(28)
     void deleteLaunchTemplateAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -598,7 +639,7 @@ class AutoScalingIntegrationTest {
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     @Test
-    @Order(27)
+    @Order(29)
     void deleteAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -613,7 +654,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(28)
+    @Order(30)
     void deleteLaunchConfiguration() {
         given()
                 .formParam("Action", "DeleteLaunchConfiguration")
@@ -627,7 +668,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(29)
+    @Order(31)
     void describeAutoScalingGroupsEmpty() {
         given()
                 .formParam("Action", "DescribeAutoScalingGroups")

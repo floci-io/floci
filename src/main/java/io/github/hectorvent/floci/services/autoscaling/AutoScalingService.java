@@ -506,7 +506,9 @@ public class AutoScalingService {
 
     public ScalingPolicy putScalingPolicy(String region, String asgName, String policyName,
                                            String policyType, String adjustmentType,
-                                           int scalingAdjustment, int cooldown) {
+                                           int scalingAdjustment, int cooldown,
+                                           Integer estimatedInstanceWarmup,
+                                           ScalingPolicy.TargetTrackingConfiguration targetTrackingConfiguration) {
         requireGroup(region, asgName);
         String key = policyKey(region, asgName, policyName);
         ScalingPolicy policy = policies.computeIfAbsent(key, k -> new ScalingPolicy());
@@ -518,6 +520,8 @@ public class AutoScalingService {
         policy.setAdjustmentType(adjustmentType);
         policy.setScalingAdjustment(scalingAdjustment);
         policy.setCooldown(cooldown);
+        policy.setEstimatedInstanceWarmup(estimatedInstanceWarmup);
+        policy.setTargetTrackingConfiguration(targetTrackingConfiguration);
         policy.setRegion(region);
         policies.put(key, policy);
         return policy;

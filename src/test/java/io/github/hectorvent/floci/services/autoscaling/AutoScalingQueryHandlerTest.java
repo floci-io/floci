@@ -126,4 +126,59 @@ class AutoScalingQueryHandlerTest {
         assertTrue(xml.contains("<LaunchTemplateId>lt-current</LaunchTemplateId>"));
         assertTrue(xml.contains("<Version>7</Version>"));
     }
+
+    @Test
+    void targetTrackingScalingPolicyUsesAwsQueryXmlShape() {
+        AutoScalingService service = new AutoScalingService();
+        service.regionResolver = new RegionResolver(REGION, "000000000000");
+        service.createAutoScalingGroup(REGION,
+                "target-tracking-asg",
+                null,
+                "lt-current",
+                null,
+                "$Latest",
+                0,
+                3,
+                1,
+                300,
+                List.of("us-east-1a"),
+                List.of(),
+                List.of(),
+                List.of(),
+                "EC2",
+                0,
+                List.of("Default"),
+                java.util.Map.of());
+
+        AutoScalingQueryHandler handler = new AutoScalingQueryHandler(service);
+        MultivaluedHashMap<String, String> putParams = new MultivaluedHashMap<>();
+        putParams.add("AutoScalingGroupName", "target-tracking-asg");
+        putParams.add("PolicyName", "cpu-target");
+        putParams.add("PolicyType", "TargetTrackingScaling");
+        putParams.add("EstimatedInstanceWarmup", "180");
+        putParams.add("TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType",
+                "ASGAverageCPUUtilization");
+        putParams.add("TargetTrackingConfiguration.TargetValue", "55.5");
+
+        Response putResponse = handler.handle("PutScalingPolicy", putParams, REGION);
+
+        assertEquals(200, putResponse.getStatus());
+        assertTrue(((String) putResponse.getEntity()).contains("<PolicyARN>"));
+
+        MultivaluedHashMap<String, String> describeParams = new MultivaluedHashMap<>();
+        describeParams.add("AutoScalingGroupName", "target-tracking-asg");
+        describeParams.add("PolicyNames.member.1", "cpu-target");
+
+        Response describeResponse = handler.handle("DescribePolicies", describeParams, REGION);
+
+        assertEquals(200, describeResponse.getStatus());
+        String xml = (String) describeResponse.getEntity();
+        assertTrue(xml.contains("<PolicyName>cpu-target</PolicyName>"));
+        assertTrue(xml.contains("<PolicyType>TargetTrackingScaling</PolicyType>"));
+        assertTrue(xml.contains("<EstimatedInstanceWarmup>180</EstimatedInstanceWarmup>"));
+        assertTrue(xml.contains("<TargetTrackingConfiguration>"));
+        assertTrue(xml.contains("<PredefinedMetricSpecification>"));
+        assertTrue(xml.contains("<PredefinedMetricType>ASGAverageCPUUtilization</PredefinedMetricType>"));
+        assertTrue(xml.contains("<TargetValue>55.5</TargetValue>"));
+    }
 }
