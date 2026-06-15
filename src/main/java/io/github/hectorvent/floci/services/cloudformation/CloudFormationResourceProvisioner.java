@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -129,6 +130,7 @@ public class CloudFormationResourceProvisioner {
     private final ElbV2Service elbV2Service;
     private final StepFunctionsService stepFunctionsService;
     private final BatchService batchService;
+    private final Ec2Service ec2Service;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -149,7 +151,8 @@ public class CloudFormationResourceProvisioner {
                                              EcsService ecsService,
                                              ElbV2Service elbV2Service,
                                              StepFunctionsService stepFunctionsService,
-                                             BatchService batchService) {
+                                             BatchService batchService,
+                                             Ec2Service ec2Service) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -173,6 +176,7 @@ public class CloudFormationResourceProvisioner {
         this.elbV2Service = elbV2Service;
         this.stepFunctionsService = stepFunctionsService;
         this.batchService = batchService;
+        this.ec2Service = ec2Service;
     }
 
     /**
@@ -269,6 +273,19 @@ public class CloudFormationResourceProvisioner {
                         provisionBatchJobQueue(resource, properties, engine, region, stackName);
                 case "AWS::Batch::JobDefinition" ->
                         provisionBatchJobDefinition(resource, properties, engine, region, stackName);
+                // EC2 networking. These delegate to Ec2Service so the resources actually exist
+                // (describe-subnets, ELBv2, etc. can find them) instead of being stubbed with a
+                // fake physical id. Topological ordering guarantees parents are provisioned first.
+                case "AWS::EC2::VPC" -> provisionVpc(resource, properties, engine, region);
+                case "AWS::EC2::Subnet" -> provisionSubnet(resource, properties, engine, region);
+                case "AWS::EC2::SecurityGroup" -> provisionSecurityGroup(resource, properties, engine, region, stackName);
+                case "AWS::EC2::InternetGateway" -> provisionInternetGateway(resource, region);
+                case "AWS::EC2::RouteTable" -> provisionRouteTable(resource, properties, engine, region);
+                case "AWS::EC2::SubnetRouteTableAssociation" ->
+                        provisionSubnetRouteTableAssociation(resource, properties, engine, region);
+                case "AWS::EC2::Route" -> provisionRoute(resource, properties, engine, region);
+                case "AWS::EC2::NatGateway" -> provisionNatGateway(resource, properties, engine, region);
+                case "AWS::EC2::EIP" -> provisionEip(resource, region);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -390,6 +407,101 @@ public class CloudFormationResourceProvisioner {
         r.getAttributes().put("Arn", queueArn);
         r.getAttributes().put("QueueName", queueName);
         r.getAttributes().put("QueueUrl", queue.getQueueUrl());
+    }
+
+    // ── EC2 networking ─────────────────────────────────────────────────────────
+    // Each method delegates to Ec2Service so the resource really exists (describe-subnets,
+    // ELBv2 create-load-balancer, etc. resolve it). physicalId is set to the real EC2 id so
+    // Ref/exports resolve to a real vpc-/subnet-/... id rather than a stub.
+
+    private void provisionVpc(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String cidr = resolveOptional(props, "CidrBlock", engine);
+        var vpc = ec2Service.createVpc(region, cidr, false);
+        r.setPhysicalId(vpc.getVpcId());
+        r.getAttributes().put("VpcId", vpc.getVpcId());
+        if (vpc.getCidrBlock() != null) {
+            r.getAttributes().put("CidrBlock", vpc.getCidrBlock());
+        }
+    }
+
+    private void provisionSubnet(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        String cidr = resolveOptional(props, "CidrBlock", engine);
+        String az = resolveOptional(props, "AvailabilityZone", engine);
+        var subnet = ec2Service.createSubnet(region, vpcId, cidr, az);
+        r.setPhysicalId(subnet.getSubnetId());
+        r.getAttributes().put("SubnetId", subnet.getSubnetId());
+        r.getAttributes().put("VpcId", subnet.getVpcId());
+        r.getAttributes().put("AvailabilityZone", subnet.getAvailabilityZone());
+    }
+
+    private void provisionSecurityGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                        String region, String stackName) {
+        String groupName = resolveOptional(props, "GroupName", engine);
+        if (groupName == null || groupName.isBlank()) {
+            groupName = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        String description = resolveOptional(props, "GroupDescription", engine);
+        if (description == null || description.isBlank()) {
+            description = "Managed by CloudFormation";
+        }
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        var sg = ec2Service.createSecurityGroup(region, groupName, description, vpcId);
+        // Ref on AWS::EC2::SecurityGroup returns the group id for VPC security groups.
+        r.setPhysicalId(sg.getGroupId());
+        r.getAttributes().put("GroupId", sg.getGroupId());
+        if (sg.getVpcId() != null) {
+            r.getAttributes().put("VpcId", sg.getVpcId());
+        }
+    }
+
+    private void provisionInternetGateway(StackResource r, String region) {
+        var igw = ec2Service.createInternetGateway(region);
+        r.setPhysicalId(igw.getInternetGatewayId());
+        r.getAttributes().put("InternetGatewayId", igw.getInternetGatewayId());
+    }
+
+    private void provisionRouteTable(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String vpcId = resolveOptional(props, "VpcId", engine);
+        var rt = ec2Service.createRouteTable(region, vpcId);
+        r.setPhysicalId(rt.getRouteTableId());
+        r.getAttributes().put("RouteTableId", rt.getRouteTableId());
+    }
+
+    private void provisionSubnetRouteTableAssociation(StackResource r, JsonNode props,
+                                                      CloudFormationTemplateEngine engine, String region) {
+        String routeTableId = resolveOptional(props, "RouteTableId", engine);
+        String subnetId = resolveOptional(props, "SubnetId", engine);
+        var assoc = ec2Service.associateRouteTable(region, routeTableId, subnetId);
+        r.setPhysicalId(assoc.getRouteTableAssociationId());
+        r.getAttributes().put("Id", assoc.getRouteTableAssociationId());
+    }
+
+    private void provisionRoute(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String routeTableId = resolveOptional(props, "RouteTableId", engine);
+        String destinationCidr = resolveOptional(props, "DestinationCidrBlock", engine);
+        String gatewayId = resolveOptional(props, "GatewayId", engine);
+        if (gatewayId == null || gatewayId.isBlank()) {
+            gatewayId = resolveOptional(props, "NatGatewayId", engine);
+        }
+        ec2Service.createRoute(region, routeTableId, destinationCidr, gatewayId);
+        r.setPhysicalId(r.getLogicalId() + "-" + UUID.randomUUID().toString().substring(0, 8));
+    }
+
+    private void provisionNatGateway(StackResource r, JsonNode props, CloudFormationTemplateEngine engine, String region) {
+        String subnetId = resolveOptional(props, "SubnetId", engine);
+        String allocationId = resolveOptional(props, "AllocationId", engine);
+        var nat = ec2Service.createNatGateway(region, subnetId, allocationId, "public", List.of());
+        r.setPhysicalId(nat.getNatGatewayId());
+        r.getAttributes().put("NatGatewayId", nat.getNatGatewayId());
+    }
+
+    private void provisionEip(StackResource r, String region) {
+        var addr = ec2Service.allocateAddress(region);
+        // Ref on AWS::EC2::EIP returns the public IP; AllocationId is exposed via Fn::GetAtt.
+        r.setPhysicalId(addr.getPublicIp());
+        r.getAttributes().put("AllocationId", addr.getAllocationId());
+        r.getAttributes().put("PublicIp", addr.getPublicIp());
     }
 
     // ── SNS ───────────────────────────────────────────────────────────────────
