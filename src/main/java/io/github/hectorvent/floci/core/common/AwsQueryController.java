@@ -274,6 +274,7 @@ public class AwsQueryController {
                 yield rdsQueryHandler.handle(action, formParams);
             }
             case "neptune" -> neptuneQueryHandler.handle(action, formParams);
+            case "docdb" -> docDbQueryHandler.handle(action, formParams);
             case "email" -> sesQueryHandler.handle(action, formParams, region);
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);
