@@ -680,7 +680,6 @@ class CognitoServiceTest {
     // =========================================================================
 
     @Test
-    @SuppressWarnings("unchecked")
     void adminSetUserPasswordPermanentFalseChangesPassword() {
         UserPool pool = createPoolAndUser(); // alice has permanent "Perm1234!"
         UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
@@ -721,6 +720,9 @@ class CognitoServiceTest {
         assertNotNull(params.get("SRP_B"));
         assertNotNull(params.get("SECRET_BLOCK"));
         assertEquals("bob", params.get("USER_ID_FOR_SRP"));
+        // Real AWS Cognito returns USERNAME alongside USER_ID_FOR_SRP; the .NET
+        // Amazon.Extensions.CognitoAuthentication SRP client requires it (issue #1305).
+        assertEquals("bob", params.get("USERNAME"));
     }
 
     @Test
@@ -1097,7 +1099,6 @@ class CognitoServiceTest {
         String session2 = (String) retryResult.get("Session");
 
         // Eventually correct answer issues tokens
-        @SuppressWarnings("unchecked")
         Map<String, Object> tokenResult = service.respondToAuthChallenge(
                 client.getClientId(), "CUSTOM_CHALLENGE", session2,
                 Map.of("USERNAME", "alice", "ANSWER", "secret-otp"));

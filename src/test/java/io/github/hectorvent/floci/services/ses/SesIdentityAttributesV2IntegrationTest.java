@@ -9,6 +9,7 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -30,6 +31,19 @@ class SesIdentityAttributesV2IntegrationTest {
             .post("/v2/email/identities")
         .then()
             .statusCode(200);
+
+        // With no MAIL FROM domain configured, AWS keeps the MailFromAttributes
+        // block carrying only BehaviorOnMxFailure and omits the inner
+        // MailFromDomain / MailFromDomainStatus fields.
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/identities/v2-attrs.floci.test")
+        .then()
+            .statusCode(200)
+            .body("MailFromAttributes.BehaviorOnMxFailure", equalTo("USE_DEFAULT_VALUE"))
+            .body("MailFromAttributes.MailFromDomain", nullValue())
+            .body("MailFromAttributes.MailFromDomainStatus", nullValue());
     }
 
     @Test
@@ -78,14 +92,18 @@ class SesIdentityAttributesV2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // Clearing the MAIL FROM domain returns to the unconfigured shape:
+        // the block stays, BehaviorOnMxFailure resets to USE_DEFAULT_VALUE,
+        // and the inner domain / status fields drop out.
         given()
             .header("Authorization", AUTH_HEADER)
         .when()
             .get("/v2/email/identities/v2-attrs.floci.test")
         .then()
             .statusCode(200)
-            .body("MailFromAttributes.MailFromDomain", equalTo(""))
-            .body("MailFromAttributes.MailFromDomainStatus", equalTo("NOT_STARTED"));
+            .body("MailFromAttributes.BehaviorOnMxFailure", equalTo("USE_DEFAULT_VALUE"))
+            .body("MailFromAttributes.MailFromDomain", nullValue())
+            .body("MailFromAttributes.MailFromDomainStatus", nullValue());
     }
 
     @Test

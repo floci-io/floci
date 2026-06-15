@@ -805,7 +805,11 @@ public class IamService {
     // =========================================================================
 
     public Optional<String> findSecretKey(String accessKeyId) {
-        return accessKeys.get(accessKeyId).map(AccessKey::getSecretAccessKey);
+        Optional<String> fromAccessKey = accessKeys.get(accessKeyId).map(AccessKey::getSecretAccessKey);
+        if (fromAccessKey.isPresent()) {
+            return fromAccessKey;
+        }
+        return sessions.get(accessKeyId).map(SessionCredential::getSecretAccessKey);
     }
 
     // =========================================================================
@@ -826,6 +830,16 @@ public class IamService {
                                 String sessionPolicyDocument) {
         sessions.put(sessionAccessKeyId,
                 new SessionCredential(sessionAccessKeyId, roleArn, expiration, sessionPolicyDocument));
+    }
+
+    /**
+     * Stores an assumed-role session including the temporary secret access key so that
+     * {@link #findSecretKey(String)} can resolve it for RDS/ElastiCache IAM token validation.
+     */
+    public void registerSession(String sessionAccessKeyId, String secretAccessKey, String roleArn,
+                                java.time.Instant expiration, String sessionPolicyDocument) {
+        sessions.put(sessionAccessKeyId,
+                new SessionCredential(sessionAccessKeyId, secretAccessKey, roleArn, expiration, sessionPolicyDocument));
     }
 
     /**
@@ -851,6 +865,10 @@ public class IamService {
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
                 sessions.delete(accessKeyId);
                 return null; // expired — unknown key → bypass
+            }
+
+            if (session.getRoleArn() == null) {
+                return null; // identity session without mapped caller context — preserve historical bypass
             }
             List<String> identityPolicies = collectRolePolicies(session.getRoleArn());
             String boundaryDoc = resolveRoleBoundaryDocument(session.getRoleArn());
@@ -884,6 +902,9 @@ public class IamService {
     }
 
     private String resolveRoleBoundaryDocument(String roleArn) {
+        if (roleArn == null) {
+            return null;
+        }
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
         return roles.get(roleName)
                 .map(IamRole::getPermissionsBoundaryArn)
@@ -970,6 +991,9 @@ public class IamService {
     }
 
     private List<String> collectRolePolicies(String roleArn) {
+        if (roleArn == null) {
+            return null;
+        }
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : roleArn;
         Optional<IamRole> roleOpt = roles.get(roleName);
         if (roleOpt.isEmpty()) {

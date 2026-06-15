@@ -33,6 +33,9 @@ public class MskCluster {
     @JsonProperty("zookeeperConnectString")
     private String zookeeperConnectString;
 
+    @JsonProperty("currentBrokerSoftwareInfo")
+    private BrokerSoftwareInfo currentBrokerSoftwareInfo;
+
     // Internal field, not directly in AWS response but needed for GetBootstrapBrokers
     private String bootstrapBrokers;
     
@@ -47,7 +50,7 @@ public class MskCluster {
 
     public MskCluster() {}
 
-    public MskCluster(String clusterArn, String clusterName) {
+    public MskCluster(String clusterArn, String clusterName, String kafkaVersion) {
         this.clusterArn = clusterArn;
         this.clusterName = clusterName;
         this.state = ClusterState.CREATING;
@@ -55,6 +58,7 @@ public class MskCluster {
         this.currentVersion = "K3V6I1"; // Example version
         this.numberOfBrokerNodes = 1;
         this.zookeeperConnectString = "localhost:2181"; // Mock ZK
+        this.currentBrokerSoftwareInfo = new BrokerSoftwareInfo(kafkaVersion);
     }
 
     public String getClusterArn() { return clusterArn; }
@@ -80,6 +84,9 @@ public class MskCluster {
 
     public String getZookeeperConnectString() { return zookeeperConnectString; }
     public void setZookeeperConnectString(String zookeeperConnectString) { this.zookeeperConnectString = zookeeperConnectString; }
+
+    public BrokerSoftwareInfo getCurrentBrokerSoftwareInfo() { return currentBrokerSoftwareInfo; }
+    public void setCurrentBrokerSoftwareInfo(BrokerSoftwareInfo currentBrokerSoftwareInfo) { this.currentBrokerSoftwareInfo = currentBrokerSoftwareInfo; }
 
     public String getBootstrapBrokers() { return bootstrapBrokers; }
     public void setBootstrapBrokers(String bootstrapBrokers) { this.bootstrapBrokers = bootstrapBrokers; }

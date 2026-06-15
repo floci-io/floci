@@ -19,11 +19,12 @@ quarkus:
     delay-enabled: true
   native:
     resources:
-      # The Pricing service reads its bundled snapshot at runtime via
+      # The Pricing service reads its bundled snapshot, and EC2 reads its image
+      # catalog (ec2/image-catalog.yaml), at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
-      # cannot detect dynamically-built paths, so the tree is registered
+      # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**
+      includes: pricing-snapshots/**,ec2/*.yaml
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -44,6 +45,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
 
 
 floci:
@@ -80,6 +82,8 @@ floci:
       acm:
         flush-interval-ms: 5000
       opensearch:
+        flush-interval-ms: 5000
+      batch:
         flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
@@ -134,7 +138,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30
-      max-message-size: 262144
+      max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
     s3:
       enabled: true
@@ -182,6 +186,9 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182
@@ -190,6 +197,10 @@ floci:
     eventbridge:
       enabled: true
     cloudmap:
+      enabled: true
+    emr:
+      enabled: true
+    wafv2:
       enabled: true
     scheduler:
       enabled: true
@@ -282,6 +293,10 @@ floci:
       mock: false
     codebuild:
       enabled: true
+      # docker-network: floci-network
+    batch:
+      enabled: true
+      runner-mode: immediate
       # docker-network: floci-network
     codedeploy:
       enabled: true

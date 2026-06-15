@@ -59,7 +59,13 @@ table_input() {
                         }
                     }
                 ]
-            }
+            },
+            PartitionKeys: [
+                {
+                    Name: "year",
+                    Type: "int"
+                }
+            ]
         }'
 }
 
@@ -69,6 +75,25 @@ create_table() {
     aws_cmd glue create-table \
         --database-name "$DB_NAME" \
         --table-input "$(table_input "$name" "$description")" >/dev/null
+}
+
+column_statistics_input() {
+    jq -n '[
+        {
+            ColumnName: "id",
+            ColumnType: "int",
+            AnalyzedTime: "2026-06-08T00:00:00Z",
+            StatisticsData: {
+                Type: "LONG",
+                LongColumnStatisticsData: {
+                    MinimumValue: 1,
+                    MaximumValue: 10,
+                    NumberOfNulls: 0,
+                    NumberOfDistinctValues: 10
+                }
+            }
+        }
+    ]'
 }
 
 function_input() {
@@ -183,18 +208,127 @@ function_input() {
     [ "$archived_version" = "0" ]
     [ "$archived_description" = "created" ]
 
+    run aws_cmd glue update-column-statistics-for-table \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --column-statistics-list "$(column_statistics_input)"
+    assert_success
+
+    run aws_cmd glue get-column-statistics-for-table \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --column-names id missing
+    assert_success
+    column_name=$(json_get "$output" '.ColumnStatisticsList[0].ColumnName')
+    statistics_type=$(json_get "$output" '.ColumnStatisticsList[0].StatisticsData.Type')
+    minimum_value=$(json_get "$output" '.ColumnStatisticsList[0].StatisticsData.LongColumnStatisticsData.MinimumValue')
+    missing_column_name=$(json_get "$output" '.Errors[0].ColumnName')
+    error_code=$(json_get "$output" '.Errors[0].Error.ErrorCode')
+    [ "$column_name" = "id" ]
+    [ "$statistics_type" = "LONG" ]
+    [ "$minimum_value" = "1" ]
+    [ "$missing_column_name" = "missing" ]
+    [ "$error_code" = "EntityNotFoundException" ]
+
+    run aws_cmd glue delete-column-statistics-for-table \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --column-name id
+    assert_success
+
+    run aws_cmd glue delete-column-statistics-for-table \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --column-name id
+    assert_success
+
+    run aws_cmd glue get-column-statistics-for-table \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --column-names id
+    assert_success
+    deleted_statistics_count=$(json_get "$output" '.ColumnStatisticsList | length')
+    deleted_error_code=$(json_get "$output" '.Errors[0].Error.ErrorCode')
+    [ "$deleted_statistics_count" = "0" ]
+    [ "$deleted_error_code" = "EntityNotFoundException" ]
+
     run aws_cmd glue create-partition \
         --database-name "$DB_NAME" \
         --table-name "$TABLE_NAME" \
         --partition-input '{"Values":["2026"]}'
     assert_success
 
+    run aws_cmd glue batch-create-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-input-list '[{"Values":["2027"]},{"Values":["2028"]}]'
+    assert_success
+    batch_create_error_count=$(json_get "$output" '.Errors | length')
+    [ "$batch_create_error_count" = "0" ]
+
+    run aws_cmd glue batch-create-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-input-list '[{"Values":["2027"]}]'
+    assert_success
+    duplicate_partition_value=$(json_get "$output" '.Errors[0].PartitionValues[0]')
+    duplicate_error_code=$(json_get "$output" '.Errors[0].ErrorDetail.ErrorCode')
+    [ "$duplicate_partition_value" = "2027" ]
+    [ "$duplicate_error_code" = "AlreadyExistsException" ]
+
+    batch_update_entries='[
+        {"PartitionValueList":["2026"],"PartitionInput":{"Values":["2026"],"Parameters":{"after":"yes"}}},
+        {"PartitionValueList":["missing"],"PartitionInput":{"Values":["missing"]}}
+    ]'
+    run aws_cmd glue batch-update-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --entries "$batch_update_entries"
+    assert_success
+    updated_missing_partition_value=$(json_get "$output" '.Errors[0].PartitionValueList[0]')
+    updated_missing_error_code=$(json_get "$output" '.Errors[0].ErrorDetail.ErrorCode')
+    [ "$updated_missing_partition_value" = "missing" ]
+    [ "$updated_missing_error_code" = "EntityNotFoundException" ]
+
+    run aws_cmd glue update-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-value-list 2027 \
+        --partition-input '{"Values":["2027"],"Parameters":{"updated":"yes"}}'
+    assert_success
+
+    run aws_cmd glue update-partition \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --partition-value-list missing \
+        --partition-input '{"Values":["missing"]}'
+    assert_failure
+    [[ "$output" == *"EntityNotFoundException"* ]]
+
     run aws_cmd glue get-partitions \
         --database-name "$DB_NAME" \
         --table-name "$TABLE_NAME"
     assert_success
     value=$(json_get "$output" '.Partitions[0].Values[0]')
+    parameter=$(json_get "$output" '.Partitions[0].Parameters.after')
     [ "$value" = "2026" ]
+    [ "$parameter" = "yes" ]
+
+    run aws_cmd glue get-partitions \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --expression "year >= 2026 AND year <= 2027"
+    assert_success
+    filtered_count=$(json_get "$output" '.Partitions | length')
+    [ "$filtered_count" = "2" ]
+
+    run aws_cmd glue get-partitions \
+        --database-name "$DB_NAME" \
+        --table-name "$TABLE_NAME" \
+        --expression "year in (2026, 2028)"
+    assert_success
+    filtered_count=$(json_get "$output" '.Partitions | length')
+    [ "$filtered_count" = "2" ]
 
     run aws_cmd glue delete-table \
         --database-name "$DB_NAME" \
@@ -205,6 +339,12 @@ function_input() {
         --database-name "$DB_NAME" \
         --name "$TABLE_NAME"
     assert_failure
+
+    run aws_cmd glue delete-table \
+        --database-name "$DB_NAME" \
+        --name "$TABLE_NAME"
+    assert_failure
+    [[ "$output" == *"EntityNotFoundException"* ]]
 }
 
 @test "Glue catalog: batch delete table" {

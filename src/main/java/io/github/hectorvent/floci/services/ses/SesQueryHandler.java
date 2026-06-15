@@ -267,21 +267,22 @@ public class SesQueryHandler {
         var xml = new XmlBuilder().start("NotificationAttributes");
         for (String identityValue : identities) {
             Identity identity = sesService.getIdentityNotificationAttributes(identityValue, region);
+            if (identity == null) {
+                continue;
+            }
             xml.start("entry");
             xml.elem("key", identityValue);
             xml.start("value");
-            if (identity != null) {
-                xml.elem("BounceTopic", identity.getNotificationAttributes().getOrDefault("BounceTopic", ""));
-                xml.elem("ComplaintTopic", identity.getNotificationAttributes().getOrDefault("ComplaintTopic", ""));
-                xml.elem("DeliveryTopic", identity.getNotificationAttributes().getOrDefault("DeliveryTopic", ""));
-                xml.elem("ForwardingEnabled", String.valueOf(identity.isFeedbackForwardingEnabled()));
-                xml.elem("HeadersInBounceNotificationsEnabled",
-                        String.valueOf(identity.getHeadersInNotificationsEnabled().getOrDefault("Bounce", false)));
-                xml.elem("HeadersInComplaintNotificationsEnabled",
-                        String.valueOf(identity.getHeadersInNotificationsEnabled().getOrDefault("Complaint", false)));
-                xml.elem("HeadersInDeliveryNotificationsEnabled",
-                        String.valueOf(identity.getHeadersInNotificationsEnabled().getOrDefault("Delivery", false)));
-            }
+            xml.elem("BounceTopic", identity.getNotificationAttributes().getOrDefault("BounceTopic", ""));
+            xml.elem("ComplaintTopic", identity.getNotificationAttributes().getOrDefault("ComplaintTopic", ""));
+            xml.elem("DeliveryTopic", identity.getNotificationAttributes().getOrDefault("DeliveryTopic", ""));
+            xml.elem("ForwardingEnabled", String.valueOf(identity.isFeedbackForwardingEnabled()));
+            xml.elem("HeadersInBounceNotificationsEnabled",
+                    String.valueOf(identity.getHeadersInNotificationsEnabled().getOrDefault("Bounce", false)));
+            xml.elem("HeadersInComplaintNotificationsEnabled",
+                    String.valueOf(identity.getHeadersInNotificationsEnabled().getOrDefault("Complaint", false)));
+            xml.elem("HeadersInDeliveryNotificationsEnabled",
+                    String.valueOf(identity.getHeadersInNotificationsEnabled().getOrDefault("Delivery", false)));
             xml.end("value");
             xml.end("entry");
         }

@@ -22,36 +22,60 @@ public class Ec2ImageCatalog {
     private static final String CATALOG_RESOURCE_NAME = "ec2/image-catalog.yaml";
     private static final ObjectMapper YAML_MAPPER = new ObjectMapper(new YAMLFactory());
 
-    private final String defaultDockerImage;
-    private final List<CatalogImage> images;
-    private final Map<String, CatalogImage> imagesByIdOrAlias;
+    private volatile Loaded loaded;
 
     public Ec2ImageCatalog() {
-        this(readResource(CATALOG_RESOURCE_NAME, Catalog.class));
+        // The catalog is parsed lazily on first access rather than at bean
+        // construction. Mock mode never reads it, so eager loading would fail
+        // EC2 bean creation needlessly when the resource is unavailable.
     }
 
     Ec2ImageCatalog(Catalog catalog) {
-        this.defaultDockerImage = require(catalog.defaultDockerImage, "defaultDockerImage");
-        this.images = List.copyOf(catalog.images == null ? List.of() : catalog.images);
-        if (this.images.isEmpty()) {
-            throw new IllegalStateException("EC2 image catalog has no images: " + CATALOG_RESOURCE_NAME);
-        }
-        this.imagesByIdOrAlias = indexImages(this.images);
+        this.loaded = new Loaded(catalog);
     }
 
     public String defaultDockerImage() {
-        return defaultDockerImage;
+        return loaded().defaultDockerImage;
     }
 
     public List<CatalogImage> images() {
-        return images;
+        return loaded().images;
     }
 
     public Optional<CatalogImage> findByIdOrAlias(String imageId) {
         if (imageId == null || imageId.isBlank()) {
             return Optional.empty();
         }
-        return Optional.ofNullable(imagesByIdOrAlias.get(imageId));
+        return Optional.ofNullable(loaded().imagesByIdOrAlias.get(imageId));
+    }
+
+    private Loaded loaded() {
+        Loaded result = loaded;
+        if (result == null) {
+            synchronized (this) {
+                result = loaded;
+                if (result == null) {
+                    result = new Loaded(readResource(CATALOG_RESOURCE_NAME, Catalog.class));
+                    loaded = result;
+                }
+            }
+        }
+        return result;
+    }
+
+    private static final class Loaded {
+        private final String defaultDockerImage;
+        private final List<CatalogImage> images;
+        private final Map<String, CatalogImage> imagesByIdOrAlias;
+
+        Loaded(Catalog catalog) {
+            this.defaultDockerImage = require(catalog.defaultDockerImage, "defaultDockerImage");
+            this.images = List.copyOf(catalog.images == null ? List.of() : catalog.images);
+            if (this.images.isEmpty()) {
+                throw new IllegalStateException("EC2 image catalog has no images: " + CATALOG_RESOURCE_NAME);
+            }
+            this.imagesByIdOrAlias = indexImages(this.images);
+        }
     }
 
     private static <T> T readResource(String resourceName, Class<T> type) {

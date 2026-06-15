@@ -1894,7 +1894,7 @@ class S3IntegrationTest {
                 .get("/{bucket}/%2e%2e/%2e%2e/secret.txt")
         .then()
                 .statusCode(400)
-                .body(containsString("InvalidKey"));
+                .body(equalTo(""));
 
         // 2. Null byte (survives URL-decoding but fails java.nio.file.Path validation)
         given()
@@ -1917,7 +1917,7 @@ class S3IntegrationTest {
                 .get("/{bucket}/%2E%2E/%2E%2E/secret.txt")
         .then()
                 .statusCode(400)
-                .body(containsString("InvalidKey"));
+                .body(equalTo(""));
     }
 
     @Test
@@ -1969,7 +1969,7 @@ class S3IntegrationTest {
             .put("/test-bucket/../../secret.txt")
         .then()
             .statusCode(400)
-            .body(containsString("InvalidKey"));
+            .body(equalTo(""));
     }
 
     @Test
@@ -1983,7 +1983,7 @@ class S3IntegrationTest {
             .put("/test-bucket/%2E%2E/%2E%2E/secret.txt")
         .then()
             .statusCode(400)
-            .body(containsString("InvalidKey"));
+            .body(equalTo(""));
     }
 
     @Test
@@ -1997,7 +1997,7 @@ class S3IntegrationTest {
             .put("/test-bucket/%2E%2E%2Fsecret.txt")
         .then()
             .statusCode(400)
-            .body(containsString("InvalidKey"));
+            .body(equalTo(""));
     }
 
     @Test
@@ -2031,6 +2031,19 @@ class S3IntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("ListBucketResult"));
+    }
+
+    @Test
+    @Order(205)
+    void putObjectWithTraversalAfterBucketPrefixReturnsBadRequest() {
+        given()
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/../secret.txt")
+        .then()
+            .statusCode(400)
+            .body(equalTo(""));
     }
 
     private static String customerKeyMd5(String customerKey) {

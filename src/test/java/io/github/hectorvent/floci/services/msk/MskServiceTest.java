@@ -52,6 +52,20 @@ class MskServiceTest {
     }
 
     @Test
+    void createClusterPopulatesCurrentBrokerSoftwareInfoWithDefaultKafkaVersion() {
+        MskCluster cluster = mskService.createCluster("test-cluster");
+        assertNotNull(cluster.getCurrentBrokerSoftwareInfo());
+        assertEquals("3.6.0", cluster.getCurrentBrokerSoftwareInfo().getKafkaVersion());
+    }
+
+    @Test
+    void createClusterEchoesRequestedKafkaVersion() {
+        MskCluster cluster = mskService.createCluster("test-cluster", "3.5.1");
+        assertNotNull(cluster.getCurrentBrokerSoftwareInfo());
+        assertEquals("3.5.1", cluster.getCurrentBrokerSoftwareInfo().getKafkaVersion());
+    }
+
+    @Test
     void describeCluster() {
         MskCluster created = mskService.createCluster("test-cluster");
         MskCluster described = mskService.describeCluster(created.getClusterArn());

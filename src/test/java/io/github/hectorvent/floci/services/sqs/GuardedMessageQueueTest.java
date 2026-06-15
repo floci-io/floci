@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.services.sqs.model.Message;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -148,20 +149,39 @@ class GuardedMessageQueueTest {
     }
 
     @Test
-    void messageCountsReturnsVisibleAndInFlight() {
+    void messageCountsReturnsVisibleInFlightAndDelayed() {
         queue.addMessage(new Message("msg1"));
         queue.addMessage(new Message("msg2"));
         queue.addMessage(new Message("msg3"));
+        Message delayedMessage = new Message("delayed");
+        delayedMessage.setVisibleAt(Instant.now().plusSeconds(60));
+        queue.addMessage(delayedMessage);
 
         var counts = queue.messageCounts();
         assertEquals(3, counts.visible());
         assertEquals(0, counts.inFlight());
+        assertEquals(1, counts.delayed(),
+                "A never-claimed message with a future visibleAt is delayed, not in flight");
 
         queue.claimVisibleMessages(2, 30, false, -1, null);
 
         var afterClaim = queue.messageCounts();
         assertEquals(1, afterClaim.visible());
-        assertEquals(2, afterClaim.inFlight());
+        assertEquals(2, afterClaim.inFlight(),
+                "Claimed messages are in flight, not delayed");
+        assertEquals(1, afterClaim.delayed());
+    }
+
+    @Test
+    void messageCountsDelayedMessageBecomesVisibleAfterDelay() {
+        Message delayedMessage = new Message("delayed");
+        delayedMessage.setVisibleAt(Instant.now().minusSeconds(1));
+        queue.addMessage(delayedMessage);
+
+        var counts = queue.messageCounts();
+        assertEquals(1, counts.visible(),
+                "A message whose delay has elapsed counts as visible");
+        assertEquals(0, counts.delayed());
     }
 
     // --- FIFO ---

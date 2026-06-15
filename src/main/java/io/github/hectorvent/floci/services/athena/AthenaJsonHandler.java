@@ -66,7 +66,7 @@ public class AthenaJsonHandler {
             }
             case "GetWorkGroup" -> {
                 String name = request.has("WorkGroup") ? request.get("WorkGroup").asText() : "primary";
-                yield Response.ok(Map.of("WorkGroup", athenaService.getWorkGroup(name))).build();
+                yield Response.ok(Map.of("WorkGroup", athenaService.getWorkGroup(name, region))).build();
             }
             case "ListWorkGroups" -> Response.ok(Map.of("WorkGroups", athenaService.listWorkGroups(region))).build();
             case "CreateWorkGroup" -> {
@@ -102,6 +102,7 @@ public class AthenaJsonHandler {
                 if ("primary".equals(wg)) {
                     throw new AwsException("InvalidRequestException", "The primary workgroup cannot be deleted.", 400);
                 }
+                athenaService.deleteWorkGroup(wg, region);
                 yield Response.ok(Map.of()).build();
             }
             default -> throw new AwsException("InvalidAction", "Action " + action + " is not supported", 400);

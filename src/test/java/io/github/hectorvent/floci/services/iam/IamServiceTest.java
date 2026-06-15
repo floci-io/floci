@@ -13,6 +13,7 @@ import io.github.hectorvent.floci.services.iam.model.PolicyVersion;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 
@@ -389,6 +390,20 @@ class IamServiceTest {
 
         iamService.deleteAccessKey("alice", key.getAccessKeyId());
         assertTrue(iamService.listAccessKeys("alice").isEmpty());
+    }
+
+    @Test
+    void getSessionTokenStyleSessionBypassesEnforcementResolution() {
+        iamService.registerSession(
+                "ASIAIOSFODNN7EXAMPLE",
+                "temporary-secret",
+                null,
+                Instant.now().plusSeconds(3600),
+                null
+        );
+
+        assertNull(iamService.resolveCallerContext("ASIAIOSFODNN7EXAMPLE"));
+        assertNull(iamService.resolveCallerPolicies("ASIAIOSFODNN7EXAMPLE"));
     }
 
     // =========================================================================

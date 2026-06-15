@@ -6,6 +6,8 @@
 
 Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies TCP connections to them, including IAM authentication support.
 
+RDS Data API (`rds-data`) is documented separately because it uses REST JSON routes instead of the RDS Query protocol. See [RDS Data API](rds-data.md).
+
 ## Supported Management Actions
 
 | Action | Description |
@@ -15,6 +17,14 @@ Floci manages real PostgreSQL, MySQL, and MariaDB Docker containers and proxies 
 | `DeleteDBInstance` | Stop and remove an instance |
 | `ModifyDBInstance` | Update instance settings |
 | `RebootDBInstance` | Restart a database instance |
+| `DescribeOrderableDBInstanceOptions` | List deterministic instance class options |
+| `CreateDBSubnetGroup` | Create a DB subnet group |
+| `DescribeDBSubnetGroups` | List DB subnet groups |
+| `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
+| `DeleteDBSubnetGroup` | Delete a DB subnet group |
+| `AddTagsToResource` | Add tags to a DB resource |
+| `ListTagsForResource` | List tags for a DB resource |
+| `RemoveTagsFromResource` | Remove tags from a DB resource |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters |
 | `DeleteDBCluster` | Delete a cluster |

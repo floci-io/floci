@@ -8,13 +8,11 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
-import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.Spliterators;
 import java.util.stream.Collectors;
@@ -95,7 +93,7 @@ class CognitoJsonHandlerTest {
         assertEquals("test-pool", pool.get("Name").asText());
         assertTrue(pool.get("Arn").asText().contains("arn:aws:cognito-idp:us-east-1:000000000000:userpool/"));
         assertEquals("Enabled", pool.get("Status").asText());
-        
+
         // Check mandatory blocks for Terraform
         assertNotNull(pool.get("SchemaAttributes"));
         assertEquals(20, pool.get("SchemaAttributes").size(),

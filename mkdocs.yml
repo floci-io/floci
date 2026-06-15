@@ -92,6 +92,7 @@ nav:
     - STS: services/sts.md
     - ElastiCache: services/elasticache.md
     - RDS: services/rds.md
+    - RDS Data API: services/rds-data.md
     - MSK (Kafka): services/msk.md
     - Glue: services/glue.md
     - Neptune: services/neptune.md
@@ -113,6 +114,7 @@ nav:
     - ELB v2: services/elb.md
     - Auto Scaling: services/autoscaling.md
     - CodeBuild: services/codebuild.md
+    - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
     - AWS Backup: services/backup.md
     - CloudFront: services/cloudfront.md

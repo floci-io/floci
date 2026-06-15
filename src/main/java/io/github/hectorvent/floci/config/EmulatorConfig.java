@@ -172,6 +172,7 @@ public interface EmulatorConfig {
         BackupStorageConfig backup();
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
+        BatchStorageConfig batch();
     }
 
     interface SsmStorageConfig {
@@ -292,6 +293,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface BatchStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -321,8 +329,11 @@ public interface EmulatorConfig {
         MskServiceConfig msk();
         ElastiCacheServiceConfig elasticache();
         RdsServiceConfig rds();
+        RdsDataServiceConfig rdsData();
         EventBridgeServiceConfig eventbridge();
         CloudMapServiceConfig cloudmap();
+        EmrServiceConfig emr();
+        WafV2ServiceConfig wafv2();
         SchedulerServiceConfig scheduler();
         CloudWatchLogsServiceConfig cloudwatchlogs();
         CloudWatchMetricsServiceConfig cloudwatchmetrics();
@@ -367,6 +378,7 @@ public interface EmulatorConfig {
         CloudTrailServiceConfig cloudtrail();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
+        BatchServiceConfig batch();
     }
 
     interface CloudTrailServiceConfig {
@@ -421,6 +433,16 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
     }
 
+    interface BatchServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("immediate")
+        String runnerMode();
+
+        Optional<String> dockerNetwork();
+    }
+
     interface CodeDeployServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -441,7 +463,7 @@ public interface EmulatorConfig {
         @WithDefault("30")
         int defaultVisibilityTimeout();
 
-        @WithDefault("262144")
+        @WithDefault("1048576")
         int maxMessageSize();
 
         @WithDefault("false")
@@ -533,6 +555,14 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
     }
 
+    interface RdsDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("180")
+        long transactionTtlSeconds();
+    }
+
     interface NeptuneServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -564,6 +594,23 @@ public interface EmulatorConfig {
          *  transitions from PENDING to SUCCESS. 0 = complete immediately. */
         @WithDefault("0")
         int operationCompletionDelaySeconds();
+    }
+
+    interface EmrServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("emr-7.5.0")
+        String defaultReleaseLabel();
+
+        /** Delay before a cluster reaches WAITING; 0 = advance synchronously. */
+        @WithDefault("0")
+        int clusterStartupDelaySeconds();
+    }
+
+    interface WafV2ServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface SchedulerServiceConfig {

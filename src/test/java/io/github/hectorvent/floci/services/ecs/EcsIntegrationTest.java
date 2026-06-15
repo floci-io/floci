@@ -192,6 +192,8 @@ class EcsIntegrationTest {
             .body("taskDefinition.taskDefinitionArn", containsString(TASK_DEF_FAMILY))
             .body("taskDefinition.containerDefinitions", hasSize(1))
             .body("taskDefinition.containerDefinitions[0].name", equalTo("app"))
+            .body("taskDefinition.requiresCompatibilities", hasItem("FARGATE"))
+            .body("taskDefinition.compatibilities", hasItem("FARGATE"))
         .extract()
             .path("taskDefinition.taskDefinitionArn");
 
@@ -210,6 +212,142 @@ class EcsIntegrationTest {
 
     @Test
     @Order(11)
+    void registerTaskDefinitionWithoutRequiresCompatibilitiesShouldDefaultToEc2() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "ec2-fallback-family",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("taskDefinition.family", equalTo("ec2-fallback-family"))
+                .body("taskDefinition.compatibilities", hasItem("EC2"))
+                // requiresCompatibilities shouldn't exist or should be empty
+                .body("taskDefinition.requiresCompatibilities", org.hamcrest.Matchers.nullValue());
+    }
+
+    @Test
+    @Order(12)
+    void registerTaskDefinitionWithFargateButBridgeModeShouldFail() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-fargate-bridge",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "bridge",
+                    "cpu": "256",
+                    "memory": "512",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("Fargate only supports network mode 'awsvpc'."));
+    }
+
+    @Test
+    @Order(13)
+    void registerTaskDefinitionWithFargateButMissingCpuShouldFail() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-fargate-cpu",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "awsvpc",
+                    "memory": "512",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("Fargate requires that 'cpu' be defined at the task level."));
+    }
+
+    @Test
+    @Order(14)
+    void registerTaskDefinitionWithFargateButMissingMemoryShouldFail() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-fargate-memory",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "awsvpc",
+                    "cpu": "256",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("Fargate requires that 'memory' be defined at the task level."));
+    }
+
+    @Test
+    @Order(15)
+    void registerTaskDefinitionWithFargateButInvalidSizesShouldFail() {
+        ecs("RegisterTaskDefinition")
+                .body("""
+                {
+                    "family": "invalid-fargate-sizes",
+                    "requiresCompatibilities": ["FARGATE"],
+                    "networkMode": "awsvpc",
+                    "cpu": "256",
+                    "memory": "1000",
+                    "containerDefinitions": [
+                        {
+                            "name": "app",
+                            "image": "nginx:latest",
+                            "essential": true
+                        }
+                    ]
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("ClientException"))
+                .body("message", containsString("No Fargate configuration exists for given values."));
+    }
+
+    @Test
+    @Order(16)
     void describeTaskDefinition() {
         ecs("DescribeTaskDefinition")
             .body("""
@@ -225,7 +363,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(12)
+    @Order(17)
     void listTaskDefinitions() {
         ecs("ListTaskDefinitions")
             .body("{}")
@@ -237,7 +375,7 @@ class EcsIntegrationTest {
     }
 
     @Test
-    @Order(13)
+    @Order(18)
     void listTaskDefinitionFamilies() {
         ecs("ListTaskDefinitionFamilies")
             .body("{}")

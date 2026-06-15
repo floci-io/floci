@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.appconfig.AppConfigController;
 import io.github.hectorvent.floci.services.backup.BackupController;
 import io.github.hectorvent.floci.services.appconfig.AppConfigDataController;
+import io.github.hectorvent.floci.services.batch.BatchController;
 import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeController;
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
@@ -15,6 +16,7 @@ import io.github.hectorvent.floci.services.cloudfront.CloudFrontController;
 import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
+import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -89,6 +91,11 @@ public class ResolvedServiceCatalog {
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("rds"), Set.of(), Set.of()),
+                descriptor("rds-data", "rds-data",
+                        config.services().rds().enabled() && config.services().rdsData().enabled(), true,
+                        null, null, 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("rds-data"), Set.of(), Set.of(RdsDataController.class)),
                 descriptor("neptune", "neptune", config.services().neptune().enabled(), true,
                         "neptune", storageMode(config.storage().services().neptune().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
@@ -102,6 +109,14 @@ public class ResolvedServiceCatalog {
                         "cloudmap", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Route53AutoNaming_v20170314."), Set.of("servicediscovery"), Set.of(), Set.of()),
+                descriptor("elasticmapreduce", "emr", config.services().emr().enabled(), true,
+                        "emr", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("ElasticMapReduce."), Set.of("elasticmapreduce"), Set.of(), Set.of()),
+                descriptor("wafv2", "wafv2", config.services().wafv2().enabled(), true,
+                        "wafv2", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AWSWAF_20190729."), Set.of("wafv2"), Set.of(), Set.of()),
                 descriptor("scheduler", "scheduler", config.services().scheduler().enabled(), true,
                         "scheduler", config.storage().mode(), 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
@@ -226,6 +241,11 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodeBuild_20161006."), Set.of("codebuild"), Set.of(), Set.of()),
+                descriptor("batch", "batch", config.services().batch().enabled(), true,
+                        "batch", storageMode(config.storage().services().batch().mode(), config.storage().mode()),
+                        config.storage().services().batch().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("batch"), Set.of(), Set.of(BatchController.class)),
                 descriptor("codedeploy", "codedeploy", config.services().codedeploy().enabled(), true,
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),

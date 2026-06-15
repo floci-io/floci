@@ -81,7 +81,6 @@ public class CloudFormationService {
                 "cloudformation", "cloudformation-exports.json", new TypeReference<Map<String, String>>() {}));
     }
 
-    @SuppressWarnings("unchecked")
     private static <V> AccountAwareStorageBackend<V> asAccountAware(StorageBackend<String, V> backend) {
         return (AccountAwareStorageBackend<V>) backend;
     }
@@ -539,7 +538,7 @@ public class CloudFormationService {
                 if (resource.getPhysicalId() != null && "CREATE_COMPLETE".equals(resource.getStatus())) {
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_IN_PROGRESS", null);
-                    provisioner.delete(resource.getResourceType(), resource.getPhysicalId(), region);
+                    provisioner.delete(resource, region);
                     resource.setStatus("DELETE_COMPLETE");
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE", null);

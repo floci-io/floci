@@ -367,7 +367,7 @@ public class ApiGatewayExecuteController {
                 if (result.getFunctionError() != null) {
                     return new AuthorizerResult(Response.status(403).build(), null, null);
                 }
-                
+
                 JsonNode policy = objectMapper.readTree(result.getPayload());
                 String effect = policy.path("policyDocument").path("Statement").get(0).path("Effect").asText("Deny");
                 if ("Deny".equalsIgnoreCase(effect)) {

@@ -11,12 +11,12 @@ public class SqsServiceFactory {
 
     public static SqsService createInMemory(String baseUrl, RegionResolver regionResolver) {
         return new SqsService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 262144, baseUrl, regionResolver);
+                30, 1048576, baseUrl, regionResolver);
     }
 
     public static SqsService createInMemoryWithFifoDedupPurgeAndSns(String baseUrl, RegionResolver regionResolver,
                                                                     SnsService snsService) {
         return new SqsService(new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
-                30, 262144, baseUrl, regionResolver, true, snsService);
+                30, 1048576, baseUrl, regionResolver, true, snsService);
     }
 }

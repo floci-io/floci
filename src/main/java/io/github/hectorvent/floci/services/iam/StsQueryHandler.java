@@ -73,9 +73,10 @@ public class StsQueryHandler {
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        // Register session so IAM enforcement can resolve the role's policies
+        // Register session so IAM enforcement can resolve the role's policies and so that
+        // RDS/ElastiCache IAM token validation can find the temporary secret key.
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, roleArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -106,6 +107,7 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
+        iamService.registerSession(accessKeyId, secretKey, null, expiration, null);
         return Response.ok(AwsQueryResponse.envelope("GetSessionToken", AwsNamespaces.STS, result)).build();
     }
 
@@ -131,7 +133,7 @@ public class StsQueryHandler {
         String provider = providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com";
 
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, roleArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -166,7 +168,7 @@ public class StsQueryHandler {
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        iamService.registerSession(accessKeyId, roleArn, expiration, null);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, null);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -202,7 +204,7 @@ public class StsQueryHandler {
 
         String sessionPolicy = getParam(params, "Policy");
         // Register federation token so enforcement can scope its policies via session policy
-        iamService.registerSession(accessKeyId, federatedUserArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, federatedUserArn, expiration, sessionPolicy);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))

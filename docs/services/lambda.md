@@ -194,6 +194,29 @@ These AWS Lambda operations have no handler in Floci. Calls will return `404` or
 | `FLOCI_SERVICES_LAMBDA_UNRESERVED_CONCURRENCY_MIN` | `100` | Minimum unreserved capacity `PutFunctionConcurrency` must leave |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED` | `false` | Enable bind-mount hot-reload via `S3Bucket=hot-reload` |
 | `FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ALLOWED_PATHS` | *(unset)* | Comma-separated allowlist of host paths that may be bind-mounted |
+| `FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK` | *(unset)* | Docker network to attach Lambda containers to (overrides `FLOCI_SERVICES_DOCKER_NETWORK`) |
+| `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE` | *(unset)* | Explicit host/IP that spawned Lambda containers use to reach Floci's Runtime API, bypassing auto-detection |
+
+### Runtime API host override
+
+When a Lambda container starts, it calls back into Floci's Runtime API to fetch
+events and post results. Floci auto-detects the address containers should use
+for that callback (its own container IP on the shared network, or
+`host.docker.internal` when running on the host). In most setups this is
+correct and needs no configuration.
+
+On unusual network topologies — for example rootless Podman — auto-detection
+can pick an address the Lambda container cannot reach, and invocations fail with
+`connect ECONNREFUSED <ip>:9200`. Set `FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE`
+to the host or IP that containers can actually reach Floci on, and Floci uses it
+verbatim instead of auto-detecting:
+
+```bash
+FLOCI_SERVICES_LAMBDA_DOCKER_HOST_OVERRIDE=floci
+```
+
+See [Docker Configuration → Running on Podman (rootless)](../configuration/docker.md#running-on-podman-rootless)
+for a full rootless Podman walkthrough.
 
 ### Docker socket requirement
 

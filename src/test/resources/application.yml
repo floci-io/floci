@@ -34,6 +34,8 @@ floci:
         flush-interval-ms: 60000
       opensearch:
         flush-interval-ms: 60000
+      batch:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
@@ -63,7 +65,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30
-      max-message-size: 262144
+      max-message-size: 1048576
     s3:
       enabled: true
       default-presign-expiry-seconds: 3600
@@ -100,6 +102,9 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182
@@ -108,6 +113,10 @@ floci:
     eventbridge:
       enabled: true
     cloudmap:
+      enabled: true
+    emr:
+      enabled: true
+    wafv2:
       enabled: true
     scheduler:
       enabled: true
@@ -174,6 +183,9 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+    batch:
+      enabled: true
+      runner-mode: immediate
     codedeploy:
       enabled: true
     autoscaling:
