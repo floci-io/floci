@@ -11,6 +11,8 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.max-request-size}M
+  datasource:
+    active: false
   security:
      security-providers: BC
   shutdown:
