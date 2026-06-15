@@ -1170,31 +1170,26 @@ public class SesService {
         String normalized = normalizeSuppressionEmail(emailAddress);
         validateSuppressionReason(reason, "reason", false);
         String key = suppressionKey(region, normalized);
-        SuppressedDestination existing = suppressionStore.get(key).orElse(null);
-        // Migrate a legacy entry persisted by a pre-canonicalization Floci (which
-        // stored the address trim-only) onto the canonical key, so a re-PUT doesn't
-        // leave a stuck duplicate alongside the new entry.
-        if (existing == null) {
-            String legacy = suppressionKey(region, emailAddress.trim());
-            if (!legacy.equals(key)) {
-                existing = suppressionStore.get(legacy).orElse(null);
-                if (existing != null) {
-                    suppressionStore.delete(legacy);
-                }
-            }
-        }
-        SuppressedDestination entry = existing != null ? existing : new SuppressedDestination(normalized, reason);
+        SuppressionMatch match = existingSuppressionMatch(region, emailAddress, normalized).orElse(null);
+        SuppressedDestination entry = match != null ? match.entry() : new SuppressedDestination(normalized, reason);
         entry.setEmailAddress(normalized);
         entry.setReason(reason);
         entry.setLastUpdateTime(Instant.now());
+        // Write the canonical key first, then drop a legacy key it migrated from,
+        // so a failed write can't lose the entry. The legacy form was persisted by
+        // a pre-canonicalization Floci (trim-only key); migrating it avoids leaving
+        // a stuck duplicate after a re-PUT.
         suppressionStore.put(key, entry);
+        if (match != null && !match.key().equals(key)) {
+            suppressionStore.delete(match.key());
+        }
         LOG.infov("Suppressed destination {0} in region {1} (reason={2})", normalized, region, reason);
     }
 
     public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
         String normalized = normalizeSuppressionEmail(emailAddress);
-        return existingSuppressionKey(region, emailAddress, normalized)
-                .flatMap(suppressionStore::get)
+        return existingSuppressionMatch(region, emailAddress, normalized)
+                .map(SuppressionMatch::entry)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Email address " + normalized + " does not exist on your suppression list.",
                         404));
@@ -1202,28 +1197,36 @@ public class SesService {
 
     public void deleteSuppressedDestination(String region, String emailAddress) {
         String normalized = normalizeSuppressionEmail(emailAddress);
-        String key = existingSuppressionKey(region, emailAddress, normalized)
+        SuppressionMatch match = existingSuppressionMatch(region, emailAddress, normalized)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Email address " + normalized + " does not exist on your suppression list.",
                         404));
-        suppressionStore.delete(key);
+        suppressionStore.delete(match.key());
         LOG.infov("Removed suppression entry for {0} in region {1}", normalized, region);
     }
 
+    /** A suppression entry together with the storage key it currently lives under. */
+    private record SuppressionMatch(String key, SuppressedDestination entry) {
+    }
+
     /**
-     * Resolve the storage key an entry currently lives under: the canonical
-     * (domain-lower-cased) key, or — for entries persisted by a pre-canonicalization
-     * Floci that stored the address trim-only — the legacy raw-trimmed key. Lets
-     * GET/DELETE reach and remove legacy entries without a keyspace scan.
+     * Resolve a suppression entry by its canonical (domain-lower-cased) key, falling
+     * back to the legacy raw-trimmed key used by a pre-canonicalization Floci. Returns
+     * the entry and the key it was found under in a single read per candidate, so
+     * callers don't re-fetch the store.
      */
-    private Optional<String> existingSuppressionKey(String region, String rawEmail, String normalized) {
+    private Optional<SuppressionMatch> existingSuppressionMatch(String region, String rawEmail, String normalized) {
         String canonical = suppressionKey(region, normalized);
-        if (suppressionStore.get(canonical).isPresent()) {
-            return Optional.of(canonical);
+        Optional<SuppressedDestination> hit = suppressionStore.get(canonical);
+        if (hit.isPresent()) {
+            return Optional.of(new SuppressionMatch(canonical, hit.get()));
         }
         String legacy = suppressionKey(region, rawEmail.trim());
-        if (!legacy.equals(canonical) && suppressionStore.get(legacy).isPresent()) {
-            return Optional.of(legacy);
+        if (!legacy.equals(canonical)) {
+            Optional<SuppressedDestination> legacyHit = suppressionStore.get(legacy);
+            if (legacyHit.isPresent()) {
+                return Optional.of(new SuppressionMatch(legacy, legacyHit.get()));
+            }
         }
         return Optional.empty();
     }
@@ -1282,8 +1285,8 @@ public class SesService {
                 continue;
             }
             String normalized = normalizeSuppressionEmail(address);
-            SuppressedDestination entry = existingSuppressionKey(region, address, normalized)
-                    .flatMap(suppressionStore::get)
+            SuppressedDestination entry = existingSuppressionMatch(region, address, normalized)
+                    .map(SuppressionMatch::entry)
                     .orElse(null);
             if (entry != null && entry.getReason() != null
                     && reasonFilter.contains(entry.getReason())) {
@@ -1341,8 +1344,8 @@ public class SesService {
         // (`normalizeSuppressionEmail`) so lookups can't drift apart from inserts,
         // with the same legacy-key fallback as GET/DELETE.
         String normalized = normalizeSuppressionEmail(emailAddress);
-        SuppressedDestination entry = existingSuppressionKey(region, emailAddress, normalized)
-                .flatMap(suppressionStore::get)
+        SuppressedDestination entry = existingSuppressionMatch(region, emailAddress, normalized)
+                .map(SuppressionMatch::entry)
                 .orElse(null);
         if (entry == null || entry.getReason() == null) {
             return null;

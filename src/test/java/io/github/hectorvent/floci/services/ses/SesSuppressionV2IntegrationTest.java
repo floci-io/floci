@@ -367,20 +367,32 @@ class SesSuppressionV2IntegrationTest {
     @Test
     @Order(21)
     void getSuppressedDestination_domainCaseInsensitive_localCaseSensitive() {
-        // Seeded by @Order(20): MixedCase@example.com. A differing domain case still
-        // hits the entry; a differing local-part case does not (it is a different key).
+        // Self-contained: seed its own entry so the test is order-independent.
+        // A differing domain case still hits the entry; a differing local-part case
+        // does not (it is a different key).
         given()
+            .contentType("application/json")
             .header("Authorization", AUTH_HEADER)
+            .body("""
+                {"EmailAddress": "CaseProbe@Example.COM", "Reason": "BOUNCE"}
+                """)
         .when()
-            .get("/v2/email/suppression/addresses/MixedCase@EXAMPLE.com")
+            .put("/v2/email/suppression/addresses")
         .then()
-            .statusCode(200)
-            .body("SuppressedDestination.EmailAddress", equalTo("MixedCase@example.com"));
+            .statusCode(200);
 
         given()
             .header("Authorization", AUTH_HEADER)
         .when()
-            .get("/v2/email/suppression/addresses/mixedcase@example.com")
+            .get("/v2/email/suppression/addresses/CaseProbe@EXAMPLE.com")
+        .then()
+            .statusCode(200)
+            .body("SuppressedDestination.EmailAddress", equalTo("CaseProbe@example.com"));
+
+        given()
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .get("/v2/email/suppression/addresses/caseprobe@example.com")
         .then()
             .statusCode(404);
     }
