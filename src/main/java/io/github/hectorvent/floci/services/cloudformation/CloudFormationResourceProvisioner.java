@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
@@ -132,6 +133,7 @@ public class CloudFormationResourceProvisioner {
     private final StepFunctionsService stepFunctionsService;
     private final BatchService batchService;
     private final Ec2Service ec2Service;
+    private final RdsService rdsService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -153,7 +155,8 @@ public class CloudFormationResourceProvisioner {
                                              ElbV2Service elbV2Service,
                                              StepFunctionsService stepFunctionsService,
                                              BatchService batchService,
-                                             Ec2Service ec2Service) {
+                                             Ec2Service ec2Service,
+                                             RdsService rdsService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -178,6 +181,7 @@ public class CloudFormationResourceProvisioner {
         this.stepFunctionsService = stepFunctionsService;
         this.batchService = batchService;
         this.ec2Service = ec2Service;
+        this.rdsService = rdsService;
     }
 
     /**
@@ -288,6 +292,13 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::NatGateway" -> provisionNatGateway(resource, properties, engine, region);
                 case "AWS::EC2::EIP" -> provisionEip(resource, region);
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
+                // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
+                case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName);
+                case "AWS::RDS::DBParameterGroup" -> provisionDbParameterGroup(resource, properties, engine, stackName);
+                case "AWS::RDS::DBClusterParameterGroup" ->
+                        provisionDbClusterParameterGroup(resource, properties, engine, stackName);
+                case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName);
+                case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -360,6 +371,11 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
                 case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
+                case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
+                case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
+                case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
+                case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
+                case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -556,6 +572,134 @@ public class CloudFormationResourceProvisioner {
         if (instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null) {
             r.getAttributes().put("AvailabilityZone", instance.getPlacement().getAvailabilityZone());
         }
+    }
+
+    // ── RDS ─────────────────────────────────────────────────────────────────────
+
+    private void provisionDbSubnetGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                        String stackName) {
+        String name = resolveOptional(props, "DBSubnetGroupName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
+        }
+        String description = firstNonBlank(resolveOptional(props, "DBSubnetGroupDescription", engine),
+                "Managed by CloudFormation");
+        List<String> subnetIds = new ArrayList<>();
+        if (props != null && props.has("SubnetIds") && props.get("SubnetIds").isArray()) {
+            for (JsonNode subnet : props.get("SubnetIds")) {
+                subnetIds.add(engine.resolve(subnet));
+            }
+        }
+        var group = rdsService.createDbSubnetGroup(name, description, subnetIds);
+        r.setPhysicalId(group.getDbSubnetGroupName());
+        r.getAttributes().put("DBSubnetGroupName", group.getDbSubnetGroupName());
+    }
+
+    private void provisionDbParameterGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                           String stackName) {
+        String name = resolveOptional(props, "DBParameterGroupName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
+        }
+        String family = resolveOptional(props, "Family", engine);
+        String description = firstNonBlank(resolveOptional(props, "Description", engine),
+                "Managed by CloudFormation");
+        var group = rdsService.createDbParameterGroup(name, family, description);
+        r.setPhysicalId(group.getDbParameterGroupName());
+        r.getAttributes().put("DBParameterGroupName", group.getDbParameterGroupName());
+    }
+
+    private void provisionDbClusterParameterGroup(StackResource r, JsonNode props,
+                                                  CloudFormationTemplateEngine engine, String stackName) {
+        String name = resolveOptional(props, "DBClusterParameterGroupName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
+        }
+        String family = resolveOptional(props, "Family", engine);
+        String description = firstNonBlank(resolveOptional(props, "Description", engine),
+                "Managed by CloudFormation");
+        var group = rdsService.createDbClusterParameterGroup(name, family, description);
+        r.setPhysicalId(group.getDbClusterParameterGroupName());
+        r.getAttributes().put("DBClusterParameterGroupName", group.getDbClusterParameterGroupName());
+    }
+
+    private void provisionDbInstance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                     String stackName) {
+        String id = resolveOptional(props, "DBInstanceIdentifier", engine);
+        if (id == null || id.isBlank()) {
+            id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
+        }
+        var instance = rdsService.createDbInstance(
+                id,
+                resolveOptional(props, "Engine", engine),
+                resolveOptional(props, "EngineVersion", engine),
+                resolveOptional(props, "MasterUsername", engine),
+                resolveOptional(props, "MasterUserPassword", engine),
+                resolveOptional(props, "DBName", engine),
+                firstNonBlank(resolveOptional(props, "DBInstanceClass", engine), "db.t3.micro"),
+                parseIntProp(props, "AllocatedStorage", engine, 20),
+                parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
+                resolveOptional(props, "DBParameterGroupName", engine),
+                resolveOptional(props, "DBSubnetGroupName", engine),
+                resolveOptional(props, "DBClusterIdentifier", engine));
+        r.setPhysicalId(instance.getDbInstanceIdentifier());
+        r.getAttributes().put("DBInstanceIdentifier", instance.getDbInstanceIdentifier());
+        if (instance.getEndpoint() != null) {
+            r.getAttributes().put("Endpoint.Address", instance.getEndpoint().address());
+            r.getAttributes().put("Endpoint.Port", String.valueOf(instance.getEndpoint().port()));
+        }
+        if (instance.getDbInstanceArn() != null) {
+            r.getAttributes().put("DBInstanceArn", instance.getDbInstanceArn());
+        }
+    }
+
+    private void provisionDbCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                    String stackName) {
+        String id = resolveOptional(props, "DBClusterIdentifier", engine);
+        if (id == null || id.isBlank()) {
+            id = generatePhysicalName(stackName, r.getLogicalId(), 60, true);
+        }
+        var cluster = rdsService.createDbCluster(
+                id,
+                resolveOptional(props, "Engine", engine),
+                resolveOptional(props, "EngineVersion", engine),
+                resolveOptional(props, "MasterUsername", engine),
+                resolveOptional(props, "MasterUserPassword", engine),
+                resolveOptional(props, "DatabaseName", engine),
+                parseBoolProp(props, "EnableIAMDatabaseAuthentication", engine),
+                resolveOptional(props, "DBClusterParameterGroupName", engine));
+        r.setPhysicalId(cluster.getDbClusterIdentifier());
+        r.getAttributes().put("DBClusterIdentifier", cluster.getDbClusterIdentifier());
+        if (cluster.getEndpoint() != null) {
+            r.getAttributes().put("Endpoint.Address", cluster.getEndpoint().address());
+            r.getAttributes().put("Endpoint.Port", String.valueOf(cluster.getEndpoint().port()));
+        }
+        if (cluster.getReaderEndpoint() != null) {
+            r.getAttributes().put("ReadEndpoint.Address", cluster.getReaderEndpoint().address());
+        }
+        if (cluster.getDbClusterArn() != null) {
+            r.getAttributes().put("DBClusterArn", cluster.getDbClusterArn());
+        }
+    }
+
+    private static String firstNonBlank(String value, String fallback) {
+        return (value == null || value.isBlank()) ? fallback : value;
+    }
+
+    private int parseIntProp(JsonNode props, String name, CloudFormationTemplateEngine engine, int fallback) {
+        String value = resolveOptional(props, name, engine);
+        if (value == null || value.isBlank()) {
+            return fallback;
+        }
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private boolean parseBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        return Boolean.parseBoolean(resolveOptional(props, name, engine));
     }
 
     // ── SNS ───────────────────────────────────────────────────────────────────
