@@ -1,8 +1,8 @@
 package io.github.hectorvent.floci.lifecycle;
 
-import io.github.hectorvent.floci.services.ui.FlociUiManager;
-import io.github.hectorvent.floci.services.ui.FlociUiManager.UiStatus;
-import io.github.hectorvent.floci.services.ui.UiPages;
+import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
+import io.github.hectorvent.floci.services.floci.ui.FlociUiManager.UiStatus;
+import io.github.hectorvent.floci.services.floci.ui.UiPages;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;

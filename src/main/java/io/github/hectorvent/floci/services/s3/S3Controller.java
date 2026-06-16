@@ -87,13 +87,13 @@ public class S3Controller {
     private final S3SelectService s3SelectService;
     private final RegionResolver regionResolver;
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
-    private final io.github.hectorvent.floci.services.ui.UiPages uiPages;
+    private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
                         RegionResolver regionResolver,
                         io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
-                        io.github.hectorvent.floci.services.ui.UiPages uiPages) {
+                        io.github.hectorvent.floci.services.floci.ui.UiPages uiPages) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
