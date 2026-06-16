@@ -44,7 +44,7 @@ class RdsCfnProvisionerTest {
                 null, null, null, null, null, null,
                 mapper,
                 null, null, null, null, null, null, null,
-                rdsService, null, null, null);
+                rdsService, null, null, null, null);
     }
 
     private CloudFormationTemplateEngine engine() {

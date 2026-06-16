@@ -17,6 +17,9 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
+import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
@@ -142,6 +145,7 @@ public class CloudFormationResourceProvisioner {
     private final EksService eksService;
     private final CloudWatchLogsService logsService;
     private final KinesisService kinesisService;
+    private final CloudWatchMetricsService cloudWatchMetricsService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -167,7 +171,8 @@ public class CloudFormationResourceProvisioner {
                                              RdsService rdsService,
                                              EksService eksService,
                                              CloudWatchLogsService logsService,
-                                             KinesisService kinesisService) {
+                                             KinesisService kinesisService,
+                                             CloudWatchMetricsService cloudWatchMetricsService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -196,6 +201,7 @@ public class CloudFormationResourceProvisioner {
         this.eksService = eksService;
         this.logsService = logsService;
         this.kinesisService = kinesisService;
+        this.cloudWatchMetricsService = cloudWatchMetricsService;
     }
 
     /**
@@ -318,6 +324,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
                 case "AWS::Kinesis::Stream" ->
                         provisionKinesisStream(resource, properties, engine, region, stackName);
+                case "AWS::CloudWatch::Alarm" ->
+                        provisionCloudWatchAlarm(resource, properties, engine, region, stackName);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -411,6 +419,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
                 case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
                 case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
+                case "AWS::CloudWatch::Alarm" ->
+                        cloudWatchMetricsService.deleteAlarms(List.of(physicalId), region);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -639,6 +649,70 @@ public class CloudFormationResourceProvisioner {
         // Ref returns the stream name; Fn::GetAtt Arn returns the stream ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", stream.getStreamArn());
+    }
+
+    // ── CloudWatch ──────────────────────────────────────────────────────────────
+
+    private void provisionCloudWatchAlarm(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                          String region, String stackName) {
+        String name = resolveOptional(props, "AlarmName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+
+        MetricAlarm alarm = new MetricAlarm();
+        alarm.setAlarmName(name);
+        alarm.setAlarmDescription(resolveOptional(props, "AlarmDescription", engine));
+        alarm.setMetricName(resolveOptional(props, "MetricName", engine));
+        alarm.setNamespace(resolveOptional(props, "Namespace", engine));
+        alarm.setStatistic(resolveOptional(props, "Statistic", engine));
+        alarm.setUnit(resolveOptional(props, "Unit", engine));
+        alarm.setComparisonOperator(resolveOptional(props, "ComparisonOperator", engine));
+        alarm.setPeriod(parseIntProp(props, "Period", engine, 60));
+        alarm.setEvaluationPeriods(parseIntProp(props, "EvaluationPeriods", engine, 1));
+        alarm.setDatapointsToAlarm(parseIntProp(props, "DatapointsToAlarm", engine, alarm.getEvaluationPeriods()));
+        String threshold = resolveOptional(props, "Threshold", engine);
+        if (threshold != null && !threshold.isBlank()) {
+            try {
+                alarm.setThreshold(Double.parseDouble(threshold.trim()));
+            } catch (NumberFormatException ignored) {
+                // leave default
+            }
+        }
+        String treatMissing = resolveOptional(props, "TreatMissingData", engine);
+        if (treatMissing != null && !treatMissing.isBlank()) {
+            alarm.setTreatMissingData(treatMissing);
+        }
+        String actionsEnabled = resolveOptional(props, "ActionsEnabled", engine);
+        alarm.setActionsEnabled(actionsEnabled == null || Boolean.parseBoolean(actionsEnabled));
+
+        if (props != null && props.has("Dimensions") && props.get("Dimensions").isArray()) {
+            List<Dimension> dimensions = new ArrayList<>();
+            for (JsonNode dim : props.get("Dimensions")) {
+                dimensions.add(new Dimension(engine.resolve(dim.path("Name")), engine.resolve(dim.path("Value"))));
+            }
+            alarm.setDimensions(dimensions);
+        }
+        addAlarmActions(props, "AlarmActions", engine, alarm.getAlarmActions());
+        addAlarmActions(props, "OKActions", engine, alarm.getOkActions());
+        addAlarmActions(props, "InsufficientDataActions", engine, alarm.getInsufficientDataActions());
+
+        cloudWatchMetricsService.putMetricAlarm(alarm, region);
+        // Ref returns the alarm name; Fn::GetAtt Arn returns the alarm ARN.
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn", alarm.getAlarmArn());
+    }
+
+    private void addAlarmActions(JsonNode props, String field, CloudFormationTemplateEngine engine,
+                                 List<String> target) {
+        if (props != null && props.has(field) && props.get(field).isArray()) {
+            for (JsonNode action : props.get(field)) {
+                String resolved = engine.resolve(action);
+                if (resolved != null && !resolved.isBlank()) {
+                    target.add(resolved);
+                }
+            }
+        }
     }
 
     private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
