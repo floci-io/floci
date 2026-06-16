@@ -523,6 +523,18 @@ public class KmsService {
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    public void enableKey(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        if ("PendingDeletion".equals(key.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    "KMS key " + key.getKeyId() + " is pending deletion.", 400);
+        }
+        key.setEnabled(true);
+        key.setKeyState("Enabled");
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Enabled KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
     public void disableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
         key.setEnabled(false);
