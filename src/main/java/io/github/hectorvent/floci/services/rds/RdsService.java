@@ -507,6 +507,14 @@ public class RdsService {
     public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
                                      String masterUsername, String masterPassword,
                                      String databaseName, boolean iamEnabled,
+                                     String paramGroupName) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, null, null, false);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
                                      String paramGroupName, String dbSubnetGroupName,
                                      String availabilityZone, boolean multiAz) {
         if (clusters.get(id).isPresent()) {
@@ -987,6 +995,11 @@ public class RdsService {
         Map<String, String> subnetAvailabilityZones = group.getSubnetAvailabilityZones();
         String vpcId = group.getVpcId();
 
+        if (multiAz && availabilityZone != null && !availabilityZone.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "AvailabilityZone cannot be specified when MultiAZ is enabled.", 400);
+        }
+
         String effectiveAvailabilityZone = availabilityZone;
         if (effectiveAvailabilityZone == null || effectiveAvailabilityZone.isBlank()) {
             effectiveAvailabilityZone = subnetAvailabilityZones.values().stream()
@@ -1005,7 +1018,7 @@ public class RdsService {
                     .distinct()
                     .count();
             if (distinctZoneCount < 2) {
-                throw new AwsException("InvalidVPCNetworkStateFault",
+                throw new AwsException("DBSubnetGroupDoesNotCoverEnoughAZs",
                         "DB subnet group " + effectiveSubnetGroupName
                                 + " does not cover multiple Availability Zones.", 400);
             }

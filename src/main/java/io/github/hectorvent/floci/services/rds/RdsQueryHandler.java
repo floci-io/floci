@@ -594,7 +594,6 @@ public class RdsQueryHandler {
 
     private String dbInstanceInnerXml(DbInstance i) {
         DbEndpoint ep = i.getEndpoint();
-        DbSubnetGroup subnetGroup = service.resolveDbSubnetGroupView(i.getDbSubnetGroupName());
         String engineStr = i.getEngine() != null ? i.getEngine().name() : "";
         String statusStr = i.getStatus() != null ? statusLabel(i.getStatus()) : "available";
 

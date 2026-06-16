@@ -345,6 +345,39 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstanceMultiAzRequiresSubnetGroupCoverageAcrossAvailabilityZones() {
+        StorageBackend<String, DbSubnetGroup> subnetGroups = new InMemoryStorage<>();
+        subnetGroups.put("single-az-group", new DbSubnetGroup(
+                "single-az-group",
+                "desc",
+                "vpc-default",
+                List.of("subnet-a", "subnet-b"),
+                Map.of("subnet-a", "us-east-1a", "subnet-b", "us-east-1a")));
+        RdsService service = newService(containerManager, proxyManager,
+                new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new InMemoryStorage<>(), new InMemoryStorage<>(), subnetGroups);
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.createDbInstance("mydb", "postgres", "13",
+                        "admin", "password", "dbname", "db.t3.micro",
+                        20, false, null, "single-az-group", null, null, true));
+
+        assertEquals("DBSubnetGroupDoesNotCoverEnoughAZs", exception.getErrorCode());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void createDbClusterRejectsAvailabilityZoneWhenMultiAzEnabled() {
+        AwsException exception = assertThrows(AwsException.class, () ->
+                rdsService.createDbCluster("cluster1", "postgres", "13",
+                        "admin", "password", "dbname", false,
+                        null, null, "us-east-1a", true));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
     void resolveDbSubnetGroupViewReturnsStoredCustomGroup() {
         rdsService.createDbSubnetGroup("my-subnet-group", "desc", List.of("subnet-default-a", "subnet-default-b"));
 
