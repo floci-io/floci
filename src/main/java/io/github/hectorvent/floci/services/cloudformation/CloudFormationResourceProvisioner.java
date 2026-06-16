@@ -19,6 +19,7 @@ import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.Dimension;
+import io.github.hectorvent.floci.services.autoscaling.AutoScalingService;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.model.MetricAlarm;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
@@ -146,6 +147,7 @@ public class CloudFormationResourceProvisioner {
     private final CloudWatchLogsService logsService;
     private final KinesisService kinesisService;
     private final CloudWatchMetricsService cloudWatchMetricsService;
+    private final AutoScalingService autoScalingService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -172,7 +174,8 @@ public class CloudFormationResourceProvisioner {
                                              EksService eksService,
                                              CloudWatchLogsService logsService,
                                              KinesisService kinesisService,
-                                             CloudWatchMetricsService cloudWatchMetricsService) {
+                                             CloudWatchMetricsService cloudWatchMetricsService,
+                                             AutoScalingService autoScalingService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -202,6 +205,7 @@ public class CloudFormationResourceProvisioner {
         this.logsService = logsService;
         this.kinesisService = kinesisService;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
+        this.autoScalingService = autoScalingService;
     }
 
     /**
@@ -326,6 +330,10 @@ public class CloudFormationResourceProvisioner {
                         provisionKinesisStream(resource, properties, engine, region, stackName);
                 case "AWS::CloudWatch::Alarm" ->
                         provisionCloudWatchAlarm(resource, properties, engine, region, stackName);
+                case "AWS::AutoScaling::LaunchConfiguration" ->
+                        provisionLaunchConfiguration(resource, properties, engine, region, stackName);
+                case "AWS::AutoScaling::AutoScalingGroup" ->
+                        provisionAutoScalingGroup(resource, properties, engine, region, stackName);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -421,6 +429,10 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
                 case "AWS::CloudWatch::Alarm" ->
                         cloudWatchMetricsService.deleteAlarms(List.of(physicalId), region);
+                case "AWS::AutoScaling::LaunchConfiguration" ->
+                        autoScalingService.deleteLaunchConfiguration(region, physicalId);
+                case "AWS::AutoScaling::AutoScalingGroup" ->
+                        autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -713,6 +725,94 @@ public class CloudFormationResourceProvisioner {
                 }
             }
         }
+    }
+
+    // ── Auto Scaling ────────────────────────────────────────────────────────────
+
+    private void provisionLaunchConfiguration(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                              String region, String stackName) {
+        String name = resolveOptional(props, "LaunchConfigurationName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        String associatePublicIp = resolveOptional(props, "AssociatePublicIpAddress", engine);
+        var lc = autoScalingService.createLaunchConfiguration(region, name,
+                resolveOptional(props, "ImageId", engine),
+                resolveOptional(props, "InstanceType", engine),
+                resolveOptional(props, "KeyName", engine),
+                resolveStringList(props, "SecurityGroups", engine),
+                resolveOptional(props, "UserData", engine),
+                resolveOptional(props, "IamInstanceProfile", engine),
+                Boolean.parseBoolean(associatePublicIp));
+        // Ref returns the launch configuration name.
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn", lc.getLaunchConfigurationArn());
+    }
+
+    private void provisionAutoScalingGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                           String region, String stackName) {
+        String name = resolveOptional(props, "AutoScalingGroupName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 255, false);
+        }
+        String launchConfigName = resolveOptional(props, "LaunchConfigurationName", engine);
+        String launchTemplateName = null;
+        String launchTemplateVersion = null;
+        if (props != null && props.has("LaunchTemplate")) {
+            JsonNode lt = props.get("LaunchTemplate");
+            launchTemplateName = engine.resolve(lt.path("LaunchTemplateName"));
+            if (launchTemplateName == null || launchTemplateName.isBlank()) {
+                launchTemplateName = engine.resolve(lt.path("LaunchTemplateId"));
+            }
+            launchTemplateVersion = engine.resolve(lt.path("Version"));
+        }
+
+        var asg = autoScalingService.createAutoScalingGroup(region, name,
+                blankToNull(launchConfigName), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
+                parseIntProp(props, "MinSize", engine, 0),
+                parseIntProp(props, "MaxSize", engine, 0),
+                parseIntProp(props, "DesiredCapacity", engine, 0),
+                parseIntProp(props, "Cooldown", engine, 0),
+                resolveStringList(props, "AvailabilityZones", engine),
+                resolveStringList(props, "TargetGroupARNs", engine),
+                resolveStringList(props, "LoadBalancerNames", engine),
+                resolveOptional(props, "HealthCheckType", engine),
+                parseIntProp(props, "HealthCheckGracePeriod", engine, 0),
+                resolveStringList(props, "TerminationPolicies", engine),
+                resolveAsgTags(props, engine));
+        // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
+    }
+
+    private Map<String, String> resolveAsgTags(JsonNode props, CloudFormationTemplateEngine engine) {
+        Map<String, String> tags = new LinkedHashMap<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    tags.put(key, engine.resolve(tag.path("Value")));
+                }
+            }
+        }
+        return tags;
+    }
+
+    private List<String> resolveStringList(JsonNode props, String field, CloudFormationTemplateEngine engine) {
+        List<String> values = new ArrayList<>();
+        if (props != null && props.has(field) && props.get(field).isArray()) {
+            for (JsonNode element : props.get(field)) {
+                String resolved = engine.resolve(element);
+                if (resolved != null && !resolved.isBlank()) {
+                    values.add(resolved);
+                }
+            }
+        }
+        return values;
+    }
+
+    private String blankToNull(String value) {
+        return (value == null || value.isBlank()) ? null : value;
     }
 
     private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
