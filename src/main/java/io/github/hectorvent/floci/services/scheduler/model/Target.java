@@ -10,6 +10,7 @@ public class Target {
     private String input;
     private RetryPolicy retryPolicy;
     private DeadLetterConfig deadLetterConfig;
+    private SqsParameters sqsParameters;
 
     public Target() {}
 
@@ -34,4 +35,7 @@ public class Target {
 
     public DeadLetterConfig getDeadLetterConfig() { return deadLetterConfig; }
     public void setDeadLetterConfig(DeadLetterConfig deadLetterConfig) { this.deadLetterConfig = deadLetterConfig; }
+
+    public SqsParameters getSqsParameters() { return sqsParameters; }
+    public void setSqsParameters(SqsParameters sqsParameters) { this.sqsParameters = sqsParameters; }
 }

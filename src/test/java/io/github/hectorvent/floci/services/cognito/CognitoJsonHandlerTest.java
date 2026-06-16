@@ -268,6 +268,79 @@ class CognitoJsonHandlerTest {
         assertTrue(emailAttr.get("Required").asBoolean(), "email must be required per the override");
     }
 
+    // =========================================================================
+    // Issue #1306 — DescribeUserPoolClient extended configuration
+    // =========================================================================
+
+    @Test
+    void describeUserPoolClientReturnsExtendedConfigurationFields() {
+        ObjectNode poolReq = mapper.createObjectNode();
+        poolReq.put("PoolName", "client-pool");
+        JsonNode poolBody = (JsonNode) handler.handle("CreateUserPool", poolReq, "us-east-1").getEntity();
+        String poolId = poolBody.get("UserPool").get("Id").asText();
+
+        ObjectNode clientReq = mapper.createObjectNode();
+        clientReq.put("UserPoolId", poolId);
+        clientReq.put("ClientName", "extended-client");
+        clientReq.put("GenerateSecret", true);
+        clientReq.put("AllowedOAuthFlowsUserPoolClient", true);
+        clientReq.putArray("AllowedOAuthFlows").add("code");
+        clientReq.putArray("AllowedOAuthScopes").add("openid").add("email");
+        clientReq.putObject("AnalyticsConfiguration")
+                .put("ApplicationId", "d70b2ba36a8c4dc5a04a0451a31a1e12")
+                .put("ExternalId", "my-external-id")
+                .put("RoleArn", "arn:aws:iam::123456789012:role/test-cognitouserpool-role")
+                .put("UserDataShared", true);
+        clientReq.putArray("CallbackURLs").add("https://example.com").add("http://localhost");
+        clientReq.put("DefaultRedirectURI", "https://example.com");
+        clientReq.putArray("ExplicitAuthFlows").add("ALLOW_USER_AUTH").add("ALLOW_REFRESH_TOKEN_AUTH");
+        clientReq.put("AccessTokenValidity", 6);
+        clientReq.put("IdTokenValidity", 7);
+        clientReq.putArray("LogoutURLs").add("https://example.com/logout");
+        clientReq.put("PreventUserExistenceErrors", "ENABLED");
+        clientReq.putArray("ReadAttributes").add("email").add("address");
+        clientReq.put("RefreshTokenValidity", 8);
+        clientReq.putArray("SupportedIdentityProviders").add("COGNITO").add("Google");
+        clientReq.putObject("TokenValidityUnits")
+                .put("AccessToken", "hours")
+                .put("IdToken", "minutes")
+                .put("RefreshToken", "days");
+        clientReq.putArray("WriteAttributes").add("family_name").add("email");
+        clientReq.putObject("RefreshTokenRotation")
+                .put("Feature", "ENABLED")
+                .put("RetryGracePeriodSeconds", 30);
+        clientReq.put("EnableTokenRevocation", true);
+
+        JsonNode clientBody = (JsonNode) handler.handle("CreateUserPoolClient", clientReq, "us-east-1").getEntity();
+        String clientId = clientBody.get("UserPoolClient").get("ClientId").asText();
+
+        ObjectNode describeReq = mapper.createObjectNode();
+        describeReq.put("UserPoolId", poolId);
+        describeReq.put("ClientId", clientId);
+
+        JsonNode describeBody = (JsonNode) handler.handle("DescribeUserPoolClient", describeReq, "us-east-1").getEntity();
+        JsonNode client = describeBody.get("UserPoolClient");
+
+        assertTrue(client.get("AllowedOAuthFlowsUserPoolClient").asBoolean());
+        assertEquals("code", client.get("AllowedOAuthFlows").get(0).asText());
+        assertEquals("openid", client.get("AllowedOAuthScopes").get(0).asText());
+        assertEquals("d70b2ba36a8c4dc5a04a0451a31a1e12", client.get("AnalyticsConfiguration").get("ApplicationId").asText());
+        assertEquals("https://example.com", client.get("CallbackURLs").get(0).asText());
+        assertEquals("https://example.com", client.get("DefaultRedirectURI").asText());
+        assertEquals("ALLOW_USER_AUTH", client.get("ExplicitAuthFlows").get(0).asText());
+        assertEquals(6, client.get("AccessTokenValidity").asInt());
+        assertEquals(7, client.get("IdTokenValidity").asInt());
+        assertEquals("https://example.com/logout", client.get("LogoutURLs").get(0).asText());
+        assertEquals("ENABLED", client.get("PreventUserExistenceErrors").asText());
+        assertEquals("email", client.get("ReadAttributes").get(0).asText());
+        assertEquals(8, client.get("RefreshTokenValidity").asInt());
+        assertEquals("COGNITO", client.get("SupportedIdentityProviders").get(0).asText());
+        assertEquals("hours", client.get("TokenValidityUnits").get("AccessToken").asText());
+        assertEquals("family_name", client.get("WriteAttributes").get(0).asText());
+        assertEquals("ENABLED", client.get("RefreshTokenRotation").get("Feature").asText());
+        assertTrue(client.get("EnableTokenRevocation").asBoolean());
+    }
+
     @Test
     void tagResourceRejectsReservedKey() {
         ObjectNode createRequest = mapper.createObjectNode();

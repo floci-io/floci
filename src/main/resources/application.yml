@@ -11,6 +11,8 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.max-request-size}M
+  datasource:
+    active: false
   security:
      security-providers: BC
   shutdown:
@@ -24,7 +26,7 @@ quarkus:
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**,ec2/*.yaml
+      includes: pricing-snapshots/**,ui/*.html,ec2/*.yaml
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -87,6 +89,10 @@ floci:
         flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
+        # mode: memory
+      ec2:
+        # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
+        # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
 
   dns:
@@ -275,6 +281,12 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname
+    ui:
+      enabled: true
+      image: "floci/floci-ui:latest"
+      container-name: floci-ui
+      port: 4500
+      keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
     eks:
