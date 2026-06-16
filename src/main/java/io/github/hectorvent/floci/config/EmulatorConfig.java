@@ -168,6 +168,7 @@ public interface EmulatorConfig {
         AppConfigDataStorageConfig appconfigdata();
         ElastiCacheStorageConfig elasticache();
         RdsStorageConfig rds();
+        Ec2StorageConfig ec2();
         NeptuneStorageConfig neptune();
         BackupStorageConfig backup();
         CloudFrontStorageConfig cloudfront();
@@ -268,6 +269,10 @@ public interface EmulatorConfig {
     }
 
     interface RdsStorageConfig {
+        Optional<String> mode();
+    }
+
+    interface Ec2StorageConfig {
         Optional<String> mode();
     }
 

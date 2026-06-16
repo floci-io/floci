@@ -88,6 +88,10 @@ floci:
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
+      ec2:
+        # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
+        # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
+        # mode: memory
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
