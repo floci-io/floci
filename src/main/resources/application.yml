@@ -22,8 +22,9 @@ quarkus:
   native:
     resources:
       # The Pricing service reads its bundled snapshot, EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), and AppSync's GraphQL parser reads
-      # its message bundles at runtime via
+      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # message bundles, and API Gateway's Velocity engine reads its default
+      # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
@@ -32,6 +33,7 @@ quarkus:
         - ui/*.html
         - ec2/*.yaml
         - i18n/*.properties
+        - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
