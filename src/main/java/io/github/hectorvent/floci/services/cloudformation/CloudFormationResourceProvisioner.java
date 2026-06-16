@@ -20,6 +20,9 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.eks.EksService;
+import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsCluster;
@@ -134,6 +137,7 @@ public class CloudFormationResourceProvisioner {
     private final BatchService batchService;
     private final Ec2Service ec2Service;
     private final RdsService rdsService;
+    private final EksService eksService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -156,7 +160,8 @@ public class CloudFormationResourceProvisioner {
                                              StepFunctionsService stepFunctionsService,
                                              BatchService batchService,
                                              Ec2Service ec2Service,
-                                             RdsService rdsService) {
+                                             RdsService rdsService,
+                                             EksService eksService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -182,6 +187,7 @@ public class CloudFormationResourceProvisioner {
         this.batchService = batchService;
         this.ec2Service = ec2Service;
         this.rdsService = rdsService;
+        this.eksService = eksService;
     }
 
     /**
@@ -299,6 +305,8 @@ public class CloudFormationResourceProvisioner {
                         provisionDbClusterParameterGroup(resource, properties, engine, stackName);
                 case "AWS::RDS::DBInstance" -> provisionDbInstance(resource, properties, engine, stackName);
                 case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName);
+                case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
+                case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -329,6 +337,19 @@ public class CloudFormationResourceProvisioner {
                 || (resourceType != null && resourceType.startsWith("Custom::"));
         if (custom) {
             deleteCustomResource(resource, region);
+            return;
+        }
+        // Nodegroup deletion needs both the cluster name (from a Fn::GetAtt attribute) and the
+        // nodegroup name (the physical id), which the type/physicalId delete path can't provide.
+        if ("AWS::EKS::Nodegroup".equals(resourceType)) {
+            String clusterName = resource.getAttributes().get("ClusterName");
+            if (clusterName != null && !clusterName.isBlank()) {
+                try {
+                    eksService.deleteNodegroup(clusterName, resource.getPhysicalId());
+                } catch (Exception e) {
+                    LOG.debugv("Error deleting nodegroup {0}: {1}", resource.getPhysicalId(), e.getMessage());
+                }
+            }
             return;
         }
         delete(resourceType, resource.getPhysicalId(), region);
@@ -376,6 +397,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
                 case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
                 case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
+                case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -700,6 +722,52 @@ public class CloudFormationResourceProvisioner {
 
     private boolean parseBoolProp(JsonNode props, String name, CloudFormationTemplateEngine engine) {
         return Boolean.parseBoolean(resolveOptional(props, name, engine));
+    }
+
+    // ── EKS ─────────────────────────────────────────────────────────────────────
+
+    private void provisionEksCluster(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                     String stackName) {
+        String name = resolveOptional(props, "Name", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 100, false);
+        }
+        CreateClusterRequest request = new CreateClusterRequest();
+        request.setName(name);
+        request.setVersion(resolveOptional(props, "Version", engine));
+        request.setRoleArn(resolveOptional(props, "RoleArn", engine));
+        var cluster = eksService.createCluster(request);
+        r.setPhysicalId(cluster.getName());
+        r.getAttributes().put("Arn", cluster.getArn());
+        if (cluster.getEndpoint() != null) {
+            r.getAttributes().put("Endpoint", cluster.getEndpoint());
+        }
+    }
+
+    private void provisionEksNodegroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                       String stackName) {
+        String clusterName = resolveOptional(props, "ClusterName", engine);
+        Nodegroup request = new Nodegroup();
+        String nodegroupName = resolveOptional(props, "NodegroupName", engine);
+        if (nodegroupName == null || nodegroupName.isBlank()) {
+            nodegroupName = generatePhysicalName(stackName, r.getLogicalId(), 100, false);
+        }
+        request.setNodegroupName(nodegroupName);
+        request.setNodeRole(resolveOptional(props, "NodeRole", engine));
+        List<String> subnets = new ArrayList<>();
+        if (props != null && props.has("Subnets") && props.get("Subnets").isArray()) {
+            for (JsonNode subnet : props.get("Subnets")) {
+                subnets.add(engine.resolve(subnet));
+            }
+        }
+        request.setSubnets(subnets);
+        var nodegroup = eksService.createNodegroup(clusterName, request);
+        r.setPhysicalId(nodegroup.getNodegroupName());
+        r.getAttributes().put("ClusterName", nodegroup.getClusterName());
+        r.getAttributes().put("NodegroupName", nodegroup.getNodegroupName());
+        if (nodegroup.getNodegroupArn() != null) {
+            r.getAttributes().put("Arn", nodegroup.getNodegroupArn());
+        }
     }
 
     // ── SNS ───────────────────────────────────────────────────────────────────
