@@ -157,6 +157,64 @@ class SecretsManagerJsonHandlerTest {
         assertThat(secret.has("CreatedDate"), is(true));
     }
 
+    private void createSecret(String name) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Name", name);
+        handler.handle("CreateSecret", req, REGION);
+    }
+
+    @Test
+    void listSecretsHonorsMaxResultsAndPaginatesWithNextToken() {
+        for (int i = 1; i <= 5; i++) {
+            createSecret("secret-" + i);
+        }
+
+        ObjectNode pageReq = MAPPER.createObjectNode();
+        pageReq.put("MaxResults", 2);
+        ObjectNode page1 = (ObjectNode) handler.handle("ListSecrets", pageReq, REGION).getEntity();
+        assertThat(page1.get("SecretList").size(), is(2));
+        assertThat(page1.has("NextToken"), is(true));
+
+        // Walk the remaining pages via NextToken; every secret appears exactly once.
+        int total = page1.get("SecretList").size();
+        String nextToken = page1.get("NextToken").asText();
+        while (nextToken != null) {
+            ObjectNode req = MAPPER.createObjectNode();
+            req.put("MaxResults", 2);
+            req.put("NextToken", nextToken);
+            ObjectNode page = (ObjectNode) handler.handle("ListSecrets", req, REGION).getEntity();
+            assertThat(page.get("SecretList").size(), lessThanOrEqualTo(2));
+            total += page.get("SecretList").size();
+            nextToken = page.has("NextToken") ? page.get("NextToken").asText() : null;
+        }
+        assertThat(total, is(5));
+    }
+
+    @Test
+    void listSecretsWithoutMaxResultsReturnsAllAndNoNextToken() {
+        for (int i = 1; i <= 3; i++) {
+            createSecret("secret-" + i);
+        }
+
+        ObjectNode body = (ObjectNode) handler.handle("ListSecrets", MAPPER.createObjectNode(), REGION).getEntity();
+        assertThat(body.get("SecretList").size(), is(3));
+        assertThat(body.has("NextToken"), is(false));
+    }
+
+    @Test
+    void listSecretsRejectsMaxResultsOutOfRange() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("MaxResults", 101);
+        assertThat(handler.handle("ListSecrets", req, REGION).getStatus(), is(400));
+    }
+
+    @Test
+    void listSecretsRejectsInvalidNextToken() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("NextToken", "not-a-number");
+        assertThat(handler.handle("ListSecrets", req, REGION).getStatus(), is(400));
+    }
+
     @Test
     void batchGetSecretValue() {
         ObjectNode createReq1 = MAPPER.createObjectNode();

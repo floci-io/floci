@@ -12,6 +12,7 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -242,11 +243,45 @@ public class SecretsManagerJsonHandler {
     }
 
     private Response handleListSecrets(JsonNode request, String region) {
-        List<Secret> secrets = service.listSecrets(region);
+        List<Secret> secrets = new ArrayList<>(service.listSecrets(region));
+        // Sort for stable pagination across calls (the store scan order is not guaranteed).
+        secrets.sort(Comparator.comparing(Secret::getName));
+
+        // MaxResults is constrained to 1-100; when absent the full result set is returned.
+        int maxResults = secrets.size();
+        if (request.hasNonNull("MaxResults")) {
+            maxResults = request.path("MaxResults").asInt();
+            if (maxResults < 1 || maxResults > 100) {
+                return Response.status(400)
+                        .entity(new AwsErrorResponse("ValidationException",
+                                "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to "
+                                        + "satisfy constraint: Member must have value less than or equal to 100 and "
+                                        + "greater than or equal to 1"))
+                        .build();
+            }
+        }
+
+        // NextToken is an opaque offset into the sorted secret list.
+        int offset = 0;
+        if (request.hasNonNull("NextToken")) {
+            try {
+                offset = Integer.parseInt(request.path("NextToken").asText());
+                if (offset < 0) {
+                    throw new NumberFormatException();
+                }
+            } catch (NumberFormatException e) {
+                return Response.status(400)
+                        .entity(new AwsErrorResponse("InvalidNextTokenException", "Invalid NextToken"))
+                        .build();
+            }
+        }
+        offset = Math.min(offset, secrets.size());
+        int end = Math.min(secrets.size(), offset + maxResults);
+        List<Secret> page = secrets.subList(offset, end);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode secretList = objectMapper.createArrayNode();
-        for (Secret secret : secrets) {
+        for (Secret secret : page) {
             ObjectNode node = objectMapper.createObjectNode();
             node.put("ARN", secret.getArn());
             node.put("Name", secret.getName());
@@ -279,6 +314,9 @@ public class SecretsManagerJsonHandler {
             secretList.add(node);
         }
         response.set("SecretList", secretList);
+        if (end < secrets.size()) {
+            response.put("NextToken", String.valueOf(end));
+        }
         return Response.ok(response).build();
     }
 
