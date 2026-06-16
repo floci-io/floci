@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.AwsVpcConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
@@ -286,6 +287,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Route" -> provisionRoute(resource, properties, engine, region);
                 case "AWS::EC2::NatGateway" -> provisionNatGateway(resource, properties, engine, region);
                 case "AWS::EC2::EIP" -> provisionEip(resource, region);
+                case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -357,6 +359,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
+                case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -502,6 +505,57 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(addr.getPublicIp());
         r.getAttributes().put("AllocationId", addr.getAllocationId());
         r.getAttributes().put("PublicIp", addr.getPublicIp());
+    }
+
+    private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                      String region) {
+        String imageId = resolveOptional(props, "ImageId", engine);
+        String instanceType = resolveOptional(props, "InstanceType", engine);
+        if (instanceType == null || instanceType.isBlank()) {
+            instanceType = "t3.micro";
+        }
+        String keyName = resolveOptional(props, "KeyName", engine);
+        String subnetId = resolveOptional(props, "SubnetId", engine);
+        String userData = resolveOptional(props, "UserData", engine);
+        String iamInstanceProfile = resolveOptional(props, "IamInstanceProfile", engine);
+
+        List<String> securityGroupIds = new ArrayList<>();
+        if (props != null && props.has("SecurityGroupIds") && props.get("SecurityGroupIds").isArray()) {
+            for (JsonNode sg : props.get("SecurityGroupIds")) {
+                securityGroupIds.add(engine.resolve(sg));
+            }
+        }
+
+        List<Tag> tags = new ArrayList<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    tags.add(new Tag(key, engine.resolve(tag.path("Value"))));
+                }
+            }
+        }
+
+        var reservation = ec2Service.runInstances(region, imageId, instanceType, 1, 1, keyName,
+                securityGroupIds, subnetId, null, tags, userData, iamInstanceProfile);
+        var instance = reservation.getInstances().get(0);
+        r.setPhysicalId(instance.getInstanceId());
+        r.getAttributes().put("InstanceId", instance.getInstanceId());
+        if (instance.getPrivateIpAddress() != null) {
+            r.getAttributes().put("PrivateIp", instance.getPrivateIpAddress());
+        }
+        if (instance.getPublicIpAddress() != null) {
+            r.getAttributes().put("PublicIp", instance.getPublicIpAddress());
+        }
+        if (instance.getPrivateDnsName() != null) {
+            r.getAttributes().put("PrivateDnsName", instance.getPrivateDnsName());
+        }
+        if (instance.getPublicDnsName() != null) {
+            r.getAttributes().put("PublicDnsName", instance.getPublicDnsName());
+        }
+        if (instance.getPlacement() != null && instance.getPlacement().getAvailabilityZone() != null) {
+            r.getAttributes().put("AvailabilityZone", instance.getPlacement().getAvailabilityZone());
+        }
     }
 
     // ── SNS ───────────────────────────────────────────────────────────────────
