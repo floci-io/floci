@@ -207,7 +207,22 @@ class CognitoServiceTest {
                 true,
                 true,
                 List.of(" code ", "code", "implicit", "", "implicit"),
-                new ArrayList<>(java.util.Arrays.asList(" openid ", "openid", "email", null, "email"))
+                new ArrayList<>(java.util.Arrays.asList(" openid ", "openid", "email", null, "email")),
+                null,
+                List.of("https://example.com/callback"),
+                "https://example.com/callback",
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null
         );
 
         assertNotNull(client.getClientId());
@@ -246,6 +261,112 @@ class CognitoServiceTest {
     }
 
     @Test
+    void createUserPoolClientRejectsInvalidTokenValidityConfiguration() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-token-validity-client",
+                        false,
+                        false,
+                        List.of(),
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        -1,
+                        0,
+                        List.of(),
+                        null,
+                        List.of(),
+                        -7,
+                        List.of(),
+                        Map.of(
+                                "AccessToken", "weeks",
+                                "IdToken", "minutes",
+                                "RefreshToken", "days"
+                        ),
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void createUserPoolClientRejectsInconsistentOAuthFlowConfiguration() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-oauth-client",
+                        false,
+                        false,
+                        List.of("code"),
+                        List.of("openid"),
+                        null,
+                        List.of("https://example.com/callback"),
+                        "https://example.com/callback",
+                        List.of(),
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void createUserPoolClientRejectsDefaultRedirectUriNotInCallbackUrls() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-redirect-client",
+                        false,
+                        true,
+                        List.of("code"),
+                        List.of("openid"),
+                        null,
+                        List.of("https://example.com/callback"),
+                        "https://different.example.com/callback",
+                        List.of(),
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
     void updateUserPoolClientAllowsClearingListFieldsWithEmptyArrays() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
 
@@ -253,9 +374,9 @@ class CognitoServiceTest {
                 pool.getId(),
                 "client",
                 false,
-                false,
-                List.of(),
-                List.of(),
+                true,
+                List.of("code"),
+                List.of("openid"),
                 null,
                 List.of("https://example.com"),
                 "https://example.com",
@@ -277,12 +398,12 @@ class CognitoServiceTest {
                 pool.getId(),
                 client.getClientId(),
                 null,
-                null,
-                null,
-                null,
-                null,
+                false,
+                List.of(),
                 List.of(),
                 null,
+                List.of(),
+                "",
                 List.of(),
                 null,
                 null,

@@ -573,8 +573,11 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "ClientName": "secret-client",
                   "GenerateSecret": true,
+                  "AllowedOAuthFlowsUserPoolClient": true,
                   "AllowedOAuthFlows": ["code"],
-                  "AllowedOAuthScopes": ["openid"]
+                  "AllowedOAuthScopes": ["openid"],
+                  "CallbackURLs": ["https://example.com/callback"],
+                  "DefaultRedirectURI": "https://example.com/callback"
                 }
                 """.formatted(poolId));
         String secretClientId = secretClient.path("UserPoolClient").path("ClientId").asText();
@@ -646,7 +649,9 @@ class CognitoIntegrationTest {
                   "ClientName": "updated-name",
                   "AllowedOAuthFlowsUserPoolClient": true,
                   "AllowedOAuthFlows": ["code", "implicit"],
-                  "AllowedOAuthScopes": ["email", "openid"]
+                  "AllowedOAuthScopes": ["email", "openid"],
+                  "CallbackURLs": ["https://example.com/callback"],
+                  "DefaultRedirectURI": "https://example.com/callback"
                 }
                 """.formatted(poolId, cid));
 
@@ -1600,7 +1605,7 @@ class CognitoIntegrationTest {
                 {
                   "UserPoolId": "%s",
                   "ClientId": "%s",
-                  "AllowedOAuthFlowsUserPoolClient": false,
+                  "AllowedOAuthFlowsUserPoolClient": true,
                   "AllowedOAuthFlows": ["implicit"],
                   "AllowedOAuthScopes": ["email"],
                   "AnalyticsConfiguration": {
@@ -1641,7 +1646,7 @@ class CognitoIntegrationTest {
                 """.formatted(extendedPoolId, extendedClientId));
         JsonNode described = describeResp.path("UserPoolClient");
 
-        assertFalse(described.path("AllowedOAuthFlowsUserPoolClient").asBoolean());
+        assertTrue(described.path("AllowedOAuthFlowsUserPoolClient").asBoolean());
         assertEquals(1, described.path("AllowedOAuthFlows").size());
         assertEquals("implicit", described.path("AllowedOAuthFlows").get(0).asText());
         assertEquals(1, described.path("AllowedOAuthScopes").size());
@@ -1675,6 +1680,84 @@ class CognitoIntegrationTest {
 
     @Test
     @Order(96)
+    void createUserPoolClientRejectsInvalidTokenValidityConfiguration() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "InvalidTokenValidityPool"
+                }
+                """);
+        String invalidPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        cognitoAction("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "invalid-token-validity-client",
+                  "AccessTokenValidity": -1,
+                  "IdTokenValidity": 0,
+                  "RefreshTokenValidity": -7,
+                  "TokenValidityUnits": {
+                    "AccessToken": "weeks",
+                    "IdToken": "minutes",
+                    "RefreshToken": "days"
+                  }
+                }
+                """.formatted(invalidPoolId))
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    @Order(97)
+    void createUserPoolClientRejectsInconsistentOAuthFlowConfiguration() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "InvalidOauthClientPool"
+                }
+                """);
+        String invalidPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        cognitoAction("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "invalid-oauth-client",
+                  "AllowedOAuthFlowsUserPoolClient": false,
+                  "AllowedOAuthFlows": ["code"],
+                  "AllowedOAuthScopes": ["openid"],
+                  "CallbackURLs": ["https://example.com/callback"],
+                  "DefaultRedirectURI": "https://example.com/callback"
+                }
+                """.formatted(invalidPoolId))
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    @Order(98)
+    void createUserPoolClientRejectsDefaultRedirectUriNotInCallbackUrls() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "InvalidRedirectClientPool"
+                }
+                """);
+        String invalidPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        cognitoAction("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "invalid-redirect-client",
+                  "AllowedOAuthFlowsUserPoolClient": true,
+                  "AllowedOAuthFlows": ["code"],
+                  "AllowedOAuthScopes": ["openid"],
+                  "CallbackURLs": ["https://example.com/callback"],
+                  "DefaultRedirectURI": "https://different.example.com/callback"
+                }
+                """.formatted(invalidPoolId))
+                .then()
+                .statusCode(400);
+    }
+
+    @Test
+    @Order(99)
     void configuredTokenValidityControlsAuthResultAndJwtExpiry() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """
                 {
