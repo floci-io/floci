@@ -2,9 +2,15 @@
 
 **Protocol:** Query (XML) for the management API
 **Management Endpoint:** `POST http://localhost:4566/` with `Action=` param
-**Data Endpoint:** `<cluster-endpoint>:<port>` (MongoDB wire protocol, port `27017`)
+**Data Endpoint:** the `Endpoint` and `Port` returned by `DescribeDBClusters` (MongoDB wire protocol)
 
 Floci emulates Amazon DocumentDB by managing real [MongoDB](https://www.mongodb.com/) Docker containers behind an RDS-shaped control plane. DocumentDB is MongoDB-compatible, so the cluster endpoint returned by `DescribeDBClusters` speaks the MongoDB wire protocol and works with any standard MongoDB driver.
+
+> **Always read the host and port from `DescribeDBClusters`** rather than assuming a fixed port. MongoDB listens on `27017` *inside* the container, but the port you connect to depends on how Floci runs:
+>
+> - **Real mode, Floci on the host** (default): the container's `27017` is published on a **dynamically assigned host port**. `DescribeDBClusters.Port` returns that mapped port.
+> - **Real mode, Floci itself in a container** (shared Docker network): the endpoint is the container host on `27017`.
+> - **Mock mode** (`FLOCI_SERVICES_DOCDB_MOCK=true`): no container is started; the cluster reports `localhost:27017`.
 
 The management API shares the RDS Query endpoint (`POST /` with an `Action=` parameter). Requests are routed to DocumentDB when `Engine=docdb` is supplied, or when the referenced cluster/instance is a known DocumentDB resource.
 
@@ -30,7 +36,7 @@ The management API shares the RDS Query endpoint (`POST /` with an `Action=` par
 | `FLOCI_SERVICES_DOCDB_DEFAULT_IMAGE` | `mongo:7.0` | MongoDB Docker image |
 | `FLOCI_SERVICES_DOCDB_DOCKER_NETWORK` | _(host default)_ | Docker network for container connectivity |
 
-In mock mode no container is started; the cluster reports `localhost:27017` as its endpoint. This is useful for control-plane tests that do not need a live database.
+Mock mode is useful for control-plane tests that do not need a live database; the cluster reports `localhost:27017` and no container is started.
 
 ### Docker Compose
 
@@ -92,8 +98,10 @@ aws docdb delete-db-cluster \
 ```python
 from pymongo import MongoClient
 
-# Use the endpoint and port returned by DescribeDBClusters
-client = MongoClient("mongodb://admin:secret99@localhost:27017/")
+# Read the host and port from DescribeDBClusters — the port is dynamic
+# in real mode and is NOT guaranteed to be 27017.
+host, port = "localhost", 32768  # e.g. DBClusters[0].Endpoint / .Port
+client = MongoClient(f"mongodb://admin:secret99@{host}:{port}/")
 
 db = client["app"]
 db["people"].insert_one({"name": "Alice"})
