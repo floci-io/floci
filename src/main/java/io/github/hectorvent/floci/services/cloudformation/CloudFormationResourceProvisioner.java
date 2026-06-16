@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.services.dynamodb.model.LocalSecondaryIndex;
 import io.github.hectorvent.floci.services.dynamodb.model.TableDefinition;
 import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
+import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
@@ -138,6 +139,7 @@ public class CloudFormationResourceProvisioner {
     private final Ec2Service ec2Service;
     private final RdsService rdsService;
     private final EksService eksService;
+    private final CloudWatchLogsService logsService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -161,7 +163,8 @@ public class CloudFormationResourceProvisioner {
                                              BatchService batchService,
                                              Ec2Service ec2Service,
                                              RdsService rdsService,
-                                             EksService eksService) {
+                                             EksService eksService,
+                                             CloudWatchLogsService logsService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -188,6 +191,7 @@ public class CloudFormationResourceProvisioner {
         this.ec2Service = ec2Service;
         this.rdsService = rdsService;
         this.eksService = eksService;
+        this.logsService = logsService;
     }
 
     /**
@@ -307,6 +311,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::RDS::DBCluster" -> provisionDbCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
+                case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -398,6 +403,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
                 case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
                 case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
+                case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -543,6 +549,39 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(addr.getPublicIp());
         r.getAttributes().put("AllocationId", addr.getAllocationId());
         r.getAttributes().put("PublicIp", addr.getPublicIp());
+    }
+
+    // ── CloudWatch Logs ─────────────────────────────────────────────────────────
+
+    private void provisionLogGroup(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                   String region, String accountId, String stackName) {
+        String name = resolveOptional(props, "LogGroupName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 512, false);
+        }
+        Integer retentionInDays = null;
+        String retention = resolveOptional(props, "RetentionInDays", engine);
+        if (retention != null && !retention.isBlank()) {
+            try {
+                retentionInDays = Integer.valueOf(retention.trim());
+            } catch (NumberFormatException ignored) {
+                // leave unset
+            }
+        }
+        Map<String, String> tags = new HashMap<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    tags.put(key, engine.resolve(tag.path("Value")));
+                }
+            }
+        }
+        logsService.createLogGroup(name, retentionInDays, tags, region);
+        // Ref returns the log group name; GetAtt Arn is arn:aws:logs:<region>:<account>:log-group:<name>:*
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn",
+                AwsArnUtils.Arn.of("logs", region, accountId, "log-group:" + name + ":*").toString());
     }
 
     private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
