@@ -239,9 +239,9 @@ final class CognitoAuthFlowHandler {
                 CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
                         clientMetadata, "TokenGeneration_RefreshTokens");
                 Map<String, Object> auth = new HashMap<>();
-                auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", tokenClientId, override));
-                auth.put("IdToken", service.generateSignedJwt(user, pool, "id", tokenClientId, override));
-                auth.put("ExpiresIn", 3600);
+                auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override));
+                auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override));
+                auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
                 auth.put("TokenType", "Bearer");
                 Map<String, Object> result = new HashMap<>();
                 result.put("AuthenticationResult", auth);
@@ -249,9 +249,9 @@ final class CognitoAuthFlowHandler {
             } catch (AwsException ignored) { }
         }
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", service.generateTokenString("access", "unknown", pool, client.getClientId()));
-        auth.put("IdToken", service.generateTokenString("id", "unknown", pool, client.getClientId()));
-        auth.put("ExpiresIn", 3600);
+        auth.put("AccessToken", service.generateTokenString("access", "unknown", pool, client));
+        auth.put("IdToken", service.generateTokenString("id", "unknown", pool, client));
+        auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
         auth.put("TokenType", "Bearer");
         Map<String, Object> result = new HashMap<>();
         result.put("AuthenticationResult", auth);
@@ -934,7 +934,7 @@ final class CognitoAuthFlowHandler {
                                              String triggerSource, Map<String, String> clientMetadata) {
         firePostAuthentication(pool, client, user, clientMetadata, false);
         CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user, clientMetadata, triggerSource);
-        return service.generateAuthResult(user, pool, client.getClientId(), override);
+        return service.generateAuthResult(user, pool, client, override);
     }
 
     CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user) {

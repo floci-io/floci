@@ -58,6 +58,7 @@ import software.amazon.awssdk.services.iam.model.NoSuchEntityException;
 import software.amazon.awssdk.services.iam.model.PutRolePolicyRequest;
 import software.amazon.awssdk.services.iam.model.RemoveRoleFromInstanceProfileRequest;
 import software.amazon.awssdk.services.iam.model.RemoveUserFromGroupRequest;
+import software.amazon.awssdk.services.iam.model.SimulatePrincipalPolicyRequest;
 import software.amazon.awssdk.services.iam.model.StatusType;
 import software.amazon.awssdk.services.iam.model.TagUserRequest;
 import software.amazon.awssdk.services.iam.model.UntagUserRequest;
@@ -377,6 +378,27 @@ class IamTest {
 
     @Test
     @Order(24)
+    void simulatePrincipalPolicy() {
+        var response = iam.simulatePrincipalPolicy(SimulatePrincipalPolicyRequest.builder()
+                .policySourceArn("arn:aws:iam::000000000000:user/" + USER_NAME)
+                .actionNames("s3:GetObject", "ec2:RunInstances")
+                .resourceArns("*")
+                .build());
+
+        assertThat(response.evaluationResults()).hasSize(2);
+        assertThat(response.evaluationResults())
+                .anySatisfy(result -> {
+                    assertThat(result.evalActionName()).isEqualTo("s3:GetObject");
+                    assertThat(result.evalDecisionAsString()).isEqualTo("allowed");
+                })
+                .anySatisfy(result -> {
+                    assertThat(result.evalActionName()).isEqualTo("ec2:RunInstances");
+                    assertThat(result.evalDecisionAsString()).isEqualTo("implicitDeny");
+                });
+    }
+
+    @Test
+    @Order(25)
     void putRolePolicy() {
         iam.putRolePolicy(PutRolePolicyRequest.builder()
                 .roleName(ROLE_NAME)
@@ -386,7 +408,7 @@ class IamTest {
     }
 
     @Test
-    @Order(25)
+    @Order(26)
     void getRolePolicy() {
         GetRolePolicyResponse response = iam.getRolePolicy(GetRolePolicyRequest.builder()
                 .roleName(ROLE_NAME).policyName("inline-exec").build());
@@ -395,7 +417,7 @@ class IamTest {
     }
 
     @Test
-    @Order(26)
+    @Order(27)
     void listRolePolicies() {
         ListRolePoliciesResponse response = iam.listRolePolicies(
                 ListRolePoliciesRequest.builder().roleName(ROLE_NAME).build());
@@ -406,7 +428,7 @@ class IamTest {
     // ── Instance Profiles ──────────────────────────────────────────────
 
     @Test
-    @Order(27)
+    @Order(28)
     void createInstanceProfile() {
         CreateInstanceProfileResponse response = iam.createInstanceProfile(
                 CreateInstanceProfileRequest.builder()
@@ -417,14 +439,14 @@ class IamTest {
     }
 
     @Test
-    @Order(28)
+    @Order(29)
     void addRoleToInstanceProfile() {
         iam.addRoleToInstanceProfile(AddRoleToInstanceProfileRequest.builder()
                 .instanceProfileName(INSTANCE_PROFILE_NAME).roleName(ROLE_NAME).build());
     }
 
     @Test
-    @Order(29)
+    @Order(30)
     void getInstanceProfile() {
         GetInstanceProfileResponse response = iam.getInstanceProfile(
                 GetInstanceProfileRequest.builder()
@@ -435,7 +457,7 @@ class IamTest {
     }
 
     @Test
-    @Order(30)
+    @Order(31)
     void listInstanceProfiles() {
         ListInstanceProfilesResponse response = iam.listInstanceProfiles();
 
@@ -446,7 +468,7 @@ class IamTest {
     // ── Error Cases ────────────────────────────────────────────────────
 
     @Test
-    @Order(31)
+    @Order(32)
     void getUserNotFoundThrows() {
         assertThatThrownBy(() -> iam.getUser(GetUserRequest.builder()
                 .userName("nonexistent-user-xyz").build()))

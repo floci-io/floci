@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.scheduler.model.RetryPolicy;
 import io.github.hectorvent.floci.services.scheduler.model.Schedule;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleGroup;
 import io.github.hectorvent.floci.services.scheduler.model.ScheduleRequest;
+import io.github.hectorvent.floci.services.scheduler.model.SqsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -260,6 +261,12 @@ public class SchedulerController {
                 dlc.put("Arn", s.getTarget().getDeadLetterConfig().getArn());
                 t.put("DeadLetterConfig", dlc);
             }
+            if (s.getTarget().getSqsParameters() != null
+                    && s.getTarget().getSqsParameters().getMessageGroupId() != null) {
+                Map<String, Object> sp = new HashMap<>();
+                sp.put("MessageGroupId", s.getTarget().getSqsParameters().getMessageGroupId());
+                t.put("SqsParameters", sp);
+            }
             r.put("Target", t);
         }
         if (s.getDescription() != null) {
@@ -386,6 +393,14 @@ public class SchedulerController {
                 dlc.setArn(dlcNode.get("Arn").asText());
             }
             target.setDeadLetterConfig(dlc);
+        }
+        if (node.has("SqsParameters") && !node.get("SqsParameters").isNull()) {
+            JsonNode spNode = node.get("SqsParameters");
+            SqsParameters sp = new SqsParameters();
+            if (spNode.has("MessageGroupId") && !spNode.get("MessageGroupId").isNull()) {
+                sp.setMessageGroupId(spNode.get("MessageGroupId").asText());
+            }
+            target.setSqsParameters(sp);
         }
         return target;
     }

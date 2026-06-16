@@ -186,7 +186,35 @@ public class CognitoJsonHandler {
                 request.path("GenerateSecret").asBoolean(false),
                 request.path("AllowedOAuthFlowsUserPoolClient").asBoolean(false),
                 readStringList(request.path("AllowedOAuthFlows")),
-                readStringList(request.path("AllowedOAuthScopes"))
+                readStringList(request.path("AllowedOAuthScopes")),
+                request.path("AnalyticsConfiguration").isObject()
+                        ? objectMapper.convertValue(request.path("AnalyticsConfiguration"),
+                                new TypeReference<Map<String, Object>>() {})
+                        : null,
+                readStringList(request.path("CallbackURLs")),
+                request.path("DefaultRedirectURI").asText(null),
+                readStringList(request.path("ExplicitAuthFlows")),
+                request.has("AccessTokenValidity") ? request.path("AccessTokenValidity").asInt()
+                        : null,
+                request.has("IdTokenValidity") ? request.path("IdTokenValidity").asInt() : null,
+                readStringList(request.path("LogoutURLs")),
+                request.path("PreventUserExistenceErrors").asText(null),
+                readStringList(request.path("ReadAttributes")),
+                request.has("RefreshTokenValidity") ? request.path("RefreshTokenValidity").asInt()
+                        : null,
+                readStringList(request.path("SupportedIdentityProviders")),
+                request.path("TokenValidityUnits").isObject()
+                        ? objectMapper.convertValue(request.path("TokenValidityUnits"),
+                                new TypeReference<Map<String, String>>() {})
+                        : null,
+                readStringList(request.path("WriteAttributes")),
+                request.path("RefreshTokenRotation").isObject()
+                        ? objectMapper.convertValue(request.path("RefreshTokenRotation"),
+                                new TypeReference<Map<String, Object>>() {})
+                        : null,
+                request.has("EnableTokenRevocation")
+                        ? request.path("EnableTokenRevocation").asBoolean()
+                        : null
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPoolClient", clientToNode(client));
@@ -225,8 +253,32 @@ public class CognitoJsonHandler {
                 request.path("ClientId").asText(),
                 request.has("ClientName") ? request.path("ClientName").asText() : null,
                 request.has("AllowedOAuthFlowsUserPoolClient") ? request.path("AllowedOAuthFlowsUserPoolClient").asBoolean() : null,
-                readStringList(request.path("AllowedOAuthFlows")),
-                readStringList(request.path("AllowedOAuthScopes"))
+                request.has("AllowedOAuthFlows") ? readStringList(request.path("AllowedOAuthFlows")) : null,
+                request.has("AllowedOAuthScopes") ? readStringList(request.path("AllowedOAuthScopes")) : null,
+                request.path("AnalyticsConfiguration").isObject()
+                        ? objectMapper.convertValue(request.path("AnalyticsConfiguration"),
+                        new TypeReference<Map<String, Object>>() {})
+                        : null,
+                request.has("CallbackURLs") ? readStringList(request.path("CallbackURLs")) : null,
+                request.has("DefaultRedirectURI") ? request.path("DefaultRedirectURI").asText(null) : null,
+                request.has("ExplicitAuthFlows") ? readStringList(request.path("ExplicitAuthFlows")) : null,
+                request.has("AccessTokenValidity") ? request.path("AccessTokenValidity").asInt() : null,
+                request.has("IdTokenValidity") ? request.path("IdTokenValidity").asInt() : null,
+                request.has("LogoutURLs") ? readStringList(request.path("LogoutURLs")) : null,
+                request.has("PreventUserExistenceErrors") ? request.path("PreventUserExistenceErrors").asText(null) : null,
+                request.has("ReadAttributes") ? readStringList(request.path("ReadAttributes")) : null,
+                request.has("RefreshTokenValidity") ? request.path("RefreshTokenValidity").asInt() : null,
+                request.has("SupportedIdentityProviders") ? readStringList(request.path("SupportedIdentityProviders")) : null,
+                request.path("TokenValidityUnits").isObject()
+                        ? objectMapper.convertValue(request.path("TokenValidityUnits"),
+                        new TypeReference<Map<String, String>>() {})
+                        : null,
+                request.has("WriteAttributes") ? readStringList(request.path("WriteAttributes")) : null,
+                request.path("RefreshTokenRotation").isObject()
+                        ? objectMapper.convertValue(request.path("RefreshTokenRotation"),
+                        new TypeReference<Map<String, Object>>() {})
+                        : null,
+                request.has("EnableTokenRevocation") ? request.path("EnableTokenRevocation").asBoolean() : null
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("UserPoolClient", clientToNode(client));
@@ -577,15 +629,15 @@ public class CognitoJsonHandler {
         node.set("AutoVerifiedAttributes", objectMapper.valueToTree(p.getAutoVerifiedAttributes() != null ? p.getAutoVerifiedAttributes() : new java.util.ArrayList<>()));
         node.set("AliasAttributes", objectMapper.valueToTree(p.getAliasAttributes() != null ? p.getAliasAttributes() : new java.util.ArrayList<>()));
         node.set("UsernameAttributes", objectMapper.valueToTree(p.getUsernameAttributes() != null ? p.getUsernameAttributes() : new java.util.ArrayList<>()));
-        
+
         if (p.getSmsVerificationMessage() != null) node.put("SmsVerificationMessage", p.getSmsVerificationMessage());
         if (p.getEmailVerificationMessage() != null) node.put("EmailVerificationMessage", p.getEmailVerificationMessage());
         if (p.getEmailVerificationSubject() != null) node.put("EmailVerificationSubject", p.getEmailVerificationSubject());
-        
+
         node.set("VerificationMessageTemplate", objectMapper.valueToTree(p.getVerificationMessageTemplate() != null ? p.getVerificationMessageTemplate() : new HashMap<>()));
-        
+
         if (p.getSmsAuthenticationMessage() != null) node.put("SmsAuthenticationMessage", p.getSmsAuthenticationMessage());
-        
+
         node.put("MfaConfiguration", p.getMfaConfiguration() != null ? p.getMfaConfiguration() : "OFF");
         node.set("DeviceConfiguration", objectMapper.valueToTree(p.getDeviceConfiguration() != null ? p.getDeviceConfiguration() : new HashMap<>()));
         node.put("EstimatedNumberOfUsers", p.getEstimatedNumberOfUsers());
@@ -623,6 +675,42 @@ public class CognitoJsonHandler {
         c.getAllowedOAuthFlows().forEach(flows::add);
         ArrayNode scopes = node.putArray("AllowedOAuthScopes");
         c.getAllowedOAuthScopes().forEach(scopes::add);
+        node.set("AnalyticsConfiguration", objectMapper.valueToTree(
+                c.getAnalyticsConfiguration() != null ? c.getAnalyticsConfiguration() : new HashMap<>()));
+        ArrayNode callbackUrls = node.putArray("CallbackURLs");
+        c.getCallbackURLs().forEach(callbackUrls::add);
+        if (c.getDefaultRedirectURI() != null) {
+            node.put("DefaultRedirectURI", c.getDefaultRedirectURI());
+        }
+        ArrayNode explicitAuthFlows = node.putArray("ExplicitAuthFlows");
+        c.getExplicitAuthFlows().forEach(explicitAuthFlows::add);
+        if (c.getAccessTokenValidity() != null) {
+            node.put("AccessTokenValidity", c.getAccessTokenValidity());
+        }
+        if (c.getIdTokenValidity() != null) {
+            node.put("IdTokenValidity", c.getIdTokenValidity());
+        }
+        ArrayNode logoutUrls = node.putArray("LogoutURLs");
+        c.getLogoutURLs().forEach(logoutUrls::add);
+        if (c.getPreventUserExistenceErrors() != null) {
+            node.put("PreventUserExistenceErrors", c.getPreventUserExistenceErrors());
+        }
+        ArrayNode readAttributes = node.putArray("ReadAttributes");
+        c.getReadAttributes().forEach(readAttributes::add);
+        if (c.getRefreshTokenValidity() != null) {
+            node.put("RefreshTokenValidity", c.getRefreshTokenValidity());
+        }
+        ArrayNode supportedIdentityProviders = node.putArray("SupportedIdentityProviders");
+        c.getSupportedIdentityProviders().forEach(supportedIdentityProviders::add);
+        node.set("TokenValidityUnits", objectMapper.valueToTree(
+                c.getTokenValidityUnits() != null ? c.getTokenValidityUnits() : new HashMap<>()));
+        ArrayNode writeAttributes = node.putArray("WriteAttributes");
+        c.getWriteAttributes().forEach(writeAttributes::add);
+        node.set("RefreshTokenRotation", objectMapper.valueToTree(
+                c.getRefreshTokenRotation() != null ? c.getRefreshTokenRotation() : new HashMap<>()));
+        if (c.getEnableTokenRevocation() != null) {
+            node.put("EnableTokenRevocation", c.getEnableTokenRevocation());
+        }
         node.put("CreationDate", c.getCreationDate());
         node.put("LastModifiedDate", c.getLastModifiedDate());
         return node;
