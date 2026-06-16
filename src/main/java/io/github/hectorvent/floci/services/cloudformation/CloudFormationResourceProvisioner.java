@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.ecr.EcrService;
 import io.github.hectorvent.floci.services.ecr.model.Repository;
 import io.github.hectorvent.floci.services.cloudwatch.logs.CloudWatchLogsService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.rds.RdsService;
@@ -140,6 +141,7 @@ public class CloudFormationResourceProvisioner {
     private final RdsService rdsService;
     private final EksService eksService;
     private final CloudWatchLogsService logsService;
+    private final KinesisService kinesisService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -164,7 +166,8 @@ public class CloudFormationResourceProvisioner {
                                              Ec2Service ec2Service,
                                              RdsService rdsService,
                                              EksService eksService,
-                                             CloudWatchLogsService logsService) {
+                                             CloudWatchLogsService logsService,
+                                             KinesisService kinesisService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -192,6 +195,7 @@ public class CloudFormationResourceProvisioner {
         this.rdsService = rdsService;
         this.eksService = eksService;
         this.logsService = logsService;
+        this.kinesisService = kinesisService;
     }
 
     /**
@@ -312,6 +316,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EKS::Cluster" -> provisionEksCluster(resource, properties, engine, stackName);
                 case "AWS::EKS::Nodegroup" -> provisionEksNodegroup(resource, properties, engine, stackName);
                 case "AWS::Logs::LogGroup" -> provisionLogGroup(resource, properties, engine, region, accountId, stackName);
+                case "AWS::Kinesis::Stream" ->
+                        provisionKinesisStream(resource, properties, engine, region, stackName);
                 default -> {
                     if (resourceType != null && resourceType.startsWith("Custom::")) {
                         provisionCustomResource(resource, properties, engine, region, accountId, stackName);
@@ -404,6 +410,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
                 case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
                 case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
+                case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
                 default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
             }
         } catch (Exception e) {
@@ -582,6 +589,56 @@ public class CloudFormationResourceProvisioner {
         r.setPhysicalId(name);
         r.getAttributes().put("Arn",
                 AwsArnUtils.Arn.of("logs", region, accountId, "log-group:" + name + ":*").toString());
+    }
+
+    // ── Kinesis ─────────────────────────────────────────────────────────────────
+
+    private void provisionKinesisStream(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
+                                        String region, String stackName) {
+        String name = resolveOptional(props, "Name", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 128, false);
+        }
+        String streamMode = null;
+        if (props != null && props.has("StreamModeDetails")) {
+            streamMode = engine.resolve(props.get("StreamModeDetails").path("StreamMode"));
+            if (streamMode != null && streamMode.isBlank()) {
+                streamMode = null;
+            }
+        }
+        // ShardCount is required for PROVISIONED streams; default to 1 when unset (ON_DEMAND ignores it).
+        int shardCount = 1;
+        String shards = resolveOptional(props, "ShardCount", engine);
+        if (shards != null && !shards.isBlank()) {
+            try {
+                shardCount = Integer.parseInt(shards.trim());
+            } catch (NumberFormatException ignored) {
+                // keep default
+            }
+        }
+
+        var stream = kinesisService.createStream(name, shardCount, streamMode, region);
+
+        String retention = resolveOptional(props, "RetentionPeriodHours", engine);
+        if (retention != null && !retention.isBlank()) {
+            try {
+                stream.setRetentionPeriodHours(Integer.parseInt(retention.trim()));
+            } catch (NumberFormatException ignored) {
+                // leave default
+            }
+        }
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    stream.getTags().put(key, engine.resolve(tag.path("Value")));
+                }
+            }
+        }
+
+        // Ref returns the stream name; Fn::GetAtt Arn returns the stream ARN.
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn", stream.getStreamArn());
     }
 
     private void provisionEc2Instance(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
