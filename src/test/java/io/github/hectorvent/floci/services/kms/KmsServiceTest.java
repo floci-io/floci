@@ -15,7 +15,9 @@ import org.junit.jupiter.api.Test;
 import java.nio.charset.StandardCharsets;
 import java.security.Security;
 import java.security.KeyFactory;
+import java.security.MessageDigest;
 import java.security.PublicKey;
+import java.security.Signature;
 import java.security.spec.X509EncodedKeySpec;
 import java.util.Arrays;
 import java.util.Base64;
@@ -778,6 +780,49 @@ class KmsServiceTest {
         byte[] sig = kmsService.sign(key.getKeyId(), message, "RSASSA_PKCS1_V1_5_SHA_256", REGION);
         assertNotNull(sig);
         assertTrue(kmsService.verify(key.getKeyId(), message, sig, "RSASSA_PKCS1_V1_5_SHA_256", REGION));
+    }
+
+    @Test
+    void signWithDigestMessageTypeVerifiesWithExternalVerifier() throws Exception {
+        KmsKey key = kmsService.createKey("rsa digest key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        byte[] message = "floci kms round-trip".getBytes(StandardCharsets.UTF_8);
+        byte[] digest = MessageDigest.getInstance("SHA-512").digest(message);
+
+        byte[] sig = kmsService.sign(key.getKeyId(), digest,
+                "RSASSA_PKCS1_V1_5_SHA_512", "DIGEST", REGION);
+
+        // floci's own Verify round-trips.
+        assertTrue(kmsService.verify(key.getKeyId(), digest, sig,
+                "RSASSA_PKCS1_V1_5_SHA_512", "DIGEST", REGION));
+
+        // External verifier (standard JCA, standing in for openssl/python) reconstructs
+        // DigestInfo from the message hash and must validate the DIGEST signature (#1345).
+        byte[] der = Base64.getDecoder().decode(kmsService.getPublicKey(key.getKeyId(), REGION).getPublicKeyEncoded());
+        PublicKey pub = KeyFactory.getInstance("RSA").generatePublic(new X509EncodedKeySpec(der));
+        Signature verifier = Signature.getInstance("SHA512withRSA");
+        verifier.initVerify(pub);
+        verifier.update(message);
+        assertTrue(verifier.verify(sig), "DIGEST signature must verify with standard SHA512withRSA");
+    }
+
+    @Test
+    void signWithDigestMessageTypeMatchesRawSignature() {
+        KmsKey key = kmsService.createKey("rsa digest key", "SIGN_VERIFY", "RSA_2048", null, Map.of(), REGION);
+        byte[] message = "deterministic pkcs1".getBytes(StandardCharsets.UTF_8);
+        byte[] digest;
+        try {
+            digest = MessageDigest.getInstance("SHA-256").digest(message);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+
+        // PKCS#1 v1.5 is deterministic, so signing the digest (DIGEST) and signing the
+        // message (RAW) with the same algorithm must produce identical signatures.
+        byte[] digestSig = kmsService.sign(key.getKeyId(), digest,
+                "RSASSA_PKCS1_V1_5_SHA_256", "DIGEST", REGION);
+        byte[] rawSig = kmsService.sign(key.getKeyId(), message,
+                "RSASSA_PKCS1_V1_5_SHA_256", "RAW", REGION);
+        assertArrayEquals(rawSig, digestSig);
     }
 
     @Test
