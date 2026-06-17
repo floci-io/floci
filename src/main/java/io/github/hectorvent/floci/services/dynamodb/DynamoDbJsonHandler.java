@@ -313,6 +313,8 @@ public class DynamoDbJsonHandler {
                     "ExpressionAttributeValues can only be specified when using expressions: ConditionExpression is null", 400);
         }
 
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
         validateItemSets(item);
 
         JsonNode oldItem = null;
@@ -417,6 +419,8 @@ public class DynamoDbJsonHandler {
                     + String.join("; ", delValidationErrors), 400);
         }
 
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
         String condOpDel = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
@@ -481,6 +485,8 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
         }
+
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
         if (conditionExpression != null && expectedUpd != null) {
             throw new AwsException("ValidationException",
@@ -708,6 +714,9 @@ public class DynamoDbJsonHandler {
                     "Invalid KeyConditionExpression: The expression can not be empty;", 400);
         }
 
+        ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
@@ -836,6 +845,8 @@ public class DynamoDbJsonHandler {
                     "The Segment parameter is zero-based and must be less than parameter TotalSegments: "
                     + "Segment: " + segment + " is not less than TotalSegments: " + totalSegments, 400);
         }
+
+        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
 
         String projectionExpressionScan = request.has("ProjectionExpression")
                 ? request.get("ProjectionExpression").asText() : null;
