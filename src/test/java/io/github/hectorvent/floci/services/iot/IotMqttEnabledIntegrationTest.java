@@ -6,6 +6,7 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
+import org.jboss.logging.Logger;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -33,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class IotMqttEnabledIntegrationTest {
 
     private static final int PORT = 18831;
+    private static final Logger LOG = Logger.getLogger(IotMqttEnabledIntegrationTest.class);
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
@@ -354,7 +356,7 @@ class IotMqttEnabledIntegrationTest {
     }
 
     private Socket connectMqttClientId(String clientId) throws IOException {
-        Socket socket = new Socket();
+        Socket socket = new MqttTestSocket();
         socket.connect(new InetSocketAddress("127.0.0.1", PORT), 2_000);
         socket.setSoTimeout(2_000);
         socket.getOutputStream().write(connectPacketForClientId(clientId));
@@ -364,7 +366,7 @@ class IotMqttEnabledIntegrationTest {
     }
 
     private Socket connectMqtt5(String clientId) throws IOException {
-        Socket socket = new Socket();
+        Socket socket = new MqttTestSocket();
         socket.connect(new InetSocketAddress("127.0.0.1", PORT), 2_000);
         socket.setSoTimeout(2_000);
         ByteArrayOutputStream variable = new ByteArrayOutputStream();
@@ -625,6 +627,21 @@ class IotMqttEnabledIntegrationTest {
     }
 
     private record MqttPublish(String topic, byte[] payload) {
+    }
+
+    private static final class MqttTestSocket extends Socket {
+        @Override
+        public void close() throws IOException {
+            if (isConnected() && !isClosed() && !isOutputShutdown()) {
+                try {
+                    getOutputStream().write(new byte[] {(byte) 0xe0, 0x00});
+                    getOutputStream().flush();
+                } catch (IOException e) {
+                    LOG.debug("MQTT test socket could not send DISCONNECT before close", e);
+                }
+            }
+            super.close();
+        }
     }
 
     public static final class EnabledMqttProfile implements QuarkusTestProfile {
