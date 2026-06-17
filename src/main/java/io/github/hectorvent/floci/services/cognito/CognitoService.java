@@ -24,6 +24,7 @@ import java.util.*;
 
 @ApplicationScoped
 public class CognitoService {
+    private static final int DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS = 30;
 
     private static final Logger LOG = Logger.getLogger(CognitoService.class);
     private static final ObjectMapper MAPPER = new ObjectMapper();
@@ -314,6 +315,7 @@ public class CognitoService {
         List<String> normalizedSupportedIdentityProviders = normalizeStringList(supportedIdentityProviders);
         Map<String, String> copiedTokenValidityUnits = copyStringMap(tokenValidityUnits);
         List<String> normalizedWriteAttributes = normalizeStringList(writeAttributes);
+        Integer normalizedRefreshTokenValidity = normalizeRefreshTokenValidity(refreshTokenValidity);
 
         validateUserPoolClientConfiguration(
                 allowedOAuthFlowsUserPoolClient,
@@ -323,7 +325,8 @@ public class CognitoService {
                 normalizedDefaultRedirectUri,
                 accessTokenValidity,
                 idTokenValidity,
-                refreshTokenValidity,
+                normalizedRefreshTokenValidity,
+                normalizedLogoutUrls,
                 copiedTokenValidityUnits
         );
 
@@ -344,7 +347,7 @@ public class CognitoService {
         client.setLogoutURLs(normalizedLogoutUrls);
         client.setPreventUserExistenceErrors(preventUserExistenceErrors);
         client.setReadAttributes(normalizedReadAttributes);
-        client.setRefreshTokenValidity(refreshTokenValidity);
+        client.setRefreshTokenValidity(normalizedRefreshTokenValidity);
         client.setSupportedIdentityProviders(normalizedSupportedIdentityProviders.isEmpty()
                 ? List.of("COGNITO")
                 : normalizedSupportedIdentityProviders);
@@ -464,11 +467,14 @@ public class CognitoService {
                 ? idTokenValidity
                 : client.getIdTokenValidity();
         Integer effectiveRefreshTokenValidity = refreshTokenValidity != null
-                ? refreshTokenValidity
+                ? normalizeRefreshTokenValidity(refreshTokenValidity)
                 : client.getRefreshTokenValidity();
         Map<String, String> effectiveTokenValidityUnits = tokenValidityUnits != null
                 ? copyStringMap(tokenValidityUnits)
                 : client.getTokenValidityUnits();
+        List<String> effectiveLogoutUrls = logoutURLs != null
+                ? normalizeStringList(logoutURLs)
+                : client.getLogoutURLs();
 
         validateUserPoolClientConfiguration(
                 effectiveAllowedOAuthFlowsUserPoolClient,
@@ -479,6 +485,7 @@ public class CognitoService {
                 effectiveAccessTokenValidity,
                 effectiveIdTokenValidity,
                 effectiveRefreshTokenValidity,
+                effectiveLogoutUrls,
                 effectiveTokenValidityUnits
         );
 
@@ -511,7 +518,7 @@ public class CognitoService {
             client.setIdTokenValidity(idTokenValidity);
         }
         if (logoutURLs != null) {
-            client.setLogoutURLs(normalizeStringList(logoutURLs));
+            client.setLogoutURLs(effectiveLogoutUrls);
         }
         if (preventUserExistenceErrors != null) {
             client.setPreventUserExistenceErrors(preventUserExistenceErrors);
@@ -520,7 +527,7 @@ public class CognitoService {
             client.setReadAttributes(normalizeStringList(readAttributes));
         }
         if (refreshTokenValidity != null) {
-            client.setRefreshTokenValidity(refreshTokenValidity);
+            client.setRefreshTokenValidity(effectiveRefreshTokenValidity);
         }
         if (supportedIdentityProviders != null) {
             client.setSupportedIdentityProviders(normalizeStringList(supportedIdentityProviders));
@@ -1546,19 +1553,22 @@ public class CognitoService {
                                                      Integer accessTokenValidity,
                                                      Integer idTokenValidity,
                                                      Integer refreshTokenValidity,
+                                                     List<String> logoutURLs,
                                                      Map<String, String> tokenValidityUnits) {
         validateTokenValidityUnits(tokenValidityUnits);
         validateTokenValidityValue("AccessTokenValidity", accessTokenValidity);
         validateTokenValidityValue("IdTokenValidity", idTokenValidity);
-        validateTokenValidityValue("RefreshTokenValidity", refreshTokenValidity);
+        validateRefreshTokenValidityValue(refreshTokenValidity);
 
         List<String> effectiveFlows = allowedOAuthFlows != null ? allowedOAuthFlows : List.of();
         List<String> effectiveScopes = allowedOAuthScopes != null ? allowedOAuthScopes : List.of();
         List<String> effectiveCallbackUrls = callbackURLs != null ? callbackURLs : List.of();
+        List<String> effectiveLogoutUrls = logoutURLs != null ? logoutURLs : List.of();
 
         if (!allowedOAuthFlowsUserPoolClient) {
             if (!effectiveFlows.isEmpty() || !effectiveScopes.isEmpty()
-                    || !effectiveCallbackUrls.isEmpty() || defaultRedirectURI != null) {
+                    || !effectiveCallbackUrls.isEmpty() || !effectiveLogoutUrls.isEmpty()
+                    || defaultRedirectURI != null) {
                 throw new AwsException("InvalidParameterException",
                         "To use authorization server features, set AllowedOAuthFlowsUserPoolClient to true.",
                         400);
@@ -1592,7 +1602,7 @@ public class CognitoService {
                         "TokenValidityUnits contains an unsupported key: " + entry.getKey() + ".", 400);
             }
             String normalizedUnit = normalizeOptionalString(entry.getValue());
-            if (normalizedUnit == null || !supportedUnits.contains(normalizedUnit.toLowerCase(Locale.ROOT))) {
+            if (normalizedUnit == null || !supportedUnits.contains(normalizedUnit)) {
                 throw new AwsException("InvalidParameterException",
                         "TokenValidityUnits contains an unsupported unit value: " + entry.getValue() + ".", 400);
             }
@@ -1603,6 +1613,19 @@ public class CognitoService {
         if (value != null && value <= 0) {
             throw new AwsException("InvalidParameterException", fieldName + " must be greater than 0.", 400);
         }
+    }
+
+    private void validateRefreshTokenValidityValue(Integer value) {
+        if (value != null && value < 0) {
+            throw new AwsException("InvalidParameterException", "RefreshTokenValidity must be greater than or equal to 0.", 400);
+        }
+    }
+
+    private Integer normalizeRefreshTokenValidity(Integer value) {
+        if (value != null && value == 0) {
+            return DEFAULT_REFRESH_TOKEN_VALIDITY_DAYS;
+        }
+        return value;
     }
 
     private List<ResourceServerScope> normalizeScopes(List<ResourceServerScope> scopes) {
