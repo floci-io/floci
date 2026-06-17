@@ -31,3 +31,5 @@ test-results.xml
 test-results
 
 scripts/node_modules/
+
+.opencode
