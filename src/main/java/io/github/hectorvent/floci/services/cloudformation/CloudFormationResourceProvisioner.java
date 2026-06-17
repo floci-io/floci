@@ -2601,6 +2601,20 @@ public class CloudFormationResourceProvisioner {
 
         var deployment = apiGatewayService.createDeployment(region, apiId, req);
         r.setPhysicalId(deployment.id());
+
+        // AWS::ApiGateway::Deployment accepts an inline StageName: when present, AWS creates that
+        // stage pointing at this deployment, with no separate AWS::ApiGateway::Stage resource.
+        String stageName = resolveOptional(props, "StageName", engine);
+        if (stageName != null && !stageName.isBlank()) {
+            Map<String, Object> stageReq = new HashMap<>();
+            stageReq.put("stageName", stageName);
+            stageReq.put("deploymentId", deployment.id());
+            JsonNode stageDescription = props != null ? props.get("StageDescription") : null;
+            if (stageDescription != null && stageDescription.has("Description")) {
+                stageReq.put("description", resolveOptional(stageDescription, "Description", engine));
+            }
+            apiGatewayService.createStage(region, apiId, stageReq);
+        }
     }
 
     private void provisionApiGatewayStage(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
