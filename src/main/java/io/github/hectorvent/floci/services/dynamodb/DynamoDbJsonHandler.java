@@ -887,7 +887,8 @@ public class DynamoDbJsonHandler {
         }
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
-                tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit, exclusiveStartKey, region);
+                tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit,
+                exclusiveStartKey, indexNameScan, region);
 
         List<JsonNode> scanItems = result.items();
         // Apply parallel scan segment partitioning
