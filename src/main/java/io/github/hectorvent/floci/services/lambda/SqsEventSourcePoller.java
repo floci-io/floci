@@ -114,7 +114,7 @@ public class SqsEventSourcePoller {
         }
     }
 
-    private void pollAndInvoke(EventSourceMapping esm) {
+    void pollAndInvoke(EventSourceMapping esm) {
         // Skip this tick if a previous poll for this ESM is still in progress.
         // This prevents concurrent deliveries of the same message when the Lambda
         // cold-start / execution time exceeds the SQS visibility timeout.
@@ -176,9 +176,18 @@ public class SqsEventSourcePoller {
                                     msg.getMessageId(), e.getMessage());
                         }
                     }
+                    // Reported partial-batch failures are not deleted; return them to the
+                    // queue immediately so they can be retried/redriven rather than sitting
+                    // in-flight for the full execution-cover visibility window.
+                    if (!failedIds.isEmpty()) {
+                        List<Message> toReturn = messages.stream()
+                                .filter(m -> failedIds.contains(m.getMessageId())).toList();
+                        returnMessagesToQueue(esm, toReturn);
+                    }
                 } else {
-                    LOG.warnv("ESM {0}: Lambda returned error [{1}], messages will return to queue",
-                            esm.getUuid(), result.getFunctionError());
+                    LOG.warnv("ESM {0}: Lambda returned error [{1}], returning {2} message(s) to queue for retry/redrive",
+                            esm.getUuid(), result.getFunctionError(), messages.size());
+                    returnMessagesToQueue(esm, messages);
                 }
             } catch (Exception e) {
                 LOG.warnv("ESM {0}: poll/invoke error: {1} ({2})",
@@ -187,6 +196,27 @@ public class SqsEventSourcePoller {
                 activePolls.remove(esm.getUuid());
             }
         });
+    }
+
+    /**
+     * Returns failed messages to the source queue immediately by resetting their
+     * visibility timeout to 0. The poller hides messages for {@code fn.timeout + 30s}
+     * to cover execution time, but on failure that long window would keep the message
+     * in-flight (and therefore not redelivered nor redriven) far longer than the queue's
+     * own visibility/redrive policy intends. Making them visible again lets the next poll
+     * re-receive them, incrementing ApproximateReceiveCount so the queue's RedrivePolicy
+     * can move them to the DLQ once {@code maxReceiveCount} is exceeded.
+     */
+    private void returnMessagesToQueue(EventSourceMapping esm, List<Message> messages) {
+        for (Message msg : messages) {
+            try {
+                sqsService.changeMessageVisibility(
+                        esm.getQueueUrl(), msg.getReceiptHandle(), 0, esm.getRegion());
+            } catch (Exception e) {
+                LOG.warnv("ESM {0}: failed to return message {1} to queue: {2}",
+                        esm.getUuid(), msg.getMessageId(), e.getMessage());
+            }
+        }
     }
 
     private Set<String> extractBatchItemFailures(EventSourceMapping esm, InvokeResult result) {
