@@ -10,7 +10,13 @@ import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.cognito.model.*;
+import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeException;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.ses.SesService;
+import io.github.hectorvent.floci.services.sns.SnsService;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -20,6 +26,8 @@ import java.security.*;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.time.Clock;
+import java.time.Duration;
 import java.util.*;
 
 @ApplicationScoped
@@ -54,12 +62,16 @@ public class CognitoService {
     private final String baseUrl;
     private final RegionResolver regionResolver;
     private final LambdaService lambdaService;
+    private final VerificationCodeService verificationCodeService;
+    private final CognitoMessageDispatcher messageDispatcher;
 
     // Keyed by session token; contains SRP ephemeral state (bPrivate, B, A, secretBlock)
     private final CognitoAuthFlowHandler authFlowHandler;
 
     @Inject
-    public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig, RegionResolver regionResolver, LambdaService lambdaService) {
+    public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
+            RegionResolver regionResolver, LambdaService lambdaService, SesService sesService,
+            SnsService snsService, Clock clock) {
         this.poolStore = storageFactory.create("cognito", "cognito-pools.json",
                 new TypeReference<Map<String, UserPool>>() {});
         this.clientStore = storageFactory.create("cognito", "cognito-clients.json",
@@ -73,6 +85,8 @@ public class CognitoService {
         this.baseUrl = trimTrailingSlash(emulatorConfig.baseUrl());
         this.regionResolver = regionResolver;
         this.lambdaService = lambdaService;
+        this.verificationCodeService = new VerificationCodeService(storageFactory, clock);
+        this.messageDispatcher = new CognitoMessageDispatcher(sesService, snsService);
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
     }
 
@@ -92,6 +106,8 @@ public class CognitoService {
         this.baseUrl = baseUrl;
         this.regionResolver = regionResolver;
         this.lambdaService = lambdaService;
+        this.verificationCodeService = null;
+        this.messageDispatcher = null;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
     }
 
@@ -1074,19 +1090,42 @@ public class CognitoService {
         userStore.put(userKey(poolId, user.getUsername()), user);
     }
 
-    public void forgotPassword(String clientId, String username) {
+    public Map<String, Object> forgotPassword(String clientId, String username) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
-        // Verify user exists; real AWS would send email/SMS
-        adminGetUser(client.getUserPoolId(), username);
-        LOG.infov("ForgotPassword stub: user {0} requested password reset", username);
+        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        UserPool pool = describeUserPool(client.getUserPoolId());
+        ensureVerificationWiring();
+        DeliveryTarget deliveryTarget = resolveForgotPasswordDeliveryTarget(pool, user);
+
+        try {
+            String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
+                    VerificationCode.Purpose.PASSWORD_RESET, Duration.ofHours(1));
+            messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.PASSWORD_RESET, code,
+                    List.of(deliveryTarget.deliveryMedium()));
+        } catch (VerificationCodeException e) {
+            throw mapVerificationCodeException(e);
+        }
+
+        Map<String, Object> response = new LinkedHashMap<>();
+        response.put("AttributeName", deliveryTarget.attributeName());
+        response.put("DeliveryMedium", deliveryTarget.deliveryMedium());
+        response.put("Destination", deliveryTarget.destination());
+        return response;
     }
 
     public void confirmForgotPassword(String clientId, String username, String confirmationCode, String newPassword) {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
-        // Accept any confirmation code in the emulator
-        adminSetUserPassword(client.getUserPoolId(), username, newPassword, true);
+        CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        ensureVerificationWiring();
+        try {
+            verificationCodeService.consume(client.getUserPoolId(), user.getUsername(),
+                    VerificationCode.Purpose.PASSWORD_RESET, confirmationCode);
+        } catch (VerificationCodeException e) {
+            throw mapVerificationCodeException(e);
+        }
+        adminSetUserPassword(client.getUserPoolId(), user.getUsername(), newPassword, true);
     }
 
     public Map<String, Object> getUser(String accessToken) {
@@ -1806,10 +1845,127 @@ public class CognitoService {
         return updated;
     }
 
+    private void ensureVerificationWiring() {
+        if (verificationCodeService == null || messageDispatcher == null) {
+            throw new IllegalStateException("Verification services are not configured");
+        }
+    }
+
+    private DeliveryTarget resolveForgotPasswordDeliveryTarget(UserPool pool, CognitoUser user) {
+        Map<String, String> attributes = user.getAttributes();
+        boolean verifiedEmail =
+                Boolean.parseBoolean(attributes.getOrDefault("email_verified", "false"));
+        boolean verifiedPhone =
+                Boolean.parseBoolean(attributes.getOrDefault("phone_number_verified", "false"));
+        String email = blankToNull(attributes.get("email"));
+        String phoneNumber = blankToNull(attributes.get("phone_number"));
+
+        for (String mechanism : accountRecoveryMechanisms(pool)) {
+            if ("verified_email".equals(mechanism) && verifiedEmail && email != null) {
+                return new DeliveryTarget("email", "EMAIL", maskEmail(email));
+            }
+            if ("verified_phone_number".equals(mechanism) && verifiedPhone && phoneNumber != null) {
+                return new DeliveryTarget("phone_number", "SMS", maskPhoneNumber(phoneNumber));
+            }
+        }
+
+        if (verifiedEmail && email != null) {
+            return new DeliveryTarget("email", "EMAIL", maskEmail(email));
+        }
+        if (verifiedPhone && phoneNumber != null) {
+            return new DeliveryTarget("phone_number", "SMS", maskPhoneNumber(phoneNumber));
+        }
+
+        throw new AwsException("InvalidParameterException",
+                "Cannot reset password for the user as there is no registered/verified email or phone_number",
+                400);
+    }
+
+    private AwsException mapVerificationCodeException(VerificationCodeException e) {
+        return switch (e.getKind()) {
+            case MISMATCH, NOT_FOUND -> new AwsException("CodeMismatchException",
+                    "Invalid verification code provided, please try again.", 400);
+            case EXPIRED -> new AwsException("ExpiredCodeException",
+                    "Invalid code provided, please request a code again.", 400);
+            case RATE_LIMIT -> new AwsException("LimitExceededException",
+                    "Attempt limit exceeded, please try again later", 400);
+        };
+    }
+
+    private List<String> accountRecoveryMechanisms(UserPool pool) {
+        Map<String, Object> setting = pool.getAccountRecoverySetting();
+        if (setting == null) {
+            return List.of();
+        }
+        Object mechanisms = setting.get("RecoveryMechanisms");
+        if (!(mechanisms instanceof List<?> recoveryMechanisms)) {
+            return List.of();
+        }
+        return recoveryMechanisms.stream().filter(Map.class::isInstance).map(Map.class::cast)
+                .sorted(Comparator.comparingInt(this::recoveryPriority))
+                .map(m -> String.valueOf(m.get("Name"))).filter(name -> !"admin_only".equals(name))
+                .toList();
+    }
+
+    private int recoveryPriority(Map<?, ?> mechanism) {
+        Object priority = mechanism.get("Priority");
+        if (priority instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return Integer.parseInt(String.valueOf(priority));
+        } catch (Exception ignored) {
+            return Integer.MAX_VALUE;
+        }
+    }
+
+    private String maskEmail(String email) {
+        int at = email.indexOf('@');
+        if (at <= 0 || at == email.length() - 1) {
+            return "****";
+        }
+        String local = email.substring(0, at);
+        String domain = email.substring(at + 1);
+        return maskSegment(local) + "@" + maskDomain(domain);
+    }
+
+    private String maskPhoneNumber(String phoneNumber) {
+        if (phoneNumber.length() <= 4) {
+            return "*".repeat(phoneNumber.length());
+        }
+        return "*".repeat(phoneNumber.length() - 4)
+                + phoneNumber.substring(phoneNumber.length() - 4);
+    }
+
+    private String maskDomain(String domain) {
+        int dot = domain.lastIndexOf('.');
+        if (dot <= 0 || dot == domain.length() - 1) {
+            return maskSegment(domain);
+        }
+        return maskSegment(domain.substring(0, dot)) + domain.substring(dot);
+    }
+
+    private String maskSegment(String value) {
+        if (value.length() <= 1) {
+            return "*";
+        }
+        return value.charAt(0) + "*".repeat(Math.max(1, value.length() - 1));
+    }
+
+    private String blankToNull(String value) {
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        return value;
+    }
+
     private String trimTrailingSlash(String value) {
         if (value.endsWith("/")) {
             return value.substring(0, value.length() - 1);
         }
         return value;
+    }
+
+    private record DeliveryTarget(String attributeName, String deliveryMedium, String destination) {
     }
 }

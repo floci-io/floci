@@ -222,6 +222,176 @@ class CognitoIntegrationTest {
         assertFalse(sub.path("Mutable").asBoolean(), "sub must not be Mutable");
     }
 
+    @Test
+    @Order(6)
+    void confirmForgotPasswordRejectsWrongConfirmationCode() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ForgotPasswordPool"
+                }
+                """);
+        String forgotPasswordPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "forgot-password-client"
+                }
+                """.formatted(forgotPasswordPoolId));
+        String forgotPasswordClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String forgotPasswordUsername = "forgot+" + UUID.randomUUID() + "@example.com";
+
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "email_verified", "Value": "true" }
+                  ]
+                }
+                """.formatted(forgotPasswordPoolId, forgotPasswordUsername, forgotPasswordUsername))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("AdminSetUserPassword", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "Password": "OrigPass123!",
+                  "Permanent": true
+                }
+                """.formatted(forgotPasswordPoolId, forgotPasswordUsername))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("ForgotPassword", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(forgotPasswordClientId, forgotPasswordUsername))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("ConfirmForgotPassword", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "000000",
+                  "Password": "ResetPass123!"
+                }
+                """.formatted(forgotPasswordClientId, forgotPasswordUsername))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"))
+                .body("message", org.hamcrest.Matchers.equalTo("Invalid verification code provided, please try again."));
+    }
+
+    @Test
+    @Order(7)
+    void forgotPasswordRequiresVerifiedRecoveryDestination() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ForgotPasswordUnverifiedPool"
+                }
+                """);
+        String pool = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "forgot-password-client"
+                }
+                """.formatted(pool));
+        String client = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String user = "unverified+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "email_verified", "Value": "false" }
+                  ]
+                }
+                """.formatted(pool, user, user))
+                .then()
+                .statusCode(200);
+
+        cognitoAction("ForgotPassword", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(client, user))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("InvalidParameterException"));
+    }
+
+    @Test
+    @Order(8)
+    void forgotPasswordUsesAccountRecoveryPriorityAndMasksDestination() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ForgotPasswordPriorityPool",
+                  "AccountRecoverySetting": {
+                    "RecoveryMechanisms": [
+                      { "Priority": 1, "Name": "verified_phone_number" },
+                      { "Priority": 2, "Name": "verified_email" }
+                    ]
+                  }
+                }
+                """);
+        String pool = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "forgot-password-client"
+                }
+                """.formatted(pool));
+        String client = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String email = "priority+" + UUID.randomUUID() + "@example.com";
+        String phone = "+819012345678";
+        cognitoAction("AdminCreateUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" },
+                    { "Name": "email_verified", "Value": "true" },
+                    { "Name": "phone_number", "Value": "%s" },
+                    { "Name": "phone_number_verified", "Value": "true" }
+                  ]
+                }
+                """.formatted(pool, email, email, phone))
+                .then()
+                .statusCode(200);
+
+        String response = cognitoAction("ForgotPassword", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(client, email))
+                .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+
+        JsonNode body = OBJECT_MAPPER.readTree(response);
+        JsonNode delivery = body.path("CodeDeliveryDetails");
+        assertEquals("phone_number", delivery.path("AttributeName").asText());
+        assertEquals("SMS", delivery.path("DeliveryMedium").asText());
+        assertNotEquals(phone, delivery.path("Destination").asText());
+        assertTrue(delivery.path("Destination").asText().contains("*"));
+    }
+
     // ── Groups ────────────────────────────────────────────────────────
 
     @Test
