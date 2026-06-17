@@ -57,6 +57,8 @@ class EmulatorLifecycleTest {
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
     @Mock private RdsContainerManager rdsContainerManager;
     @Mock private RdsProxyManager rdsProxyManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager memoryDbContainerManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager memoryDbProxyManager;
     @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -82,7 +84,8 @@ class EmulatorLifecycleTest {
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
-                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager, rdsService,
+                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
+                memoryDbContainerManager, memoryDbProxyManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState);
     }
