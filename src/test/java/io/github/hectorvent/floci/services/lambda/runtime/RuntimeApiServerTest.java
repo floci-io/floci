@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.lambda.runtime;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.PendingInvocation;
 import io.vertx.core.Vertx;
+import io.vertx.core.json.JsonObject;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -169,7 +170,9 @@ class RuntimeApiServerTest {
                 HttpResponse.BodyHandlers.ofString());
 
         assertEquals(202, response.statusCode());
-        assertEquals("{\"status\":\"OK\"}", response.body(),
+        assertEquals("application/json",
+                response.headers().firstValue("Content-Type").orElse(""));
+        assertEquals("OK", new JsonObject(response.body()).getString("status"),
                 "/error must return a JSON ack body so the .NET runtime client can deserialize it");
     }
 
@@ -199,7 +202,9 @@ class RuntimeApiServerTest {
                 HttpResponse.BodyHandlers.ofString());
 
         assertEquals(202, response.statusCode());
-        assertEquals("{\"status\":\"OK\"}", response.body());
+        assertEquals("application/json",
+                response.headers().firstValue("Content-Type").orElse(""));
+        assertEquals("OK", new JsonObject(response.body()).getString("status"));
     }
 
     @Test
