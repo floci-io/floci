@@ -167,6 +167,7 @@ public interface EmulatorConfig {
         AppConfigStorageConfig appconfig();
         AppConfigDataStorageConfig appconfigdata();
         ElastiCacheStorageConfig elasticache();
+        MemoryDbStorageConfig memorydb();
         RdsStorageConfig rds();
         Ec2StorageConfig ec2();
         NeptuneStorageConfig neptune();
@@ -268,6 +269,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface MemoryDbStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface RdsStorageConfig {
         Optional<String> mode();
     }
@@ -333,6 +341,7 @@ public interface EmulatorConfig {
         IamServiceConfig iam();
         MskServiceConfig msk();
         ElastiCacheServiceConfig elasticache();
+        MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
         RdsDataServiceConfig rdsData();
         EventBridgeServiceConfig eventbridge();
@@ -536,6 +545,26 @@ public interface EmulatorConfig {
         String defaultMemcachedImage();
 
         /** Docker network to attach ElastiCache containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+    }
+
+    interface MemoryDbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean mock();
+
+        @WithDefault("6400")
+        int proxyBasePort();
+
+        @WithDefault("6419")
+        int proxyMaxPort();
+
+        @WithDefault("valkey/valkey:8")
+        String defaultImage();
+
+        /** Docker network to attach MemoryDB containers to. Empty = default bridge. */
         Optional<String> dockerNetwork();
     }
 
