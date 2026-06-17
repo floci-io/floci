@@ -6,22 +6,26 @@ import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;
 import io.quarkus.test.junit.TestProfile;
 import jakarta.inject.Inject;
-import org.jboss.logging.Logger;
+import org.eclipse.paho.client.mqttv3.IMqttDeliveryToken;
+import org.eclipse.paho.client.mqttv3.MqttCallback;
+import org.eclipse.paho.client.mqttv3.MqttClient;
+import org.eclipse.paho.client.mqttv3.MqttConnectOptions;
+import org.eclipse.paho.client.mqttv3.MqttException;
+import org.eclipse.paho.client.mqttv3.MqttMessage;
+import org.eclipse.paho.client.mqttv3.persist.MemoryPersistence;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.io.ByteArrayOutputStream;
 import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
-import java.net.InetSocketAddress;
-import java.net.Socket;
-import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Arrays;
 import java.util.Map;
+import java.util.Optional;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
@@ -34,8 +38,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class IotMqttEnabledIntegrationTest {
 
     private static final int PORT = 18831;
-    private static final int CONNECT_ATTEMPTS = 3;
-    private static final Logger LOG = Logger.getLogger(IotMqttEnabledIntegrationTest.class);
+    private static final String BROKER_URI = "tcp://127.0.0.1:" + PORT;
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     @Inject
@@ -48,14 +51,14 @@ class IotMqttEnabledIntegrationTest {
 
     @Test
     void enabledMqttAcceptsConnect() throws Exception {
-        try (Socket client = connectMqtt("phase6-connect")) {
+        try (MqttTestClient client = connectMqtt("phase6-connect")) {
             assertTrue(client.isConnected());
         }
     }
 
     @Test
     void enabledMqttAcceptsMqtt5Connect() throws Exception {
-        try (Socket client = connectMqtt5("phase6-connect-v5")) {
+        try (Mqtt5TestClient client = connectMqtt5("phase6-connect-v5")) {
             assertTrue(client.isConnected());
         }
     }
@@ -64,7 +67,7 @@ class IotMqttEnabledIntegrationTest {
     void deleteConnectionClosesConnectedMqttClient() throws Exception {
         String clientId = "phase6-delete-" + System.nanoTime();
 
-        try (Socket client = connectMqttClientId(clientId)) {
+        try (MqttTestClient client = connectMqttClientId(clientId)) {
             given()
                 .queryParam("cleanSession", true)
             .when()
@@ -72,7 +75,7 @@ class IotMqttEnabledIntegrationTest {
             .then()
                 .statusCode(200);
 
-            assertSocketClosed(client);
+            client.awaitDisconnected();
         }
 
         given()
@@ -89,8 +92,8 @@ class IotMqttEnabledIntegrationTest {
         String topic = "phase6/direct/" + System.nanoTime();
         byte[] payload = "direct-payload".getBytes(StandardCharsets.UTF_8);
 
-        try (Socket client = connectMqttClientId(clientId)) {
-            subscribe(client, topic);
+        try (MqttTestClient client = connectMqttClientId(clientId)) {
+            client.subscribe(topic);
 
             given()
                 .queryParam("includeSocketInformation", true)
@@ -120,7 +123,7 @@ class IotMqttEnabledIntegrationTest {
                 .statusCode(200)
                 .body("message", equalTo("OK"));
 
-            MqttPublish received = readPublish(client.getInputStream());
+            MqttPublish received = client.takePublish();
             assertEquals(topic, received.topic());
             assertArrayEquals(payload, received.payload());
         }
@@ -138,14 +141,14 @@ class IotMqttEnabledIntegrationTest {
         String topic = "phase6/devices/one/events";
         byte[] payload = "hello-phase-six".getBytes(StandardCharsets.UTF_8);
 
-        try (Socket subscriber = connectMqtt("phase6-sub")) {
-            subscribe(subscriber, topic);
+        try (MqttTestClient subscriber = connectMqtt("phase6-sub")) {
+            subscriber.subscribe(topic);
 
-            try (Socket publisher = connectMqtt("phase6-pub")) {
-                publish(publisher, topic, payload);
+            try (MqttTestClient publisher = connectMqtt("phase6-pub")) {
+                publisher.publish(topic, payload);
             }
 
-            MqttPublish received = readPublish(subscriber.getInputStream());
+            MqttPublish received = subscriber.takePublish();
             assertEquals(topic, received.topic());
             assertArrayEquals(payload, received.payload());
         }
@@ -158,15 +161,14 @@ class IotMqttEnabledIntegrationTest {
         String topic = "phase6/devices/qos1/events";
         byte[] payload = "hello-qos-one".getBytes(StandardCharsets.UTF_8);
 
-        try (Socket subscriber = connectMqtt("phase6-qos1-sub")) {
-            subscribe(subscriber, topic, 1);
+        try (MqttTestClient subscriber = connectMqtt("phase6-qos1-sub")) {
+            subscriber.subscribe(topic, 1);
 
-            try (Socket publisher = connectMqtt("phase6-qos1-pub")) {
-                publishQos1(publisher, topic, payload, 7);
-                assertArrayEquals(new byte[] {0x40, 0x02, 0x00, 0x07}, readPacket(publisher.getInputStream()));
+            try (MqttTestClient publisher = connectMqtt("phase6-qos1-pub")) {
+                publisher.publish(topic, payload, 1);
             }
 
-            MqttPublish received = readQos1Publish(subscriber.getInputStream());
+            MqttPublish received = subscriber.takePublish();
             assertEquals(topic, received.topic());
             assertArrayEquals(payload, received.payload());
         }
@@ -176,15 +178,15 @@ class IotMqttEnabledIntegrationTest {
 
     @Test
     void shadowUpdateTopicPublishesAcceptedResponse() throws Exception {
-        try (Socket subscriber = connectMqtt("phase7-update-sub")) {
-            subscribe(subscriber, "$aws/things/phase7Thing/shadow/update/accepted");
+        try (MqttTestClient subscriber = connectMqtt("phase7-update-sub")) {
+            subscriber.subscribe("$aws/things/phase7Thing/shadow/update/accepted");
 
-            try (Socket publisher = connectMqtt("phase7-update-pub")) {
-                publish(publisher, "$aws/things/phase7Thing/shadow/update",
+            try (MqttTestClient publisher = connectMqtt("phase7-update-pub")) {
+                publisher.publish("$aws/things/phase7Thing/shadow/update",
                         json("{\"state\":{\"desired\":{\"color\":\"blue\"}},\"clientToken\":\"token-1\"}"));
             }
 
-            MqttPublish accepted = readPublish(subscriber.getInputStream());
+            MqttPublish accepted = subscriber.takePublish();
             JsonNode payload = readJson(accepted.payload());
             assertEquals("$aws/things/phase7Thing/shadow/update/accepted", accepted.topic());
             assertEquals("blue", payload.path("state").path("desired").path("color").asText());
@@ -194,15 +196,15 @@ class IotMqttEnabledIntegrationTest {
 
     @Test
     void mqtt5ShadowUpdateTopicPublishesAcceptedResponse() throws Exception {
-        try (Socket subscriber = connectMqtt5("phase7-mqtt5-update-sub")) {
-            subscribeMqtt5(subscriber, "$aws/things/phase7Mqtt5Thing/shadow/update/accepted");
+        try (Mqtt5TestClient subscriber = connectMqtt5("phase7-mqtt5-update-sub")) {
+            subscriber.subscribe("$aws/things/phase7Mqtt5Thing/shadow/update/accepted");
 
-            try (Socket publisher = connectMqtt5("phase7-mqtt5-update-pub")) {
-                publishMqtt5(publisher, "$aws/things/phase7Mqtt5Thing/shadow/update",
+            try (Mqtt5TestClient publisher = connectMqtt5("phase7-mqtt5-update-pub")) {
+                publisher.publish("$aws/things/phase7Mqtt5Thing/shadow/update",
                         json("{\"state\":{\"desired\":{\"color\":\"purple\"}},\"clientToken\":\"mqtt5-token\"}"));
             }
 
-            MqttPublish accepted = readMqtt5Publish(subscriber.getInputStream());
+            MqttPublish accepted = subscriber.takePublish();
             JsonNode payload = readJson(accepted.payload());
             assertEquals("$aws/things/phase7Mqtt5Thing/shadow/update/accepted", accepted.topic());
             assertEquals("purple", payload.path("state").path("desired").path("color").asText());
@@ -213,14 +215,14 @@ class IotMqttEnabledIntegrationTest {
 
     @Test
     void malformedShadowUpdateTopicPublishesRejectedResponse() throws Exception {
-        try (Socket subscriber = connectMqtt("phase7-rejected-sub")) {
-            subscribe(subscriber, "$aws/things/phase7Thing/shadow/update/rejected");
+        try (MqttTestClient subscriber = connectMqtt("phase7-rejected-sub")) {
+            subscriber.subscribe("$aws/things/phase7Thing/shadow/update/rejected");
 
-            try (Socket publisher = connectMqtt("phase7-rejected-pub")) {
-                publish(publisher, "$aws/things/phase7Thing/shadow/update", "{".getBytes(StandardCharsets.UTF_8));
+            try (MqttTestClient publisher = connectMqtt("phase7-rejected-pub")) {
+                publisher.publish("$aws/things/phase7Thing/shadow/update", "{".getBytes(StandardCharsets.UTF_8));
             }
 
-            MqttPublish rejected = readPublish(subscriber.getInputStream());
+            MqttPublish rejected = subscriber.takePublish();
             JsonNode payload = readJson(rejected.payload());
             assertEquals("$aws/things/phase7Thing/shadow/update/rejected", rejected.topic());
             assertEquals("InvalidRequestException", payload.path("code").asText());
@@ -230,22 +232,22 @@ class IotMqttEnabledIntegrationTest {
 
     @Test
     void shadowGetAndDeleteTopicsPublishAcceptedResponses() throws Exception {
-        try (Socket subscriber = connectMqtt("phase7-get-delete-sub")) {
-            subscribe(subscriber, "$aws/things/phase7GetDelete/shadow/get/accepted");
-            subscribe(subscriber, "$aws/things/phase7GetDelete/shadow/delete/accepted");
+        try (MqttTestClient subscriber = connectMqtt("phase7-get-delete-sub")) {
+            subscriber.subscribe("$aws/things/phase7GetDelete/shadow/get/accepted");
+            subscriber.subscribe("$aws/things/phase7GetDelete/shadow/delete/accepted");
 
-            try (Socket publisher = connectMqtt("phase7-get-delete-pub")) {
-                publish(publisher, "$aws/things/phase7GetDelete/shadow/update",
+            try (MqttTestClient publisher = connectMqtt("phase7-get-delete-pub")) {
+                publisher.publish("$aws/things/phase7GetDelete/shadow/update",
                         json("{\"state\":{\"reported\":{\"online\":true}}}"));
-                publish(publisher, "$aws/things/phase7GetDelete/shadow/get", json("{\"clientToken\":\"get-token\"}"));
-                MqttPublish getAccepted = readPublish(subscriber.getInputStream());
+                publisher.publish("$aws/things/phase7GetDelete/shadow/get", json("{\"clientToken\":\"get-token\"}"));
+                MqttPublish getAccepted = subscriber.takePublish();
                 JsonNode getPayload = readJson(getAccepted.payload());
                 assertEquals("$aws/things/phase7GetDelete/shadow/get/accepted", getAccepted.topic());
                 assertTrue(getPayload.path("state").path("reported").path("online").asBoolean());
                 assertEquals("get-token", getPayload.path("clientToken").asText());
 
-                publish(publisher, "$aws/things/phase7GetDelete/shadow/delete", json("{\"clientToken\":\"delete-token\"}"));
-                MqttPublish deleteAccepted = readPublish(subscriber.getInputStream());
+                publisher.publish("$aws/things/phase7GetDelete/shadow/delete", json("{\"clientToken\":\"delete-token\"}"));
+                MqttPublish deleteAccepted = subscriber.takePublish();
                 JsonNode deletePayload = readJson(deleteAccepted.payload());
                 assertEquals("$aws/things/phase7GetDelete/shadow/delete/accepted", deleteAccepted.topic());
                 assertTrue(deletePayload.path("state").path("reported").path("online").asBoolean());
@@ -256,19 +258,19 @@ class IotMqttEnabledIntegrationTest {
 
     @Test
     void shadowUpdatePublishesDocumentsAndDeltaResponses() throws Exception {
-        try (Socket subscriber = connectMqtt("phase7-docs-delta-sub")) {
-            subscribe(subscriber, "$aws/things/phase7Documents/shadow/update/documents");
-            subscribe(subscriber, "$aws/things/phase7Documents/shadow/update/delta");
+        try (MqttTestClient subscriber = connectMqtt("phase7-docs-delta-sub")) {
+            subscriber.subscribe("$aws/things/phase7Documents/shadow/update/documents");
+            subscriber.subscribe("$aws/things/phase7Documents/shadow/update/delta");
 
-            try (Socket publisher = connectMqtt("phase7-docs-delta-pub")) {
-                publish(publisher, "$aws/things/phase7Documents/shadow/update",
+            try (MqttTestClient publisher = connectMqtt("phase7-docs-delta-pub")) {
+                publisher.publish("$aws/things/phase7Documents/shadow/update",
                         json("{\"state\":{\"reported\":{\"color\":\"red\"}}}"));
-                readPublish(subscriber.getInputStream());
+                subscriber.takePublish();
 
-                publish(publisher, "$aws/things/phase7Documents/shadow/update",
+                publisher.publish("$aws/things/phase7Documents/shadow/update",
                         json("{\"state\":{\"desired\":{\"color\":\"blue\"}}}"));
-                MqttPublish documents = readPublish(subscriber.getInputStream());
-                MqttPublish delta = readPublish(subscriber.getInputStream());
+                MqttPublish documents = subscriber.takePublish();
+                MqttPublish delta = subscriber.takePublish();
                 if (documents.topic().endsWith("/delta")) {
                     MqttPublish swap = documents;
                     documents = delta;
@@ -292,21 +294,21 @@ class IotMqttEnabledIntegrationTest {
         String updateTopic = "$aws/things/" + thingName + "/shadow/name/settings/update";
         String getTopic = "$aws/things/" + thingName + "/shadow/name/settings/get";
 
-        try (Socket subscriber = connectMqtt("phase7-named-sub")) {
-            subscribe(subscriber, updateTopic + "/accepted");
-            subscribe(subscriber, getTopic + "/accepted");
+        try (MqttTestClient subscriber = connectMqtt("phase7-named-sub")) {
+            subscriber.subscribe(updateTopic + "/accepted");
+            subscriber.subscribe(getTopic + "/accepted");
 
-            try (Socket publisher = connectMqtt("phase7-named-pub")) {
-                publish(publisher, updateTopic,
+            try (MqttTestClient publisher = connectMqtt("phase7-named-pub")) {
+                publisher.publish(updateTopic,
                         json("{\"state\":{\"desired\":{\"mode\":\"auto\"}},\"clientToken\":\"named-update\"}"));
-                MqttPublish updateAccepted = readPublish(subscriber.getInputStream());
+                MqttPublish updateAccepted = subscriber.takePublish();
                 JsonNode updatePayload = readJson(updateAccepted.payload());
                 assertEquals(updateTopic + "/accepted", updateAccepted.topic());
                 assertEquals("auto", updatePayload.path("state").path("desired").path("mode").asText());
                 assertEquals("named-update", updatePayload.path("clientToken").asText());
 
-                publish(publisher, getTopic, json("{\"clientToken\":\"named-get\"}"));
-                MqttPublish getAccepted = readPublish(subscriber.getInputStream());
+                publisher.publish(getTopic, json("{\"clientToken\":\"named-get\"}"));
+                MqttPublish getAccepted = subscriber.takePublish();
                 JsonNode getPayload = readJson(getAccepted.payload());
                 assertEquals(getTopic + "/accepted", getAccepted.topic());
                 assertEquals("auto", getPayload.path("state").path("desired").path("mode").asText());
@@ -339,216 +341,33 @@ class IotMqttEnabledIntegrationTest {
         .then()
             .statusCode(200);
 
-        try (Socket subscriber = connectMqtt("phase8-republish-sub")) {
-            subscribe(subscriber, "devices/phase8/mqtt/target");
+        try (MqttTestClient subscriber = connectMqtt("phase8-republish-sub")) {
+            subscriber.subscribe("devices/phase8/mqtt/target");
 
-            try (Socket publisher = connectMqtt("phase8-republish-pub")) {
-                publish(publisher, "devices/phase8/mqtt/source", "mqtt-rule-payload".getBytes(StandardCharsets.UTF_8));
+            try (MqttTestClient publisher = connectMqtt("phase8-republish-pub")) {
+                publisher.publish("devices/phase8/mqtt/source", "mqtt-rule-payload".getBytes(StandardCharsets.UTF_8));
             }
 
-            MqttPublish republished = readPublish(subscriber.getInputStream());
+            MqttPublish republished = subscriber.takePublish();
             assertEquals("devices/phase8/mqtt/target", republished.topic());
             assertArrayEquals("mqtt-rule-payload".getBytes(StandardCharsets.UTF_8), republished.payload());
         }
     }
 
-    private Socket connectMqtt(String clientId) throws IOException {
+    private MqttTestClient connectMqtt(String clientId) throws MqttException {
         return connectMqttClientId(uniqueClientId(clientId));
     }
 
-    private Socket connectMqttClientId(String clientId) throws IOException {
-        IOException lastFailure = null;
-        for (int attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
-            Socket socket = new MqttTestSocket();
-            try {
-                socket.connect(new InetSocketAddress("127.0.0.1", PORT), 2_000);
-                socket.setSoTimeout(2_000);
-                socket.getOutputStream().write(connectPacketForClientId(clientId));
-                byte[] connack = readPacket(socket.getInputStream());
-                assertArrayEquals(new byte[] {0x20, 0x02, 0x00, 0x00}, connack);
-                assertMqttPing(socket);
-                return socket;
-            } catch (IOException e) {
-                lastFailure = e;
-                LOG.debugf(e, "MQTT test connection attempt %d failed for client %s", attempt, clientId);
-                closeAfterFailedConnect(socket);
-            } catch (AssertionError e) {
-                closeAfterFailedConnect(socket);
-                throw e;
-            }
-        }
-        throw lastFailure;
-    }
-
-    private Socket connectMqtt5(String clientId) throws IOException {
-        String uniqueClientId = uniqueClientId(clientId);
-        IOException lastFailure = null;
-        for (int attempt = 1; attempt <= CONNECT_ATTEMPTS; attempt++) {
-            Socket socket = new MqttTestSocket();
-            try {
-                socket.connect(new InetSocketAddress("127.0.0.1", PORT), 2_000);
-                socket.setSoTimeout(2_000);
-                ByteArrayOutputStream variable = new ByteArrayOutputStream();
-                writeUtf8(variable, "MQTT");
-                variable.write(0x05);
-                variable.write(0x02);
-                variable.write(0x00);
-                variable.write(0x3c);
-                variable.write(0x00);
-                writeUtf8(variable, uniqueClientId);
-                socket.getOutputStream().write(packet(0x10, variable.toByteArray()));
-                byte[] connack = readPacket(socket.getInputStream());
-                assertMqtt5SuccessConnack(connack);
-                assertMqttPing(socket);
-                return socket;
-            } catch (IOException e) {
-                lastFailure = e;
-                LOG.debugf(e, "MQTT 5 test connection attempt %d failed for client %s", attempt, uniqueClientId);
-                closeAfterFailedConnect(socket);
-            } catch (AssertionError e) {
-                closeAfterFailedConnect(socket);
-                throw e;
-            }
-        }
-        throw lastFailure;
-    }
-
-    private void assertMqttPing(Socket socket) throws IOException {
-        socket.getOutputStream().write(new byte[] {(byte) 0xc0, 0x00});
-        assertArrayEquals(new byte[] {(byte) 0xd0, 0x00}, readPacket(socket.getInputStream()));
-    }
-
-    private void closeAfterFailedConnect(Socket socket) {
-        try {
-            socket.close();
-        } catch (IOException e) {
-            LOG.debug("MQTT test socket could not be closed after failed connect", e);
-        }
-    }
-
-    private void assertMqtt5SuccessConnack(byte[] connack) {
-        assertEquals(0x20, connack[0] & 0xff);
-        int position = 1 + remainingLengthBytes(connack);
-        assertEquals(0x00, connack[position] & 0xff);
-        assertEquals(0x00, connack[position + 1] & 0xff);
-    }
-
-    private byte[] connectPacket(String clientId) throws IOException {
-        return connectPacketForClientId(uniqueClientId(clientId));
-    }
-
-    private byte[] connectPacketForClientId(String clientId) throws IOException {
-        ByteArrayOutputStream variable = new ByteArrayOutputStream();
-        writeUtf8(variable, "MQTT");
-        variable.write(0x04);
-        variable.write(0x02);
-        variable.write(0x00);
-        variable.write(0x3c);
-        writeUtf8(variable, clientId);
-        return packet(0x10, variable.toByteArray());
+    private MqttTestClient connectMqttClientId(String clientId) throws MqttException {
+        return MqttTestClient.connect(clientId);
     }
 
     private String uniqueClientId(String clientId) {
         return clientId + "-" + System.nanoTime();
     }
 
-    private void subscribe(Socket socket, String topic) throws IOException {
-        subscribe(socket, topic, 0);
-    }
-
-    private void subscribe(Socket socket, String topic, int qos) throws IOException {
-        ByteArrayOutputStream variable = new ByteArrayOutputStream();
-        variable.write(0x00);
-        variable.write(0x01);
-        writeUtf8(variable, topic);
-        variable.write(qos);
-        socket.getOutputStream().write(packet(0x82, variable.toByteArray()));
-        byte[] suback = readPacket(socket.getInputStream());
-        assertArrayEquals(new byte[] {(byte) 0x90, 0x03, 0x00, 0x01, (byte) qos}, suback);
-    }
-
-    private void subscribeMqtt5(Socket socket, String topic) throws IOException {
-        ByteArrayOutputStream variable = new ByteArrayOutputStream();
-        variable.write(0x00);
-        variable.write(0x01);
-        variable.write(0x00);
-        writeUtf8(variable, topic);
-        variable.write(0x00);
-        socket.getOutputStream().write(packet(0x82, variable.toByteArray()));
-        byte[] suback = readPacket(socket.getInputStream());
-        assertEquals(0x90, suback[0] & 0xff);
-        int position = 1 + remainingLengthBytes(suback);
-        assertEquals(0x00, suback[position] & 0xff);
-        assertEquals(0x01, suback[position + 1] & 0xff);
-        position += 2;
-        int propertiesLengthBytes = variableLengthBytes(suback, position);
-        int propertiesLength = variableLength(suback, position);
-        position += propertiesLengthBytes + propertiesLength;
-        assertEquals(0x00, suback[position] & 0xff);
-    }
-
-    private void publish(Socket socket, String topic, byte[] payload) throws IOException {
-        ByteArrayOutputStream variable = new ByteArrayOutputStream();
-        writeUtf8(variable, topic);
-        variable.write(payload);
-        socket.getOutputStream().write(packet(0x30, variable.toByteArray()));
-    }
-
-    private void publishQos1(Socket socket, String topic, byte[] payload, int packetId) throws IOException {
-        ByteArrayOutputStream variable = new ByteArrayOutputStream();
-        writeUtf8(variable, topic);
-        variable.write((packetId >>> 8) & 0xff);
-        variable.write(packetId & 0xff);
-        variable.write(payload);
-        socket.getOutputStream().write(packet(0x32, variable.toByteArray()));
-    }
-
-    private void publishMqtt5(Socket socket, String topic, byte[] payload) throws IOException {
-        ByteArrayOutputStream variable = new ByteArrayOutputStream();
-        writeUtf8(variable, topic);
-        variable.write(0x02);
-        variable.write(0x01);
-        variable.write(0x01);
-        variable.write(payload);
-        socket.getOutputStream().write(packet(0x30, variable.toByteArray()));
-    }
-
-    private MqttPublish readPublish(InputStream input) throws IOException {
-        byte[] packet = readPacket(input);
-        assertEquals(0x30, packet[0] & 0xf0);
-        int remainingLengthBytes = remainingLengthBytes(packet);
-        int position = 1 + remainingLengthBytes;
-        int topicLength = ((packet[position] & 0xff) << 8) | (packet[position + 1] & 0xff);
-        position += 2;
-        String topic = new String(packet, position, topicLength, StandardCharsets.UTF_8);
-        position += topicLength;
-        return new MqttPublish(topic, Arrays.copyOfRange(packet, position, packet.length));
-    }
-
-    private MqttPublish readQos1Publish(InputStream input) throws IOException {
-        byte[] packet = readPacket(input);
-        assertEquals(0x32, packet[0] & 0xff);
-        int remainingLengthBytes = remainingLengthBytes(packet);
-        int position = 1 + remainingLengthBytes;
-        int topicLength = ((packet[position] & 0xff) << 8) | (packet[position + 1] & 0xff);
-        position += 2;
-        String topic = new String(packet, position, topicLength, StandardCharsets.UTF_8);
-        position += topicLength + 2;
-        return new MqttPublish(topic, Arrays.copyOfRange(packet, position, packet.length));
-    }
-
-    private MqttPublish readMqtt5Publish(InputStream input) throws IOException {
-        byte[] packet = readPacket(input);
-        assertEquals(0x30, packet[0] & 0xf0);
-        int position = 1 + remainingLengthBytes(packet);
-        int topicLength = ((packet[position] & 0xff) << 8) | (packet[position + 1] & 0xff);
-        position += 2;
-        String topic = new String(packet, position, topicLength, StandardCharsets.UTF_8);
-        position += topicLength;
-        int propertiesLengthBytes = variableLengthBytes(packet, position);
-        int propertiesLength = variableLength(packet, position);
-        position += propertiesLengthBytes + propertiesLength;
-        return new MqttPublish(topic, Arrays.copyOfRange(packet, position, packet.length));
+    private Mqtt5TestClient connectMqtt5(String clientId) throws org.eclipse.paho.mqttv5.common.MqttException {
+        return Mqtt5TestClient.connect(uniqueClientId(clientId));
     }
 
     private byte[] json(String value) {
@@ -557,95 +376,6 @@ class IotMqttEnabledIntegrationTest {
 
     private JsonNode readJson(byte[] payload) throws IOException {
         return OBJECT_MAPPER.readTree(payload);
-    }
-
-    private byte[] packet(int type, byte[] body) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        out.write(type);
-        writeRemainingLength(out, body.length);
-        out.write(body);
-        return out.toByteArray();
-    }
-
-    private byte[] readPacket(InputStream input) throws IOException {
-        ByteArrayOutputStream out = new ByteArrayOutputStream();
-        int first = input.read();
-        if (first < 0) {
-            throw new IOException("No MQTT packet received");
-        }
-        out.write(first);
-
-        int multiplier = 1;
-        int remainingLength = 0;
-        int encoded;
-        do {
-            encoded = input.read();
-            if (encoded < 0) {
-                throw new IOException("Incomplete MQTT remaining length");
-            }
-            out.write(encoded);
-            remainingLength += (encoded & 127) * multiplier;
-            multiplier *= 128;
-        } while ((encoded & 128) != 0);
-
-        byte[] body = input.readNBytes(remainingLength);
-        if (body.length != remainingLength) {
-            throw new IOException("Incomplete MQTT packet body");
-        }
-        out.write(body);
-        return out.toByteArray();
-    }
-
-    private int remainingLengthBytes(byte[] packet) {
-        int count = 0;
-        int encoded;
-        do {
-            encoded = packet[1 + count] & 0xff;
-            count++;
-        } while ((encoded & 128) != 0);
-        return count;
-    }
-
-    private int variableLength(byte[] packet, int offset) {
-        int multiplier = 1;
-        int value = 0;
-        int position = offset;
-        int encoded;
-        do {
-            encoded = packet[position++] & 0xff;
-            value += (encoded & 127) * multiplier;
-            multiplier *= 128;
-        } while ((encoded & 128) != 0);
-        return value;
-    }
-
-    private int variableLengthBytes(byte[] packet, int offset) {
-        int count = 0;
-        int encoded;
-        do {
-            encoded = packet[offset + count] & 0xff;
-            count++;
-        } while ((encoded & 128) != 0);
-        return count;
-    }
-
-    private void writeUtf8(OutputStream out, String value) throws IOException {
-        byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
-        out.write((bytes.length >>> 8) & 0xff);
-        out.write(bytes.length & 0xff);
-        out.write(bytes);
-    }
-
-    private void writeRemainingLength(OutputStream out, int length) throws IOException {
-        int value = length;
-        do {
-            int encoded = value % 128;
-            value /= 128;
-            if (value > 0) {
-                encoded |= 128;
-            }
-            out.write(encoded);
-        } while (value > 0);
     }
 
     private void awaitPublishedEvent(String topic, byte[] payload) throws InterruptedException {
@@ -661,29 +391,169 @@ class IotMqttEnabledIntegrationTest {
         throw new AssertionError("MQTT publish event was not recorded");
     }
 
-    private void assertSocketClosed(Socket socket) throws IOException {
-        try {
-            assertEquals(-1, socket.getInputStream().read());
-        } catch (SocketTimeoutException e) {
-            throw new AssertionError("MQTT connection stayed open after DeleteConnection", e);
-        }
-    }
-
     private record MqttPublish(String topic, byte[] payload) {
     }
 
-    private static final class MqttTestSocket extends Socket {
-        @Override
-        public void close() throws IOException {
-            if (isConnected() && !isClosed() && !isOutputShutdown()) {
-                try {
-                    getOutputStream().write(new byte[] {(byte) 0xe0, 0x00});
-                    getOutputStream().flush();
-                } catch (IOException e) {
-                    LOG.debug("MQTT test socket could not send DISCONNECT before close", e);
+    private static final class MqttTestClient implements AutoCloseable {
+        private final MqttClient client;
+        private final BlockingQueue<MqttPublish> publishes = new LinkedBlockingQueue<>();
+
+        private MqttTestClient(MqttClient client) {
+            this.client = client;
+        }
+
+        static MqttTestClient connect(String clientId) throws MqttException {
+            MqttClient client = new MqttClient(BROKER_URI, clientId, new MemoryPersistence());
+            MqttTestClient testClient = new MqttTestClient(client);
+            client.setCallback(new MqttCallback() {
+                @Override
+                public void connectionLost(Throwable cause) {
                 }
+
+                @Override
+                public void messageArrived(String topic, MqttMessage message) {
+                    testClient.publishes.add(new MqttPublish(topic, message.getPayload()));
+                }
+
+                @Override
+                public void deliveryComplete(IMqttDeliveryToken token) {
+                }
+            });
+            client.connect(connectOptions());
+            return testClient;
+        }
+
+        boolean isConnected() {
+            return client.isConnected();
+        }
+
+        void subscribe(String topic) throws MqttException {
+            subscribe(topic, 0);
+        }
+
+        void subscribe(String topic, int qos) throws MqttException {
+            client.subscribe(topic, qos);
+        }
+
+        void publish(String topic, byte[] payload) throws MqttException {
+            publish(topic, payload, 0);
+        }
+
+        void publish(String topic, byte[] payload, int qos) throws MqttException {
+            client.publish(topic, payload, qos, false);
+        }
+
+        MqttPublish takePublish() throws InterruptedException {
+            return Optional.ofNullable(publishes.poll(2, TimeUnit.SECONDS))
+                    .orElseThrow(() -> new AssertionError("No MQTT publish received"));
+        }
+
+        void awaitDisconnected() throws InterruptedException {
+            Instant deadline = Instant.now().plus(Duration.ofSeconds(2));
+            while (Instant.now().isBefore(deadline)) {
+                if (!client.isConnected()) {
+                    return;
+                }
+                Thread.sleep(25);
             }
-            super.close();
+            throw new AssertionError("MQTT connection stayed open after DeleteConnection");
+        }
+
+        @Override
+        public void close() throws MqttException {
+            if (client.isConnected()) {
+                client.disconnect();
+            }
+            client.close();
+        }
+
+        private static MqttConnectOptions connectOptions() {
+            MqttConnectOptions options = new MqttConnectOptions();
+            options.setCleanSession(true);
+            options.setConnectionTimeout(2);
+            options.setKeepAliveInterval(60);
+            options.setAutomaticReconnect(false);
+            return options;
+        }
+    }
+
+    private static final class Mqtt5TestClient implements AutoCloseable {
+        private final org.eclipse.paho.mqttv5.client.MqttClient client;
+        private final BlockingQueue<MqttPublish> publishes = new LinkedBlockingQueue<>();
+
+        private Mqtt5TestClient(org.eclipse.paho.mqttv5.client.MqttClient client) {
+            this.client = client;
+        }
+
+        static Mqtt5TestClient connect(String clientId) throws org.eclipse.paho.mqttv5.common.MqttException {
+            org.eclipse.paho.mqttv5.client.MqttClient client =
+                    new org.eclipse.paho.mqttv5.client.MqttClient(BROKER_URI, clientId, null);
+            Mqtt5TestClient testClient = new Mqtt5TestClient(client);
+            client.setCallback(new org.eclipse.paho.mqttv5.client.MqttCallback() {
+                @Override
+                public void disconnected(org.eclipse.paho.mqttv5.client.MqttDisconnectResponse disconnectResponse) {
+                }
+
+                @Override
+                public void mqttErrorOccurred(org.eclipse.paho.mqttv5.common.MqttException exception) {
+                }
+
+                @Override
+                public void messageArrived(String topic, org.eclipse.paho.mqttv5.common.MqttMessage message) {
+                    testClient.publishes.add(new MqttPublish(topic, message.getPayload()));
+                }
+
+                @Override
+                public void deliveryComplete(org.eclipse.paho.mqttv5.client.IMqttToken token) {
+                }
+
+                @Override
+                public void connectComplete(boolean reconnect, String serverURI) {
+                }
+
+                @Override
+                public void authPacketArrived(int reasonCode, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties) {
+                }
+            });
+            client.connect(connectOptions());
+            return testClient;
+        }
+
+        boolean isConnected() {
+            return client.isConnected();
+        }
+
+        void subscribe(String topic) throws org.eclipse.paho.mqttv5.common.MqttException {
+            client.subscribe(topic, 0);
+        }
+
+        void publish(String topic, byte[] payload) throws org.eclipse.paho.mqttv5.common.MqttException {
+            org.eclipse.paho.mqttv5.common.MqttMessage message = new org.eclipse.paho.mqttv5.common.MqttMessage(payload);
+            message.setQos(0);
+            client.publish(topic, message);
+        }
+
+        MqttPublish takePublish() throws InterruptedException {
+            return Optional.ofNullable(publishes.poll(2, TimeUnit.SECONDS))
+                    .orElseThrow(() -> new AssertionError("No MQTT publish received"));
+        }
+
+        @Override
+        public void close() throws org.eclipse.paho.mqttv5.common.MqttException {
+            if (client.isConnected()) {
+                client.disconnect();
+            }
+            client.close();
+        }
+
+        private static org.eclipse.paho.mqttv5.client.MqttConnectionOptions connectOptions() {
+            org.eclipse.paho.mqttv5.client.MqttConnectionOptions options =
+                    new org.eclipse.paho.mqttv5.client.MqttConnectionOptions();
+            options.setCleanStart(true);
+            options.setConnectionTimeout(2);
+            options.setKeepAliveInterval(60);
+            options.setAutomaticReconnect(false);
+            return options;
         }
     }
 
