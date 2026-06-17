@@ -123,6 +123,9 @@ nav:
     - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
     - AWS Config: services/config.md
+    - CloudTrail: services/cloudtrail.md
+    - EMR: services/emr.md
+    - WAF v2: services/wafv2.md
     - Textract: services/textract.md
     - Transcribe: services/transcribe.md
     - Pricing: services/pricing.md

@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.floci;
+package io.github.hectorvent.floci.services.floci.duck;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;

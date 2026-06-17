@@ -177,7 +177,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**54 AWS services. Broad coverage. Free forever.**
+**58 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -222,7 +222,8 @@ Floci supports local emulation for application services, data services, eventing
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
 | Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
-| Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract, Transcribe |
+| Data and analytics | Athena, Glue, EMR, Firehose, OpenSearch, Textract, Transcribe |
+| Security and governance | WAF v2, CloudTrail |
 | Databases | RDS, RDS Data API, Neptune |
 | Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
@@ -266,6 +267,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
+| EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets, steps, security configurations, tagging |
 | Data Firehose | In-process | Streaming delivery, NDJSON flush to S3 |
 | ECS | Real Docker | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |
@@ -285,6 +287,8 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Auto Scaling | In-process with reconciler | Launch configs, ASGs, desired capacity reconciliation, lifecycle hooks |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
+| CloudTrail | In-process | Trail lifecycle, event selectors, logging status; management API only |
+| WAF v2 | In-process | Web ACLs, IP sets, regex pattern sets, rule groups, logging configs, resource associations, tagging (REGIONAL and CLOUDFRONT scopes) |
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
 | Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
