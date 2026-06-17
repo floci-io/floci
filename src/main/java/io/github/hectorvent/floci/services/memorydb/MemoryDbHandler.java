@@ -76,6 +76,7 @@ public class MemoryDbHandler {
         spec.setEngineVersion(text(request, "EngineVersion"));
         spec.setAclName(text(request, "ACLName"));
         spec.setTlsEnabled(request.path("TLSEnabled").asBoolean(false));
+        spec.setAuthToken(text(request, "AuthToken"));
         spec.setAuthMode(resolveAuthMode(request));
         spec.setTags(parseTags(request.path("Tags")));
         Cluster created = service.createCluster(spec, region);
