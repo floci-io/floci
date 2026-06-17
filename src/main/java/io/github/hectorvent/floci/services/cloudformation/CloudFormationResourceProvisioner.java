@@ -25,6 +25,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
@@ -148,6 +150,7 @@ public class CloudFormationResourceProvisioner {
     private final KinesisService kinesisService;
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
+    private final FirehoseService firehoseService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -175,7 +178,8 @@ public class CloudFormationResourceProvisioner {
                                              CloudWatchLogsService logsService,
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
-                                             AutoScalingService autoScalingService) {
+                                             AutoScalingService autoScalingService,
+                                             FirehoseService firehoseService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -206,6 +210,7 @@ public class CloudFormationResourceProvisioner {
         this.kinesisService = kinesisService;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
+        this.firehoseService = firehoseService;
     }
 
     /**
@@ -315,6 +320,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Route" -> provisionRoute(resource, properties, engine, region);
                 case "AWS::EC2::NatGateway" -> provisionNatGateway(resource, properties, engine, region);
                 case "AWS::EC2::EIP" -> provisionEip(resource, region);
+                case "AWS::KinesisFirehose::DeliveryStream" ->
+                        provisionFirehoseDeliveryStream(resource, properties, engine, stackName);
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
                 case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName);
@@ -418,6 +425,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
+                case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
                 case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
                 case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
                 case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
@@ -1038,6 +1046,48 @@ public class CloudFormationResourceProvisioner {
         if (nodegroup.getNodegroupArn() != null) {
             r.getAttributes().put("Arn", nodegroup.getNodegroupArn());
         }
+    }
+
+    // ── Kinesis Data Firehose ───────────────────────────────────────────────────
+
+    private void provisionFirehoseDeliveryStream(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine, String stackName) {
+        String name = resolveOptional(props, "DeliveryStreamName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 64, false);
+        }
+
+        DeliveryStreamDescription.S3Destination s3 = null;
+        JsonNode s3Node = props != null && props.has("ExtendedS3DestinationConfiguration")
+                ? props.get("ExtendedS3DestinationConfiguration")
+                : (props != null ? props.get("S3DestinationConfiguration") : null);
+        if (s3Node != null && !s3Node.isNull()) {
+            s3 = new DeliveryStreamDescription.S3Destination();
+            s3.setBucketArn(blankToNull(engine.resolve(s3Node.path("BucketARN"))));
+            s3.setPrefix(blankToNull(engine.resolve(s3Node.path("Prefix"))));
+            if (s3Node.has("BufferingHints")) {
+                JsonNode hints = s3Node.get("BufferingHints");
+                var bufferingHints = new DeliveryStreamDescription.BufferingHints();
+                bufferingHints.setSizeInMBs(parseIntProp(hints, "SizeInMBs", engine, 5));
+                bufferingHints.setIntervalInSeconds(parseIntProp(hints, "IntervalInSeconds", engine, 300));
+                s3.setBufferingHints(bufferingHints);
+            }
+        }
+
+        List<DeliveryStreamDescription.Tag> tags = new ArrayList<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    tags.add(new DeliveryStreamDescription.Tag(key, engine.resolve(tag.path("Value"))));
+                }
+            }
+        }
+
+        String arn = firehoseService.createDeliveryStream(name, s3, tags);
+        // Ref returns the delivery stream name; Fn::GetAtt Arn returns the stream ARN.
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn", arn);
     }
 
     // ── SNS ───────────────────────────────────────────────────────────────────
