@@ -244,8 +244,10 @@ public class SecretsManagerJsonHandler {
 
     private Response handleListSecrets(JsonNode request, String region) {
         List<Secret> secrets = new ArrayList<>(service.listSecrets(region));
-        // Sort for stable pagination across calls (the store scan order is not guaranteed).
-        secrets.sort(Comparator.comparing(Secret::getName));
+        // AWS lists secrets by CreatedDate when SortBy is absent; sort on it (name as a
+        // tiebreaker) for AWS-matching, stable pagination across calls.
+        secrets.sort(Comparator.comparing(Secret::getCreatedDate, Comparator.nullsLast(Comparator.naturalOrder()))
+                .thenComparing(Secret::getName));
 
         // MaxResults is constrained to 1-100; when absent the full result set is returned.
         int maxResults = secrets.size();
@@ -253,10 +255,8 @@ public class SecretsManagerJsonHandler {
             maxResults = request.path("MaxResults").asInt();
             if (maxResults < 1 || maxResults > 100) {
                 return Response.status(400)
-                        .entity(new AwsErrorResponse("ValidationException",
-                                "1 validation error detected: Value '" + maxResults + "' at 'maxResults' failed to "
-                                        + "satisfy constraint: Member must have value less than or equal to 100 and "
-                                        + "greater than or equal to 1"))
+                        .entity(new AwsErrorResponse("InvalidParameterException",
+                                "Invalid MaxResults value, must be between 1 and 100"))
                         .build();
             }
         }

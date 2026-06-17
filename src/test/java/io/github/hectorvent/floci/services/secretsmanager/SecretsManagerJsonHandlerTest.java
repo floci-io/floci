@@ -205,7 +205,11 @@ class SecretsManagerJsonHandlerTest {
     void listSecretsRejectsMaxResultsOutOfRange() {
         ObjectNode req = MAPPER.createObjectNode();
         req.put("MaxResults", 101);
-        assertThat(handler.handle("ListSecrets", req, REGION).getStatus(), is(400));
+        Response response = handler.handle("ListSecrets", req, REGION);
+        assertThat(response.getStatus(), is(400));
+        // ListSecrets does not model ValidationException; AWS returns InvalidParameterException.
+        assertThat(((io.github.hectorvent.floci.core.common.AwsErrorResponse) response.getEntity()).type(),
+                is("InvalidParameterException"));
     }
 
     @Test
