@@ -183,7 +183,7 @@ public class AwsServiceRouter {
 
         if (action == null || action.isBlank()) {
             throw new AwsException("MissingAction",
-                    "The request body must contain the parameter Action", 400);
+                    "The request must contain the parameter Action", 400);
         }
 
         try {
