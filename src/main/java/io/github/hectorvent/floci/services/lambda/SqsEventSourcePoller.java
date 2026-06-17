@@ -35,6 +35,9 @@ public class SqsEventSourcePoller {
 
     private static final Logger LOG = Logger.getLogger(SqsEventSourcePoller.class);
 
+    /** AWS SQS default visibility timeout, used as the retry backoff when a queue has none configured. */
+    private static final int DEFAULT_RETRY_VISIBILITY_SECONDS = 30;
+
     private final Vertx vertx;
     private final SqsService sqsService;
     private final LambdaExecutorService executorService;
@@ -114,6 +117,7 @@ public class SqsEventSourcePoller {
         }
     }
 
+    /** Package-private (not private) only so unit tests can drive a single poll directly. */
     void pollAndInvoke(EventSourceMapping esm) {
         // Skip this tick if a previous poll for this ESM is still in progress.
         // This prevents concurrent deliveries of the same message when the Lambda
@@ -199,24 +203,48 @@ public class SqsEventSourcePoller {
     }
 
     /**
-     * Returns failed messages to the source queue immediately by resetting their
-     * visibility timeout to 0. The poller hides messages for {@code fn.timeout + 30s}
-     * to cover execution time, but on failure that long window would keep the message
-     * in-flight (and therefore not redelivered nor redriven) far longer than the queue's
-     * own visibility/redrive policy intends. Making them visible again lets the next poll
-     * re-receive them, incrementing ApproximateReceiveCount so the queue's RedrivePolicy
-     * can move them to the DLQ once {@code maxReceiveCount} is exceeded.
+     * Returns failed messages to the source queue by resetting their visibility timeout
+     * to the queue's own {@code VisibilityTimeout}. The poller hides messages for
+     * {@code fn.timeout + 30s} to cover execution time, but on failure that long window
+     * would keep the message in-flight (and therefore not redelivered nor redriven) far
+     * longer than the queue's own visibility/redrive policy intends. Shrinking the window
+     * back to the queue's visibility timeout lets the next poll re-receive them — matching
+     * AWS's redelivery cadence rather than spinning a tight retry loop (which resetting to
+     * 0 would cause for a persistently failing function) — so ApproximateReceiveCount
+     * climbs and the queue's RedrivePolicy moves them to the DLQ once
+     * {@code maxReceiveCount} is exceeded.
      */
     private void returnMessagesToQueue(EventSourceMapping esm, List<Message> messages) {
+        int retryVisibility = retryVisibilityTimeout(esm);
         for (Message msg : messages) {
             try {
                 sqsService.changeMessageVisibility(
-                        esm.getQueueUrl(), msg.getReceiptHandle(), 0, esm.getRegion());
+                        esm.getQueueUrl(), msg.getReceiptHandle(), retryVisibility, esm.getRegion());
             } catch (Exception e) {
                 LOG.warnv("ESM {0}: failed to return message {1} to queue: {2}",
                         esm.getUuid(), msg.getMessageId(), e.getMessage());
             }
         }
+    }
+
+    /**
+     * The visibility timeout to apply when returning a failed message to the queue: the
+     * queue's configured {@code VisibilityTimeout}, or the AWS default of 30s when unset
+     * or unreadable. This governs how soon the message is retried/redriven.
+     */
+    private int retryVisibilityTimeout(EventSourceMapping esm) {
+        try {
+            String vt = sqsService.getQueueAttributes(
+                    esm.getQueueUrl(), List.of("VisibilityTimeout"), esm.getRegion())
+                    .get("VisibilityTimeout");
+            if (vt != null) {
+                return Math.max(0, Integer.parseInt(vt));
+            }
+        } catch (Exception e) {
+            LOG.debugv("ESM {0}: could not read VisibilityTimeout, using default {1}s backoff: {2}",
+                    esm.getUuid(), DEFAULT_RETRY_VISIBILITY_SECONDS, e.getMessage());
+        }
+        return DEFAULT_RETRY_VISIBILITY_SECONDS;
     }
 
     private Set<String> extractBatchItemFailures(EventSourceMapping esm, InvokeResult result) {

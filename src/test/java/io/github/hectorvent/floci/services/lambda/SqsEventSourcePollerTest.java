@@ -15,6 +15,7 @@ import org.junit.jupiter.api.Test;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -127,7 +128,7 @@ class SqsEventSourcePollerTest {
     }
 
     @Test
-    void failedInvocationReturnsMessagesToQueueImmediately() {
+    void failedInvocationReturnsMessagesToQueueUsingQueueVisibilityTimeout() {
         EventSourceMapping esm = esm();
         LambdaFunction fn = new LambdaFunction();
         fn.setFunctionName("throwfn");
@@ -138,6 +139,8 @@ class SqsEventSourcePollerTest {
         Message msg = message("m1");
         when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
                 .thenReturn(List.of(msg));
+        when(sqsService.getQueueAttributes(eq(esm.getQueueUrl()), any(), eq("us-east-1")))
+                .thenReturn(Map.of("VisibilityTimeout", "2"));
 
         InvokeResult failure = new InvokeResult();
         failure.setFunctionError("Handled");
@@ -146,11 +149,40 @@ class SqsEventSourcePollerTest {
 
         poller.pollAndInvoke(esm);
 
-        // The failed message must be made visible again (timeout 0) so the next poll
-        // re-receives it and the queue's RedrivePolicy can move it to the DLQ.
+        // The failed message must be made visible again after the queue's own visibility
+        // timeout (2s here) so the next poll re-receives it and the queue's RedrivePolicy
+        // can move it to the DLQ — rather than staying in-flight for fn.timeout + 30s.
         verify(sqsService, timeout(2000)).changeMessageVisibility(
-                esm.getQueueUrl(), "rh-m1", 0, "us-east-1");
+                esm.getQueueUrl(), "rh-m1", 2, "us-east-1");
         verify(sqsService, never()).deleteMessage(any(), any(), any());
+    }
+
+    @Test
+    void failedInvocationFallsBackToDefaultVisibilityWhenQueueHasNone() {
+        EventSourceMapping esm = esm();
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("throwfn");
+        fn.setTimeout(10);
+        when(functionStore.getForAccount("000000000000", "us-east-1", "throwfn"))
+                .thenReturn(Optional.of(fn));
+
+        Message msg = message("m1");
+        when(sqsService.receiveMessage(eq(esm.getQueueUrl()), anyInt(), anyInt(), anyInt(), eq("us-east-1")))
+                .thenReturn(List.of(msg));
+        // Queue reports no VisibilityTimeout attribute.
+        when(sqsService.getQueueAttributes(eq(esm.getQueueUrl()), any(), eq("us-east-1")))
+                .thenReturn(Map.of());
+
+        InvokeResult failure = new InvokeResult();
+        failure.setFunctionError("Handled");
+        when(executorService.invoke(eq(fn), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(failure);
+
+        poller.pollAndInvoke(esm);
+
+        // Falls back to the AWS default of 30s rather than 0 (which would spin a tight retry loop).
+        verify(sqsService, timeout(2000)).changeMessageVisibility(
+                esm.getQueueUrl(), "rh-m1", 30, "us-east-1");
     }
 
     @Test
