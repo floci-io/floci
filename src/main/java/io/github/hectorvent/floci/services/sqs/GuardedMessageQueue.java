@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.sqs;
 
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.sqs.model.Message;
 
@@ -266,6 +267,33 @@ class GuardedMessageQueue {
         if (closed || messageStore == null || storageKey == null) {
             return;
         }
+        if (messageStore instanceof AccountAwareStorageBackend<List<Message>> aware) {
+            String accountId = extractAccountFromStorageKey(storageKey);
+            if (accountId != null) {
+                aware.putForAccount(accountId, storageKey, new ArrayList<>(messages));
+                return;
+            }
+        }
         messageStore.put(storageKey, new ArrayList<>(messages));
+    }
+
+    /**
+     * Extracts the 12-digit account ID from a storage key of the form
+     * {@code region::/accountId/queueName}.
+     */
+    private static String extractAccountFromStorageKey(String storageKey) {
+        if (storageKey == null) {
+            return null;
+        }
+        // storageKey format: "us-east-1::/000000000001/my-queue"
+        int separator = storageKey.indexOf("::");
+        if (separator < 0) {
+            return null;
+        }
+        String path = storageKey.substring(separator + 2); // "/000000000001/my-queue"
+        String trimmed = path.startsWith("/") ? path.substring(1) : path;
+        int slash = trimmed.indexOf('/');
+        String candidate = slash > 0 ? trimmed.substring(0, slash) : trimmed;
+        return candidate.matches("\\d{12}") ? candidate : null;
     }
 }
