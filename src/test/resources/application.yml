@@ -4,6 +4,8 @@ quarkus:
     test-port: 0
     limits:
       max-body-size: ${floci.max-request-size}M
+  datasource:
+    active: false
 
 floci:
   base-url: "http://localhost:4566"
@@ -85,6 +87,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: true
@@ -169,6 +172,8 @@ floci:
     appconfigdata:
       enabled: true
     ecr:
+      enabled: true
+    ui:
       enabled: true
     bedrock-runtime:
       enabled: true

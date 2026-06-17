@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Floci — local AWS emulator</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Sora:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #070B14;
+      --bg2: #161E2E;
+      --bg3: #0F1520;
+      --border: #2A3142;
+      --border-bright: #3D4559;
+      --text: #F8FAFC;
+      --text-muted: #94A3B8;
+      --text-dim: #64748B;
+      --accent: #7A7FD6;
+      --accent-deep: #5559A7;
+      --accent-mid: #6368C2;
+      --accent-dim: rgba(85,89,167,.12);
+      --green: #22c55e;
+      --sans: "Sora", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      --mono: "Space Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      font-family: var(--sans);
+      background:
+        radial-gradient(900px 480px at 50% -12%, rgba(122,127,214,0.18) 0%, rgba(85,89,167,0.06) 38%, transparent 70%),
+        var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+    }
+    .card {
+      width: min(640px, 92vw); padding: 44px 46px; border-radius: 20px;
+      background: linear-gradient(180deg, var(--bg2), var(--bg3));
+      border: 1px solid var(--border);
+      box-shadow: 0 30px 90px rgba(0,0,0,0.55);
+    }
+    .logo-wrap { display: flex; align-items: center; gap: 14px; margin: 0 0 10px; }
+    .floci-logo { height: 40px; width: auto; display: block; }
+    .floci-text { fill: var(--text); }
+    .floci-cloud { fill: var(--text); }
+    .floci-dot { fill: var(--accent); }
+    .status {
+      display: inline-flex; align-items: center; gap: 8px; margin-left: auto;
+      font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+      padding: 5px 11px; border-radius: 999px;
+      background: var(--bg3); border: 1px solid var(--border);
+    }
+    .status .dot {
+      width: 9px; height: 9px; border-radius: 50%; flex: none;
+      background: var(--text-dim); box-shadow: 0 0 0 0 transparent;
+      transition: background .2s ease, box-shadow .2s ease;
+    }
+    .status.ready .dot { background: var(--green); box-shadow: 0 0 0 4px rgba(34,197,94,0.18); }
+    .status.starting .dot { background: #e0b341; box-shadow: 0 0 0 4px rgba(224,179,65,0.18); }
+    .status.offline .dot { background: var(--text-dim); }
+    .tag {
+      margin: 0 0 26px; color: var(--text-muted); font-size: 15px; font-weight: 400;
+    }
+    p { line-height: 1.65; color: #c4cde0; font-size: 15px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; margin: 24px 0 30px; }
+    .grid div { font-size: 13px; color: var(--text-muted); }
+    .grid b { color: var(--text); font-weight: 600; letter-spacing: -0.01em; }
+    .svc { margin: 0 0 28px; }
+    .svc-head {
+      display: flex; align-items: baseline; gap: 12px; margin: 0 0 12px;
+    }
+    .svc-head h2 {
+      margin: 0; font-size: 13px; font-weight: 600; letter-spacing: 0.04em;
+      text-transform: uppercase; color: var(--text-muted);
+    }
+    .svc-count { font-family: var(--mono); font-size: 12px; color: var(--text-dim); }
+    .svc-count b { color: var(--green); font-weight: 700; }
+    .svc-search {
+      width: 100%; margin: 0 0 12px; padding: 9px 13px; border-radius: 10px;
+      background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      font-family: var(--mono); font-size: 12.5px; outline: none;
+      transition: border-color .15s ease, box-shadow .15s ease;
+    }
+    .svc-search::placeholder { color: var(--text-dim); }
+    .svc-search:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+    .svc-list {
+      display: grid; grid-template-columns: repeat(auto-fill, minmax(135px, 1fr)); gap: 7px;
+      max-height: 188px; overflow-y: auto; padding: 4px;
+      border: 1px solid var(--border); border-radius: 12px; background: var(--bg3);
+    }
+    .svc-list::-webkit-scrollbar { width: 9px; }
+    .svc-list::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 9px; border: 2px solid var(--bg3); }
+    .badge {
+      display: flex; align-items: center; gap: 8px; padding: 7px 10px; border-radius: 9px;
+      font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+      background: var(--bg2); border: 1px solid transparent;
+    }
+    .badge .b-dot {
+      width: 8px; height: 8px; border-radius: 50%; flex: none;
+      border: 1.5px solid var(--text-dim); background: transparent;
+    }
+    .badge.running { color: var(--text); border-color: rgba(122,127,214,0.28); background: var(--accent-dim); }
+    .badge.running .b-dot { background: var(--accent); border-color: var(--accent); }
+    .badge .b-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .svc-empty { padding: 16px; font-family: var(--mono); font-size: 12px; color: var(--text-dim); text-align: center; }
+    code {
+      font-family: var(--mono);
+      background: var(--accent-dim); color: #cfd3f5;
+      padding: 2px 7px; border-radius: 6px; font-size: 12.5px;
+      border: 1px solid rgba(122,127,214,0.18);
+    }
+    .btn {
+      display: inline-flex; align-items: center; gap: 9px; text-decoration: none;
+      background: linear-gradient(180deg, var(--accent), var(--accent-deep)); color: #fff;
+      font-family: var(--sans); font-weight: 600; font-size: 15px;
+      padding: 13px 22px; border-radius: 12px; border: 1px solid rgba(122,127,214,0.35);
+      transition: transform .08s ease, box-shadow .15s ease;
+      box-shadow: 0 8px 26px rgba(85,89,167,0.45);
+    }
+    .btn:hover { transform: translateY(-1px); box-shadow: 0 12px 32px rgba(85,89,167,0.6); }
+    .foot { margin-top: 24px; font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
+    .foot a { color: var(--accent); text-decoration: none; }
+    .foot a:hover { color: #9aa0e6; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="logo-wrap">
+      <svg class="floci-logo" viewBox="0 0 531.25 156.71" xmlns="http://www.w3.org/2000/svg" aria-label="floci" role="img">
+        <g style="isolation:isolate"><g style="isolation:isolate">
+          <path class="floci-text" d="M305.44,141.35h-15.94V39.04h-17.08c-13.18,0-16.75,7.81-16.59,17.4v8.95h17.4v13.34h-17.4v62.62h-15.94v-62.62h-14.64v-13.34h14.64v-7.16c0-20.66,8.95-34.16,29.6-34.16h35.95v117.28Z"></path>
+          <path class="floci-text" d="M324.31,103.29c0-24.07,18.22-39.85,39.85-39.85s40.01,15.78,40.01,39.85-18.38,40.01-40.01,40.01-39.85-15.94-39.85-40.01ZM388.24,103.29c0-14.64-11.06-24.89-24.07-24.89s-23.91,10.25-23.91,24.89,10.9,25.05,23.91,25.05,24.07-10.25,24.07-25.05Z"></path>
+          <path class="floci-text" d="M418,103.29c0-24.07,19.03-39.85,40.99-39.85,12.36,0,22.93,5.04,29.6,13.01l-10.57,9.92c-4.39-4.88-11.06-7.97-18.71-7.97-14.15,0-25.38,10.41-25.38,24.89s11.22,25.05,25.38,25.05c7.65,0,14.31-3.09,18.71-7.97l10.57,9.92c-6.67,7.97-17.24,13.01-29.6,13.01-21.96,0-40.99-15.94-40.99-40.01Z"></path>
+          <path class="floci-text" d="M502.91,37.74c0-5.86,5.04-10.25,10.9-10.25s10.9,4.39,10.9,10.25-4.88,10.25-10.9,10.25-10.9-4.39-10.9-10.25ZM505.84,141.35v-75.96h15.94v75.96h-15.94Z"></path>
+        </g></g>
+        <g>
+          <path class="floci-cloud" d="M44.46,52.16l-1.44,9.05c-.1.64-35.57,8.08-30.51,43.05,2.04,14.08,14.69,31.06,31.94,31.22l84.34.78c3.64.03,7.49.5,9.97,2.81,1.69,1.57,1.95,6.1-.29,9.22l-83.49.43c-22.68.12-43.45-11.19-51.76-32.9-8.64-22.56.61-49.48,22.58-59.54,5.11-2.34,7.7-4,8.39-9.37l10.28,5.24h-.01Z"></path>
+          <path class="floci-cloud" d="M44.46,52.16l-10.28-5.24c1.94-15.09,10.61-28.25,23.15-36.38C74.85-.82,94.57-3.69,115.01,5.35c14.93,6.6,26.96,21.97,32.12,39.33,26.07,3.63,46.19,26.18,40.75,53.8-3.06.86-9.18-1.15-11.34-3.72,1.28-12.11-3.1-22.27-10.75-29.43-8.19-7.67-17.88-9.28-30.09-8.04-.09-25.91-19.81-43.97-43.82-45.33-22.91-1.29-43.59,16.13-47.42,40.2h0Z"></path>
+          <ellipse class="floci-dot" cx="173.57" cy="127.13" rx="20.36" ry="20.4"></ellipse>
+          <ellipse class="floci-dot" cx="513.02" cy="37.71" rx="13.22" ry="13.25"></ellipse>
+        </g>
+      </svg>
+      <span class="status offline" id="status" title="Emulator status">
+        <span class="dot"></span><span id="status-label">connecting…</span>
+      </span>
+    </div>
+    <p class="tag">Any cloud. Locally. — a local AWS emulator speaking real AWS wire protocols.</p>
+    <p>You've reached the Floci endpoint. Point your AWS SDK or CLI here with
+       <code>--endpoint-url http://localhost:4566</code> and it behaves like AWS.</p>
+    <div class="grid">
+      <div><b>Endpoint</b><br>http://localhost:4566</div>
+      <div><b>Region</b><br>us-east-1 (default)</div>
+      <div><b>Account</b><br>000000000000</div>
+      <div><b>Version</b><br><span id="version">…</span></div>
+    </div>
+    <section class="svc">
+      <div class="svc-head">
+        <h2>Services</h2>
+        <span class="svc-count" id="svc-count"><b>—</b> running · — available</span>
+      </div>
+      <input class="svc-search" id="svc-search" type="text" placeholder="filter services…"
+             autocomplete="off" autocapitalize="off" spellcheck="false" disabled />
+      <div class="svc-list" id="svc-list">
+        <div class="svc-empty">Loading services…</div>
+      </div>
+    </section>
+    <a class="btn" href="/_floci/ui">
+      Open Floci UI &rarr;
+    </a>
+    <p class="foot">The UI launches on demand as a sidecar container the first time you open it.
+       &nbsp;·&nbsp; <a href="/_floci/health">health</a> · <a href="/_floci/info">info</a></p>
+  </main>
+
+  <script>
+    (function () {
+      var statusEl = document.getElementById("status");
+      var statusLabel = document.getElementById("status-label");
+      var versionEl = document.getElementById("version");
+      var countEl = document.getElementById("svc-count");
+      var listEl = document.getElementById("svc-list");
+      var searchEl = document.getElementById("svc-search");
+
+      var services = []; // [{ name, running }]
+      var filter = "";
+
+      function setStatus(state, label) {
+        statusEl.className = "status " + state;
+        statusLabel.textContent = label;
+      }
+
+      function renderCount() {
+        var running = services.filter(function (s) { return s.running; }).length;
+        var available = services.length - running;
+        countEl.innerHTML = "<b>" + running + "</b> running · " + available + " available";
+      }
+
+      function renderList() {
+        var q = filter.trim().toLowerCase();
+        var shown = services.filter(function (s) { return !q || s.name.toLowerCase().indexOf(q) !== -1; });
+        if (!services.length) {
+          listEl.innerHTML = '<div class="svc-empty">No services reported.</div>';
+          return;
+        }
+        if (!shown.length) {
+          listEl.innerHTML = '<div class="svc-empty">No services match "' + escapeHtml(q) + '".</div>';
+          return;
+        }
+        listEl.innerHTML = shown.map(function (s) {
+          return '<span class="badge ' + (s.running ? "running" : "") + '" title="' +
+            escapeHtml(s.name) + " — " + (s.running ? "running" : "available") + '">' +
+            '<span class="b-dot"></span><span class="b-name">' + escapeHtml(s.name) + "</span></span>";
+        }).join("");
+      }
+
+      function escapeHtml(str) {
+        return String(str).replace(/[&<>"]/g, function (c) {
+          return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+        });
+      }
+
+      function sortServices(map) {
+        return Object.keys(map).map(function (name) {
+          return { name: name, running: map[name] === "running" };
+        }).sort(function (a, b) {
+          if (a.running !== b.running) { return a.running ? -1 : 1; }
+          return a.name.localeCompare(b.name);
+        });
+      }
+
+      function getJson(path) {
+        return fetch(path, { headers: { Accept: "application/json" } }).then(function (r) {
+          if (!r.ok) { throw new Error(path + " -> " + r.status); }
+          return r.json();
+        });
+      }
+
+      var refreshing = false;
+      function refresh() {
+        if (refreshing) { return; }
+        refreshing = true;
+        Promise.allSettled([getJson("/_floci/health"), getJson("/_floci/init")])
+          .then(function (results) {
+            var health = results[0].status === "fulfilled" ? results[0].value : null;
+            var init = results[1].status === "fulfilled" ? results[1].value : null;
+
+            if (!health) {
+              setStatus("offline", "offline");
+              if (!services.length) {
+                listEl.innerHTML = '<div class="svc-empty">Couldn\'t reach Floci. Retrying…</div>';
+              }
+              return;
+            }
+
+            if (health.version) { versionEl.textContent = health.version; }
+            if (health.edition) {
+              versionEl.textContent = (health.version || "—") + " · " + health.edition;
+            }
+
+            services = sortServices(health.services || {});
+            renderCount();
+            renderList();
+            if (searchEl.disabled) { searchEl.disabled = false; }
+
+            var completed = (init && init.completed) || {};
+            if (completed.ready || completed.start) {
+              setStatus("ready", "ready");
+            } else if (completed.boot) {
+              setStatus("starting", "starting…");
+            } else {
+              setStatus("ready", "online");
+            }
+          })
+          .finally(function () { refreshing = false; });
+      }
+
+      searchEl.addEventListener("input", function () {
+        filter = searchEl.value;
+        renderList();
+      });
+
+      refresh();
+      setInterval(refresh, 5000);
+    })();
+  </script>
+</body>
+</html>

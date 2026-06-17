@@ -377,6 +377,35 @@ class SchedulerIntegrationTest {
     }
 
     @Test
+    @Order(20)
+    void createScheduleWithSqsParametersRoundTrips() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 hour)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "Target": {
+                        "Arn": "arn:aws:sqs:us-east-1:000000000000:my-queue.fifo",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "SqsParameters": {"MessageGroupId": "group-1"}
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/fifo-schedule")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/schedules/fifo-schedule")
+        .then()
+            .statusCode(200)
+            .body("Target.SqsParameters.MessageGroupId", equalTo("group-1"));
+    }
+
+    @Test
     @Order(21)
     void createScheduleInGroup() {
         // First create the group

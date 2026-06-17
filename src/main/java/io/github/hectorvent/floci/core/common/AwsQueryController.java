@@ -2,6 +2,8 @@ package io.github.hectorvent.floci.core.common;
 
 import io.github.hectorvent.floci.services.neptune.NeptuneQueryHandler;
 import io.github.hectorvent.floci.services.neptune.NeptuneService;
+import io.github.hectorvent.floci.services.docdb.DocDbQueryHandler;
+import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingQueryHandler;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.ec2.Ec2QueryHandler;
@@ -104,7 +106,8 @@ public class AwsQueryController {
             "TagPolicy", "UntagPolicy", "ListPolicyTags",
             "CreateLoginProfile", "GetLoginProfile", "DeleteLoginProfile", "UpdateLoginProfile",
             "GenerateCredentialReport", "GetCredentialReport",
-            "GetAccountSummary", "GetAccountAuthorizationDetails"
+            "GetAccountSummary", "GetAccountAuthorizationDetails",
+            "SimulatePrincipalPolicy"
     );
 
     private static final Set<String> AUTOSCALING_ACTIONS = Set.of(
@@ -166,7 +169,8 @@ public class AwsQueryController {
             "DescribeInstanceTypes", "DescribeInstanceTypeOfferings",
             "CreateLaunchTemplate", "CreateLaunchTemplateVersion", "DescribeLaunchTemplates", "DescribeLaunchTemplateVersions",
             "ModifyLaunchTemplate", "DeleteLaunchTemplate",
-            "DescribeNetworkInterfaces"
+            "DescribeNetworkInterfaces",
+            "CreateVolume", "DescribeVolumes", "DeleteVolume"
     );
 
     private final CloudFormationQueryHandler cloudFormationQueryHandler;
@@ -174,6 +178,8 @@ public class AwsQueryController {
     private final RdsQueryHandler rdsQueryHandler;
     private final NeptuneQueryHandler neptuneQueryHandler;
     private final NeptuneService neptuneService;
+    private final DocDbQueryHandler docDbQueryHandler;
+    private final DocDbService docDbService;
     private final SqsQueryHandler sqsQueryHandler;
     private final SnsQueryHandler snsQueryHandler;
     private final SesQueryHandler sesQueryHandler;
@@ -194,6 +200,8 @@ public class AwsQueryController {
                               RdsQueryHandler rdsQueryHandler,
                               NeptuneQueryHandler neptuneQueryHandler,
                               NeptuneService neptuneService,
+                              DocDbQueryHandler docDbQueryHandler,
+                              DocDbService docDbService,
                               SqsQueryHandler sqsQueryHandler, SnsQueryHandler snsQueryHandler,
                               SesQueryHandler sesQueryHandler,
                               IamQueryHandler iamQueryHandler, StsQueryHandler stsQueryHandler,
@@ -210,6 +218,8 @@ public class AwsQueryController {
         this.rdsQueryHandler = rdsQueryHandler;
         this.neptuneQueryHandler = neptuneQueryHandler;
         this.neptuneService = neptuneService;
+        this.docDbQueryHandler = docDbQueryHandler;
+        this.docDbService = docDbService;
         this.sqsQueryHandler = sqsQueryHandler;
         this.snsQueryHandler = snsQueryHandler;
         this.sesQueryHandler = sesQueryHandler;
@@ -238,7 +248,8 @@ public class AwsQueryController {
             action = formParams.getFirst("Operation");
         }
         if (action == null) {
-            return null;
+            return xmlErrorResponse("MissingAction",
+                    "The request must contain the parameter Action", 400);
         }
 
         String service = resolveService(authorization, action);
@@ -252,7 +263,7 @@ public class AwsQueryController {
             case "iam" -> iamQueryHandler.handle(action, formParams);
             case "sts" -> stsQueryHandler.handle(action, formParams);
             case "elasticache" -> elastiCacheQueryHandler.handle(action, formParams);
-            case "rds" -> {
+            case "rds" -> { 
                 // Neptune signs requests with "rds" credential scope (same wire protocol).
                 // Route to Neptune when Engine=neptune (create ops) or when the cluster/instance
                 // already exists in Neptune storage (describe/modify/delete ops).
@@ -264,9 +275,16 @@ public class AwsQueryController {
                         || neptuneService.hasInstance(instanceId)) {
                     yield neptuneQueryHandler.handle(action, formParams);
                 }
+
+                if ("docdb".equalsIgnoreCase(engine)
+                       || docDbService.hasCluster(clusterId)
+                       || docDbService.hasInstance(instanceId)) {
+                        yield docDbQueryHandler.handle(action, formParams);
+                }
                 yield rdsQueryHandler.handle(action, formParams);
             }
             case "neptune" -> neptuneQueryHandler.handle(action, formParams);
+            case "docdb" -> docDbQueryHandler.handle(action, formParams);
             case "email" -> sesQueryHandler.handle(action, formParams, region);
             case "monitoring" -> cloudWatchMetricsQueryHandler.handle(action, formParams, region);
             case "cloudformation" -> cloudFormationQueryHandler.handle(action, formParams, region);

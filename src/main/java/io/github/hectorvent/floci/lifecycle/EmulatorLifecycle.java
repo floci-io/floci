@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHook;
 import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.ec2.Ec2MetadataServer;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
+import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
@@ -66,6 +67,7 @@ public class EmulatorLifecycle {
     private final PipesService pipesService;
     private final Ec2MetadataServer ec2MetadataServer;
     private final EcrRegistryManager ecrRegistryManager;
+    private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
 
     @Inject
@@ -84,6 +86,7 @@ public class EmulatorLifecycle {
                              PipesService pipesService,
                              Ec2MetadataServer ec2MetadataServer,
                              EcrRegistryManager ecrRegistryManager,
+                             FlociUiManager flociUiManager,
                              InitLifecycleState initLifecycleState) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
@@ -101,6 +104,7 @@ public class EmulatorLifecycle {
         this.pipesService = pipesService;
         this.ec2MetadataServer = ec2MetadataServer;
         this.ecrRegistryManager = ecrRegistryManager;
+        this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
     }
 
@@ -218,6 +222,7 @@ public class EmulatorLifecycle {
         elastiCacheMemcachedContainerManager.stopAll();
         rdsContainerManager.stopAll();
         ecrRegistryManager.shutdown();
+        flociUiManager.shutdown();
         storageFactory.shutdownAll();
 
         LOG.info("=== AWS Local Emulator Stopped ===");

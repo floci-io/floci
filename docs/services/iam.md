@@ -38,6 +38,9 @@
 ### Login Profiles
 `CreateLoginProfile` · `DeleteLoginProfile` · `UpdateLoginProfile`
 
+### Policy Simulation
+`SimulatePrincipalPolicy`
+
 ## AWS Managed Policies
 
 Floci seeds a catalog of commonly-used AWS managed policies at startup. These are attachable immediately without any setup:
@@ -58,6 +61,20 @@ Floci seeds a catalog of commonly-used AWS managed policies at startup. These ar
 `AmazonS3ObjectLambdaExecutionRolePolicy` · `CloudWatchLambdaInsightsExecutionRolePolicy` · `CloudWatchLambdaApplicationSignalsExecutionRolePolicy` · `AWSConfigRulesExecutionRole` · `AWSMSKReplicatorExecutionRole` · `AWS-SSM-DiagnosisAutomation-ExecutionRolePolicy` · `AWS-SSM-RemediationAutomation-ExecutionRolePolicy` · `AmazonSageMakerGeospatialExecutionRole` · `AmazonSageMakerCanvasEMRServerlessExecutionRolePolicy` · `SageMakerStudioBedrockFunctionExecutionRolePolicy` · `SageMakerStudioDomainExecutionRolePolicy` · `SageMakerStudioQueryExecutionRolePolicy` · `AmazonDataZoneDomainExecutionRolePolicy` · `AmazonBedrockAgentCoreMemoryBedrockModelInferenceExecutionRolePolicy` · `AWSPartnerCentralSellingResourceSnapshotJobExecutionRolePolicy`
 
 All seeded policies use a permissive wildcard document since Floci does not enforce IAM policy evaluation by default.
+
+## Optional Local Deployer Principal
+
+Floci can seed a local IAM user for development workflows that expect a concrete caller identity before provisioning starts. This is disabled by default.
+
+Enable it with:
+
+```bash
+FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL=true
+```
+
+When enabled, Floci creates the `floci-deployer` user if it does not already exist, attaches `arn:aws:iam::aws:policy/AdministratorAccess`, and creates static `floci` / `floci` access-key credentials if that access key does not already exist. Existing users and access keys are preserved.
+
+Requests signed with the seeded access key return the deployer user ARN from `sts:GetCallerIdentity`.
 
 ## IAM Enforcement Mode
 
@@ -153,6 +170,7 @@ AWS_ACCESS_KEY_ID=$AKID AWS_SECRET_ACCESS_KEY=$SECRET \
 |---|---|---|
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable or disable the service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | Enforce IAM policies on all inbound requests |
+| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Seed the optional `floci-deployer` user and `floci` / `floci` access key |
 
 ## Examples
 

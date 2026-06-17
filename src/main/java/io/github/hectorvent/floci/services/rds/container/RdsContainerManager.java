@@ -95,7 +95,7 @@ public class RdsContainerManager {
         }
 
         // Handle persistence mounting
-        addPersistenceMounts(specBuilder, instanceId, volumeId, engine, envVars);
+        addPersistenceMounts(specBuilder, instanceId, volumeId, engine, image);
 
         // Add engine-specific command
         List<String> cmd = buildContainerCmd(engine);
@@ -150,25 +150,57 @@ public class RdsContainerManager {
     }
 
     private void addPersistenceMounts(ContainerBuilder.Builder specBuilder, String instanceId,
-                                      String volumeId, DatabaseEngine engine, List<String> envVars) {
+                                      String volumeId, DatabaseEngine engine, String image) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
             ContainerStorageHelper.applyStorage(
                     specBuilder, lifecycleManager, "rds", volumeId, instanceId,
-                    engineDefaultDataPath(engine));
+                    engineDefaultDataPath(engine, image));
             return;
         }
 
         // Legacy host-path mode: host-persistent-path is an absolute path
         String hostDataPath = Path.of(config.storage().hostPersistentPath(), "rds", instanceId).toString();
         ContainerStorageHelper.ensureHostDir(hostDataPath);
-        specBuilder.withBind(hostDataPath, engineDefaultDataPath(engine));
+        specBuilder.withBind(hostDataPath, engineDefaultDataPath(engine, image));
     }
 
-    private static String engineDefaultDataPath(DatabaseEngine engine) {
+    static String engineDefaultDataPath(DatabaseEngine engine, String image) {
         return switch (engine) {
-            case POSTGRES -> "/var/lib/postgresql/data";
+            case POSTGRES -> postgresDataPath(image);
             case MYSQL, MARIADB -> "/var/lib/mysql";
         };
+    }
+
+    private static String postgresDataPath(String image) {
+        if (postgresImageMajorVersion(image) >= 18) {
+            return "/var/lib/postgresql";
+        }
+        return "/var/lib/postgresql/data";
+    }
+
+    private static int postgresImageMajorVersion(String image) {
+        if (image == null || image.isBlank()) {
+            return -1;
+        }
+        String reference = image;
+        int digestSeparator = reference.indexOf('@');
+        if (digestSeparator >= 0) {
+            reference = reference.substring(0, digestSeparator);
+        }
+        int slashSeparator = reference.lastIndexOf('/');
+        int tagSeparator = reference.lastIndexOf(':');
+        if (tagSeparator < slashSeparator || tagSeparator == reference.length() - 1) {
+            return -1;
+        }
+        String tag = reference.substring(tagSeparator + 1);
+        int end = 0;
+        while (end < tag.length() && Character.isDigit(tag.charAt(end))) {
+            end++;
+        }
+        if (end == 0) {
+            return -1;
+        }
+        return Integer.parseInt(tag.substring(0, end));
     }
 
     private void initializeEngine(String containerName, String containerId, DatabaseEngine engine, String masterUsername) {

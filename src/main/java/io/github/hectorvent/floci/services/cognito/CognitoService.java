@@ -286,6 +286,22 @@ public class CognitoService {
                                                boolean allowedOAuthFlowsUserPoolClient,
                                                List<String> allowedOAuthFlows,
                                                List<String> allowedOAuthScopes) {
+        return createUserPoolClient(userPoolId, clientName, generateSecret,
+                allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes, null,
+                List.of(), null, List.of(), null, null, List.of(), null, List.of(), null, null,
+                null, List.of(), null, null);
+    }
+
+    public UserPoolClient createUserPoolClient(String userPoolId, String clientName,
+            boolean generateSecret, boolean allowedOAuthFlowsUserPoolClient,
+            List<String> allowedOAuthFlows, List<String> allowedOAuthScopes,
+            Map<String, Object> analyticsConfiguration, List<String> callbackURLs,
+            String defaultRedirectURI, List<String> explicitAuthFlows, Integer accessTokenValidity,
+            Integer idTokenValidity, List<String> logoutURLs, String preventUserExistenceErrors,
+            List<String> readAttributes, Integer refreshTokenValidity,
+            List<String> supportedIdentityProviders, Map<String, String> tokenValidityUnits,
+            List<String> writeAttributes, Map<String, Object> refreshTokenRotation,
+            Boolean enableTokenRevocation) {
         describeUserPool(userPoolId);
         String clientId = UUID.randomUUID().toString().replace("-", "").substring(0, 26);
         UserPoolClient client = new UserPoolClient();
@@ -296,6 +312,24 @@ public class CognitoService {
         client.setAllowedOAuthFlowsUserPoolClient(allowedOAuthFlowsUserPoolClient);
         client.setAllowedOAuthFlows(normalizeStringList(allowedOAuthFlows));
         client.setAllowedOAuthScopes(normalizeStringList(allowedOAuthScopes));
+        client.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
+        client.setCallbackURLs(normalizeStringList(callbackURLs));
+        client.setDefaultRedirectURI(defaultRedirectURI);
+        client.setExplicitAuthFlows(normalizeStringList(explicitAuthFlows));
+        client.setAccessTokenValidity(accessTokenValidity);
+        client.setIdTokenValidity(idTokenValidity);
+        client.setLogoutURLs(normalizeStringList(logoutURLs));
+        client.setPreventUserExistenceErrors(preventUserExistenceErrors);
+        client.setReadAttributes(normalizeStringList(readAttributes));
+        client.setRefreshTokenValidity(refreshTokenValidity);
+        List<String> normalizedSupportedIdentityProviders = normalizeStringList(supportedIdentityProviders);
+        client.setSupportedIdentityProviders(normalizedSupportedIdentityProviders.isEmpty()
+                ? List.of("COGNITO")
+                : normalizedSupportedIdentityProviders);
+        client.setTokenValidityUnits(copyStringMap(tokenValidityUnits));
+        client.setWriteAttributes(normalizeStringList(writeAttributes));
+        client.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
+        client.setEnableTokenRevocation(enableTokenRevocation != null ? enableTokenRevocation : Boolean.TRUE);
         if (generateSecret) {
             String clientSecret = generateSecretValue();
             client.setClientSecret(clientSecret);
@@ -341,6 +375,50 @@ public class CognitoService {
                                                Boolean allowedOAuthFlowsUserPoolClient,
                                                List<String> allowedOAuthFlows,
                                                List<String> allowedOAuthScopes) {
+        return updateUserPoolClient(
+                userPoolId,
+                clientId,
+                clientName,
+                allowedOAuthFlowsUserPoolClient,
+                allowedOAuthFlows,
+                allowedOAuthScopes,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+    }
+
+    public UserPoolClient updateUserPoolClient(String userPoolId, String clientId, String clientName,
+                                               Boolean allowedOAuthFlowsUserPoolClient,
+                                               List<String> allowedOAuthFlows,
+                                               List<String> allowedOAuthScopes,
+                                               Map<String, Object> analyticsConfiguration,
+                                               List<String> callbackURLs,
+                                               String defaultRedirectURI,
+                                               List<String> explicitAuthFlows,
+                                               Integer accessTokenValidity,
+                                               Integer idTokenValidity,
+                                               List<String> logoutURLs,
+                                               String preventUserExistenceErrors,
+                                               List<String> readAttributes,
+                                               Integer refreshTokenValidity,
+                                               List<String> supportedIdentityProviders,
+                                               Map<String, String> tokenValidityUnits,
+                                               List<String> writeAttributes,
+                                               Map<String, Object> refreshTokenRotation,
+                                               Boolean enableTokenRevocation) {
         UserPoolClient client = describeUserPoolClient(userPoolId, clientId);
         if (clientName != null) client.setClientName(clientName);
         if (allowedOAuthFlowsUserPoolClient != null) {
@@ -351,6 +429,51 @@ public class CognitoService {
         }
         if (allowedOAuthScopes != null) {
             client.setAllowedOAuthScopes(normalizeStringList(allowedOAuthScopes));
+        }
+        if (analyticsConfiguration != null) {
+            client.setAnalyticsConfiguration(copyObjectMap(analyticsConfiguration));
+        }
+        if (callbackURLs != null) {
+            client.setCallbackURLs(normalizeStringList(callbackURLs));
+        }
+        if (defaultRedirectURI != null) {
+            client.setDefaultRedirectURI(defaultRedirectURI);
+        }
+        if (explicitAuthFlows != null) {
+            client.setExplicitAuthFlows(normalizeStringList(explicitAuthFlows));
+        }
+        if (accessTokenValidity != null) {
+            client.setAccessTokenValidity(accessTokenValidity);
+        }
+        if (idTokenValidity != null) {
+            client.setIdTokenValidity(idTokenValidity);
+        }
+        if (logoutURLs != null) {
+            client.setLogoutURLs(normalizeStringList(logoutURLs));
+        }
+        if (preventUserExistenceErrors != null) {
+            client.setPreventUserExistenceErrors(preventUserExistenceErrors);
+        }
+        if (readAttributes != null) {
+            client.setReadAttributes(normalizeStringList(readAttributes));
+        }
+        if (refreshTokenValidity != null) {
+            client.setRefreshTokenValidity(refreshTokenValidity);
+        }
+        if (supportedIdentityProviders != null) {
+            client.setSupportedIdentityProviders(normalizeStringList(supportedIdentityProviders));
+        }
+        if (tokenValidityUnits != null) {
+            client.setTokenValidityUnits(copyStringMap(tokenValidityUnits));
+        }
+        if (writeAttributes != null) {
+            client.setWriteAttributes(normalizeStringList(writeAttributes));
+        }
+        if (refreshTokenRotation != null) {
+            client.setRefreshTokenRotation(copyObjectMap(refreshTokenRotation));
+        }
+        if (enableTokenRevocation != null) {
+            client.setEnableTokenRevocation(enableTokenRevocation);
         }
 
         client.setLastModifiedDate(System.currentTimeMillis() / 1000L);
@@ -1010,7 +1133,7 @@ public class CognitoService {
         Map<String, Object> response = new LinkedHashMap<>();
         response.put("access_token", generateClientAccessToken(client, pool, normalizedScope));
         response.put("token_type", "Bearer");
-        response.put("expires_in", 3600);
+        response.put("expires_in", resolveAccessTokenLifetimeSeconds(client));
         return response;
     }
 
@@ -1078,32 +1201,36 @@ public class CognitoService {
         if (!client.getUserPoolId().equals(poolId)) {
             throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
         }
+        if (isRefreshTokenExpired(client, parts)) {
+            throw new AwsException("NotAuthorizedException", "Refresh Token has expired", 400);
+        }
         UserPool pool = describeUserPool(poolId);
         CognitoUser user = adminGetUser(poolId, username);
         ClaimsOverride override = authFlowHandler.preTokenGenerationForRefresh(pool, client, user);
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", generateSignedJwt(user, pool, "access", clientId, override));
-        auth.put("IdToken", generateSignedJwt(user, pool, "id", clientId, override));
-        auth.put("ExpiresIn", 3600);
+        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override));
+        auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override));
+        auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
         auth.put("TokenType", "Bearer");
         Map<String, Object> result = new HashMap<>();
         result.put("AuthenticationResult", auth);
         return result;
     }
 
-    Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, String clientId, ClaimsOverride override) {
+    Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override) {
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", generateSignedJwt(user, pool, "access", clientId, override));
-        auth.put("IdToken", generateSignedJwt(user, pool, "id", clientId, override));
-        auth.put("RefreshToken", buildRefreshToken(pool.getId(), user.getUsername(), clientId));
-        auth.put("ExpiresIn", 3600);
+        auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override));
+        auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override));
+        auth.put("RefreshToken", buildRefreshToken(pool.getId(), user.getUsername(), client.getClientId()));
+        auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
         auth.put("TokenType", "Bearer");
         return auth;
     }
 
-    String generateSignedJwt(CognitoUser user, UserPool pool, String type, String clientId, ClaimsOverride override) {
+    String generateSignedJwt(CognitoUser user, UserPool pool, String type, UserPoolClient client, ClaimsOverride override) {
         String header = encodeJwtHeader(pool);
         long now = System.currentTimeMillis() / 1000L;
+        long lifetimeSeconds = resolveTokenLifetimeSeconds(client, type);
 
         Map<String, Object> claims = new LinkedHashMap<>();
         String sub = user.getAttributes().getOrDefault("sub", user.getUsername());
@@ -1113,11 +1240,12 @@ public class CognitoService {
         claims.put("token_use", type);
         claims.put("auth_time", now);
         claims.put("iss", getIssuer(pool.getId()));
-        claims.put("exp", now + 3600);
+        claims.put("exp", now + lifetimeSeconds);
         claims.put("iat", now);
         claims.put("username", user.getUsername());
         claims.put("email", email);
         claims.put("cognito:username", user.getUsername());
+        String clientId = client != null ? client.getClientId() : null;
         if (clientId != null && !clientId.isBlank()) {
             if ("access".equals(type)) claims.put("client_id", clientId);
             if ("id".equals(type)) claims.put("aud", clientId);
@@ -1202,20 +1330,22 @@ public class CognitoService {
         }
     }
 
-    String generateTokenString(String type, String username, UserPool pool, String clientId) {
+    String generateTokenString(String type, String username, UserPool pool, UserPoolClient client) {
         long now = System.currentTimeMillis() / 1000L;
+        long lifetimeSeconds = resolveTokenLifetimeSeconds(client, type);
         String headerJson = String.format(
                 "{\"alg\":\"RS256\",\"typ\":\"JWT\",\"kid\":\"%s\"}",
                 escapeJson(getSigningKeyId(pool)));
         String header = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
+        String clientId = client != null ? client.getClientId() : null;
         String audFragment = (clientId != null && !clientId.isBlank() && "id".equals(type))
                 ? ",\"aud\":\"" + escapeJson(clientId) + "\""
                 : "";
         String payloadJson = String.format(
                 "{\"sub\":\"%s\",\"token_use\":\"%s\",\"iss\":\"%s\"," +
                 "\"exp\":%d,\"iat\":%d,\"username\":\"%s\"%s}",
-                UUID.randomUUID(), type, escapeJson(getIssuer(pool.getId())), now + 3600, now, username, audFragment
+                UUID.randomUUID(), type, escapeJson(getIssuer(pool.getId())), now + lifetimeSeconds, now, username, audFragment
         );
         String payload = Base64.getUrlEncoder().withoutPadding()
                 .encodeToString(payloadJson.getBytes(StandardCharsets.UTF_8));
@@ -1230,6 +1360,7 @@ public class CognitoService {
                 .encodeToString(headerJson.getBytes(StandardCharsets.UTF_8));
 
         long now = System.currentTimeMillis() / 1000L;
+        long lifetimeSeconds = resolveAccessTokenLifetimeSeconds(client);
         StringBuilder payloadJson = new StringBuilder();
         payloadJson.append("{")
                 .append("\"iss\":\"").append(escapeJson(getIssuer(pool.getId()))).append("\",")
@@ -1237,7 +1368,7 @@ public class CognitoService {
                 .append("\"sub\":\"").append(escapeJson(client.getClientId())).append("\",")
                 .append("\"client_id\":\"").append(escapeJson(client.getClientId())).append("\",")
                 .append("\"token_use\":\"access\",")
-                .append("\"exp\":").append(now + 3600).append(",")
+                .append("\"exp\":").append(now + lifetimeSeconds).append(",")
                 .append("\"iat\":").append(now).append(",")
                 .append("\"jti\":\"").append(UUID.randomUUID()).append("\"");
         if (scope != null && !scope.isBlank()) {
@@ -1329,6 +1460,20 @@ public class CognitoService {
             }
         }
         return normalized.isEmpty() ? null : String.join(" ", normalized);
+    }
+
+    private Map<String, Object> copyObjectMap(Map<String, Object> source) {
+        if (source == null || source.isEmpty()) {
+            return null;
+        }
+        return new LinkedHashMap<>(source);
+    }
+
+    private Map<String, String> copyStringMap(Map<String, String> source) {
+        if (source == null || source.isEmpty()) {
+            return null;
+        }
+        return new LinkedHashMap<>(source);
     }
 
     private List<ResourceServerScope> normalizeScopes(List<ResourceServerScope> scopes) {
@@ -1488,8 +1633,83 @@ public class CognitoService {
         user.setSrpVerifier(verifierHex);
     }
 
+    int getAccessTokenExpiresInSeconds(UserPoolClient client) {
+        return resolveAccessTokenLifetimeSeconds(client);
+    }
+
+    private int resolveAccessTokenLifetimeSeconds(UserPoolClient client) {
+        return resolveTokenLifetimeSeconds(client, "access");
+    }
+
+    private int resolveTokenLifetimeSeconds(UserPoolClient client, String tokenType) {
+        String normalizedType = tokenType == null ? "" : tokenType.toLowerCase(Locale.ROOT);
+        int defaultValue;
+        String defaultUnit;
+        Integer configuredValue;
+        if ("refresh".equals(normalizedType)) {
+            defaultValue = 30;
+            defaultUnit = "days";
+            configuredValue = client != null ? client.getRefreshTokenValidity() : null;
+        } else if ("id".equals(normalizedType)) {
+            defaultValue = 1;
+            defaultUnit = "hours";
+            configuredValue = client != null ? client.getIdTokenValidity() : null;
+        } else {
+            defaultValue = 1;
+            defaultUnit = "hours";
+            configuredValue = client != null ? client.getAccessTokenValidity() : null;
+        }
+
+        int value = configuredValue == null ? defaultValue : configuredValue;
+        if ("refresh".equals(normalizedType) && value == 0) {
+            value = defaultValue;
+        } else if (value <= 0) {
+            value = defaultValue;
+        }
+        String unit = resolveTokenValidityUnit(client, normalizedType, defaultUnit);
+        long seconds = switch (unit) {
+            case "seconds" -> value;
+            case "minutes" -> value * 60L;
+            case "hours" -> value * 3600L;
+            case "days" -> value * 86400L;
+            default -> throw new AwsException("InvalidParameterException", "Unsupported token validity unit: " + unit, 400);
+        };
+        if (seconds > Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        return (int) seconds;
+    }
+
+    private String resolveTokenValidityUnit(UserPoolClient client, String tokenType, String defaultUnit) {
+        Map<String, String> units = client != null ? client.getTokenValidityUnits() : null;
+        if (units == null || units.isEmpty()) {
+            return defaultUnit;
+        }
+        String key = switch (tokenType) {
+            case "refresh" -> "RefreshToken";
+            case "id" -> "IdToken";
+            default -> "AccessToken";
+        };
+        String configured = units.get(key);
+        return configured == null || configured.isBlank() ? defaultUnit : configured.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private boolean isRefreshTokenExpired(UserPoolClient client, String[] parts) {
+        if (parts.length < 5) {
+            return false;
+        }
+        try {
+            long issuedAt = Long.parseLong(parts[3]);
+            long expiresAt = issuedAt + resolveTokenLifetimeSeconds(client, "refresh");
+            return System.currentTimeMillis() / 1000L >= expiresAt;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
+    }
+
     String buildRefreshToken(String poolId, String username, String clientId) {
-        String raw = poolId + "|" + username + "|" + clientId + "|" + UUID.randomUUID();
+        long issuedAt = System.currentTimeMillis() / 1000L;
+        String raw = poolId + "|" + username + "|" + clientId + "|" + issuedAt + "|" + UUID.randomUUID();
         return Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
     }
 
@@ -1497,9 +1717,12 @@ public class CognitoService {
         try {
             byte[] decoded = Base64.getDecoder().decode(refreshToken);
             String raw = new String(decoded, StandardCharsets.UTF_8);
-            String[] parts = raw.split("\\|", 4);
+            String[] parts = raw.split("\\|", 5);
+            if (parts.length == 5) {
+                return parts; // [poolId, username, clientId, issuedAt, nonce]
+            }
             if (parts.length == 4) {
-                return parts; // [poolId, username, clientId, nonce]
+                return new String[] { parts[0], parts[1], parts[2], "", parts[3] };
             }
         } catch (Exception ignored) { }
         return null;

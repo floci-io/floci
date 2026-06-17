@@ -65,6 +65,7 @@ class EmulatorLifecycleTest {
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
     @Mock private EcrRegistryManager ecrRegistryManager;
+    @Mock private io.github.hectorvent.floci.services.floci.ui.FlociUiManager flociUiManager;
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
 
@@ -83,7 +84,7 @@ class EmulatorLifecycleTest {
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
                 elastiCacheProxyManager, rdsContainerManager, rdsProxyManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, ecrRegistryManager, initLifecycleState);
+                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState);
     }
 
     private void stubStorageConfig() {

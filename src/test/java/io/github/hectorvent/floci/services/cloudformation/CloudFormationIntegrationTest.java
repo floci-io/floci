@@ -3971,6 +3971,78 @@ class CloudFormationIntegrationTest {
             .body("item[0].type", equalTo("TOKEN"));
     }
 
+    // ── Issue #1163: AWS::ApiGateway::Deployment with inline StageName creates the stage ──
+
+    @Test
+    void createStack_withApiGatewayDeploymentStageName_createsStage() {
+        // Regression test for issue #1163: a Deployment carrying an inline StageName created
+        // the deployment but never the stage, so `get-stages` returned empty and invoking
+        // .../{stage}/_user_request_/... returned "Stage not found".
+        String stackName = "cfn-apigw-deploy-stagename-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-deploy-stagename-api"
+                  }
+                },
+                "Deployment": {
+                  "Type": "AWS::ApiGateway::Deployment",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "StageName": "prod"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String deploymentId = physicalIdByLogicalId(resourcesXml, "Deployment");
+
+        // The inline StageName must have produced a real stage bound to this deployment.
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/stages")
+        .then()
+            .statusCode(200)
+            .body("item.size()", equalTo(1))
+            .body("item[0].stageName", equalTo("prod"))
+            .body("item[0].deploymentId", equalTo(deploymentId));
+    }
+
     @Test
     void createStack_withApiGatewayMethod_wiresAuthorizerIdViaRef() {
         // Core scenario from issue #788: `AuthorizationType: CUSTOM` plus

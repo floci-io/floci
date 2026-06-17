@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.floci;
+package io.github.hectorvent.floci.services.floci.duck;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;

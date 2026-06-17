@@ -75,6 +75,34 @@ class EmbeddedDnsServerTest {
         assertFalse(dns.matchesSuffix(""));
     }
 
+    // ── EC2 private DNS names ────────────────────────────────────────────────
+
+    @Test
+    void resolveEc2PrivateDnsName_decodesAwsIpName() {
+        assertEquals(
+                "172.16.128.9",
+                dns.resolveEc2PrivateDnsName("ip-172-16-128-9.ec2.internal").orElseThrow());
+    }
+
+    @Test
+    void resolveEc2PrivateDnsName_isCaseInsensitive() {
+        assertEquals(
+                "10.42.32.17",
+                dns.resolveEc2PrivateDnsName("IP-10-42-32-17.EC2.INTERNAL").orElseThrow());
+    }
+
+    @Test
+    void resolveEc2PrivateDnsName_rejectsInvalidOctets() {
+        assertTrue(dns.resolveEc2PrivateDnsName("ip-172-16-128-300.ec2.internal").isEmpty());
+    }
+
+    @Test
+    void resolveARecord_prefersEc2PrivateDnsAddressOverFlociWildcard() {
+        assertEquals(
+                "172.16.128.9",
+                dns.resolveARecord("ip-172-16-128-9.ec2.internal", "172.16.128.5").orElseThrow());
+    }
+
     // ── matchesSuffix — built-in emulator domains ─────────────────────────────
 
     @Test
