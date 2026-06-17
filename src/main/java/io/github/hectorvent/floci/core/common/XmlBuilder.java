@@ -50,6 +50,10 @@ public final class XmlBuilder {
         if (value == null) {
             return this;
         }
+        if (value.isEmpty()) {
+            sb.append('<').append(name).append("/>");
+            return this;
+        }
         sb.append('<').append(name).append('>')
           .append(escape(value))
           .append("</").append(name).append('>');
