@@ -21,6 +21,8 @@
 | `AddTagsToResource` | Tag a parameter |
 | `ListTagsForResource` | List tags on a parameter |
 | `RemoveTagsFromResource` | Remove tags from a parameter |
+| `DescribePatchBaselines` | List AWS-owned predefined patch baselines (filter by `OWNER`, `OPERATING_SYSTEM`, `NAME_PREFIX`) |
+| `GetDefaultPatchBaseline` | Get the default patch baseline id for an operating system |
 
 ### Run Command
 
