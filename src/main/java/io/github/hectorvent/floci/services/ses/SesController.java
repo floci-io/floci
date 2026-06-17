@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttribute
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
@@ -835,6 +836,70 @@ public class SesController {
         } catch (AwsException e) {
             throw remapV1Exception(e);
         }
+    }
+
+    // ──────────────────────── Dedicated IP Pools ────────────────────────
+
+    @POST
+    @Path("/dedicated-ip-pools")
+    public Response createDedicatedIpPool(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            if (body == null || body.isBlank()) {
+                throw new AwsException("BadRequestException", "Request body is required.", 400);
+            }
+            JsonNode request = objectMapper.readTree(body);
+            requireJsonObject(request);
+            String poolName = readRequiredStringField(request, "PoolName");
+            JsonNode scalingNode = request.path("ScalingMode");
+            String scalingMode;
+            if (scalingNode.isMissingNode() || scalingNode.isNull()) {
+                scalingMode = null;
+            } else if (!scalingNode.isTextual()) {
+                throw new AwsException("BadRequestException",
+                        "The ScalingMode parameter is invalid.", 400);
+            } else {
+                scalingMode = scalingNode.asText();
+            }
+            sesService.createDedicatedIpPool(poolName, scalingMode, region);
+            LOG.infov("SES V2 CreateDedicatedIpPool: {0}", poolName);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/dedicated-ip-pools")
+    public Response listDedicatedIpPools(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode pools = result.putArray("DedicatedIpPools");
+        sesService.listDedicatedIpPools(region).forEach(pools::add);
+        return Response.ok(result).build();
+    }
+
+    @GET
+    @Path("/dedicated-ip-pools/{poolName}")
+    public Response getDedicatedIpPool(@Context HttpHeaders headers,
+                                       @PathParam("poolName") String poolName) {
+        String region = regionResolver.resolveRegion(headers);
+        DedicatedIpPool pool = sesService.getDedicatedIpPool(poolName, region);
+        ObjectNode result = objectMapper.createObjectNode();
+        result.set("DedicatedIpPool", objectMapper.valueToTree(pool));
+        return Response.ok(result).build();
+    }
+
+    @DELETE
+    @Path("/dedicated-ip-pools/{poolName}")
+    public Response deleteDedicatedIpPool(@Context HttpHeaders headers,
+                                          @PathParam("poolName") String poolName) {
+        String region = regionResolver.resolveRegion(headers);
+        sesService.deleteDedicatedIpPool(poolName, region);
+        LOG.infov("SES V2 DeleteDedicatedIpPool: {0}", poolName);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     // ──────────────────────────── Account ────────────────────────────

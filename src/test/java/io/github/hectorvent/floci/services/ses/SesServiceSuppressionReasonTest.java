@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
@@ -46,6 +47,7 @@ class SesServiceSuppressionReasonTest {
                 new InMemoryStorage<String, ConfigurationSet>(),
                 suppressionStore,
                 accountSuppressionStore,
+                new InMemoryStorage<String, DedicatedIpPool>(),
                 mock(SmtpRelay.class),
                 new ObjectMapper());
     }

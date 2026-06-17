@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
@@ -67,6 +68,7 @@ public class SesService {
     private final StorageBackend<String, ConfigurationSet> configSetStore;
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
+    private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -89,6 +91,8 @@ public class SesService {
                 new TypeReference<Map<String, SuppressedDestination>>() {});
         this.accountSuppressionStore = storageFactory.create("ses", "ses-account-suppression.json",
                 new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
+        this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
+                new TypeReference<Map<String, DedicatedIpPool>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
@@ -102,6 +106,7 @@ public class SesService {
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper) {
         this.identityStore = identityStore;
@@ -111,6 +116,7 @@ public class SesService {
         this.configSetStore = configSetStore;
         this.suppressionStore = suppressionStore;
         this.accountSuppressionStore = accountSuppressionStore;
+        this.dedicatedIpPoolStore = dedicatedIpPoolStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
@@ -689,6 +695,61 @@ public class SesService {
     private static String configSetKey(String region, String name) {
         validateConfigurationSetName(name);
         return "configSet::" + region + "::" + name;
+    }
+
+    // ──────────────────────── Dedicated IP Pools ────────────────────────
+
+    private static final java.util.Set<String> SCALING_MODES = java.util.Set.of("STANDARD", "MANAGED");
+
+    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, String region) {
+        if (poolName == null || poolName.isBlank()) {
+            throw new AwsException("BadRequestException", "PoolName is required.", 400);
+        }
+        String effectiveScaling = (scalingMode == null || scalingMode.isBlank()) ? "STANDARD" : scalingMode;
+        if (!SCALING_MODES.contains(effectiveScaling)) {
+            throw new AwsException("BadRequestException", "The ScalingMode parameter is invalid.", 400);
+        }
+        String key = dedicatedIpPoolKey(region, poolName);
+        if (dedicatedIpPoolStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "The pool <" + poolName + "> already exists.", 400);
+        }
+        DedicatedIpPool pool = new DedicatedIpPool(poolName, effectiveScaling);
+        dedicatedIpPoolStore.put(key, pool);
+        LOG.infov("Created SES dedicated IP pool: {0} in region {1}", poolName, region);
+        return pool;
+    }
+
+    public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
+        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "The requested pool <" + poolName + "> does not exist.", 404));
+    }
+
+    public boolean dedicatedIpPoolExists(String poolName, String region) {
+        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName)).isPresent();
+    }
+
+    public List<String> listDedicatedIpPools(String region) {
+        String prefix = "dedicatedIpPool::" + region + "::";
+        return dedicatedIpPoolStore.scan(k -> k.startsWith(prefix)).stream()
+                .map(DedicatedIpPool::getPoolName)
+                .sorted()
+                .toList();
+    }
+
+    public void deleteDedicatedIpPool(String poolName, String region) {
+        String key = dedicatedIpPoolKey(region, poolName);
+        if (dedicatedIpPoolStore.get(key).isEmpty()) {
+            throw new AwsException("NotFoundException",
+                    "The requested pool <" + poolName + "> does not exist.", 404);
+        }
+        dedicatedIpPoolStore.delete(key);
+        LOG.infov("Deleted SES dedicated IP pool: {0} in region {1}", poolName, region);
+    }
+
+    private static String dedicatedIpPoolKey(String region, String name) {
+        return "dedicatedIpPool::" + region + "::" + name;
     }
 
     static void validateConfigurationSetName(String name) {
