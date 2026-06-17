@@ -1,0 +1,60 @@
+name: Build and Push to GHCR
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest-16-cores
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Pull the version out of pom.xml so we can build a fork-versioned tag
+      # e.g. if upstream is 1.4.2, we push ghcr.io/alexjplant/floci:1.4.2-fork
+      - name: Extract upstream version from pom.xml
+        id: version
+        run: |
+          VERSION=$(./mvnw help:evaluate -Dexpression=project.version -q -DforceStdout 2>/dev/null \
+            || grep -m1 '<version>' pom.xml | sed 's/.*<version>\(.*\)<\/version>.*/\1/' | tr -d '[:space:]')
+          echo "upstream_version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Detected upstream version: ${VERSION}"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.native
+          push: true
+          # Pushes two tags:
+          #   latest            — always tracks your fork's main branch
+          #   <version>-fork    — ties the image to the upstream release it was forked from
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.upstream_version }}-fork
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Quarkus multi-stage build can eat RAM — give it room
+          build-args: |
+            MAVEN_OPTS=-Xmx12g
