@@ -645,6 +645,31 @@ public class DynamoDbJsonHandler {
         return changedAttributes;
     }
 
+    // DynamoDB rejects an ExclusiveStartKey whose attribute set does not exactly match the
+    // key schema being paged: the table's primary key, plus the index's key attributes when
+    // an IndexName is supplied. Query and Scan report different messages for the same fault.
+    private void validateExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
+                                           String indexName, boolean isScan) {
+        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
+        Set<String> expected = new HashSet<>();
+        expected.add(table.getPartitionKeyName());
+        String sortKey = table.getSortKeyName();
+        if (sortKey != null) expected.add(sortKey);
+        if (indexName != null) {
+            table.findGsi(indexName).ifPresent(g ->
+                    g.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
+            table.findLsi(indexName).ifPresent(l ->
+                    l.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
+        }
+        Set<String> actual = new HashSet<>();
+        exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw new AwsException("ValidationException", isScan
+                    ? "The provided starting key is invalid: The provided key element does not match the schema"
+                    : "The provided starting key is invalid", 400);
+        }
+    }
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -755,6 +780,11 @@ public class DynamoDbJsonHandler {
             checkUnusedEan(exprAttrNames, hashTokens);
         }
 
+        if (exclusiveStartKey != null) {
+            validateExclusiveStartKey(exclusiveStartKey,
+                    dynamoDbService.describeTable(tableName, region), indexName, false);
+        }
+
         DynamoDbService.QueryResult result = dynamoDbService.query(tableName, keyConditions,
                 exprAttrValues, keyConditionExpr, filterExpr, limit, scanIndexForward, indexName,
                 exclusiveStartKey, exprAttrNames, region);
@@ -850,6 +880,11 @@ public class DynamoDbJsonHandler {
 
         String projectionExpressionScan = request.has("ProjectionExpression")
                 ? request.get("ProjectionExpression").asText() : null;
+
+        if (exclusiveStartKey != null) {
+            validateExclusiveStartKey(exclusiveStartKey,
+                    dynamoDbService.describeTable(tableName, region), indexNameScan, true);
+        }
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
                 tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit, exclusiveStartKey, region);
