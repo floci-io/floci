@@ -140,6 +140,10 @@ public class Ec2QueryHandler {
                 case "CreateVolume" -> handleCreateVolume(params, region);
                 case "DescribeVolumes" -> handleDescribeVolumes(params, region);
                 case "DeleteVolume" -> handleDeleteVolume(params, region);
+                // Spot Instances
+                case "RequestSpotInstances" -> handleRequestSpotInstances(params, region);
+                case "DescribeSpotInstanceRequests" -> handleDescribeSpotInstanceRequests(params, region);
+                case "CancelSpotInstanceRequests" -> handleCancelSpotInstanceRequests(params, region);
                 default -> ec2Error("UnsupportedOperation",
                         "Operation " + action + " is not supported.", 400);
             };
@@ -2148,6 +2152,160 @@ public class Ec2QueryHandler {
             xml.end("groups").end("item");
         }
         xml.end(wrapperTag);
+        return xml.build();
+    }
+
+    private Response handleRequestSpotInstances(MultivaluedMap<String, String> p, String region) {
+        String spotPrice = p.getFirst("SpotPrice");
+        Integer instanceCount = parseIntParam(p, "InstanceCount", 1);
+        String type = p.getFirst("Type");
+        String productDescription = p.getFirst("ProductDescription");
+
+        String imageId = p.getFirst("LaunchSpecification.ImageId");
+        String instanceType = p.getFirst("LaunchSpecification.InstanceType");
+        String keyName = p.getFirst("LaunchSpecification.KeyName");
+        String subnetId = p.getFirst("LaunchSpecification.SubnetId");
+        List<String> securityGroupIds = getList(p, "LaunchSpecification.SecurityGroupId");
+        String userDataEncoded = p.getFirst("LaunchSpecification.UserData");
+        String userData = null;
+        if (userDataEncoded != null && !userDataEncoded.isBlank()) {
+            userData = new String(Base64.getDecoder().decode(userDataEncoded), StandardCharsets.UTF_8);
+        }
+        String iamInstanceProfileArn = p.getFirst("LaunchSpecification.IamInstanceProfile.Arn");
+
+        // Parse TagSpecifications
+        List<Tag> spotRequestTags = new ArrayList<>();
+        List<Tag> instanceTags = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String resType = p.getFirst("TagSpecification." + i + ".ResourceType");
+            if (resType == null) break;
+            if ("spot-instances-request".equals(resType)) {
+                for (int j = 1; ; j++) {
+                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
+                    if (k == null) break;
+                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
+                    spotRequestTags.add(new Tag(k, v));
+                }
+            } else if ("instance".equals(resType)) {
+                for (int j = 1; ; j++) {
+                    String k = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Key");
+                    if (k == null) break;
+                    String v = p.getFirst("TagSpecification." + i + ".Tag." + j + ".Value");
+                    instanceTags.add(new Tag(k, v));
+                }
+            }
+        }
+
+        List<SpotInstanceRequest> requests = service.requestSpotInstances(region, spotPrice, instanceCount,
+                type, productDescription, imageId, instanceType, keyName, subnetId, securityGroupIds, userData, iamInstanceProfileArn,
+                spotRequestTags, instanceTags);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("RequestSpotInstancesResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("spotInstanceRequestSet");
+        for (SpotInstanceRequest sir : requests) {
+            xml.start("item").raw(spotInstanceRequestXml(sir)).end("item");
+        }
+        xml.end("spotInstanceRequestSet")
+                .end("RequestSpotInstancesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeSpotInstanceRequests(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "SpotInstanceRequestId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<SpotInstanceRequest> requests = service.describeSpotInstanceRequests(region, ids, filters);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeSpotInstanceRequestsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("spotInstanceRequestSet");
+        for (SpotInstanceRequest sir : requests) {
+            xml.start("item").raw(spotInstanceRequestXml(sir)).end("item");
+        }
+        xml.end("spotInstanceRequestSet")
+                .end("DescribeSpotInstanceRequestsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleCancelSpotInstanceRequests(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "SpotInstanceRequestId");
+        List<SpotInstanceRequest> requests = service.cancelSpotInstanceRequests(region, ids);
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CancelSpotInstanceRequestsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("spotInstanceRequestSet");
+        for (SpotInstanceRequest sir : requests) {
+            xml.start("item")
+                    .elem("spotInstanceRequestId", sir.getSpotInstanceRequestId())
+                    .elem("state", sir.getState())
+                    .end("item");
+        }
+        xml.end("spotInstanceRequestSet")
+                .end("CancelSpotInstanceRequestsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private String spotInstanceRequestXml(SpotInstanceRequest sir) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("spotInstanceRequestId", sir.getSpotInstanceRequestId())
+                .elem("spotPrice", sir.getSpotPrice())
+                .elem("type", sir.getType())
+                .elem("state", sir.getState())
+                .start("status")
+                .elem("code", sir.getStatusCode())
+                .elem("updateTime", sir.getStatusUpdateTime() != null ? ISO_FMT.format(sir.getStatusUpdateTime()) : "")
+                .elem("message", sir.getStatusMessage())
+                .end("status");
+
+        if (sir.getLaunchSpecification() != null) {
+            LaunchSpecification spec = sir.getLaunchSpecification();
+            xml.start("launchSpecification")
+                    .elem("imageId", spec.getImageId())
+                    .elem("instanceType", spec.getInstanceType())
+                    .elem("keyName", spec.getKeyName())
+                    .elem("subnetId", spec.getSubnetId());
+
+            xml.start("groupSet");
+            for (GroupIdentifier gi : spec.getSecurityGroups()) {
+                xml.start("item")
+                        .elem("groupId", gi.getGroupId())
+                        .elem("groupName", gi.getGroupName())
+                        .end("item");
+            }
+            xml.end("groupSet");
+
+            if (spec.getUserData() != null) {
+                String encodedUserData = Base64.getEncoder().encodeToString(spec.getUserData().getBytes(StandardCharsets.UTF_8));
+                xml.elem("userData", encodedUserData);
+            }
+            if (spec.getIamInstanceProfileArn() != null) {
+                xml.start("iamInstanceProfile")
+                        .elem("arn", spec.getIamInstanceProfileArn())
+                        .end("iamInstanceProfile");
+            }
+            xml.end("launchSpecification");
+        }
+
+        if (sir.getInstanceId() != null) {
+            xml.elem("instanceId", sir.getInstanceId());
+        }
+        xml.elem("createTime", sir.getCreateTime() != null ? ISO_FMT.format(sir.getCreateTime()) : "")
+                .elem("productDescription", sir.getProductDescription());
+
+        if (sir.getTags() != null && !sir.getTags().isEmpty()) {
+            xml.start("tagSet");
+            for (Tag t : sir.getTags()) {
+                xml.start("item")
+                        .elem("key", t.getKey())
+                        .elem("value", t.getValue())
+                        .end("item");
+            }
+            xml.end("tagSet");
+        }
+
         return xml.build();
     }
 }
