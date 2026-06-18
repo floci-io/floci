@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.ec2;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.services.ec2.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -27,10 +28,12 @@ public class Ec2QueryHandler {
             .withZone(ZoneOffset.UTC);
 
     private final Ec2Service service;
+    private final EmulatorConfig config;
 
     @Inject
-    public Ec2QueryHandler(Ec2Service service) {
+    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config) {
         this.service = service;
+        this.config = config;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -248,6 +251,23 @@ public class Ec2QueryHandler {
         return tags;
     }
 
+    private List<Tag> parseLaunchTemplateDataTagsForResource(MultivaluedMap<String, String> p, String resourceType) {
+        List<Tag> tags = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String resType = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".ResourceType");
+            if (resType == null) break;
+            if (resourceType.equals(resType)) {
+                for (int j = 1; ; j++) {
+                    String key = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".Tag." + j + ".Key");
+                    if (key == null) break;
+                    String value = p.getFirst("LaunchTemplateData.TagSpecification." + i + ".Tag." + j + ".Value");
+                    tags.add(new Tag(key, value));
+                }
+            }
+        }
+        return tags;
+    }
+
     private Response xmlResponse(String xml) {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
@@ -281,8 +301,7 @@ public class Ec2QueryHandler {
             userData = decodeUserData(userDataEncoded);
         }
 
-        // IamInstanceProfile
-        String iamInstanceProfileArn = p.getFirst("IamInstanceProfile.Arn");
+        String iamInstanceProfileArn = resolveIamInstanceProfileArn(p);
 
         // Parse TagSpecifications
         List<Tag> instanceTags = new ArrayList<>();
@@ -1382,7 +1401,8 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
-                parseTagsForResource(p, "launch-template"));
+                parseTagsForResource(p, "launch-template"),
+                parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1396,12 +1416,13 @@ public class Ec2QueryHandler {
                 region,
                 p.getFirst("LaunchTemplateId"),
                 p.getFirst("LaunchTemplateName"),
+                p.getFirst("SourceVersion"),
                 p.getFirst("LaunchTemplateData.ImageId"),
                 p.getFirst("LaunchTemplateData.InstanceType"),
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
-                p.getFirst("SourceVersion"));
+                parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1695,6 +1716,18 @@ public class Ec2QueryHandler {
         return xml.build();
     }
 
+    private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p) {
+        String arn = p.getFirst("IamInstanceProfile.Arn");
+        if (arn != null && !arn.isBlank()) {
+            return arn;
+        }
+        String name = p.getFirst("IamInstanceProfile.Name");
+        if (name == null || name.isBlank()) {
+            return null;
+        }
+        return "arn:aws:iam::" + config.defaultAccountId() + ":instance-profile/" + name;
+    }
+
     private String vpcXml(Vpc vpc) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("vpcId", vpc.getVpcId())
@@ -1872,8 +1905,16 @@ public class Ec2QueryHandler {
         for (String securityGroupId : launchTemplate.getSecurityGroupIds()) {
             xml.elem("item", securityGroupId);
         }
-        xml.end("securityGroupIdSet")
-                .end("launchTemplateData");
+        xml.end("securityGroupIdSet");
+        if (launchTemplate.getInstanceTags() != null && !launchTemplate.getInstanceTags().isEmpty()) {
+            xml.start("tagSpecificationSet")
+                    .start("item")
+                    .elem("resourceType", "instance")
+                    .raw(tagSetXml(launchTemplate.getInstanceTags()))
+                    .end("item")
+                    .end("tagSpecificationSet");
+        }
+        xml.end("launchTemplateData");
         return xml.build();
     }
 

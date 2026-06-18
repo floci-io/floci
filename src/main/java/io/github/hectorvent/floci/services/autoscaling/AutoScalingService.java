@@ -1,9 +1,14 @@
 package io.github.hectorvent.floci.services.autoscaling;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.autoscaling.model.*;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -18,12 +23,38 @@ public class AutoScalingService {
     @Inject
     RegionResolver regionResolver;
 
+    @Inject
+    StorageFactory storageFactory;
+
+    @Inject
+    Ec2Service ec2Service;
+
     // region :: name → resource
-    private final Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
-    private final Map<String, AutoScalingGroup>    groups         = new ConcurrentHashMap<>();
-    private final Map<String, LifecycleHook>       hooks          = new ConcurrentHashMap<>();
-    private final Map<String, ScalingPolicy>       policies       = new ConcurrentHashMap<>();
-    private final Map<String, ScalingActivity>     activities     = new ConcurrentHashMap<>();
+    private Map<String, LaunchConfiguration> launchConfigs = new ConcurrentHashMap<>();
+    private Map<String, AutoScalingGroup> groups = new ConcurrentHashMap<>();
+    private Map<String, LifecycleHook> hooks = new ConcurrentHashMap<>();
+    private Map<String, ScalingPolicy> policies = new ConcurrentHashMap<>();
+    private Map<String, ScalingActivity> activities = new ConcurrentHashMap<>();
+    private Map<String, InstanceRefresh> instanceRefreshes = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    void initializeStorage()
+    {
+        if (storageFactory == null) {
+            return;
+        }
+        this.launchConfigs = storageBacked("autoscaling-launch-configurations.json", new TypeReference<Map<String, LaunchConfiguration>>() {});
+        this.groups = storageBacked("autoscaling-groups.json", new TypeReference<Map<String, AutoScalingGroup>>() {});
+        this.hooks = storageBacked("autoscaling-lifecycle-hooks.json", new TypeReference<Map<String, LifecycleHook>>() {});
+        this.policies = storageBacked("autoscaling-policies.json", new TypeReference<Map<String, ScalingPolicy>>() {});
+        this.activities = storageBacked("autoscaling-activities.json", new TypeReference<Map<String, ScalingActivity>>() {});
+        this.instanceRefreshes = storageBacked("autoscaling-instance-refreshes.json", new TypeReference<Map<String, InstanceRefresh>>() {});
+    }
+
+    private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference)
+    {
+        return new StorageBackedMap<>(storageFactory.create("autoscaling", fileName, typeReference));
+    }
 
     // ── Launch Configurations ──────────────────────────────────────────────────
 
@@ -78,9 +109,11 @@ public class AutoScalingService {
 
     public AutoScalingGroup createAutoScalingGroup(String region, String name,
                                                     String launchConfigName,
-                                                    String launchTemplateName, String launchTemplateVersion,
+                                                    String launchTemplateId, String launchTemplateName,
+                                                    String launchTemplateVersion,
                                                     int minSize, int maxSize, int desiredCapacity,
                                                     int defaultCooldown, List<String> availabilityZones,
+                                                    List<String> subnetIds,
                                                     List<String> targetGroupArns, List<String> lbNames,
                                                     String healthCheckType, int healthCheckGracePeriod,
                                                     List<String> terminationPolicies,
@@ -90,7 +123,7 @@ public class AutoScalingService {
             throw new AwsException("AlreadyExists",
                     "Auto Scaling group '" + name + "' already exists.", 400);
         }
-        if (launchConfigName == null && launchTemplateName == null) {
+        if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null) {
             throw new AwsException("ValidationError",
                     "Either LaunchConfigurationName or LaunchTemplate must be specified.", 400);
         }
@@ -101,6 +134,7 @@ public class AutoScalingService {
                 AwsArnUtils.Arn.of("autoscaling", region, regionResolver.getAccountId(),
                         "autoScalingGroup:" + name).toString());
         asg.setLaunchConfigurationName(launchConfigName);
+        asg.setLaunchTemplateId(launchTemplateId);
         asg.setLaunchTemplateName(launchTemplateName);
         asg.setLaunchTemplateVersion(launchTemplateVersion);
         asg.setMinSize(minSize);
@@ -108,6 +142,7 @@ public class AutoScalingService {
         asg.setDesiredCapacity(desiredCapacity);
         asg.setDefaultCooldown(defaultCooldown > 0 ? defaultCooldown : 300);
         asg.setAvailabilityZones(availabilityZones != null ? new ArrayList<>(availabilityZones) : new ArrayList<>());
+        asg.setSubnetIds(subnetIds != null ? new ArrayList<>(subnetIds) : new ArrayList<>());
         asg.setTargetGroupARNs(targetGroupArns != null ? new ArrayList<>(targetGroupArns) : new ArrayList<>());
         asg.setLoadBalancerNames(lbNames != null ? new ArrayList<>(lbNames) : new ArrayList<>());
         asg.setHealthCheckType(healthCheckType != null ? healthCheckType : "EC2");
@@ -124,16 +159,19 @@ public class AutoScalingService {
 
     public void updateAutoScalingGroup(String region, String name,
                                         String launchConfigName,
-                                        String launchTemplateName, String launchTemplateVersion,
+                                        String launchTemplateId, String launchTemplateName,
+                                        String launchTemplateVersion,
                                         Integer minSize, Integer maxSize, Integer desiredCapacity,
                                         Integer defaultCooldown, List<String> availabilityZones,
+                                        List<String> subnetIds,
                                         String healthCheckType, Integer healthCheckGracePeriod,
                                         List<String> terminationPolicies) {
         AutoScalingGroup asg = requireGroup(region, name);
         if (launchConfigName != null) {
             asg.setLaunchConfigurationName(launchConfigName);
         }
-        if (launchTemplateName != null) {
+        if (launchTemplateId != null || launchTemplateName != null) {
+            asg.setLaunchTemplateId(launchTemplateId);
             asg.setLaunchTemplateName(launchTemplateName);
             asg.setLaunchTemplateVersion(launchTemplateVersion);
         }
@@ -142,9 +180,11 @@ public class AutoScalingService {
         if (desiredCapacity != null) { asg.setDesiredCapacity(desiredCapacity); }
         if (defaultCooldown != null) { asg.setDefaultCooldown(defaultCooldown); }
         if (availabilityZones != null) { asg.setAvailabilityZones(new ArrayList<>(availabilityZones)); }
+        if (subnetIds != null) { asg.setSubnetIds(new ArrayList<>(subnetIds)); }
         if (healthCheckType != null) { asg.setHealthCheckType(healthCheckType); }
         if (healthCheckGracePeriod != null) { asg.setHealthCheckGracePeriod(healthCheckGracePeriod); }
         if (terminationPolicies != null) { asg.setTerminationPolicies(new ArrayList<>(terminationPolicies)); }
+        groups.put(asgKey(region, name), asg);
     }
 
     public void deleteAutoScalingGroup(String region, String name, boolean forceDelete) {
@@ -157,10 +197,24 @@ public class AutoScalingService {
                     "Auto Scaling group '" + name + "' has " + active.size()
                             + " instance(s). Set ForceDelete=true to delete anyway.", 400);
         }
+        if (forceDelete && ec2Service != null && !active.isEmpty()) {
+            active.stream()
+                    .map(AsgInstance::getInstanceId)
+                    .filter(Objects::nonNull)
+                    .forEach(instanceId -> {
+                        try {
+                            ec2Service.terminateInstances(region, List.of(instanceId));
+                        }
+                        catch (AwsException ignored) {
+                            // ForceDelete should remove stale ASG membership even if EC2 no longer has the instance.
+                        }
+                    });
+        }
         groups.remove(asgKey(region, name));
         // clean up associated hooks and policies
         hooks.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
         policies.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
+        instanceRefreshes.entrySet().removeIf(e -> e.getValue().getAutoScalingGroupName().equals(name));
     }
 
     public List<AutoScalingGroup> describeAutoScalingGroups(String region, List<String> names) {
@@ -175,6 +229,10 @@ public class AutoScalingService {
                 .collect(Collectors.toList());
     }
 
+    public void saveAutoScalingGroup(AutoScalingGroup asg) {
+        groups.put(asgKey(asg.getRegion(), asg.getAutoScalingGroupName()), asg);
+    }
+
     public void setDesiredCapacity(String region, String name, int desiredCapacity) {
         AutoScalingGroup asg = requireGroup(region, name);
         if (desiredCapacity < asg.getMinSize() || desiredCapacity > asg.getMaxSize()) {
@@ -183,6 +241,27 @@ public class AutoScalingService {
                             + asg.getMinSize() + " and MaxSize=" + asg.getMaxSize() + ".", 400);
         }
         asg.setDesiredCapacity(desiredCapacity);
+        groups.put(asgKey(region, name), asg);
+    }
+
+    public void createOrUpdateTags(String region, String resourceId, String resourceType, Map<String, String> tags) {
+        AutoScalingGroup asg = requireTaggableGroup(region, resourceId, resourceType);
+        asg.getTags().putAll(tags);
+        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+    }
+
+    public void deleteTags(String region, String resourceId, String resourceType, List<String> tagKeys) {
+        AutoScalingGroup asg = requireTaggableGroup(region, resourceId, resourceType);
+        tagKeys.forEach(asg.getTags()::remove);
+        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+    }
+
+    private AutoScalingGroup requireTaggableGroup(String region, String resourceId, String resourceType) {
+        if (!"auto-scaling-group".equals(resourceType)) {
+            throw new AwsException("ValidationError",
+                    "Unsupported tag resource type '" + resourceType + "'.", 400);
+        }
+        return requireGroup(region, resourceId);
     }
 
     // ── Instance management ────────────────────────────────────────────────────
@@ -209,11 +288,15 @@ public class AutoScalingService {
             inst.setAvailabilityZone(
                     asg.getAvailabilityZones().isEmpty() ? region + "a" : asg.getAvailabilityZones().get(0));
             inst.setLaunchConfigurationName(asg.getLaunchConfigurationName());
+            inst.setLaunchTemplateId(asg.getLaunchTemplateId());
+            inst.setLaunchTemplateName(asg.getLaunchTemplateName());
+            inst.setLaunchTemplateVersion(asg.getLaunchTemplateVersion());
             asg.getInstances().add(inst);
         }
         if (asg.getInstances().size() > asg.getDesiredCapacity()) {
             asg.setDesiredCapacity(asg.getInstances().size());
         }
+        groups.put(asgKey(region, name), asg);
     }
 
     public void detachInstances(String region, String name, List<String> instanceIds,
@@ -224,6 +307,7 @@ public class AutoScalingService {
             int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - instanceIds.size());
             asg.setDesiredCapacity(newDesired);
         }
+        groups.put(asgKey(region, name), asg);
     }
 
     public void terminateInstanceInAutoScalingGroup(String region, String instanceId,
@@ -242,6 +326,100 @@ public class AutoScalingService {
             int newDesired = Math.max(asg.getMinSize(), asg.getDesiredCapacity() - 1);
             asg.setDesiredCapacity(newDesired);
         }
+        groups.put(asgKey(region, asg.getAutoScalingGroupName()), asg);
+    }
+
+    // ── Instance refreshes ────────────────────────────────────────────────────
+
+    public InstanceRefresh startInstanceRefresh(String region, String asgName, InstanceRefresh requestedRefresh) {
+        AutoScalingGroup asg = requireGroup(region, asgName);
+        boolean activeRefresh = instanceRefreshes.values().stream()
+                .filter(r -> region.equals(r.getRegion()))
+                .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
+                .anyMatch(r -> isActiveRefreshStatus(r.getStatus()));
+        if (activeRefresh) {
+            throw new AwsException("InstanceRefreshInProgress",
+                    "An active instance refresh already exists for Auto Scaling group '" + asgName + "'.", 400);
+        }
+
+        Instant now = Instant.now();
+        InstanceRefresh refresh = new InstanceRefresh();
+        refresh.setInstanceRefreshId(UUID.randomUUID().toString());
+        refresh.setAutoScalingGroupName(asgName);
+        refresh.setStrategy(normalizeRefreshStrategy(requestedRefresh.getStrategy()));
+        refresh.setStartTime(now);
+        refresh.setRegion(region);
+        copyDesiredConfiguration(requestedRefresh, refresh);
+        copyPreferences(requestedRefresh, refresh);
+
+        applyDesiredConfiguration(asg, refresh);
+        List<String> instanceIds = markInstancesForRefresh(asg, refresh);
+        if (instanceIds.isEmpty()) {
+            refresh.setStatus("Successful");
+            refresh.setStatusReason("Instance refresh completed.");
+            refresh.setPercentageComplete(100);
+            refresh.setInstancesToUpdate(0);
+            refresh.setEndTime(now);
+        } else {
+            refresh.setStatus("InProgress");
+            refresh.setStatusReason("Instance refresh in progress.");
+            refresh.setPercentageComplete(0);
+            refresh.setInstancesToUpdate(instanceIds.size());
+        }
+        instanceRefreshes.put(instanceRefreshKey(region, asgName, refresh.getInstanceRefreshId()), refresh);
+        groups.put(asgKey(region, asgName), asg);
+        if (!instanceIds.isEmpty()) {
+            recordActivity(region, asgName,
+                    "Marked EC2 instance(s) for refresh: " + instanceIds,
+                    "At " + now + " an instance refresh selected active instances for replacement.",
+                    "Successful");
+        }
+        recordActivity(region, asgName,
+                "Started instance refresh " + refresh.getInstanceRefreshId() + ".",
+                "At " + now + " an instance refresh was started.",
+                "Successful");
+        return refresh;
+    }
+
+    public void completeInstanceRefreshIfSettled(String region, String asgName) {
+        AutoScalingGroup asg = requireGroup(region, asgName);
+        List<InstanceRefresh> activeRefreshes = instanceRefreshes.values().stream()
+                .filter(r -> region.equals(r.getRegion()))
+                .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
+                .filter(r -> isActiveRefreshStatus(r.getStatus()))
+                .collect(Collectors.toList());
+        for (InstanceRefresh refresh : activeRefreshes) {
+            int remaining = remainingInstancesToUpdate(asg);
+            refresh.setInstancesToUpdate(remaining);
+            refresh.setPercentageComplete(remaining == 0 ? 100 : 0);
+            if (remaining == 0) {
+                refresh.setStatus("Successful");
+                refresh.setStatusReason("Instance refresh completed.");
+                refresh.setEndTime(Instant.now());
+            }
+            instanceRefreshes.put(instanceRefreshKey(region, asgName, refresh.getInstanceRefreshId()), refresh);
+        }
+    }
+
+    public InstanceRefreshPage describeInstanceRefreshes(String region, String asgName, List<String> refreshIds,
+                                                          Integer maxRecords, String nextToken) {
+        requireGroup(region, asgName);
+        int offset = parseNextToken(nextToken);
+        int limit = maxRecords != null ? Math.min(Math.max(maxRecords, 1), 100) : 50;
+        Set<String> requestedIds = refreshIds != null && !refreshIds.isEmpty()
+                ? new HashSet<>(refreshIds) : null;
+        List<InstanceRefresh> matches = instanceRefreshes.values().stream()
+                .filter(r -> region.equals(r.getRegion()))
+                .filter(r -> asgName.equals(r.getAutoScalingGroupName()))
+                .filter(r -> requestedIds == null || requestedIds.contains(r.getInstanceRefreshId()))
+                .sorted(Comparator.comparing(InstanceRefresh::getStartTime).reversed())
+                .collect(Collectors.toList());
+        if (offset > matches.size()) {
+            throw new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400);
+        }
+        int end = Math.min(offset + limit, matches.size());
+        String followingToken = end < matches.size() ? String.valueOf(end) : null;
+        return new InstanceRefreshPage(matches.subList(offset, end), followingToken);
     }
 
     // ── Load balancer attachment ───────────────────────────────────────────────
@@ -253,11 +431,13 @@ public class AutoScalingService {
                 asg.getTargetGroupARNs().add(arn);
             }
         }
+        groups.put(asgKey(region, name), asg);
     }
 
     public void detachLoadBalancerTargetGroups(String region, String name, List<String> tgArns) {
         AutoScalingGroup asg = requireGroup(region, name);
         asg.getTargetGroupARNs().removeAll(tgArns);
+        groups.put(asgKey(region, name), asg);
     }
 
     public List<String> describeLoadBalancerTargetGroups(String region, String name) {
@@ -271,10 +451,13 @@ public class AutoScalingService {
                 asg.getLoadBalancerNames().add(lb);
             }
         }
+        groups.put(asgKey(region, name), asg);
     }
 
     public void detachLoadBalancers(String region, String name, List<String> lbNames) {
-        requireGroup(region, name).getLoadBalancerNames().removeAll(lbNames);
+        AutoScalingGroup asg = requireGroup(region, name);
+        asg.getLoadBalancerNames().removeAll(lbNames);
+        groups.put(asgKey(region, name), asg);
     }
 
     // ── Lifecycle hooks ────────────────────────────────────────────────────────
@@ -294,6 +477,7 @@ public class AutoScalingService {
         hook.setNotificationMetadata(notificationMetadata);
         if (heartbeatTimeout != null) { hook.setHeartbeatTimeout(heartbeatTimeout); }
         if (defaultResult != null) { hook.setDefaultResult(defaultResult); }
+        hooks.put(key, hook);
     }
 
     public void deleteLifecycleHook(String region, String asgName, String hookName) {
@@ -335,6 +519,7 @@ public class AutoScalingService {
         policy.setScalingAdjustment(scalingAdjustment);
         policy.setCooldown(cooldown);
         policy.setRegion(region);
+        policies.put(key, policy);
         return policy;
     }
 
@@ -383,8 +568,11 @@ public class AutoScalingService {
             activity.setStatusCode(statusCode);
             activity.setStatusMessage(statusMessage);
             activity.setProgress(100);
+            activities.put(activityId, activity);
         }
     }
+
+    public record InstanceRefreshPage(List<InstanceRefresh> instanceRefreshes, String nextToken) {}
 
     // ── Internal helpers ───────────────────────────────────────────────────────
 
@@ -411,5 +599,148 @@ public class AutoScalingService {
 
     private static String policyKey(String region, String asgName, String policyName) {
         return region + "::" + asgName + "::" + policyName;
+    }
+
+    private static String instanceRefreshKey(String region, String asgName, String refreshId) {
+        return region + "::" + asgName + "::" + refreshId;
+    }
+
+    private static boolean isActiveRefreshStatus(String status) {
+        return "Pending".equals(status)
+                || "InProgress".equals(status)
+                || "Cancelling".equals(status)
+                || "RollbackInProgress".equals(status)
+                || "Baking".equals(status);
+    }
+
+    private static String normalizeRefreshStrategy(String strategy) {
+        if (strategy == null || strategy.isBlank()) {
+            return "Rolling";
+        }
+        if (!"Rolling".equals(strategy) && !"ReplaceRootVolume".equals(strategy)) {
+            throw new AwsException("ValidationError",
+                    "Unsupported instance refresh strategy '" + strategy + "'.", 400);
+        }
+        return strategy;
+    }
+
+    private static int parseNextToken(String nextToken) {
+        if (nextToken == null || nextToken.isBlank()) {
+            return 0;
+        }
+        try {
+            int offset = Integer.parseInt(nextToken);
+            if (offset < 0) {
+                throw new NumberFormatException("negative");
+            }
+            return offset;
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidNextToken", "The NextToken value is not valid.", 400);
+        }
+    }
+
+    private static void copyDesiredConfiguration(InstanceRefresh source, InstanceRefresh target) {
+        target.setDesiredLaunchTemplateId(source.getDesiredLaunchTemplateId());
+        target.setDesiredLaunchTemplateName(source.getDesiredLaunchTemplateName());
+        target.setDesiredLaunchTemplateVersion(source.getDesiredLaunchTemplateVersion());
+    }
+
+    private static void copyPreferences(InstanceRefresh source, InstanceRefresh target) {
+        target.setMinHealthyPercentage(source.getMinHealthyPercentage());
+        target.setMaxHealthyPercentage(source.getMaxHealthyPercentage());
+        target.setInstanceWarmup(source.getInstanceWarmup());
+        target.setSkipMatching(source.getSkipMatching());
+        target.setAutoRollback(source.getAutoRollback());
+        target.setScaleInProtectedInstances(source.getScaleInProtectedInstances());
+        target.setStandbyInstances(source.getStandbyInstances());
+        target.setCheckpointDelay(source.getCheckpointDelay());
+        target.setBakeTime(source.getBakeTime());
+        target.setCheckpointPercentages(new ArrayList<>(source.getCheckpointPercentages()));
+    }
+
+    private static void applyDesiredConfiguration(AutoScalingGroup asg, InstanceRefresh refresh) {
+        if (!refresh.hasDesiredConfiguration()) {
+            return;
+        }
+        if (refresh.getDesiredLaunchTemplateId() != null || refresh.getDesiredLaunchTemplateName() != null) {
+            asg.setLaunchTemplateId(refresh.getDesiredLaunchTemplateId());
+            asg.setLaunchTemplateName(refresh.getDesiredLaunchTemplateName());
+            asg.setLaunchConfigurationName(null);
+        }
+        if (refresh.getDesiredLaunchTemplateVersion() != null) {
+            asg.setLaunchTemplateVersion(refresh.getDesiredLaunchTemplateVersion());
+        }
+    }
+
+    private static List<String> markInstancesForRefresh(AutoScalingGroup asg, InstanceRefresh refresh) {
+        boolean skipMatching = Boolean.TRUE.equals(refresh.getSkipMatching());
+        List<String> instanceIds = new ArrayList<>();
+        for (AsgInstance instance : asg.getInstances()) {
+            if (!isRefreshCandidate(instance, asg, skipMatching)) {
+                continue;
+            }
+            instance.setLifecycleState("Terminating");
+            instanceIds.add(instance.getInstanceId());
+        }
+        return instanceIds;
+    }
+
+    private static boolean isRefreshCandidate(AsgInstance instance, AutoScalingGroup asg, boolean skipMatching) {
+        String state = instance.getLifecycleState();
+        if (!"Pending".equals(state) && !"InService".equals(state)) {
+            return false;
+        }
+        if (!skipMatching) {
+            return true;
+        }
+        if (isDynamicLaunchTemplateVersion(asg.getLaunchTemplateVersion())
+                && (asg.getLaunchTemplateId() != null || asg.getLaunchTemplateName() != null)) {
+            return true;
+        }
+        return !Objects.equals(instance.getLaunchConfigurationName(), asg.getLaunchConfigurationName())
+                || !Objects.equals(instance.getLaunchTemplateId(), asg.getLaunchTemplateId())
+                || !Objects.equals(instance.getLaunchTemplateName(), asg.getLaunchTemplateName())
+                || !Objects.equals(instance.getLaunchTemplateVersion(), asg.getLaunchTemplateVersion());
+    }
+
+    private static int remainingInstancesToUpdate(AutoScalingGroup asg) {
+        int remaining = 0;
+        int matchingInService = 0;
+        for (AsgInstance instance : asg.getInstances()) {
+            String state = instance.getLifecycleState();
+            if ("Terminating".equals(state) || "Pending".equals(state)) {
+                remaining++;
+                continue;
+            }
+            if ("InService".equals(state)) {
+                if (matchesCurrentLaunchSource(instance, asg)) {
+                    matchingInService++;
+                } else {
+                    remaining++;
+                }
+            }
+        }
+        remaining += Math.max(0, asg.getDesiredCapacity() - matchingInService);
+        return remaining;
+    }
+
+    private static boolean matchesCurrentLaunchSource(AsgInstance instance, AutoScalingGroup asg) {
+        if (isDynamicLaunchTemplateVersion(asg.getLaunchTemplateVersion())
+                && Objects.equals(instance.getLaunchTemplateId(), asg.getLaunchTemplateId())
+                && Objects.equals(instance.getLaunchTemplateName(), asg.getLaunchTemplateName())) {
+            return true;
+        }
+        return Objects.equals(instance.getLaunchConfigurationName(), asg.getLaunchConfigurationName())
+                && Objects.equals(instance.getLaunchTemplateId(), asg.getLaunchTemplateId())
+                && Objects.equals(instance.getLaunchTemplateName(), asg.getLaunchTemplateName())
+                && Objects.equals(instance.getLaunchTemplateVersion(), asg.getLaunchTemplateVersion());
+    }
+
+    private static boolean isLaunchTemplateVersionAlias(String version) {
+        return "$Latest".equals(version) || "$Default".equals(version);
+    }
+
+    private static boolean isDynamicLaunchTemplateVersion(String version) {
+        return version == null || version.isBlank() || isLaunchTemplateVersionAlias(version);
     }
 }

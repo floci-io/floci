@@ -12,6 +12,9 @@ public class AsgInstance {
     private String lifecycleState;   // Pending | InService | Terminating | Terminated | Detached
     private String healthStatus;     // Healthy | Unhealthy
     private String launchConfigurationName;
+    private String launchTemplateId;
+    private String launchTemplateName;
+    private String launchTemplateVersion;
     private String instanceType;
     private boolean protectedFromScaleIn;
 
@@ -31,6 +34,15 @@ public class AsgInstance {
 
     public String getLaunchConfigurationName() { return launchConfigurationName; }
     public void setLaunchConfigurationName(String v) { this.launchConfigurationName = v; }
+
+    public String getLaunchTemplateId() { return launchTemplateId; }
+    public void setLaunchTemplateId(String v) { this.launchTemplateId = v; }
+
+    public String getLaunchTemplateName() { return launchTemplateName; }
+    public void setLaunchTemplateName(String v) { this.launchTemplateName = v; }
+
+    public String getLaunchTemplateVersion() { return launchTemplateVersion; }
+    public void setLaunchTemplateVersion(String v) { this.launchTemplateVersion = v; }
 
     public String getInstanceType() { return instanceType; }
     public void setInstanceType(String v) { this.instanceType = v; }

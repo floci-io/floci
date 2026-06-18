@@ -7,6 +7,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
@@ -17,6 +18,8 @@ class AutoScalingIntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260501/us-east-1/autoscaling/aws4_request";
 
     private static String policyArn;
+    private static String instanceRefreshId;
+    private static String pagedInstanceRefreshId;
 
     // ── Launch Configurations ─────────────────────────────────────────────────
 
@@ -386,10 +389,216 @@ class AutoScalingIntegrationTest {
                 .body(containsString("DescribeScalingActivitiesResponse"));
     }
 
+    @Test
+    @Order(21)
+    void createAutoScalingGroupWithLaunchTemplateId() {
+        given()
+                .formParam("Action", "CreateAutoScalingGroup")
+                .formParam("AutoScalingGroupName", "my-lt-asg")
+                .formParam("LaunchTemplate.LaunchTemplateId", "lt-0123456789abcdef0")
+                .formParam("LaunchTemplate.Version", "$Latest")
+                .formParam("MinSize", "0")
+                .formParam("MaxSize", "1")
+                .formParam("DesiredCapacity", "0")
+                .formParam("AvailabilityZones.member.1", "us-east-1a")
+                .formParam("VPCZoneIdentifier", "subnet-12345678,subnet-87654321")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("CreateAutoScalingGroupResponse"));
+
+        given()
+                .formParam("Action", "CreateOrUpdateTags")
+                .formParam("Tags.member.1.ResourceId", "my-lt-asg")
+                .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.1.Key", "owner")
+                .formParam("Tags.member.1.Value", "sample-app")
+                .formParam("Tags.member.1.PropagateAtLaunch", "true")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("CreateOrUpdateTagsResponse"));
+    }
+
+    @Test
+    @Order(22)
+    void describeAutoScalingGroupWithLaunchTemplateId() {
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-lt-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("my-lt-asg"))
+                .body(containsString("<LaunchTemplateId>lt-0123456789abcdef0</LaunchTemplateId>"))
+                .body(containsString("<Version>$Latest</Version>"))
+                .body(containsString("<VPCZoneIdentifier>subnet-12345678,subnet-87654321</VPCZoneIdentifier>"))
+                .body(containsString("owner"))
+                .body(containsString("sample-app"));
+
+        given()
+                .formParam("Action", "DeleteTags")
+                .formParam("Tags.member.1.ResourceId", "my-lt-asg")
+                .formParam("Tags.member.1.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.1.Key", "owner")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DeleteTagsResponse"));
+
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-lt-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(not(containsString("sample-app")));
+    }
+
+    @Test
+    @Order(23)
+    void startInstanceRefresh() {
+        instanceRefreshId = given()
+                .formParam("Action", "StartInstanceRefresh")
+                .formParam("AutoScalingGroupName", "my-lt-asg")
+                .formParam("Strategy", "Rolling")
+                .formParam("DesiredConfiguration.LaunchTemplate.LaunchTemplateId", "lt-0fedcba9876543210")
+                .formParam("DesiredConfiguration.LaunchTemplate.Version", "2")
+                .formParam("Preferences.MinHealthyPercentage", "90")
+                .formParam("Preferences.MaxHealthyPercentage", "120")
+                .formParam("Preferences.InstanceWarmup", "200")
+                .formParam("Preferences.SkipMatching", "true")
+                .formParam("Preferences.AutoRollback", "true")
+                .formParam("Preferences.CheckpointPercentages.member.1", "50")
+                .formParam("Preferences.CheckpointPercentages.member.2", "100")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("StartInstanceRefreshResponse"))
+                .body(containsString("InstanceRefreshId"))
+                .extract().xmlPath()
+                .getString("StartInstanceRefreshResponse.StartInstanceRefreshResult.InstanceRefreshId");
+
+        assertThat(instanceRefreshId, not(emptyOrNullString()));
+    }
+
+    @Test
+    @Order(24)
+    void describeInstanceRefreshes() {
+        String body = given()
+                .formParam("Action", "DescribeInstanceRefreshes")
+                .formParam("AutoScalingGroupName", "my-lt-asg")
+                .formParam("InstanceRefreshIds.member.1", instanceRefreshId)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DescribeInstanceRefreshesResponse"))
+                .extract().body().asString();
+
+        assertThat(body, containsString(instanceRefreshId));
+        assertThat(body, containsString("<AutoScalingGroupName>my-lt-asg</AutoScalingGroupName>"));
+        assertThat(body, containsString("<Status>Successful</Status>"));
+        assertThat(body, containsString("<PercentageComplete>100</PercentageComplete>"));
+        assertThat(body, containsString("<InstancesToUpdate>0</InstancesToUpdate>"));
+        assertThat(body, containsString("<Strategy>Rolling</Strategy>"));
+        assertThat(body, containsString("<LaunchTemplateId>lt-0fedcba9876543210</LaunchTemplateId>"));
+        assertThat(body, containsString("<Version>2</Version>"));
+        assertThat(body, containsString("<MinHealthyPercentage>90</MinHealthyPercentage>"));
+        assertThat(body, containsString("<MaxHealthyPercentage>120</MaxHealthyPercentage>"));
+        assertThat(body, containsString("<InstanceWarmup>200</InstanceWarmup>"));
+        assertThat(body, containsString("<SkipMatching>true</SkipMatching>"));
+        assertThat(body, containsString("<AutoRollback>true</AutoRollback>"));
+        assertThat(body, containsString("<CheckpointPercentages>"));
+
+        given()
+                .formParam("Action", "DescribeAutoScalingGroups")
+                .formParam("AutoScalingGroupNames.member.1", "my-lt-asg")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<LaunchTemplateId>lt-0fedcba9876543210</LaunchTemplateId>"))
+                .body(containsString("<Version>2</Version>"));
+    }
+
+    @Test
+    @Order(25)
+    void describeInstanceRefreshesPaginatesNewestFirst() {
+        pagedInstanceRefreshId = given()
+                .formParam("Action", "StartInstanceRefresh")
+                .formParam("AutoScalingGroupName", "my-lt-asg")
+                .formParam("Preferences.SkipMatching", "true")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().xmlPath()
+                .getString("StartInstanceRefreshResponse.StartInstanceRefreshResult.InstanceRefreshId");
+
+        String firstPage = given()
+                .formParam("Action", "DescribeInstanceRefreshes")
+                .formParam("AutoScalingGroupName", "my-lt-asg")
+                .formParam("MaxRecords", "1")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("<NextToken>1</NextToken>"))
+                .extract().body().asString();
+
+        assertThat(firstPage, containsString(pagedInstanceRefreshId));
+        assertThat(firstPage, not(containsString(instanceRefreshId)));
+
+        given()
+                .formParam("Action", "DescribeInstanceRefreshes")
+                .formParam("AutoScalingGroupName", "my-lt-asg")
+                .formParam("MaxRecords", "1")
+                .formParam("NextToken", "1")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString(instanceRefreshId))
+                .body(not(containsString("<NextToken>")));
+    }
+
+    @Test
+    @Order(26)
+    void deleteLaunchTemplateAutoScalingGroup() {
+        given()
+                .formParam("Action", "DeleteAutoScalingGroup")
+                .formParam("AutoScalingGroupName", "my-lt-asg")
+                .formParam("ForceDelete", "true")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body(containsString("DeleteAutoScalingGroupResponse"));
+    }
+
     // ── Cleanup ───────────────────────────────────────────────────────────────
 
     @Test
-    @Order(21)
+    @Order(27)
     void deleteAutoScalingGroup() {
         given()
                 .formParam("Action", "DeleteAutoScalingGroup")
@@ -404,7 +613,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(22)
+    @Order(28)
     void deleteLaunchConfiguration() {
         given()
                 .formParam("Action", "DeleteLaunchConfiguration")
@@ -418,7 +627,7 @@ class AutoScalingIntegrationTest {
     }
 
     @Test
-    @Order(23)
+    @Order(29)
     void describeAutoScalingGroupsEmpty() {
         given()
                 .formParam("Action", "DescribeAutoScalingGroups")

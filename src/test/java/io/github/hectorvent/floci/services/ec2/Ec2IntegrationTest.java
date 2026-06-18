@@ -646,6 +646,11 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
+            .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:ClusterId")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "sample-template")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Key", "example:NodeType")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Value", "COORDINATOR")
             .formParam("TagSpecification.1.ResourceType", "launch-template")
             .formParam("TagSpecification.1.Tag.1.Key", "Name")
             .formParam("TagSpecification.1.Tag.1.Value", "sample-template")
@@ -696,7 +701,13 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template\n"));
+                    equalTo("#!/bin/sh\necho launch-template\n"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
+                    equalTo("instance"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:ClusterId' }.value",
+                    equalTo("sample-template"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("COORDINATOR"));
     }
 
     @Test
@@ -713,6 +724,9 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
+            .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:NodeType")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "WORKER")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -727,7 +741,9 @@ class Ec2IntegrationTest {
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.instanceType",
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template-version\n"));
+                    equalTo("#!/bin/sh\necho launch-template-version\n"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("WORKER"));
 
         given()
             .formParam("Action", "DescribeLaunchTemplateVersions")
@@ -743,7 +759,11 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.defaultVersion",
                     equalTo("true"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
-                    equalTo("t3.micro"));
+                    equalTo("t3.micro"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
+                    equalTo("#!/bin/sh\necho launch-template\n"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("COORDINATOR"));
     }
 
     @Test
@@ -1246,6 +1266,8 @@ class Ec2IntegrationTest {
             .formParam("Action", "DescribeInstances")
             .formParam("Filter.1.Name", "instance-state-name")
             .formParam("Filter.1.Value.1", "running")
+            .formParam("Filter.2.Name", "instance-id")
+            .formParam("Filter.2.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1337,9 +1359,10 @@ class Ec2IntegrationTest {
     @Test
     @Order(79)
     void describeNetworkInterfacesBeforeRun() {
-        // Before any instances exist, the set should be empty
         given()
             .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", "i-00000000000000000")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1354,13 +1377,15 @@ class Ec2IntegrationTest {
     void describeNetworkInterfacesAfterRun() {
         networkInterfaceId = given()
             .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", greaterThanOrEqualTo(1))
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].networkInterfaceId",
                     startsWith("eni-"))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].vpcId", notNullValue())
@@ -1373,7 +1398,7 @@ class Ec2IntegrationTest {
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].attachment.deviceIndex",
                     equalTo("0"))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].attachment.instanceId",
-                    notNullValue())
+                    equalTo(instanceId))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].groupSet.item.size()",
                     greaterThanOrEqualTo(1))
             .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].networkInterfaceId");
@@ -1576,13 +1601,15 @@ class Ec2IntegrationTest {
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("Filter.1.Name", "status")
             .formParam("Filter.1.Value.1", "in-use")
+            .formParam("Filter.2.Name", "attachment.instance-id")
+            .formParam("Filter.2.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()",
-                    greaterThanOrEqualTo(1))
+                    equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].status",
                     equalTo("in-use"));
     }
