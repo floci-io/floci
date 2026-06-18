@@ -55,6 +55,34 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void describeDbInstances_includesDbParameterGroupAttachment() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setParameterGroupName("postgres18");
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroups>"));
+        assertTrue(body.contains("<DBParameterGroupName>postgres18</DBParameterGroupName>"));
+        assertTrue(body.contains("<ParameterApplyStatus>in-sync</ParameterApplyStatus>"));
+    }
+
+    @Test
+    void describeDbInstances_reportsDefaultDbParameterGroupWhenUnattached() {
+        DbInstance instance = makeInstance("mydb");
+        instance.setEngineVersion("16.3");
+        when(service.listDbInstances(null)).thenReturn(List.of(instance));
+
+        Response response = handler.handle("DescribeDBInstances", params());
+
+        String body = (String) response.getEntity();
+        assertTrue(body.contains("<DBParameterGroups>"));
+        assertTrue(body.contains("<DBParameterGroupName>default.postgres16</DBParameterGroupName>"));
+        assertTrue(body.contains("<ParameterApplyStatus>in-sync</ParameterApplyStatus>"));
+    }
+
+    @Test
     void describeDbInstances_filterByDirectIdentifier() {
         DbInstance instance = makeInstance("mydb");
         when(service.listDbInstances("mydb")).thenReturn(List.of(instance));
