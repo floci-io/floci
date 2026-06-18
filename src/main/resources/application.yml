@@ -21,12 +21,19 @@ quarkus:
     delay-enabled: true
   native:
     resources:
-      # The Pricing service reads its bundled snapshot, and EC2 reads its image
-      # catalog (ec2/image-catalog.yaml), at runtime via
+      # The Pricing service reads its bundled snapshot, EC2 reads its image
+      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # message bundles, and API Gateway's Velocity engine reads its default
+      # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
       # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**,ui/*.html,ec2/*.yaml
+      includes:
+        - pricing-snapshots/**
+        - ui/*.html
+        - ec2/*.yaml
+        - i18n/*.properties
+        - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -52,7 +59,7 @@ quarkus:
 
 floci:
   port: 4566
-  max-request-size: 512
+  max-request-size: 2048
   base-url: "http://localhost:4566"
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
@@ -175,6 +182,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: false

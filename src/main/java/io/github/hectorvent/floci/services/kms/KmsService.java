@@ -12,10 +12,15 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.ASN1ObjectIdentifier;
 import org.bouncycastle.asn1.ASN1Primitive;
 import org.bouncycastle.asn1.ASN1Sequence;
+import org.bouncycastle.asn1.DERNull;
 import org.bouncycastle.asn1.DERSequenceGenerator;
+import org.bouncycastle.asn1.nist.NISTObjectIdentifiers;
 import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.x509.DigestInfo;
 import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
 import org.bouncycastle.crypto.params.ECDomainParameters;
 import org.bouncycastle.crypto.params.ECPrivateKeyParameters;
@@ -34,6 +39,7 @@ import org.jboss.logging.Logger;
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -523,6 +529,18 @@ public class KmsService {
         LOG.infov("Disabled key rotation for KMS key: {0} in {1}", key.getKeyId(), region);
     }
 
+    public void enableKey(String keyId, String region) {
+        KmsKey key = resolveKey(keyId, region);
+        if ("PendingDeletion".equals(key.getKeyState())) {
+            throw new AwsException("KMSInvalidStateException",
+                    "KMS key " + key.getKeyId() + " is pending deletion.", 400);
+        }
+        key.setEnabled(true);
+        key.setKeyState("Enabled");
+        keyStore.put(region + "::" + key.getKeyId(), key);
+        LOG.infov("Enabled KMS key: {0} in {1}", key.getKeyId(), region);
+    }
+
     public void disableKey(String keyId, String region) {
         KmsKey key = resolveKey(keyId, region);
         key.setEnabled(false);
@@ -729,6 +747,12 @@ public class KmsService {
             if ("DIGEST".equals(messageType)) {
                 // If message is already a digest, we need a "NONEwith..." algorithm
                 jcaAlgo = "NONEwith" + (kmsKey.getCustomerMasterKeySpec().startsWith("RSA") ? "RSA" : "ECDSA");
+                if (algorithm.startsWith("RSASSA_PKCS1_V1_5")) {
+                    // RFC 8017 9.2: PKCS#1 v1.5 signs DigestInfo{hashOID, digest}, not the
+                    // bare digest, so the signature validates with external verifiers and
+                    // real KMS (NONEwithRSA only pads the bytes it is given).
+                    message = wrapInDigestInfo(message, algorithm);
+                }
             }
 
             if (isSecgP256k1(kmsKey.getCustomerMasterKeySpec())) {
@@ -759,6 +783,10 @@ public class KmsService {
             
             if ("DIGEST".equals(messageType)) {
                 jcaAlgo = "NONEwith" + (kmsKey.getCustomerMasterKeySpec().startsWith("RSA") ? "RSA" : "ECDSA");
+                if (algorithm.startsWith("RSASSA_PKCS1_V1_5")) {
+                    // Mirror sign(): verify against DigestInfo{hashOID, digest} (RFC 8017 9.2).
+                    message = wrapInDigestInfo(message, algorithm);
+                }
             }
 
             if (isSecgP256k1(kmsKey.getCustomerMasterKeySpec())) {
@@ -882,6 +910,29 @@ public class KmsService {
             return converter.generatePublic(SubjectPublicKeyInfo.getInstance(decoded));
         }
         return buildKeyFactory(spec).generatePublic(new X509EncodedKeySpec(decoded));
+    }
+
+    /**
+     * Wraps a pre-computed digest in the ASN.1 {@code DigestInfo} structure that PKCS#1
+     * v1.5 signing prepends before padding (RFC 8017 9.2). Needed for {@code MessageType=DIGEST}
+     * RSA signatures because {@code NONEwithRSA} pads only the bytes it is given.
+     */
+    private byte[] wrapInDigestInfo(byte[] digest, String algorithm) {
+        ASN1ObjectIdentifier hashOid;
+        if (algorithm.endsWith("SHA_256")) {
+            hashOid = NISTObjectIdentifiers.id_sha256;
+        } else if (algorithm.endsWith("SHA_384")) {
+            hashOid = NISTObjectIdentifiers.id_sha384;
+        } else if (algorithm.endsWith("SHA_512")) {
+            hashOid = NISTObjectIdentifiers.id_sha512;
+        } else {
+            throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + algorithm, 400);
+        }
+        try {
+            return new DigestInfo(new AlgorithmIdentifier(hashOid, DERNull.INSTANCE), digest).getEncoded();
+        } catch (IOException e) {
+            throw new AwsException("InternalFailure", "Failed to encode DigestInfo: " + e.getMessage(), 500);
+        }
     }
 
     private String mapAlgorithm(String awsAlgo) {

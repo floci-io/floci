@@ -26,6 +26,7 @@
 | `ListAliases` | List all aliases |
 | `ScheduleKeyDeletion` | Mark a key for deletion |
 | `CancelKeyDeletion` | Cancel pending deletion |
+| `EnableKey` | Enable a key |
 | `DisableKey` | Disable a key |
 | `TagResource` | Tag a key |
 | `UntagResource` | Remove tags |

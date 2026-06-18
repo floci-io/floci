@@ -36,7 +36,7 @@ The block below mirrors `src/main/resources/application.yml`, it's the effective
 
 ```yaml
 floci:
-  max-request-size: 512              # Max HTTP request body size in MB
+  max-request-size: 2048             # Max HTTP request body size in MB
   base-url: "http://localhost:4566"  # Used to build response URLs (SQS QueueUrl, SNS endpoints, etc.)
   # hostname: ""                     # When set, overrides the host in base-url for multi-container Docker
   default-region: us-east-1
@@ -141,6 +141,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false        # Set to true to enforce IAM policies on all requests
+      seed-deployer-principal: false    # Set to true to create a local floci-deployer admin principal
 
     elasticache:
       enabled: true

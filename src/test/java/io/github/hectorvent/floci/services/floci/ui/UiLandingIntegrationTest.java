@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.ui;
+package io.github.hectorvent.floci.services.floci.ui;
 
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;

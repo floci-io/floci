@@ -8,7 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.athena.model.*;
 import io.github.hectorvent.floci.services.glue.model.Column;
-import io.github.hectorvent.floci.services.floci.FlociDuckClient;
+import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Table;

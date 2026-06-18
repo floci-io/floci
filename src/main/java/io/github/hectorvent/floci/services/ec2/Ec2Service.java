@@ -1068,6 +1068,11 @@ public class Ec2Service {
                 .orElse(null);
     }
 
+    public boolean isInstanceContainerRunning(String instanceId) {
+        Instance instance = findInstanceById(instanceId);
+        return instance != null && containerManager.isContainerRunning(instance.getDockerContainerId());
+    }
+
     public KeyPair findKeyPair(String region, String keyName) {
         if (keyName == null) {
             return null;
@@ -1776,6 +1781,10 @@ public class Ec2Service {
         allTypes.add(buildInstanceType("t4g.micro", 2, 1024, List.of("arm64")));
         allTypes.add(buildInstanceType("t4g.small", 2, 2048, List.of("arm64")));
         allTypes.add(buildInstanceType("t4g.medium", 2, 4096, List.of("arm64")));
+        allTypes.add(buildInstanceType("m6gd.2xlarge", 8, 32768, List.of("arm64")));
+        allTypes.add(buildInstanceType("m7gd.2xlarge", 8, 32768, List.of("arm64")));
+        allTypes.add(buildInstanceType("m8gd.medium", 1, 4096, List.of("arm64")));
+        allTypes.add(buildInstanceType("m8gd.2xlarge", 8, 32768, List.of("arm64")));
 
         if (instanceTypeNames.isEmpty()) {
             return allTypes;

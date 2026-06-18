@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -274,6 +276,32 @@ class Ec2IntegrationTest {
                     equalTo("region"))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].location",
                     equalTo("us-east-1"));
+    }
+
+    @Test
+    @Order(20)
+    void describeModernGravitonInstanceTypeOfferingsByRegion() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m8gd.2xlarge")
+            .formParam("Filter.1.Value.2", "m7gd.2xlarge")
+            .formParam("Filter.1.Value.3", "m6gd.2xlarge")
+            .formParam("Filter.1.Value.4", "m8gd.medium")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(4))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                    containsInAnyOrder("m8gd.2xlarge", "m7gd.2xlarge", "m6gd.2xlarge", "m8gd.medium"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
+                    everyItem(equalTo("region")))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
+                    everyItem(equalTo("us-east-1")));
     }
 
     // =========================================================================

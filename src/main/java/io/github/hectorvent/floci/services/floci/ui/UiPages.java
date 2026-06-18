@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.ui;
+package io.github.hectorvent.floci.services.floci.ui;
 
 import java.io.IOException;
 import java.io.InputStream;

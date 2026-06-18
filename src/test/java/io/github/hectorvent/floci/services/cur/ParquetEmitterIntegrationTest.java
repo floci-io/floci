@@ -1,7 +1,7 @@
 package io.github.hectorvent.floci.services.cur;
 
 import io.github.hectorvent.floci.core.common.UsageLine;
-import io.github.hectorvent.floci.services.floci.FlociDuckClient;
+import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.test.junit.QuarkusTest;
 import io.quarkus.test.junit.QuarkusTestProfile;

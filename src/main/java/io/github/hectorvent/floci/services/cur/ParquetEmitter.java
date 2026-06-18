@@ -4,7 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.UsageLine;
-import io.github.hectorvent.floci.services.floci.FlociDuckClient;
+import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import jakarta.enterprise.context.ApplicationScoped;

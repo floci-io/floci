@@ -1,4 +1,4 @@
-package io.github.hectorvent.floci.services.ui;
+package io.github.hectorvent.floci.services.floci.ui;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.RegionResolver;

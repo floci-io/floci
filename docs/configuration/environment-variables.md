@@ -201,6 +201,7 @@ See [Initialization Hooks](./initialization-hooks.md) for lifecycle phases and s
 |---|---|---|
 | `FLOCI_SERVICES_IAM_ENABLED` | `true` | Enable the IAM service |
 | `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED` | `false` | When `true`, enforce IAM policies on API calls. Leave `false` for most local development scenarios |
+| `FLOCI_SERVICES_IAM_SEED_DEPLOYER_PRINCIPAL` | `false` | Create a local `floci-deployer` IAM user with `AdministratorAccess` and static `floci`/`floci` credentials |
 
 ### KMS
 

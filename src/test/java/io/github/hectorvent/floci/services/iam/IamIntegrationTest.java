@@ -237,7 +237,7 @@ class IamIntegrationTest {
 
     @Test
     @Order(9)
-    void stsGetCallerIdentityHonoursSeededFlociAccessKey() {
+    void stsGetCallerIdentityFallsBackForUnseededFlociAccessKey() {
         given()
             .formParam("Action", "GetCallerIdentity")
             .header("Authorization",
@@ -249,7 +249,7 @@ class IamIntegrationTest {
             .contentType("application/xml")
             .body("GetCallerIdentityResponse.GetCallerIdentityResult.Account", equalTo("000000000000"))
             .body("GetCallerIdentityResponse.GetCallerIdentityResult.Arn",
-                    equalTo("arn:aws:iam::000000000000:user/floci-deployer"));
+                    equalTo("arn:aws:iam::000000000000:root"));
     }
 
     @Test
@@ -431,7 +431,7 @@ class IamIntegrationTest {
         .then()
             .statusCode(200)
             .body("ListUsersResponse.ListUsersResult.Users.member.UserName",
-                    hasItem("test-user"));
+                    equalTo("test-user"));
     }
 
     @Test
