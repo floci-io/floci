@@ -133,9 +133,12 @@ public class CloudFormationService {
                                      Map<String, String> tags, String region) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
 
-        boolean isNewStack = !stacks.containsKey(key(stackName, region));
-
+        // Detect first creation atomically: the mapping function runs at most once per key, so the
+        // flag is only set for the thread that actually creates the stack (no double-recording under
+        // concurrent CreateChangeSet calls).
+        boolean[] stackCreated = {false};
         Stack stack = stacks.computeIfAbsent(key(stackName, region), k -> {
+            stackCreated[0] = true;
             Stack s = newStack(stackName, region);
             if (tags != null) s.getTags().putAll(tags);
             return s;
@@ -143,9 +146,10 @@ public class CloudFormationService {
 
         // A CREATE change set puts a brand-new stack into REVIEW_IN_PROGRESS. Record the matching
         // stack-level event (as AWS and LocalStack do) so DescribeStackEvents is non-empty straight
-        // after change-set creation — tooling such as the AWS SAM CLI reads StackEvents[0] at that
-        // point and otherwise fails with an IndexError.
-        if (isNewStack && "REVIEW_IN_PROGRESS".equals(stack.getStatus())) {
+        // after change-set creation — tooling such as the AWS SAM CLI reads StackEvents[0] there and
+        // otherwise fails with an IndexError. (CreateChangeSet defaults a null type to CREATE.)
+        boolean isCreateType = changeSetType == null || "CREATE".equalsIgnoreCase(changeSetType);
+        if (stackCreated[0] && isCreateType) {
             addEvent(stack, stack.getStackName(), stack.getStackId(),
                     "AWS::CloudFormation::Stack", "REVIEW_IN_PROGRESS", "User Initiated");
         }
