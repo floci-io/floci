@@ -457,4 +457,38 @@ class SamTransformProcessorTest {
         assertTrue(hasProxyMethod, "expected an API Gateway Method with AWS_PROXY integration");
         assertTrue(hasPermission, "expected a Lambda permission for apigateway.amazonaws.com");
     }
+
+    @Test
+    void expandSamTemplate_dedupesDuplicateApiRoutes() throws Exception {
+        // Two events resolving to the same (path, method) must collapse to a single API Gateway Method.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "A": { "Type": "Api", "Properties": { "Path": "/docs", "Method": "GET" } },
+                      "B": { "Type": "Api", "Properties": { "Path": "/docs", "Method": "GET" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        int methods = 0;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            if ("AWS::ApiGateway::Method".equals(it.next().getValue().path("Type").asText())) {
+                methods++;
+            }
+        }
+        assertEquals(1, methods, "duplicate (path, method) routes must collapse to a single Method");
+    }
 }

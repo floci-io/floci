@@ -117,8 +117,9 @@ class SamTransformProcessor {
                     continue;
                 }
                 JsonNode p = ev.path("Properties");
-                if (!p.path("RestApiId").isMissingNode()) {
-                    continue; // bound to an explicit API — not an implicit-API route
+                JsonNode restApiId = p.path("RestApiId");
+                if (!restApiId.isMissingNode() && !restApiId.isNull()) {
+                    continue; // bound to an explicit API — not an implicit-API route (null == implicit)
                 }
                 String path = p.path("Path").asText(null);
                 if (path != null) {
@@ -130,7 +131,9 @@ class SamTransformProcessor {
     }
 
     private void generateImplicitApi(List<ApiRoute> routes, JsonNode globals, ObjectNode resources) {
-        final String apiId = "ServerlessRestApi";
+        // Collision-safe: reuse "ServerlessRestApi" when free, otherwise a suffixed id, so an existing
+        // resource with that logical id is never silently overwritten.
+        final String apiId = uniqueId("ServerlessRestApi", resources);
 
         ObjectNode api = objectMapper.createObjectNode();
         api.put("Type", "AWS::ApiGateway::RestApi");
@@ -147,10 +150,14 @@ class SamTransformProcessor {
         Map<String, String> pathToResource = new java.util.LinkedHashMap<>();
         List<String> methodIds = new ArrayList<>();
         java.util.Set<String> permissionFns = new java.util.LinkedHashSet<>();
+        java.util.Set<String> seenRoutes = new java.util.LinkedHashSet<>();
 
         for (ApiRoute r : routes) {
-            String resourceId = ensureResourcePath(apiId, r.path(), pathToResource, resources);
             String method = r.httpMethod().toUpperCase();
+            if (!seenRoutes.add(r.path() + " " + method)) {
+                continue; // API Gateway allows one method per verb per resource — skip duplicate (path, method)
+            }
+            String resourceId = ensureResourcePath(apiId, r.path(), pathToResource, resources);
 
             String methodLogicalId = uniqueId(apiId + "Method" + sanitize(r.path()) + capitalize(method.toLowerCase()), resources);
             ObjectNode m = objectMapper.createObjectNode();
