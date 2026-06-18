@@ -328,6 +328,13 @@ class EventBridgeSchedulerIntegrationTest {
                     @Override public boolean selfSigned() { return true; }
                 };
             }
+            @Override
+            public TuiConfig tui() {
+                return new TuiConfig() {
+                    @Override public boolean enabled() { return false; }
+                    @Override public int refreshIntervalSeconds() { return 2; }
+                };
+            }
         };
     }
 }

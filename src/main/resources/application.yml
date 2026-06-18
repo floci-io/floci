@@ -132,6 +132,10 @@ floci:
     # extra-cors-expose-headers:
     disable-cors-headers: false
 
+  tui:
+    enabled: false                     # FLOCI_TUI_ENABLED (default: false)
+    refresh-interval-seconds: 2        # FLOCI_TUI_REFRESH_INTERVAL_SECONDS
+
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
     # cert-path: ""                    # FLOCI_TLS_CERT_PATH (PEM certificate file)

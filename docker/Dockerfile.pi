@@ -1,0 +1,54 @@
+# Dockerfile.pi — Minimal Raspberry Pi 3B+ deployment image
+#
+# Expects the pre-built native binary at target/floci-pi-runner.
+# Build with: docker build --platform linux/arm64 -f docker/Dockerfile.pi -t floci/floci:pi .
+#
+# Run with TUI (interactive):
+#   docker run -it --rm -p 4566:4566 floci/floci:pi
+#
+# Run headless:
+#   docker run -d --rm -p 4566:4566 -e FLOCI_TUI_ENABLED=false floci/floci:pi
+
+FROM --platform=linux/arm64 arm64v8/ubuntu:24.04
+
+ARG VERSION=pi
+ENV FLOCI_VERSION=${VERSION}
+ENV FLOCI_STORAGE_PERSISTENT_PATH=/app/data
+
+# Install minimal runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl \
+        libz-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create floci user
+RUN useradd -r -u 1001 -g root -d /app -s /sbin/nologin floci
+
+WORKDIR /app
+
+# Create data directory
+RUN mkdir -p /app/data \
+    && chown -R 1001:root /app \
+    && chmod -R g+rwX /app
+
+VOLUME /app/data
+
+# Copy the pre-built native binary
+COPY --chown=1001:root target/floci-pi-runner /app/application
+RUN chmod +x /app/application
+
+# Raspberry Pi optimizations:
+# - Memory-only storage by default (no disk I/O overhead)
+# - Pi profile disables Docker-dependent services
+# - TUI enabled by default for interactive use
+ENV QUARKUS_PROFILE=pi
+ENV FLOCI_TUI_ENABLED=true
+
+EXPOSE 4566
+
+HEALTHCHECK --interval=10s --timeout=5s --retries=3 \
+    CMD curl -sf http://localhost:4566/_floci/health || exit 1
+
+# When run with -it, the TUI will be interactive.
+# When run with -d, TUI output goes to container logs (disable via FLOCI_TUI_ENABLED=false).
+CMD ["/app/application", "-Dquarkus.http.host=0.0.0.0"]

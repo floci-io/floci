@@ -72,6 +72,8 @@ public interface EmulatorConfig {
 
     TlsConfig tls();
 
+    TuiConfig tui();
+
     interface DnsConfig {
         /**
          * Additional hostname suffixes the embedded DNS server will resolve to Floci's
@@ -1226,5 +1228,20 @@ public interface EmulatorConfig {
             String username();
             String password();
         }
+    }
+
+    /**
+     * Configuration for the optional Text User Interface (TUI) console.
+     * When enabled, Floci renders an interactive terminal dashboard alongside
+     * the HTTP server, showing live service status, config, and logs.
+     */
+    interface TuiConfig {
+        /** Enable the TUI console. Env: FLOCI_TUI_ENABLED */
+        @WithDefault("false")
+        boolean enabled();
+
+        /** How often the dashboard refreshes service status (seconds). */
+        @WithDefault("2")
+        int refreshIntervalSeconds();
     }
 }

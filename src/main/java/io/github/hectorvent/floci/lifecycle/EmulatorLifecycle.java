@@ -18,6 +18,7 @@ import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
+import io.github.hectorvent.floci.tui.FlociTui;
 import io.quarkus.runtime.Quarkus;
 import io.quarkus.runtime.ShutdownDelayInitiatedEvent;
 import io.quarkus.runtime.ShutdownEvent;
@@ -69,6 +70,7 @@ public class EmulatorLifecycle {
     private final EcrRegistryManager ecrRegistryManager;
     private final FlociUiManager flociUiManager;
     private final InitLifecycleState initLifecycleState;
+    private final FlociTui flociTui;
 
     @Inject
     public EmulatorLifecycle(StorageFactory storageFactory, ServiceRegistry serviceRegistry,
@@ -87,7 +89,8 @@ public class EmulatorLifecycle {
                              Ec2MetadataServer ec2MetadataServer,
                              EcrRegistryManager ecrRegistryManager,
                              FlociUiManager flociUiManager,
-                             InitLifecycleState initLifecycleState) {
+                             InitLifecycleState initLifecycleState,
+                             FlociTui flociTui) {
         this.storageFactory = storageFactory;
         this.serviceRegistry = serviceRegistry;
         this.config = config;
@@ -106,6 +109,7 @@ public class EmulatorLifecycle {
         this.ecrRegistryManager = ecrRegistryManager;
         this.flociUiManager = flociUiManager;
         this.initLifecycleState = initLifecycleState;
+        this.flociTui = flociTui;
     }
 
     void onStart(@Observes StartupEvent ignored) {
@@ -148,6 +152,7 @@ public class EmulatorLifecycle {
             initLifecycleState.markStartCompleted();
             initLifecycleState.markReadyCompleted();
             logReady();
+            flociTui.start();
         }
     }
 
@@ -171,6 +176,7 @@ public class EmulatorLifecycle {
             }
             initLifecycleState.markReadyCompleted();
             logReady();
+            flociTui.start();
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             LOG.error("Startup hook execution interrupted — shutting down", e);
@@ -213,6 +219,7 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
+        flociTui.stop();
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.stop();
         }
