@@ -48,9 +48,9 @@ jobs:
 
       - name: Build native executable
         run: |
-          EXTRA_ARGS=""
+          EXTRA_ARGS="-Dquarkus.native.additional-build-args-append=\"-march=armv8-a\""
           if [[ -n "${{ github.event.inputs.profile }}" ]]; then
-            EXTRA_ARGS="-Dquarkus.profile=${{ github.event.inputs.profile }}"
+            EXTRA_ARGS="$EXTRA_ARGS -Dquarkus.profile=${{ github.event.inputs.profile }}"
           fi
           mvn clean package -Dnative -DskipTests -B $EXTRA_ARGS
 
