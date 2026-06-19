@@ -121,10 +121,13 @@ class SamTransformProcessor {
                 if (!restApiId.isMissingNode() && !restApiId.isNull()) {
                     continue; // bound to an explicit API — not an implicit-API route (null == implicit)
                 }
-                String path = p.path("Path").asText(null);
-                if (path != null) {
-                    routes.add(new ApiRoute(logicalId, path, p.path("Method").asText("ANY")));
+                JsonNode pathNode = p.path("Path");
+                if (!pathNode.isTextual()) {
+                    continue; // implicit routing needs a literal path; skip intrinsics (Ref/Fn::Sub)
                 }
+                JsonNode methodNode = p.path("Method");
+                String method = methodNode.isTextual() ? methodNode.asText() : "ANY";
+                routes.add(new ApiRoute(logicalId, pathNode.asText(), method));
             }
         }
         return routes;
@@ -189,7 +192,7 @@ class SamTransformProcessor {
             resources.set(uniqueId(fn + "ApiPermission", resources), perm);
         }
 
-        String deploymentId = apiId + "Deployment";
+        String deploymentId = uniqueId(apiId + "Deployment", resources);
         ObjectNode dep = objectMapper.createObjectNode();
         dep.put("Type", "AWS::ApiGateway::Deployment");
         ObjectNode dp = objectMapper.createObjectNode();
@@ -207,7 +210,7 @@ class SamTransformProcessor {
         sp.set("DeploymentId", ref(deploymentId));
         sp.put("StageName", "Prod");
         stage.set("Properties", sp);
-        resources.set(apiId + "ProdStage", stage);
+        resources.set(uniqueId(apiId + "ProdStage", resources), stage);
     }
 
     /** Builds the API Gateway resource chain for a path; returns the leaf resource logical id (null = root). */

@@ -491,4 +491,38 @@ class SamTransformProcessorTest {
         }
         assertEquals(1, methods, "duplicate (path, method) routes must collapse to a single Method");
     }
+
+    @Test
+    void expandSamTemplate_skipsApiRouteWithNonLiteralPath() throws Exception {
+        // A Path given as an intrinsic (Ref/Fn::Sub) can't be turned into a literal API Gateway
+        // resource path, so the route must be skipped rather than registered as the API root.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "A": { "Type": "Api", "Properties": { "Path": { "Ref": "SomePath" }, "Method": "GET" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        int methods = 0;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            if ("AWS::ApiGateway::Method".equals(it.next().getValue().path("Type").asText())) {
+                methods++;
+            }
+        }
+        assertEquals(0, methods, "a route with a non-literal Path must not be registered");
+    }
 }
