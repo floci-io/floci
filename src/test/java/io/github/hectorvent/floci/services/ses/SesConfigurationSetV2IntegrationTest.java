@@ -1136,6 +1136,26 @@ class SesConfigurationSetV2IntegrationTest {
             .body("__type", equalTo("NotFoundException"));
     }
 
+    @Test
+    @Order(61)
+    void putDeliveryOptions_existingSendingPool_roundTrips() {
+        // A SendingPoolName that refers to a dedicated IP pool created via
+        // CreateDedicatedIpPool is accepted and echoed (verified against real
+        // AWS 2026-06-18).
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"PoolName\": \"v2-cs-pool-ref\"}")
+        .when().post("/v2/email/dedicated-ip-pools").then().statusCode(200);
+        putConfigSet("v2-cs-delivery-poolref");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"REQUIRE\", \"SendingPoolName\": \"v2-cs-pool-ref\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-poolref/delivery-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-delivery-poolref")
+        .then().statusCode(200)
+            .body("DeliveryOptions.SendingPoolName", equalTo("v2-cs-pool-ref"));
+    }
+
     private static void putConfigSet(String name) {
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
             .body("{\"ConfigurationSetName\": \"" + name + "\"}")

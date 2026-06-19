@@ -14,8 +14,10 @@ import software.amazon.awssdk.services.sesv2.model.BadRequestException;
 import software.amazon.awssdk.services.sesv2.model.DashboardOptions;
 import software.amazon.awssdk.services.sesv2.model.GuardianOptions;
 import software.amazon.awssdk.services.sesv2.model.CreateConfigurationSetRequest;
+import software.amazon.awssdk.services.sesv2.model.CreateDedicatedIpPoolRequest;
 import software.amazon.awssdk.services.sesv2.model.CreateEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteConfigurationSetRequest;
+import software.amazon.awssdk.services.sesv2.model.DeleteDedicatedIpPoolRequest;
 import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.DeliveryOptions;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;
@@ -244,5 +246,21 @@ class SesConfigurationSetOptionsTest {
         assertThat(response.vdmOptions()).isNotNull();
         assertThat(response.vdmOptions().dashboardOptions().engagementMetricsAsString()).isEqualTo("ENABLED");
         assertThat(response.vdmOptions().guardianOptions().optimizedSharedDeliveryAsString()).isEqualTo("DISABLED");
+    }
+
+    @Test
+    @Order(12)
+    void putDeliveryOptions_existingSendingPool_roundTrips() {
+        String pool = "compat-cs-options-pool";
+        sesV2.createDedicatedIpPool(CreateDedicatedIpPoolRequest.builder().poolName(pool).build());
+        try {
+            sesV2.putConfigurationSetDeliveryOptions(PutConfigurationSetDeliveryOptionsRequest.builder()
+                    .configurationSetName(CS_NAME)
+                    .sendingPoolName(pool)
+                    .build());
+            assertThat(getConfigSet().deliveryOptions().sendingPoolName()).isEqualTo(pool);
+        } finally {
+            sesV2.deleteDedicatedIpPool(DeleteDedicatedIpPoolRequest.builder().poolName(pool).build());
+        }
     }
 }

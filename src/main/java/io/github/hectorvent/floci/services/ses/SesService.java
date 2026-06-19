@@ -657,7 +657,7 @@ public class SesService {
             }
         }
         validateTrackingOptions(configSet.getTrackingOptions(), region);
-        validateDeliveryOptions(configSet.getDeliveryOptions());
+        validateDeliveryOptions(configSet.getDeliveryOptions(), region);
         validateArchivingOptions(configSet.getArchivingOptions());
         validateVdmOptions(configSet.getVdmOptions());
         if (configSetStore.get(key).isPresent()) {
@@ -682,7 +682,7 @@ public class SesService {
 
     public void setConfigurationSetDeliveryOptions(String configSetName, DeliveryOptions options, String region) {
         ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        validateDeliveryOptions(options);
+        validateDeliveryOptions(options, region);
         cs.setDeliveryOptions(options);
         configSetStore.put(configSetKey(region, configSetName), cs);
         LOG.infov("Updated DeliveryOptions on configuration set {0} in region {1}", configSetName, region);
@@ -771,7 +771,7 @@ public class SesService {
         }
     }
 
-    private void validateDeliveryOptions(DeliveryOptions options) {
+    private void validateDeliveryOptions(DeliveryOptions options, String region) {
         if (options == null) {
             return;
         }
@@ -780,16 +780,18 @@ public class SesService {
                     "1 validation error detected: Value at 'tlsPolicy' failed to satisfy constraint: "
                             + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]", 400);
         }
-        // AWS rejects a blank SendingPoolName outright, and Floci has no
-        // dedicated-IP pools so any other provided pool reference is unknown
-        // (both verified against real AWS 2026-06-17).
+        // AWS rejects a blank SendingPoolName outright, and a non-existent
+        // dedicated IP pool (both verified against real AWS 2026-06-17). The
+        // pool must have been created via CreateDedicatedIpPool.
         if (options.getSendingPoolName() != null) {
             if (options.getSendingPoolName().isBlank()) {
                 throw new AwsException("BadRequestException",
                         "sendingPoolName can't be blank.", 400);
             }
-            throw new AwsException("BadRequestException",
-                    "SendingPool <" + options.getSendingPoolName() + "> doesn't exist", 400);
+            if (!dedicatedIpPoolExists(options.getSendingPoolName(), region)) {
+                throw new AwsException("BadRequestException",
+                        "SendingPool <" + options.getSendingPoolName() + "> doesn't exist", 400);
+            }
         }
         // AWS constrains MaxDeliverySeconds to [300, 50400] (max verified against
         // real AWS 2026-06-17; min follows the same smithy range-constraint shape).
