@@ -1634,12 +1634,14 @@ public class Ec2QueryHandler {
                     .end("item");
         }
         xml.end("networkInterfaceSet");
-        xml.elem("clientToken", inst.getClientToken())
-                .start("stateReason")
-                .elem("code", "")
-                .elem("message", "")
-                .end("stateReason")
-                .start("cpuOptions")
+        xml.elem("clientToken", inst.getClientToken());
+        if (inst.getStateReasonCode() != null || inst.getStateReasonMessage() != null) {
+            xml.start("stateReason")
+                    .elem("code", inst.getStateReasonCode())
+                    .elem("message", inst.getStateReasonMessage())
+                    .end("stateReason");
+        }
+        xml.start("cpuOptions")
                 .elem("coreCount", "1")
                 .elem("threadsPerCore", "1")
                 .end("cpuOptions")

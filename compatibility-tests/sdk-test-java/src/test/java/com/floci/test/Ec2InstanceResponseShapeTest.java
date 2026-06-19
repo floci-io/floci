@@ -180,11 +180,13 @@ class Ec2InstanceResponseShapeTest {
 
     @Test
     @Order(9)
-    @DisplayName("stateReason is not null")
+    @DisplayName("stateReason is null for a running instance")
     void stateReason() {
         assertThat(instance.stateReason())
-                .as("stateReason must not be null — Terraform reads Code and Message")
-                .isNotNull();
+                .as("stateReason must be null for a running instance with no state reason. " +
+                    "AWS omits the element entirely; a non-null stateReason with empty code/message " +
+                    "crashes Terraform's Go XML decoder.")
+                .isNull();
     }
 
     @Test

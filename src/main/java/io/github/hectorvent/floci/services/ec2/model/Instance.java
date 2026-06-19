@@ -39,6 +39,8 @@ public class Instance {
     private boolean ebsOptimized = false;
     private boolean enaSupport = true;
     private String iamInstanceProfileArn;
+    private String stateReasonCode;
+    private String stateReasonMessage;
     private String region;
     private List<Tag> tags = new ArrayList<>();
 
@@ -142,6 +144,12 @@ public class Instance {
 
     public String getIamInstanceProfileArn() { return iamInstanceProfileArn; }
     public void setIamInstanceProfileArn(String iamInstanceProfileArn) { this.iamInstanceProfileArn = iamInstanceProfileArn; }
+
+    public String getStateReasonCode() { return stateReasonCode; }
+    public void setStateReasonCode(String stateReasonCode) { this.stateReasonCode = stateReasonCode; }
+
+    public String getStateReasonMessage() { return stateReasonMessage; }
+    public void setStateReasonMessage(String stateReasonMessage) { this.stateReasonMessage = stateReasonMessage; }
 
     public String getRegion() { return region; }
     public void setRegion(String region) { this.region = region; }
