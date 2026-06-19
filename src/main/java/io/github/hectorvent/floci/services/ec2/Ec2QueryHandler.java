@@ -62,6 +62,7 @@ public class Ec2QueryHandler {
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
+                case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -683,6 +684,7 @@ public class Ec2QueryHandler {
                 getList(p, "RouteTableId"),
                 getList(p, "SubnetId"),
                 getList(p, "SecurityGroupId"),
+                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 parseTagsForResource(p, "vpc-endpoint"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
@@ -704,6 +706,28 @@ public class Ec2QueryHandler {
             xml.start("item").raw(vpcEndpointXml(endpoint)).end("item");
         }
         xml.end("vpcEndpointSet").end("DescribeVpcEndpointsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribePrefixLists(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "PrefixListId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<PrefixList> lists = service.describePrefixLists(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribePrefixListsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixListSet");
+        for (PrefixList pl : lists) {
+            xml.start("item")
+                    .elem("prefixListId", pl.getPrefixListId())
+                    .elem("prefixListName", pl.getPrefixListName())
+                    .start("cidrSet");
+            for (String cidr : pl.getCidrs()) {
+                xml.elem("item", cidr);
+            }
+            xml.end("cidrSet").end("item");
+        }
+        xml.end("prefixListSet").end("DescribePrefixListsResponse");
         return xmlResponse(xml.build());
     }
 
@@ -2078,18 +2102,19 @@ public class Ec2QueryHandler {
                 .elem("vpcEndpointType", endpoint.getVpcEndpointType())
                 .elem("vpcId", endpoint.getVpcId())
                 .elem("serviceName", endpoint.getServiceName())
-                .elem("state", endpoint.getState());
+                .elem("state", endpoint.getState())
+                .elem("privateDnsEnabled", String.valueOf(endpoint.isPrivateDnsEnabled()));
         if (endpoint.getCreationTimestamp() != null) {
             xml.elem("creationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
         }
         xml.start("routeTableIdSet");
         for (String routeTableId : endpoint.getRouteTableIds()) {
-            xml.start("item").elem("routeTableId", routeTableId).end("item");
+            xml.elem("item", routeTableId);
         }
         xml.end("routeTableIdSet")
                 .start("subnetIdSet");
         for (String subnetId : endpoint.getSubnetIds()) {
-            xml.start("item").elem("subnetId", subnetId).end("item");
+            xml.elem("item", subnetId);
         }
         xml.end("subnetIdSet")
                 .start("groupSet");

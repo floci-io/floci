@@ -147,6 +147,7 @@ public class AwsQueryController {
             "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
             "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
             "DescribeVpcEndpointServices", "CreateVpcEndpoint", "DescribeVpcEndpoints", "DeleteVpcEndpoints",
+            "DescribePrefixLists",
             "CreateDefaultVpc", "AssociateVpcCidrBlock", "DisassociateVpcCidrBlock",
             "CreateSubnet", "DescribeSubnets", "DeleteSubnet", "ModifySubnetAttribute",
             "CreateSecurityGroup", "DescribeSecurityGroups", "DeleteSecurityGroup",

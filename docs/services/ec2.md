@@ -136,6 +136,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 ### Network ACLs
 `CreateNetworkAcl` · `DescribeNetworkAcls` · `DeleteNetworkAcl` · `CreateNetworkAclEntry` · `ReplaceNetworkAclEntry` · `DeleteNetworkAclEntry` · `ReplaceNetworkAclAssociation`
 
+### Prefix Lists
+`DescribePrefixLists`
+
 ### NAT Gateways
 `CreateNatGateway` · `DescribeNatGateways` · `DeleteNatGateway`
 

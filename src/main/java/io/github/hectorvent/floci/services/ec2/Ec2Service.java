@@ -50,6 +50,7 @@ import io.github.hectorvent.floci.services.ec2.model.NatGateway;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
 import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
+import io.github.hectorvent.floci.services.ec2.model.PrefixList;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -464,6 +465,25 @@ public class Ec2Service {
                     "The network ACL '" + networkAclId + "' has dependencies and cannot be deleted.", 400);
         }
         networkAcls.delete(key(region, networkAclId));
+    }
+
+    // AWS-managed prefix lists for the gateway-endpoint services (S3, DynamoDB). These are
+    // not user-created, so they're returned as static managed data per region. Querying any
+    // other service name (e.g. an interface endpoint) correctly yields no match.
+    public List<PrefixList> describePrefixLists(String region, List<String> ids, Map<String, List<String>> filters) {
+        List<PrefixList> managed = new ArrayList<>();
+        managed.add(new PrefixList("pl-63a5400a", "com.amazonaws." + region + ".s3",
+                new ArrayList<>(List.of("52.216.0.0/15", "54.231.0.0/16"))));
+        managed.add(new PrefixList("pl-02cd2c6b", "com.amazonaws." + region + ".dynamodb",
+                new ArrayList<>(List.of("3.218.182.0/24", "52.94.0.0/22"))));
+
+        List<String> names = filters.getOrDefault("prefix-list-name", List.of());
+        List<String> filterIds = filters.getOrDefault("prefix-list-id", List.of());
+        return managed.stream()
+                .filter(pl -> ids.isEmpty() || ids.contains(pl.getPrefixListId()))
+                .filter(pl -> filterIds.isEmpty() || filterIds.contains(pl.getPrefixListId()))
+                .filter(pl -> names.isEmpty() || names.contains(pl.getPrefixListName()))
+                .collect(Collectors.toList());
     }
 
     private String key(String region, String id) {
@@ -926,7 +946,7 @@ public class Ec2Service {
 
     public VpcEndpoint createVpcEndpoint(String region, String vpcId, String serviceName, String endpointType,
                                          List<String> routeTableIds, List<String> subnetIds,
-                                         List<String> securityGroupIds, List<Tag> endpointTags) {
+                                         List<String> securityGroupIds, Boolean privateDnsEnabled, List<Tag> endpointTags) {
         ensureDefaultResources(region);
         getRequiredVpc(region, vpcId);
         for (String routeTableId : routeTableIds) {
@@ -944,6 +964,8 @@ public class Ec2Service {
         endpoint.setVpcId(vpcId);
         endpoint.setServiceName(serviceName);
         endpoint.setVpcEndpointType(endpointType != null && !endpointType.isBlank() ? endpointType : "Gateway");
+        boolean isInterface = "Interface".equalsIgnoreCase(endpoint.getVpcEndpointType());
+        endpoint.setPrivateDnsEnabled(privateDnsEnabled != null ? privateDnsEnabled : isInterface);
         endpoint.setCreationTimestamp(Instant.now());
         endpoint.setRegion(region);
         endpoint.setRouteTableIds(new ArrayList<>(routeTableIds));
