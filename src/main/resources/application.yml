@@ -207,7 +207,9 @@ floci:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
+      db-type: "gremlin"
       default-image: "tinkerpop/gremlin-server:3.7.3"
+      default-neo4j-image: "neo4j:5-community"
     eventbridge:
       enabled: true
     cloudmap:

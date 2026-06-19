@@ -585,8 +585,21 @@ public interface EmulatorConfig {
         @WithDefault("8282")
         int proxyMaxPort();
 
+        /**
+         * Backend graph engine and query language: {@code gremlin} (Apache TinkerPop, Gremlin
+         * over WebSocket) or {@code neo4j} (Neo4j, openCypher over Bolt). Mirrors LocalStack's
+         * {@code NEPTUNE_DB_TYPE}.
+         */
+        @WithDefault("gremlin")
+        String dbType();
+
+        /** Image used when {@code db-type=gremlin}. */
         @WithDefault("tinkerpop/gremlin-server:3.7.3")
         String defaultImage();
+
+        /** Image used when {@code db-type=neo4j} (openCypher / Bolt). */
+        @WithDefault("neo4j:5-community")
+        String defaultNeo4jImage();
 
         Optional<String> dockerNetwork();
     }

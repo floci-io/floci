@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -26,13 +27,13 @@ import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * Manages backend Docker container lifecycle for Neptune DB clusters.
- * Spins up a TinkerPop Gremlin Server container per cluster.
+ * Spins up one graph database container per cluster — a TinkerPop Gremlin Server
+ * ({@code db-type=gremlin}) or Neo4j ({@code db-type=neo4j}, openCypher over Bolt).
  */
 @ApplicationScoped
 public class NeptuneContainerManager {
 
     private static final Logger LOG = Logger.getLogger(NeptuneContainerManager.class);
-    private static final int GREMLIN_PORT = 8182;
     private static final int BACKEND_READY_DEADLINE_MS = 60_000;
     private static final int BACKEND_READY_RETRY_MS = 200;
     private static final int BACKEND_PROBE_CONNECT_MS = 2_000;
@@ -60,28 +61,30 @@ public class NeptuneContainerManager {
         this.regionResolver = regionResolver;
     }
 
-    public NeptuneContainerHandle start(String clusterId, String image) {
-        LOG.infov("Starting Neptune Gremlin Server container for cluster: {0}", clusterId);
+    public NeptuneContainerHandle start(String clusterId, String image, NeptuneDbType dbType) {
+        LOG.infov("Starting Neptune backend container ({0}) for cluster: {1}", dbType, clusterId);
 
+        int backendPort = dbType.backendPort();
         String containerName = "floci-neptune-" + clusterId;
         lifecycleManager.removeIfExists(containerName);
 
         ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image)
                 .withName(containerName)
+                .withEnv(backendEnv(dbType))
                 .withDockerNetwork(config.services().neptune().dockerNetwork())
                 .withLogRotation();
 
         if (!containerDetector.isRunningInContainer()) {
-            specBuilder.withDynamicPort(GREMLIN_PORT);
+            specBuilder.withDynamicPort(backendPort);
         } else {
-            specBuilder.withExposedPort(GREMLIN_PORT);
+            specBuilder.withExposedPort(backendPort);
         }
 
         ContainerSpec spec = specBuilder.build();
         ContainerInfo info = lifecycleManager.createAndStart(spec);
-        EndpointInfo endpoint = info.getEndpoint(GREMLIN_PORT);
+        EndpointInfo endpoint = info.getEndpoint(backendPort);
 
-        LOG.infov("Neptune Gremlin Server for cluster {0}: {1}", clusterId, endpoint);
+        LOG.infov("Neptune {0} backend for cluster {1}: {2}", dbType, clusterId, endpoint);
 
         NeptuneContainerHandle handle = new NeptuneContainerHandle(
                 info.containerId(), clusterId, endpoint.host(), endpoint.port());
@@ -90,7 +93,7 @@ public class NeptuneContainerManager {
         String shortId = info.containerId().length() >= 8
                 ? info.containerId().substring(0, 8)
                 : info.containerId();
-        String logGroup = "/aws/neptune/cluster/" + clusterId + "/gremlin-log";
+        String logGroup = "/aws/neptune/cluster/" + clusterId + "/" + dbType.name().toLowerCase() + "-log";
         String logStream = logStreamer.generateLogStreamName(shortId);
         String region = regionResolver.getDefaultRegion();
 
@@ -98,9 +101,22 @@ public class NeptuneContainerManager {
                 info.containerId(), logGroup, logStream, region, "neptune:" + clusterId);
         handle.setLogStream(logHandle);
 
-        waitForBackendReady(clusterId, endpoint.host(), endpoint.port());
+        waitForBackendReady(clusterId, dbType, endpoint.host(), endpoint.port());
 
         return handle;
+    }
+
+    /**
+     * Environment for the backend container. Neo4j's Bolt endpoint requires auth to be
+     * explicitly disabled so the transparent proxy can relay openCypher sessions without
+     * brokering credentials — matching Neptune, which authenticates at the AWS edge (IAM),
+     * not at the graph protocol.
+     */
+    private static List<String> backendEnv(NeptuneDbType dbType) {
+        return switch (dbType) {
+            case GREMLIN -> List.of();
+            case NEO4J -> List.of("NEO4J_AUTH=none");
+        };
     }
 
     public void stop(NeptuneContainerHandle handle) {
@@ -122,12 +138,32 @@ public class NeptuneContainerManager {
     }
 
     /**
-     * Probes the Gremlin Server HTTP endpoint. Gremlin Server responds to a plain HTTP GET
-     * on /gremlin with HTTP 400 (not a WebSocket upgrade), confirming the server is listening.
+     * Bolt handshake magic preamble {@code 0x6060B017} followed by four 4-byte version
+     * proposals (highest first). Neo4j replies with the 4-byte agreed version once its Bolt
+     * connector is accepting connections, which is the readiness signal we probe for.
      */
-    private static void waitForBackendReady(String clusterId, String host, int port) {
-        byte[] probe = "GET /gremlin HTTP/1.1\r\nHost: floci\r\n\r\n"
-                .getBytes(StandardCharsets.UTF_8);
+    private static final byte[] BOLT_HANDSHAKE = {
+            0x60, 0x60, (byte) 0xB0, 0x17,   // magic preamble
+            0x00, 0x00, 0x00, 0x05,           // propose Bolt 5.0
+            0x00, 0x00, 0x00, 0x04,           // propose Bolt 4.0
+            0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x00
+    };
+
+    /**
+     * Waits until the backend's native data-plane protocol is answering. The probe payload and
+     * expected response differ per engine:
+     * <ul>
+     *   <li>Gremlin Server replies to a plain HTTP {@code GET /gremlin} (HTTP 400, not a
+     *       WebSocket upgrade), confirming it is listening.</li>
+     *   <li>Neo4j replies to the Bolt handshake with a 4-byte agreed version.</li>
+     * </ul>
+     */
+    private static void waitForBackendReady(String clusterId, NeptuneDbType dbType, String host, int port) {
+        byte[] probe = switch (dbType) {
+            case GREMLIN -> "GET /gremlin HTTP/1.1\r\nHost: floci\r\n\r\n".getBytes(StandardCharsets.UTF_8);
+            case NEO4J -> BOLT_HANDSHAKE;
+        };
         long deadline = System.currentTimeMillis() + BACKEND_READY_DEADLINE_MS;
         int attempt = 0;
         while (System.currentTimeMillis() < deadline) {
@@ -142,15 +178,15 @@ public class NeptuneContainerManager {
                 int n = s.getInputStream().read(buf);
                 if (n > 0) {
                     if (attempt > 1) {
-                        LOG.infov("Gremlin backend ready for cluster {0} after {1} probe attempt(s)",
-                                clusterId, attempt);
+                        LOG.infov("Neptune {0} backend ready for cluster {1} after {2} probe attempt(s)",
+                                dbType, clusterId, attempt);
                     }
                     return;
                 }
             } catch (IOException e) {
                 if (LOG.isDebugEnabled()) {
-                    LOG.debugv("Gremlin probe for cluster {0} attempt {1}: {2}",
-                            clusterId, attempt, e.getMessage());
+                    LOG.debugv("Neptune {0} probe for cluster {1} attempt {2}: {3}",
+                            dbType, clusterId, attempt, e.getMessage());
                 }
             }
             try {
@@ -158,11 +194,11 @@ public class NeptuneContainerManager {
             } catch (InterruptedException ie) {
                 Thread.currentThread().interrupt();
                 throw new RuntimeException(
-                        "Interrupted while waiting for Gremlin backend " + clusterId, ie);
+                        "Interrupted while waiting for Neptune " + dbType + " backend " + clusterId, ie);
             }
         }
         throw new RuntimeException(
-                "Gremlin backend for cluster " + clusterId + " did not become ready on "
+                "Neptune " + dbType + " backend for cluster " + clusterId + " did not become ready on "
                         + host + ":" + port + " within " + BACKEND_READY_DEADLINE_MS + "ms");
     }
 }
