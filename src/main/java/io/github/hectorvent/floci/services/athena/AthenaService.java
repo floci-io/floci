@@ -480,14 +480,22 @@ public class AthenaService {
         metadata.put("TableType", table.getTableType() != null ? table.getTableType() : "EXTERNAL_TABLE");
         metadata.put("Columns", athenaColumns(table));
         metadata.put("Parameters", table.getParameters() != null ? table.getParameters() : Map.of());
+        metadata.put("PartitionKeys", athenaColumns(table.getPartitionKeys()));
         return metadata;
     }
 
     private List<Map<String, String>> athenaColumns(Table table) {
-        if (table.getStorageDescriptor() == null || table.getStorageDescriptor().getColumns() == null) {
+        if (table.getStorageDescriptor() == null) {
             return List.of();
         }
-        return table.getStorageDescriptor().getColumns().stream()
+        return athenaColumns(table.getStorageDescriptor().getColumns());
+    }
+
+    private List<Map<String, String>> athenaColumns(List<Column> columns) {
+        if (columns == null) {
+            return List.of();
+        }
+        return columns.stream()
                 .map(column -> Map.of(
                         "Name", column.getName(),
                         "Type", glueTypeToAthena(column)

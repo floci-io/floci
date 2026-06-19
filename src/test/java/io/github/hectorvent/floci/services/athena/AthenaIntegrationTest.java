@@ -190,11 +190,77 @@ class AthenaIntegrationTest {
             .body("TableMetadata.Name", equalTo("orders"))
             .body("TableMetadata.Columns[0].Name", equalTo("id"))
             .body("TableMetadata.Columns[0].Type", equalTo("varchar"))
-            .body("TableMetadata.Columns[1].Type", equalTo("varchar"));
+            .body("TableMetadata.Columns[1].Type", equalTo("varchar"))
+            .body("TableMetadata.PartitionKeys", empty());
     }
 
     @Test
     @Order(8)
+    void listsGlueDatabasesAndTablesAsAthenaMetadataHasPartitionKeys() {
+        given()
+                .header("X-Amz-Target", "AWSGlue.CreateDatabase")
+                .contentType(CONTENT_TYPE)
+                .body("{ \"DatabaseInput\": { \"Name\": \"analytics_test2\" } }")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "AWSGlue.CreateTable")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                {
+                  "DatabaseName": "analytics_test2",
+                  "TableInput": {
+                    "Name": "orders",
+                    "TableType": "EXTERNAL_TABLE",
+                    "StorageDescriptor": {
+                      "Location": "s3://bucket/orders",
+                      "Columns": [
+                        { "Name": "id", "Type": "string" },
+                        { "Name": "payload", "Type": "struct<id:string>" }
+                      ]
+                    },
+                    "PartitionKeys": [
+                      { "Name": "pkey", "Type": "string" }
+                    ]
+                  }
+                }
+                """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "AmazonAthena.ListDatabases")
+                .contentType(CONTENT_TYPE)
+                .body("{ \"CatalogName\": \"AwsDataCatalog\" }")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("DatabaseList.Name", hasItem("analytics_test2"));
+
+        given()
+                .header("X-Amz-Target", "AmazonAthena.GetTableMetadata")
+                .contentType(CONTENT_TYPE)
+                .body("{ \"CatalogName\": \"AwsDataCatalog\", \"DatabaseName\": \"analytics_test2\", \"TableName\": \"orders\" }")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("TableMetadata.Name", equalTo("orders"))
+                .body("TableMetadata.Columns[0].Name", equalTo("id"))
+                .body("TableMetadata.Columns[0].Type", equalTo("varchar"))
+                .body("TableMetadata.Columns[1].Type", equalTo("varchar"))
+                .body("TableMetadata.PartitionKeys[0].Name", equalTo("pkey"))
+                .body("TableMetadata.PartitionKeys[0].Type", equalTo("varchar"));
+    }
+
+    @Test
+    @Order(9)
     void deleteWorkGroup() {
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -208,7 +274,7 @@ class AthenaIntegrationTest {
     }
 
     @Test
-    @Order(9)
+    @Order(10)
     void deleteWorkGroupMissingOrBlank() {
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
@@ -256,7 +322,7 @@ class AthenaIntegrationTest {
     }
 
     @Test
-    @Order(10)
+    @Order(11)
     void deletePrimaryWorkGroup() {
         given()
             .header("X-Amz-Target", "AmazonAthena.DeleteWorkGroup")
