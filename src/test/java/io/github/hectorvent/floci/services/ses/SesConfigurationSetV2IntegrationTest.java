@@ -7,7 +7,6 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
@@ -753,14 +752,20 @@ class SesConfigurationSetV2IntegrationTest {
 
     @Test
     @Order(36)
-    void putArchivingOptions_malformedArn_returns400() {
-        putConfigSet("v2-cs-archiving-bad");
+    void putArchivingOptions_arbitraryArn_accepted() {
+        // Floci does not model Mail Manager archives, so the ArchiveArn is not
+        // validated — any value is stored and echoed (matching the store-only
+        // behaviour of other local AWS emulators).
+        String arn = "not-an-arn";
+        putConfigSet("v2-cs-archiving-any");
         given().contentType("application/json").header("Authorization", AUTH_HEADER)
-            .body("{\"ArchiveArn\": \"arn:aws:ses:us-east-1:123456789012:mailmanager-archive/a-short\"}")
-        .when().put("/v2/email/configuration-sets/v2-cs-archiving-bad/archiving-options")
-        .then().statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("message", containsString("failed to satisfy constraint"));
+            .body("{\"ArchiveArn\": \"" + arn + "\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-archiving-any/archiving-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-archiving-any")
+        .then().statusCode(200)
+            .body("ArchivingOptions.ArchiveArn", equalTo(arn));
     }
 
     @Test

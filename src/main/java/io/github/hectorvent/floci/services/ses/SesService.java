@@ -658,7 +658,6 @@ public class SesService {
         }
         validateTrackingOptions(configSet.getTrackingOptions(), region);
         validateDeliveryOptions(configSet.getDeliveryOptions(), region);
-        validateArchivingOptions(configSet.getArchivingOptions());
         validateVdmOptions(configSet.getVdmOptions());
         if (configSetStore.get(key).isPresent()) {
             throw new AwsException("ConfigurationSetAlreadyExists",
@@ -698,7 +697,6 @@ public class SesService {
 
     public void setConfigurationSetArchivingOptions(String configSetName, ArchivingOptions options, String region) {
         ConfigurationSet cs = getConfigurationSet(configSetName, region);
-        validateArchivingOptions(options);
         cs.setArchivingOptions(options);
         configSetStore.put(configSetKey(region, configSetName), cs);
         LOG.infov("Updated ArchivingOptions on configuration set {0} in region {1}", configSetName, region);
@@ -739,8 +737,6 @@ public class SesService {
     private static final java.util.Set<String> HTTPS_POLICIES =
             java.util.Set.of("REQUIRE", "REQUIRE_OPEN_ONLY", "OPTIONAL");
     private static final java.util.Set<String> TLS_POLICIES = java.util.Set.of("REQUIRE", "OPTIONAL");
-    private static final java.util.regex.Pattern ARCHIVE_ARN_PATTERN = java.util.regex.Pattern.compile(
-            "arn:(aws|aws-[a-z-]+):ses:[a-z]{2,4}-[a-z-]+-[0-9]:[0-9]{1,20}:mailmanager-archive/a-[a-z0-9]{24,62}");
 
     private void validateTrackingOptions(TrackingOptions options, String region) {
         if (options == null) {
@@ -807,21 +803,6 @@ public class SesService {
                         "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
                                 + "Member must have value less than or equal to 50400", 400);
             }
-        }
-    }
-
-    private void validateArchivingOptions(ArchivingOptions options) {
-        if (options == null || options.getArchiveArn() == null) {
-            return;
-        }
-        // Validate the ARN format (verified against real AWS 2026-06-17). The
-        // archive's existence / account ownership is not checked — Floci does not
-        // model Mail Manager archives — so a well-formed ARN is accepted.
-        if (!ARCHIVE_ARN_PATTERN.matcher(options.getArchiveArn()).matches()) {
-            throw new AwsException("BadRequestException",
-                    "1 validation error detected: Value at 'archiveArn' failed to satisfy constraint: "
-                            + "Member must satisfy regular expression pattern: " + ARCHIVE_ARN_PATTERN.pattern(),
-                    400);
         }
     }
 
