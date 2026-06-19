@@ -256,6 +256,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>scheduler</artifactId>
         </dependency>
+        <!-- Auto Scaling client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>autoscaling</artifactId>
+        </dependency>
         <!-- CloudFormation client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

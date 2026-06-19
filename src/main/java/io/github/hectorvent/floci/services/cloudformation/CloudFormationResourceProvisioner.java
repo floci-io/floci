@@ -746,6 +746,7 @@ public class CloudFormationResourceProvisioner {
         }
         String associatePublicIp = resolveOptional(props, "AssociatePublicIpAddress", engine);
         var lc = autoScalingService.createLaunchConfiguration(region, name,
+                resolveOptional(props, "InstanceId", engine),
                 resolveOptional(props, "ImageId", engine),
                 resolveOptional(props, "InstanceType", engine),
                 resolveOptional(props, "KeyName", engine),
