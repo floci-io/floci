@@ -180,6 +180,145 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void limitTruncatesResultsAfterSort() {
+        String group = "analytics/dashboard";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "one");
+        put(group, stream, BASE_MS + 2000, "INFO", "JOB-1", "two");
+        put(group, stream, BASE_MS + 3000, "INFO", "JOB-1", "three");
+        put(group, stream, BASE_MS + 4000, "INFO", "JOB-1", "four");
+
+        // 'limit 2' applies after sort, keeping only the two newest.
+        String query = """
+                fields @timestamp, @message
+                | filter params.job_id = 'JOB-1'
+                | sort @timestamp desc
+                | limit 2
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(2, state.rows().size(), "limit 2 keeps only the top two after sort");
+        assertTrue(state.rows().get(0).get("@message").contains("four"));
+        assertTrue(state.rows().get(1).get("@message").contains("three"));
+    }
+
+    @Test
+    void sortAscendingByJsonField() {
+        String group = "query-builder/explorer";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        putRaw(service, group, stream, BASE_MS + 1000, idLog("REQ-C", "third"));
+        putRaw(service, group, stream, BASE_MS + 2000, idLog("REQ-A", "first"));
+        putRaw(service, group, stream, BASE_MS + 3000, idLog("REQ-B", "second"));
+
+        // Ascending sort on a nested JSON field (lexicographic via the string comparator).
+        String query = """
+                fields @message, params.id
+                | sort params.id asc
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(3, state.rows().size());
+        assertEquals("REQ-A", state.rows().get(0).get("params.id"));
+        assertEquals("REQ-B", state.rows().get(1).get("params.id"));
+        assertEquals("REQ-C", state.rows().get(2).get("params.id"));
+    }
+
+    @Test
+    void defaultProjectionReturnsTimestampAndMessage() {
+        String group = "metrics/kpi-center";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "hello");
+
+        // No 'fields' stage → the engine defaults to @timestamp, @message.
+        String query = "filter params.job_id = 'JOB-1'";
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(1, state.rows().size());
+        LinkedHashMap<String, String> row = state.rows().get(0);
+        assertTrue(row.containsKey("@timestamp"), "default projection includes @timestamp");
+        assertTrue(row.containsKey("@message"), "default projection includes @message");
+        assertNotNull(row.get("@ptr"));
+        assertTrue(row.get("@message").contains("hello"));
+    }
+
+    @Test
+    void missingFieldProjectsEmptyAndKeepsEventsOnInequality() {
+        String group = "alerts/notifications";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "present");
+
+        // 'params.absent' is not in the log: projecting it yields "", and '!=' keeps the event (null != 'x').
+        String query = """
+                fields @message, params.absent
+                | filter params.absent != 'x'
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(1, state.rows().size(), "an event lacking the field survives a '!=' filter on it");
+        assertEquals("", state.rows().get(0).get("params.absent"), "an absent field projects as an empty string");
+    }
+
+    @Test
+    void unsupportedCommandsAreIgnored() {
+        String group = "data-sources/connectors";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "kept");
+        put(group, stream, BASE_MS + 2000, "TRACE", "JOB-1", "dropped");
+
+        // 'parse' / 'stats' are unsupported: ignored with a warning, while the supported stages still run.
+        String query = """
+                fields @message
+                | filter level != 'TRACE'
+                | parse @message '*' as x
+                | stats count(*) by level
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(1, state.rows().size(), "TRACE dropped by filter; parse/stats ignored, not applied");
+        assertTrue(state.rows().get(0).get("@message").contains("kept"));
+    }
+
+    @Test
+    void statisticsReportScannedAndMatched() {
+        String group = "data-studio/insights";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "a");
+        put(group, stream, BASE_MS + 2000, "TRACE", "JOB-1", "b"); // dropped: level
+        put(group, stream, BASE_MS + 3000, "INFO", "JOB-2", "c");  // dropped: job_id
+        put(group, stream, BASE_MS + 4000, "INFO", "JOB-1", "d");
+
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, APP_QUERY, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(4, state.recordsScanned(), "recordsScanned counts every event in the window");
+        assertEquals(2, state.recordsMatched(), "recordsMatched counts only the rows returned after filtering");
+        assertEquals(2, state.rows().size());
+    }
+
+    @Test
     void getQueryResultsUnknownIdThrowsResourceNotFound() {
         AwsException ex = assertThrows(AwsException.class, () -> service.getQueryResults("does-not-exist"));
         assertEquals("ResourceNotFoundException", ex.getErrorCode());
