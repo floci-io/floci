@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -4707,6 +4708,107 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(404);
 
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
+    void createStack_withCognitoUserPoolClientOAuthFlowsAndCallbacks() {
+        String template = """
+            {
+              "Resources": {
+                "Pool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cfn-oauth-test-pool"
+                  }
+                },
+                "Client": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {
+                    "ClientName": "web-client",
+                    "UserPoolId": {"Ref": "Pool"},
+                    "AllowedOAuthFlows": ["implicit", "code"],
+                    "AllowedOAuthFlowsUserPoolClient": true,
+                    "AllowedOAuthScopes": ["openid", "profile", "email"],
+                    "CallbackURLs": ["https://example.local/signin-redirect"],
+                    "LogoutURLs": ["https://example.local"],
+                    "SupportedIdentityProviders": ["COGNITO"],
+                    "GenerateSecret": false
+                  }
+                }
+              },
+              "Outputs": {
+                "PoolId": { "Value": { "Ref": "Pool" } },
+                "ClientId": { "Value": { "Ref": "Client" } }
+              }
+            }
+            """;
+
+        String stackName = "cognito-oauth-stack";
+
+        // 1. Create Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // 2. Describe Stacks and capture outputs
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        String poolId = describeXml.split("<OutputKey>PoolId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String clientId = describeXml.split("<OutputKey>ClientId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+
+        // 3. Verify UserPoolClient via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientName", equalTo("web-client"))
+            .body("UserPoolClient.UserPoolId", equalTo(poolId))
+            .body("UserPoolClient.AllowedOAuthFlowsUserPoolClient", equalTo(true))
+            .body("UserPoolClient.AllowedOAuthFlows", hasItems("implicit", "code"))
+            .body("UserPoolClient.AllowedOAuthScopes", hasItems("openid", "profile", "email"))
+            .body("UserPoolClient.CallbackURLs", hasItems("https://example.local/signin-redirect"))
+            .body("UserPoolClient.LogoutURLs", hasItems("https://example.local"))
+            .body("UserPoolClient.SupportedIdentityProviders", hasItems("COGNITO"));
+
+        // 4. Delete Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 5. Verify resources are deleted
         given()
             .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
             .contentType(COGNITO_CONTENT_TYPE)

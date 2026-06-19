@@ -2827,13 +2827,39 @@ public class CloudFormationResourceProvisioner {
         List<String> allowedOAuthFlows = resolveStringListOrEmpty(props, "AllowedOAuthFlows", engine);
         List<String> allowedOAuthScopes = resolveStringListOrEmpty(props, "AllowedOAuthScopes", engine);
 
+        Map<String, Object> analyticsConfiguration = resolveMapOrDefault(props, "AnalyticsConfiguration", engine, null);
+        List<String> callbackURLs = resolveStringListOrEmpty(props, "CallbackURLs", engine);
+        String defaultRedirectURI = resolveOptional(props, "DefaultRedirectURI", engine);
+        List<String> explicitAuthFlows = resolveStringListOrEmpty(props, "ExplicitAuthFlows", engine);
+        Integer accessTokenValidity = parseIntegerPropOrNull(props, "AccessTokenValidity", engine);
+        Integer idTokenValidity = parseIntegerPropOrNull(props, "IdTokenValidity", engine);
+        List<String> logoutURLs = resolveStringListOrEmpty(props, "LogoutURLs", engine);
+        String preventUserExistenceErrors = resolveOptional(props, "PreventUserExistenceErrors", engine);
+        List<String> readAttributes = resolveStringListOrEmpty(props, "ReadAttributes", engine);
+        Integer refreshTokenValidity = parseIntegerPropOrNull(props, "RefreshTokenValidity", engine);
+        List<String> supportedIdentityProviders = resolveStringListOrEmpty(props, "SupportedIdentityProviders", engine);
+        Map<String, String> tokenValidityUnits = resolveStringMapOrNull(props, "TokenValidityUnits", engine);
+        List<String> writeAttributes = resolveStringListOrEmpty(props, "WriteAttributes", engine);
+        Map<String, Object> refreshTokenRotation = resolveMapOrDefault(props, "RefreshTokenRotation", engine, null);
+        Boolean enableTokenRevocation = parseBooleanOrNull(resolveOptional(props, "EnableTokenRevocation", engine));
+
         UserPoolClient client;
         if (r.getPhysicalId() == null) {
-            client = cognitoService.createUserPoolClient(userPoolId, clientName, generateSecret,
-                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+            client = cognitoService.createUserPoolClient(
+                    userPoolId, clientName, generateSecret, allowedOAuthFlowsUserPoolClient,
+                    allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
+                    defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
+                    logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                    supportedIdentityProviders, tokenValidityUnits, writeAttributes,
+                    refreshTokenRotation, enableTokenRevocation);
         } else {
-            client = cognitoService.updateUserPoolClient(userPoolId, r.getPhysicalId(), clientName,
-                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+            client = cognitoService.updateUserPoolClient(
+                    userPoolId, r.getPhysicalId(), clientName, allowedOAuthFlowsUserPoolClient,
+                    allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
+                    defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
+                    logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                    supportedIdentityProviders, tokenValidityUnits, writeAttributes,
+                    refreshTokenRotation, enableTokenRevocation);
         }
 
         r.setPhysicalId(client.getClientId());
@@ -2842,6 +2868,31 @@ public class CloudFormationResourceProvisioner {
         if (client.getClientSecret() != null) {
             r.getAttributes().put("ClientSecret", client.getClientSecret());
         }
+    }
+
+    private Integer parseIntegerPropOrNull(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        String value = resolveOptional(props, name, engine);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private Map<String, String> resolveStringMapOrNull(JsonNode props, String source, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return null;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null || !resolved.isObject()) {
+            return null;
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        resolved.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        return out;
     }
 
     // ── Lambda LayerVersion ──────────────────────────────────────────────────
