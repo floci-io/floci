@@ -525,4 +525,121 @@ class SamTransformProcessorTest {
         }
         assertEquals(0, methods, "a route with a non-literal Path must not be registered");
     }
+
+    @Test
+    void expandSamTemplate_appliesGlobalsFunctionToFunction() throws Exception {
+        // Handler/Runtime defined only in Globals.Function (common SAM pattern, e.g. Go provided.al2023)
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "Handler": "bootstrap",
+                  "Runtime": "provided.al2023"
+                }
+              },
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "InlineCode": "bootstrap"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+
+        // Globals is a SAM-only section and must be stripped from the emitted CFN template
+        assertTrue(expanded.path("Globals").isMissingNode());
+
+        JsonNode lambdaProps = expanded.path("Resources").path("MyFunc").path("Properties");
+        assertEquals("AWS::Lambda::Function",
+                expanded.path("Resources").path("MyFunc").path("Type").asText());
+        // Handler/Runtime from Globals must be propagated onto the generated function
+        assertEquals("bootstrap", lambdaProps.path("Handler").asText());
+        assertEquals("provided.al2023", lambdaProps.path("Runtime").asText());
+    }
+
+    @Test
+    void expandSamTemplate_functionPropertiesOverrideGlobals() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "Handler": "bootstrap",
+                  "Runtime": "provided.al2023",
+                  "Timeout": 3
+                }
+              },
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode lambdaProps = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties");
+
+        // Function-level values win; Globals-only values still apply
+        assertEquals("index.handler", lambdaProps.path("Handler").asText());
+        assertEquals("nodejs20.x", lambdaProps.path("Runtime").asText());
+        assertEquals(3, lambdaProps.path("Timeout").asInt());
+    }
+
+    @Test
+    void expandSamTemplate_mergesNestedMapsFromGlobals() throws Exception {
+        // Environment.Variables must merge key-wise: globals-only keys preserved, function keys win on clash
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "Handler": "bootstrap",
+                  "Runtime": "provided.al2023",
+                  "Environment": { "Variables": { "GLOBAL_VAR": "g", "SHARED": "from-globals" } }
+                }
+              },
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "InlineCode": "bootstrap",
+                    "Environment": { "Variables": { "LOCAL_VAR": "l", "SHARED": "from-function" } }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode vars = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties")
+                .path("Environment").path("Variables");
+
+        assertEquals("g", vars.path("GLOBAL_VAR").asText());          // globals-only key preserved
+        assertEquals("l", vars.path("LOCAL_VAR").asText());           // function-only key added
+        assertEquals("from-function", vars.path("SHARED").asText());  // clash resolved in favor of function
+    }
+
+    @Test
+    void expandSamTemplate_stripsGlobalsWhenResourcesAbsent() throws Exception {
+        // SAM-only Globals must be stripped even on the early return (no/!object Resources)
+        JsonNode template = objectMapper.readTree("""
+            {"Transform": "AWS::Serverless-2016-10-31", "Globals": {"Function": {"Runtime": "provided.al2023"}}}
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+
+        assertTrue(expanded.path("Transform").isMissingNode());
+        assertTrue(expanded.path("Globals").isMissingNode());
+    }
 }
