@@ -49,6 +49,7 @@ public class IamService {
     private final StorageBackend<String, InstanceProfile> instanceProfiles;
     private final StorageBackend<String, SessionCredential> sessions;
     private final RegionResolver regionResolver;
+    private final boolean seedDeployerPrincipal;
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -60,7 +61,8 @@ public class IamService {
             storageFactory.create("iam", "iam-access-keys.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-instance-profiles.json", new TypeReference<>() {}),
             storageFactory.create("iam", "iam-sessions.json", new TypeReference<>() {}),
-            regionResolver
+            regionResolver,
+            config.services().iam().seedDeployerPrincipal()
         );
     }
 
@@ -72,6 +74,18 @@ public class IamService {
                StorageBackend<String, InstanceProfile> instanceProfiles,
                StorageBackend<String, SessionCredential> sessions,
                RegionResolver regionResolver) {
+        this(users, groups, roles, policies, accessKeys, instanceProfiles, sessions, regionResolver, false);
+    }
+
+    IamService(StorageBackend<String, IamUser> users,
+               StorageBackend<String, IamGroup> groups,
+               StorageBackend<String, IamRole> roles,
+               StorageBackend<String, IamPolicy> policies,
+               StorageBackend<String, AccessKey> accessKeys,
+               StorageBackend<String, InstanceProfile> instanceProfiles,
+               StorageBackend<String, SessionCredential> sessions,
+               RegionResolver regionResolver,
+               boolean seedDeployerPrincipal) {
         this.users = users;
         this.groups = groups;
         this.roles = roles;
@@ -80,12 +94,15 @@ public class IamService {
         this.instanceProfiles = instanceProfiles;
         this.sessions = sessions;
         this.regionResolver = regionResolver;
+        this.seedDeployerPrincipal = seedDeployerPrincipal;
     }
 
     @PostConstruct
     void seedDefaults() {
         seedAwsManagedPolicies();
-        seedDefaultDeployerPrincipal();
+        if (seedDeployerPrincipal) {
+            seedDefaultDeployerPrincipal();
+        }
     }
 
     void seedAwsManagedPolicies() {

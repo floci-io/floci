@@ -1013,6 +1013,48 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createChangeSet_recordsReviewInProgressEvent() {
+        // A CREATE change set for a brand-new stack must record a REVIEW_IN_PROGRESS stack event,
+        // so DescribeStackEvents is non-empty right after CreateChangeSet (matching AWS/LocalStack).
+        // Tooling such as the AWS SAM CLI reads StackEvents[0] at this point.
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "review-event-bucket" }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", "review-event-stack")
+            .formParam("ChangeSetName", "cs1")
+            .formParam("ChangeSetType", "CREATE")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Before the change set is executed the stack is REVIEW_IN_PROGRESS and must already
+        // carry a matching stack-level event.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", "review-event-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceType>AWS::CloudFormation::Stack</ResourceType>"))
+            .body(containsString("<ResourceStatus>REVIEW_IN_PROGRESS</ResourceStatus>"));
+    }
+
+    @Test
     void describeDeletedStackEvents_byArn_returnsDeleteCompleteEvents() throws Exception {
         String template = """
             {
@@ -3969,6 +4011,78 @@ class CloudFormationIntegrationTest {
             .body("item[0].id", equalTo(authorizerId))
             .body("item[0].name", equalTo("MyTokenAuth"))
             .body("item[0].type", equalTo("TOKEN"));
+    }
+
+    // ── Issue #1163: AWS::ApiGateway::Deployment with inline StageName creates the stage ──
+
+    @Test
+    void createStack_withApiGatewayDeploymentStageName_createsStage() {
+        // Regression test for issue #1163: a Deployment carrying an inline StageName created
+        // the deployment but never the stage, so `get-stages` returned empty and invoking
+        // .../{stage}/_user_request_/... returned "Stage not found".
+        String stackName = "cfn-apigw-deploy-stagename-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-deploy-stagename-api"
+                  }
+                },
+                "Deployment": {
+                  "Type": "AWS::ApiGateway::Deployment",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "StageName": "prod"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String deploymentId = physicalIdByLogicalId(resourcesXml, "Deployment");
+
+        // The inline StageName must have produced a real stage bound to this deployment.
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/stages")
+        .then()
+            .statusCode(200)
+            .body("item.size()", equalTo(1))
+            .body("item[0].stageName", equalTo("prod"))
+            .body("item[0].deploymentId", equalTo(deploymentId));
     }
 
     @Test

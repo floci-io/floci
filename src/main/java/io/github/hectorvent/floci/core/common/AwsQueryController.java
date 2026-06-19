@@ -113,6 +113,7 @@ public class AwsQueryController {
             "CreateLaunchConfiguration", "DescribeLaunchConfigurations", "DeleteLaunchConfiguration",
             "CreateAutoScalingGroup", "UpdateAutoScalingGroup", "DeleteAutoScalingGroup",
             "DescribeAutoScalingGroups", "SetDesiredCapacity",
+            "StartInstanceRefresh", "DescribeInstanceRefreshes",
             "CreateOrUpdateTags", "DeleteTags",
             "DescribeAutoScalingInstances", "AttachInstances", "DetachInstances",
             "TerminateInstanceInAutoScalingGroup",

@@ -59,7 +59,7 @@ quarkus:
 
 floci:
   port: 4566
-  max-request-size: 512
+  max-request-size: 2048
   base-url: "http://localhost:4566"
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
@@ -182,6 +182,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: false

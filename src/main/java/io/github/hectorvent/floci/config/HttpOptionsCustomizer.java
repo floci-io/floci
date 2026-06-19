@@ -22,7 +22,7 @@ import jakarta.enterprise.context.ApplicationScoped;
  * </ul>
  *
  * The overall request body size is still bounded by
- * {@code quarkus.http.limits.max-body-size} (default 512 MB).
+ * {@code quarkus.http.limits.max-body-size} (default 2048 MB).
  */
 @ApplicationScoped
 public class HttpOptionsCustomizer implements HttpServerOptionsCustomizer {

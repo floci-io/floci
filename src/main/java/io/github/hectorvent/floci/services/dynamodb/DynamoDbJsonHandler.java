@@ -313,6 +313,8 @@ public class DynamoDbJsonHandler {
                     "ExpressionAttributeValues can only be specified when using expressions: ConditionExpression is null", 400);
         }
 
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
         validateItemSets(item);
 
         JsonNode oldItem = null;
@@ -417,6 +419,8 @@ public class DynamoDbJsonHandler {
                     + String.join("; ", delValidationErrors), 400);
         }
 
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
         String condOpDel = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
@@ -481,6 +485,8 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
         }
+
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
         if (conditionExpression != null && expectedUpd != null) {
             throw new AwsException("ValidationException",
@@ -639,6 +645,31 @@ public class DynamoDbJsonHandler {
         return changedAttributes;
     }
 
+    // DynamoDB rejects an ExclusiveStartKey whose attribute set does not exactly match the
+    // key schema being paged: the table's primary key, plus the index's key attributes when
+    // an IndexName is supplied. Query and Scan report different messages for the same fault.
+    private void validateExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
+                                           String indexName, boolean isScan) {
+        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
+        Set<String> expected = new HashSet<>();
+        expected.add(table.getPartitionKeyName());
+        String sortKey = table.getSortKeyName();
+        if (sortKey != null) expected.add(sortKey);
+        if (indexName != null) {
+            table.findGsi(indexName).ifPresent(g ->
+                    g.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
+            table.findLsi(indexName).ifPresent(l ->
+                    l.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
+        }
+        Set<String> actual = new HashSet<>();
+        exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw new AwsException("ValidationException", isScan
+                    ? "The provided starting key is invalid: The provided key element does not match the schema"
+                    : "The provided starting key is invalid", 400);
+        }
+    }
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -708,6 +739,9 @@ public class DynamoDbJsonHandler {
                     "Invalid KeyConditionExpression: The expression can not be empty;", 400);
         }
 
+        ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
@@ -744,6 +778,11 @@ public class DynamoDbJsonHandler {
             // Check unused EAN across all expressions (KCE + FE + PE)
             Set<String> hashTokens = extractHashTokens(keyConditionExpr, filterExpr, projectionExpression);
             checkUnusedEan(exprAttrNames, hashTokens);
+        }
+
+        if (exclusiveStartKey != null) {
+            validateExclusiveStartKey(exclusiveStartKey,
+                    dynamoDbService.describeTable(tableName, region), indexName, false);
         }
 
         DynamoDbService.QueryResult result = dynamoDbService.query(tableName, keyConditions,
@@ -837,8 +876,15 @@ public class DynamoDbJsonHandler {
                     + "Segment: " + segment + " is not less than TotalSegments: " + totalSegments, 400);
         }
 
+        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+
         String projectionExpressionScan = request.has("ProjectionExpression")
                 ? request.get("ProjectionExpression").asText() : null;
+
+        if (exclusiveStartKey != null) {
+            validateExclusiveStartKey(exclusiveStartKey,
+                    dynamoDbService.describeTable(tableName, region), indexNameScan, true);
+        }
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
                 tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit, exclusiveStartKey, region);

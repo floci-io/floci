@@ -69,6 +69,7 @@ public class KmsJsonHandler {
             case "GetKeyRotationStatus" -> handleGetKeyRotationStatus(request, region);
             case "EnableKeyRotation" -> handleEnableKeyRotation(request, region);
             case "DisableKeyRotation" -> handleDisableKeyRotation(request, region);
+            case "EnableKey" -> handleEnableKey(request, region);
             case "DisableKey" -> handleDisableKey(request, region);
             case "RotateKeyOnDemand" -> handleRotateKeyOnDemand(request, region);
             default -> Response.status(400)
@@ -508,6 +509,11 @@ public class KmsJsonHandler {
 
     private Response handleDisableKeyRotation(JsonNode request, String region) {
         service.disableKeyRotation(request.path("KeyId").asText(), region);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleEnableKey(JsonNode request, String region) {
+        service.enableKey(request.path("KeyId").asText(), region);
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 

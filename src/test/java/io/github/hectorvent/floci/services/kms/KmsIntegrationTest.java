@@ -382,6 +382,92 @@ class KmsIntegrationTest {
     }
 
     @Test
+    void enableKeyRestoresKeyState() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"enable-key\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.DisableKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.EnableKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.DescribeKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.Enabled", equalTo(true))
+                .body("KeyMetadata.KeyState", equalTo("Enabled"));
+    }
+
+    @Test
+    void enableKeyOnPendingDeletionKeyFails() {
+        String keyId = given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("{\"Description\":\"enable-pending-deletion\"}")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .extract()
+                .path("KeyMetadata.KeyId");
+
+        given()
+                .header("X-Amz-Target", "TrentService.ScheduleKeyDeletion")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s","PendingWindowInDays":7}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", "TrentService.EnableKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                    {"KeyId":"%s"}
+                    """.formatted(keyId))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", equalTo("KMSInvalidStateException"));
+    }
+
+    @Test
     void updateKeyDescriptionRequiresDescription() {
         String keyId = given()
                 .header("X-Amz-Target", "TrentService.CreateKey")

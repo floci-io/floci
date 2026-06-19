@@ -1,6 +1,8 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.containsInAnyOrder;
+import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
 import static org.hamcrest.Matchers.greaterThanOrEqualTo;
 import static org.hamcrest.Matchers.not;
@@ -274,6 +276,32 @@ class Ec2IntegrationTest {
                     equalTo("region"))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item[0].location",
                     equalTo("us-east-1"));
+    }
+
+    @Test
+    @Order(20)
+    void describeModernGravitonInstanceTypeOfferingsByRegion() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m8gd.2xlarge")
+            .formParam("Filter.1.Value.2", "m7gd.2xlarge")
+            .formParam("Filter.1.Value.3", "m6gd.2xlarge")
+            .formParam("Filter.1.Value.4", "m8gd.medium")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(4))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                    containsInAnyOrder("m8gd.2xlarge", "m7gd.2xlarge", "m6gd.2xlarge", "m8gd.medium"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
+                    everyItem(equalTo("region")))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
+                    everyItem(equalTo("us-east-1")));
     }
 
     // =========================================================================
@@ -618,6 +646,11 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
+            .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:ClusterId")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "sample-template")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Key", "example:NodeType")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Value", "COORDINATOR")
             .formParam("TagSpecification.1.ResourceType", "launch-template")
             .formParam("TagSpecification.1.Tag.1.Key", "Name")
             .formParam("TagSpecification.1.Tag.1.Value", "sample-template")
@@ -668,7 +701,13 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template\n"));
+                    equalTo("#!/bin/sh\necho launch-template\n"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
+                    equalTo("instance"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:ClusterId' }.value",
+                    equalTo("sample-template"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("COORDINATOR"));
     }
 
     @Test
@@ -685,6 +724,9 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
+            .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:NodeType")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "WORKER")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -699,7 +741,9 @@ class Ec2IntegrationTest {
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.instanceType",
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template-version\n"));
+                    equalTo("#!/bin/sh\necho launch-template-version\n"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("WORKER"));
 
         given()
             .formParam("Action", "DescribeLaunchTemplateVersions")
@@ -715,7 +759,11 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.defaultVersion",
                     equalTo("true"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
-                    equalTo("t3.micro"));
+                    equalTo("t3.micro"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
+                    equalTo("#!/bin/sh\necho launch-template\n"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("COORDINATOR"));
     }
 
     @Test
@@ -1218,6 +1266,8 @@ class Ec2IntegrationTest {
             .formParam("Action", "DescribeInstances")
             .formParam("Filter.1.Name", "instance-state-name")
             .formParam("Filter.1.Value.1", "running")
+            .formParam("Filter.2.Name", "instance-id")
+            .formParam("Filter.2.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1309,9 +1359,10 @@ class Ec2IntegrationTest {
     @Test
     @Order(79)
     void describeNetworkInterfacesBeforeRun() {
-        // Before any instances exist, the set should be empty
         given()
             .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", "i-00000000000000000")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1326,13 +1377,15 @@ class Ec2IntegrationTest {
     void describeNetworkInterfacesAfterRun() {
         networkInterfaceId = given()
             .formParam("Action", "DescribeNetworkInterfaces")
+            .formParam("Filter.1.Name", "attachment.instance-id")
+            .formParam("Filter.1.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", greaterThanOrEqualTo(1))
+            .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()", equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].networkInterfaceId",
                     startsWith("eni-"))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].vpcId", notNullValue())
@@ -1345,7 +1398,7 @@ class Ec2IntegrationTest {
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].attachment.deviceIndex",
                     equalTo("0"))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].attachment.instanceId",
-                    notNullValue())
+                    equalTo(instanceId))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].groupSet.item.size()",
                     greaterThanOrEqualTo(1))
             .extract().path("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].networkInterfaceId");
@@ -1548,13 +1601,15 @@ class Ec2IntegrationTest {
             .formParam("Action", "DescribeNetworkInterfaces")
             .formParam("Filter.1.Name", "status")
             .formParam("Filter.1.Value.1", "in-use")
+            .formParam("Filter.2.Name", "attachment.instance-id")
+            .formParam("Filter.2.Value.1", instanceId)
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item.size()",
-                    greaterThanOrEqualTo(1))
+                    equalTo(1))
             .body("DescribeNetworkInterfacesResponse.networkInterfaceSet.item[0].status",
                     equalTo("in-use"));
     }
@@ -2248,5 +2303,83 @@ class Ec2IntegrationTest {
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/");
+    }
+
+    @Test
+    @Order(150)
+    void spotInstanceLifecycle() {
+        // 1. Request Spot Instance
+        String spotRequestId = given()
+            .formParam("Action", "RequestSpotInstances")
+            .formParam("SpotPrice", "0.05")
+            .formParam("InstanceCount", "1")
+            .formParam("Type", "one-time")
+            .formParam("LaunchSpecification.ImageId", "ami-0abcdef1234567890")
+            .formParam("LaunchSpecification.InstanceType", "t2.micro")
+            .formParam("TagSpecification.1.ResourceType", "spot-instances-request")
+            .formParam("TagSpecification.1.Tag.1.Key", "SpotKey")
+            .formParam("TagSpecification.1.Tag.1.Value", "SpotValue")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", startsWith("sir-"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotPrice", equalTo("0.05"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].state", equalTo("active"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].status.code", equalTo("fulfilled"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].launchSpecification.imageId", equalTo("ami-0abcdef1234567890"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].productDescription", equalTo("Linux/UNIX"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].key", equalTo("SpotKey"))
+            .body("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].tagSet.item[0].value", equalTo("SpotValue"))
+            .extract().path("RequestSpotInstancesResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId");
+
+        // 2. Describe Spot Instance Request by ID
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId))
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("active"));
+
+        // 3. Describe Spot Instance Request using tag filter
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("Filter.1.Name", "tag:SpotKey")
+            .formParam("Filter.1.Value.1", "SpotValue")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId));
+
+        // 4. Cancel Spot Instance Request
+        given()
+            .formParam("Action", "CancelSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("CancelSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].spotInstanceRequestId", equalTo(spotRequestId))
+            .body("CancelSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("cancelled"));
+
+        // 5. Describe Spot Instance Request to verify state is cancelled
+        given()
+            .formParam("Action", "DescribeSpotInstanceRequests")
+            .formParam("SpotInstanceRequestId.1", spotRequestId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("cancelled"));
     }
 }

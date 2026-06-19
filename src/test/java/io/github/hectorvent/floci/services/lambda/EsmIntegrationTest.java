@@ -9,6 +9,8 @@ import org.junit.jupiter.api.TestMethodOrder;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
 /**
  * Integration tests for Lambda Event Source Mapping (ESM) endpoints.
  * Requires an SQS queue and Lambda function to be created first.
@@ -27,6 +29,13 @@ class EsmIntegrationTest {
             "arn:aws:sqs:" + REGION + ":" + ACCOUNT_ID + ":" + QUEUE_NAME;
     private static final String FUNCTION_ARN =
             "arn:aws:lambda:" + REGION + ":" + ACCOUNT_ID + ":function:" + FUNCTION_NAME;
+    private static final String NON_DEFAULT_ACCOUNT = "000000000001";
+    private static final String MULTI_ACCOUNT_QUEUE_NAME = "esm-multi-account-queue";
+    private static final String MULTI_ACCOUNT_FUNCTION_NAME = "esm-multi-account-fn";
+    private static final String MULTI_ACCOUNT_QUEUE_ARN =
+            "arn:aws:sqs:" + REGION + ":" + NON_DEFAULT_ACCOUNT + ":" + MULTI_ACCOUNT_QUEUE_NAME;
+    private static final String MULTI_ACCOUNT_QUEUE_URL =
+            "http://localhost:4566/" + NON_DEFAULT_ACCOUNT + "/" + MULTI_ACCOUNT_QUEUE_NAME;
 
     private static String esmUuid;
 
@@ -585,5 +594,175 @@ class EsmIntegrationTest {
             .body("$", not(hasKey("ScalingConfig")));
 
         given().delete(LAMBDA_BASE + "/event-source-mappings/" + uuid).then().statusCode(202);
+    }
+
+    /**
+     * Builds a SigV4 Authorization header whose access key ID is the given
+     * 12-digit account ID. Floci's AccountResolver treats a 12-digit AKID as
+     * the account ID directly (LocalStack multi-account convention). The full
+     * header form (SignedHeaders + Signature) mirrors AccountIsolationIntegrationTest.
+     */
+    private static String authForAccount(String accountId, String service) {
+        return "AWS4-HMAC-SHA256 Credential=" + accountId
+                + "/20260101/us-east-1/" + service + "/aws4_request, SignedHeaders=host, Signature=abc";
+    }
+
+    /**
+     * Returns the raw GetQueueAttributes (Query protocol) response body for the
+     * queue, queried as the given account. Only ApproximateNumberOfMessagesNotVisible
+     * is requested, so the body contains exactly one {@code <Value>} element.
+     */
+    private static String getQueueAttributesBody(String queueUrl, String auth) {
+        return given()
+                .header("Authorization", auth)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "GetQueueAttributes")
+                .formParam("QueueUrl", queueUrl)
+                .formParam("AttributeName.1", "ApproximateNumberOfMessagesNotVisible")
+                .formParam("Version", "2012-11-05")
+            .when().post(SQS_BASE)
+            .then().statusCode(200)
+            .extract().asString();
+    }
+
+    /**
+     * Parses the single ApproximateNumberOfMessagesNotVisible value out of a
+     * GetQueueAttributes response body. Uses direct substring extraction (not
+     * XmlPath) so the result is independent of XML-path library quirks.
+     */
+    private static int parseNotVisible(String body) {
+        int start = body.indexOf("<Value>");
+        int end = body.indexOf("</Value>");
+        if (start < 0 || end <= start) {
+            return 0;
+        }
+        try {
+            return Integer.parseInt(body.substring(start + "<Value>".length(), end).trim());
+        } catch (NumberFormatException e) {
+            return 0;
+        }
+    }
+
+    // ──────────────────────────── Multi-account ESM ────────────────────────────
+
+    /**
+     * Regression test for the SQS ESM poller account-aware lookup bug (M1/M2).
+     *
+     * The poller runs on a Vert.x timer thread outside CDI request scope. Before
+     * the fix, doReceiveMessage() looked up the queue under the default account
+     * and never found queues created under another account, so Lambda never fired.
+     *
+     * Creates a queue, function, and ESM under account 000000000001 (via a
+     * 12-digit AKID in the SigV4 credential), sends a message, and asserts the
+     * poller claims it (ApproximateNumberOfMessagesNotVisible > 0).
+     */
+    @Test
+    @Order(60)
+    void esmPollerReceivesMessagesFromNonDefaultAccount() throws Exception {
+        String sqsAuth = authForAccount(NON_DEFAULT_ACCOUNT, "sqs");
+        String lambdaAuth = authForAccount(NON_DEFAULT_ACCOUNT, "lambda");
+        String esmUuid = null;
+        try {
+            // 1. Create the queue under account 000000000001
+            given()
+                .header("Authorization", sqsAuth)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "CreateQueue")
+                .formParam("QueueName", MULTI_ACCOUNT_QUEUE_NAME)
+                .formParam("Version", "2012-11-05")
+            .when().post(SQS_BASE)
+            .then().statusCode(200)
+                .body(containsString(NON_DEFAULT_ACCOUNT + "/" + MULTI_ACCOUNT_QUEUE_NAME));
+
+            // 2. Create the Lambda function under account 000000000001
+            given()
+                .header("Authorization", lambdaAuth)
+                .contentType("application/json")
+                .body("""
+                    {
+                        "FunctionName": "%s",
+                        "Runtime": "nodejs20.x",
+                        "Role": "arn:aws:iam::000000000001:role/lambda-role",
+                        "Handler": "index.handler"
+                    }
+                    """.formatted(MULTI_ACCOUNT_FUNCTION_NAME))
+            .when().post(LAMBDA_BASE + "/functions")
+            .then().statusCode(201)
+                .body("FunctionName", equalTo(MULTI_ACCOUNT_FUNCTION_NAME));
+
+            // 3. Create the ESM linking the queue to the function (both account 000000000001)
+            esmUuid = given()
+                .header("Authorization", lambdaAuth)
+                .contentType("application/json")
+                .body("""
+                    {
+                        "FunctionName": "%s",
+                        "EventSourceArn": "%s",
+                        "BatchSize": 1
+                    }
+                    """.formatted(MULTI_ACCOUNT_FUNCTION_NAME, MULTI_ACCOUNT_QUEUE_ARN))
+            .when().post(LAMBDA_BASE + "/event-source-mappings")
+            .then().statusCode(202)
+                .body("State", equalTo("Enabled"))
+                .body("EventSourceArn", equalTo(MULTI_ACCOUNT_QUEUE_ARN))
+            .extract().path("UUID");
+
+            // 4. Send a message to the queue
+            given()
+                .header("Authorization", sqsAuth)
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "SendMessage")
+                .formParam("QueueUrl", MULTI_ACCOUNT_QUEUE_URL)
+                .formParam("MessageBody", "esm-multi-account-payload")
+                .formParam("Version", "2012-11-05")
+            .when().post(SQS_BASE)
+            .then().statusCode(200);
+
+            // 5. Wait for the poller to claim the message. Poll interval is 1000ms;
+            //    a claimed message becomes in-flight (NotVisible > 0), proving the
+            //    poller resolved the queue under account 000000000001 and received it.
+            long deadline = System.currentTimeMillis() + 8_000;
+            int notVisible = 0;
+            String lastBody = "";
+            while (System.currentTimeMillis() < deadline) {
+                lastBody = getQueueAttributesBody(MULTI_ACCOUNT_QUEUE_URL, sqsAuth);
+                notVisible = parseNotVisible(lastBody);
+                if (notVisible > 0) {
+                    break;
+                }
+                Thread.sleep(250);
+            }
+            assertTrue(notVisible > 0,
+                    "ESM poller never claimed the message under account " + NON_DEFAULT_ACCOUNT
+                            + " (ApproximateNumberOfMessagesNotVisible stayed 0) — "
+                            + "account-aware queue lookup in doReceiveMessage is broken. "
+                            + "Last GetQueueAttributes body: " + lastBody);
+
+        } finally {
+            // Best-effort cleanup so the test is re-runnable and leaks no state.
+            // Each cleanup is isolated so a missing resource doesn't abort the others.
+            try {
+                if (esmUuid != null) {
+                    given().header("Authorization", lambdaAuth)
+                        .when().delete(LAMBDA_BASE + "/event-source-mappings/" + esmUuid);
+                }
+            } catch (Exception ignored) {
+            }
+            try {
+                given().header("Authorization", sqsAuth)
+                    .contentType("application/x-www-form-urlencoded")
+                    .formParam("Action", "DeleteQueue")
+                    .formParam("QueueUrl", MULTI_ACCOUNT_QUEUE_URL)
+                    .formParam("Version", "2012-11-05")
+                    .when().post(SQS_BASE);
+            } catch (Exception ignored) {
+            }
+            try {
+                given().header("Authorization", lambdaAuth)
+                    .contentType("application/json")
+                    .when().delete(LAMBDA_BASE + "/functions/" + MULTI_ACCOUNT_FUNCTION_NAME);
+            } catch (Exception ignored) {
+            }
+        }
     }
 }

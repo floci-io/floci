@@ -95,8 +95,8 @@ public class CloudWatchMetricsJsonHandler {
         String metricName = request.path("MetricName").asText();
         List<Dimension> dimensions = parseDimensionsJson(request.path("Dimensions"));
         int period = request.path("Period").asInt(60);
-        Instant startTime = parseInstant(request.path("StartTime").asText(null));
-        Instant endTime = parseInstant(request.path("EndTime").asText(null));
+        Instant startTime = parseInstantNode(request.path("StartTime"));
+        Instant endTime = parseInstantNode(request.path("EndTime"));
 
         List<String> statistics = new ArrayList<>();
         JsonNode statsNode = request.path("Statistics");
@@ -313,7 +313,7 @@ public class CloudWatchMetricsJsonHandler {
             datum.setUnit(item.path("Unit").asText(null));
             JsonNode ts = item.path("Timestamp");
             if (!ts.isMissingNode()) {
-                Instant parsed = parseInstant(ts.asText(null));
+                Instant parsed = parseInstantNode(ts);
                 if (parsed != null) datum.setTimestamp(parsed.getEpochSecond());
             }
             datum.setDimensions(parseDimensionsJson(item.path("Dimensions")));

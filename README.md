@@ -173,6 +173,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | Cognito | Yes | No |
 | RDS, ElastiCache, MSK | Real Docker | No |
 | Neptune (graph DB + Gremlin WebSocket) | Real Docker | No |
+| DocumentDB (MongoDB-compatible) | Real Docker | No |
 | ECS, EC2, EKS | Real Docker | No |
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
@@ -224,7 +225,7 @@ Floci supports local emulation for application services, data services, eventing
 | Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
 | Data and analytics | Athena, Glue, EMR, Firehose, OpenSearch, Textract, Transcribe |
 | Security and governance | WAF v2, CloudTrail |
-| Databases | RDS, RDS Data API, Neptune |
+| Databases | RDS, RDS Data API, Neptune, DocumentDB |
 | Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
@@ -237,7 +238,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Service | How it works | Notable features |
 |---|---|---|
 | SSM Parameter Store | In-process | Version history, labels, SecureString, tagging |
-| SSM Run Command | In-process | SendCommand, GetCommandInvocation, ListCommands, CancelCommand, agent polling via ec2messages |
+| SSM Run Command | In-process + EC2 containers | SendCommand, GetCommandInvocation, ListCommands, CancelCommand, direct EC2 container execution, agent polling via ec2messages |
 | SQS | In-process | Standard and FIFO queues, DLQ, visibility timeout, batch operations, tagging |
 | SNS | In-process | Topics, subscriptions, SQS, Lambda and HTTP delivery, tagging |
 | S3 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |
@@ -264,6 +265,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | RDS | Real Docker | PostgreSQL, MySQL, MariaDB, IAM auth, JDBC-compatible engines |
 | RDS Data API | REST JSON over real RDS containers | Raw SQL execution and transactions for local MySQL / MariaDB RDS resources |
 | Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server; RDS-shaped control plane; Gremlin WebSocket on port 8182 with SigV4 proxy |
+| DocumentDB | Real Docker, mock mode available | MongoDB-compatible cluster via real MongoDB containers; RDS-shaped control plane; MongoDB wire protocol on port 27017 |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
@@ -313,6 +315,7 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | RDS MySQL / Aurora | `mysql:8.0` | MySQL engine, IAM auth, JDBC-compatible access |
 | RDS MariaDB | `mariadb:11` | MariaDB engine, IAM auth, JDBC-compatible access |
 | Neptune | `tinkerpop/gremlin-server:3.7.3` | TinkerPop Gremlin Server; Gremlin WebSocket on port 8182; SigV4 auth proxy |
+| DocumentDB | `mongo:7.0` | MongoDB engine; MongoDB wire protocol on port 27017 |
 | MSK | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda |
 | EC2 | AMI-mapped Linux images | Linux containers, SSH key injection, UserData, IMDS, IAM credentials |
 | ECS | User-specified task image | Container lifecycle, start, stop, health checks |
@@ -342,6 +345,7 @@ docker run -d --name floci \
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` |
 | `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` |
 | `FLOCI_SERVICES_NEPTUNE_DEFAULT_IMAGE` | `tinkerpop/gremlin-server:3.7.3` |
+| `FLOCI_SERVICES_DOCDB_DEFAULT_IMAGE` | `mongo:7.0` |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` |
 | `FLOCI_ECR_BASE_URI` | `public.ecr.aws` |

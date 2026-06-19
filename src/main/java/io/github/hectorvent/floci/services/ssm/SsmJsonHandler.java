@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.ssm.model.CommandInvocation;
 import io.github.hectorvent.floci.services.ssm.model.InstanceInformation;
 import io.github.hectorvent.floci.services.ssm.model.Parameter;
 import io.github.hectorvent.floci.services.ssm.model.ParameterHistory;
+import io.github.hectorvent.floci.services.ssm.model.PatchBaselineIdentity;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -57,6 +58,9 @@ public class SsmJsonHandler {
             case "ListCommandInvocations" -> handleListCommandInvocations(request, region);
             case "CancelCommand" -> handleCancelCommand(request, region);
             case "DescribeInstanceInformation" -> handleDescribeInstanceInformation(request, region);
+            // Patch Manager (read-only: AWS-owned predefined baselines)
+            case "DescribePatchBaselines" -> handleDescribePatchBaselines(request, region);
+            case "GetDefaultPatchBaseline" -> handleGetDefaultPatchBaseline(request, region);
             // Agent registration (internal, not in public SDK)
             case "UpdateInstanceInformation" -> handleUpdateInstanceInformation(request, region);
             default -> Response.status(400)
@@ -197,6 +201,47 @@ public class SsmJsonHandler {
             parametersArray.add(node);
         }
         response.set("Parameters", parametersArray);
+        return Response.ok(response).build();
+    }
+
+    private Response handleDescribePatchBaselines(JsonNode request, String region) {
+        Map<String, List<String>> filters = new HashMap<>();
+        JsonNode filtersNode = request.path("Filters");
+        if (filtersNode.isArray()) {
+            for (JsonNode f : filtersNode) {
+                String key = f.path("Key").asText("");
+                List<String> values = new ArrayList<>();
+                f.path("Values").forEach(v -> values.add(v.asText()));
+                if (!key.isEmpty()) {
+                    filters.put(key, values);
+                }
+            }
+        }
+
+        List<PatchBaselineIdentity> baselines = ssmService.describePatchBaselines(filters);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode identities = objectMapper.createArrayNode();
+        for (PatchBaselineIdentity b : baselines) {
+            ObjectNode node = objectMapper.createObjectNode();
+            node.put("BaselineId", b.baselineId());
+            node.put("BaselineName", b.baselineName());
+            node.put("OperatingSystem", b.operatingSystem());
+            node.put("BaselineDescription", b.baselineDescription());
+            node.put("DefaultBaseline", b.defaultBaseline());
+            identities.add(node);
+        }
+        response.set("BaselineIdentities", identities);
+        return Response.ok(response).build();
+    }
+
+    private Response handleGetDefaultPatchBaseline(JsonNode request, String region) {
+        String operatingSystem = request.has("OperatingSystem") ? request.path("OperatingSystem").asText() : null;
+        String baselineId = ssmService.getDefaultPatchBaseline(operatingSystem);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("BaselineId", baselineId);
+        response.put("OperatingSystem", (operatingSystem == null || operatingSystem.isBlank()) ? "WINDOWS" : operatingSystem);
         return Response.ok(response).build();
     }
 

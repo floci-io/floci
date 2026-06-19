@@ -87,6 +87,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: true

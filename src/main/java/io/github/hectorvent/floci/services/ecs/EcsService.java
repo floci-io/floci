@@ -590,6 +590,9 @@ public class EcsService {
         svc.setClusterArn(cluster.getClusterArn());
         svc.setTaskDefinition(taskDefinition);
         svc.setLaunchType(launchType != null ? launchType : LaunchType.FARGATE);
+        if (desiredCount < 0) {
+            throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
+        }
         svc.setDesiredCount(desiredCount);
         svc.setLoadBalancers(loadBalancers);
         svc.setNetworkConfiguration(networkConfiguration);
@@ -623,6 +626,9 @@ public class EcsService {
                     "Service " + serviceName + " is not active.", 400);
         }
         if (desiredCount != null) {
+            if (desiredCount < 0) {
+                throw new AwsException("InvalidParameterException", "desiredCount cannot be a negative number.", 400);
+            }
             svc.setDesiredCount(desiredCount);
         }
         if (networkConfiguration != null) {

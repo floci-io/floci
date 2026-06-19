@@ -24,8 +24,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.Queue;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * Handles SSM agent registration and command execution lifecycle:
@@ -37,13 +40,16 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 public class SsmCommandService {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
-    private static final int MAX_OUTPUT_CHARS = 24000;
+    private static final int MAX_STDOUT_CHARS = 24000;
+    private static final int MAX_STDERR_CHARS = 8000;
 
     private final StorageBackend<String, InstanceInformation> instanceStore;
     private final StorageBackend<String, Command> commandStore;
     private final StorageBackend<String, CommandInvocation> invocationStore;
     private final ObjectMapper objectMapper;
     private final RegionResolver regionResolver;
+    private final SsmDirectCommandExecutor directCommandExecutor;
+    private final ExecutorService directExecutionExecutor;
 
     // In-memory queues: instanceId → pending messages. Not persisted — lost on restart.
     private final ConcurrentHashMap<String, Queue<PendingMessage>> messageQueues = new ConcurrentHashMap<>();
@@ -51,12 +57,22 @@ public class SsmCommandService {
     private final ConcurrentHashMap<String, String[]> messageIndex = new ConcurrentHashMap<>();
 
     @Inject
-    public SsmCommandService(StorageFactory storageFactory, ObjectMapper objectMapper, RegionResolver regionResolver) {
+    public SsmCommandService(
+            StorageFactory storageFactory,
+            ObjectMapper objectMapper,
+            RegionResolver regionResolver,
+            SsmDirectCommandExecutor directCommandExecutor) {
         this.instanceStore = storageFactory.create("ssm", "ssm-instances.json", new TypeReference<>() {});
         this.commandStore = storageFactory.create("ssm", "ssm-commands.json", new TypeReference<>() {});
         this.invocationStore = storageFactory.create("ssm", "ssm-invocations.json", new TypeReference<>() {});
         this.objectMapper = objectMapper;
         this.regionResolver = regionResolver;
+        this.directCommandExecutor = directCommandExecutor;
+        this.directExecutionExecutor = Executors.newCachedThreadPool(runnable -> {
+            Thread thread = new Thread(runnable, "floci-ssm-direct-execution");
+            thread.setDaemon(true);
+            return thread;
+        });
     }
 
     // ── Agent registration ──────────────────────────────────────────────────
@@ -119,6 +135,7 @@ public class SsmCommandService {
 
         String commandId = UUID.randomUUID().toString();
         Instant now = Instant.now();
+        List<DirectExecutionRequest> directExecutionRequests = new ArrayList<>();
 
         Command command = new Command();
         command.setCommandId(commandId);
@@ -129,7 +146,7 @@ public class SsmCommandService {
         command.setInstanceIds(new ArrayList<>(instanceIds));
         command.setRequestedDateTime(now);
         command.setStatus("Pending");
-        command.setStatusDetails("Pending");
+        command.setStatusDetails(statusDetails("Pending"));
         command.setTimeoutSeconds(timeoutSeconds);
         command.setTargetCount(instanceIds.size());
         command.setOutputS3BucketName(outputS3Bucket.isEmpty() ? null : outputS3Bucket);
@@ -138,9 +155,11 @@ public class SsmCommandService {
         command.setRegion(region);
         command.setExpiresAfter(now.plusSeconds(timeoutSeconds));
 
+        command.setStatus("InProgress");
+        command.setStatusDetails(statusDetails("InProgress"));
         commandStore.put(commandKey(region, commandId), command);
 
-        // Create invocations and queue messages for each target instance
+        // Create invocations and queue messages or directly execute against Floci EC2 containers.
         for (String instanceId : instanceIds) {
             CommandInvocation inv = new CommandInvocation();
             inv.setCommandId(commandId);
@@ -150,20 +169,33 @@ public class SsmCommandService {
             inv.setDocumentVersion(documentVersion);
             inv.setRequestedDateTime(now);
             inv.setStatus("Pending");
-            inv.setStatusDetails("Pending");
+            inv.setStatusDetails(statusDetails("Pending"));
             inv.setRegion(region);
-            invocationStore.put(invocationKey(region, commandId, instanceId), inv);
 
-            queueMessage(commandId, instanceId, documentName, parameters, timeoutSeconds, region);
+            if (directCommandExecutor.supports(instanceId, documentName)) {
+                inv.setStatus("InProgress");
+                inv.setStatusDetails(statusDetails("InProgress"));
+                invocationStore.put(invocationKey(region, commandId, instanceId), inv);
+                directExecutionRequests.add(new DirectExecutionRequest(instanceId, documentName, parameters));
+            }
+            else {
+                invocationStore.put(invocationKey(region, commandId, instanceId), inv);
+                queueMessage(commandId, instanceId, documentName, parameters, timeoutSeconds, region);
+            }
         }
 
-        // Transition command to InProgress since messages are queued
-        command.setStatus("InProgress");
-        command.setStatusDetails("InProgress");
-        commandStore.put(commandKey(region, commandId), command);
-
         LOG.infov("SendCommand: commandId={0} document={1} targets={2}", commandId, documentName, instanceIds);
-        return command;
+        Command response = copyCommand(command);
+        for (DirectExecutionRequest directExecutionRequest : directExecutionRequests) {
+            runDirectCommandAsync(
+                    commandId,
+                    directExecutionRequest.instanceId(),
+                    directExecutionRequest.documentName(),
+                    directExecutionRequest.parameters(),
+                    timeoutSeconds,
+                    region);
+        }
+        return response;
     }
 
     public CommandInvocation getCommandInvocation(String commandId, String instanceId, String region) {
@@ -269,7 +301,7 @@ public class SsmCommandService {
         invocationStore.get(invKey).ifPresent(inv -> {
             if ("Pending".equals(inv.getStatus())) {
                 inv.setStatus("InProgress");
-                inv.setStatusDetails("InProgress");
+                inv.setStatusDetails(statusDetails("InProgress"));
                 inv.setExecutionStartDateTime(Instant.now());
                 invocationStore.put(invKey, inv);
             }
@@ -312,18 +344,18 @@ public class SsmCommandService {
             }
 
             // Trim output to AWS limits
-            if (stdout.length() > MAX_OUTPUT_CHARS) {
-                stdout = stdout.substring(stdout.length() - MAX_OUTPUT_CHARS);
+            if (stdout.length() > MAX_STDOUT_CHARS) {
+                stdout = truncateOutput(stdout, MAX_STDOUT_CHARS);
             }
-            if (stderr.length() > MAX_OUTPUT_CHARS) {
-                stderr = stderr.substring(stderr.length() - MAX_OUTPUT_CHARS);
+            if (stderr.length() > MAX_STDERR_CHARS) {
+                stderr = truncateOutput(stderr, MAX_STDERR_CHARS);
             }
 
             String invKey = invocationKey(region, commandId, instanceId);
             CommandInvocation inv = invocationStore.get(invKey).orElse(null);
             if (inv != null) {
                 inv.setStatus(toInvocationStatus(status));
-                inv.setStatusDetails(toInvocationStatus(status));
+                inv.setStatusDetails(statusDetails(toInvocationStatus(status)));
                 inv.setStandardOutputContent(stdout);
                 inv.setStandardErrorContent(stderr);
                 inv.setResponseCode(returnCode);
@@ -383,7 +415,7 @@ public class SsmCommandService {
         command.setInstanceIds(List.of(instanceId));
         command.setRequestedDateTime(now);
         command.setStatus("InProgress");
-        command.setStatusDetails("InProgress");
+        command.setStatusDetails(statusDetails("InProgress"));
         command.setTimeoutSeconds(timeoutSeconds);
         command.setTargetCount(1);
         command.setRegion(region);
@@ -397,7 +429,7 @@ public class SsmCommandService {
         inv.setDocumentVersion("$DEFAULT");
         inv.setRequestedDateTime(now);
         inv.setStatus("Pending");
-        inv.setStatusDetails("Pending");
+        inv.setStatusDetails(statusDetails("Pending"));
         inv.setRegion(region);
         invocationStore.put(invocationKey(region, commandId, instanceId), inv);
 
@@ -412,6 +444,57 @@ public class SsmCommandService {
     }
 
     // ── Internal helpers ────────────────────────────────────────────────────
+
+    private void runDirectCommandAsync(
+            String commandId,
+            String instanceId,
+            String documentName,
+            Map<String, List<String>> parameters,
+            int timeoutSeconds,
+            String region) {
+        CompletableFuture.runAsync(() -> {
+            String invKey = invocationKey(region, commandId, instanceId);
+            CommandInvocation invocation = invocationStore.get(invKey).orElse(null);
+            if (invocation == null || "Cancelled".equals(invocation.getStatus())) {
+                return;
+            }
+
+            SsmDirectCommandExecutor.ExecutionResult result = directCommandExecutor
+                    .executeIfSupported(instanceId, documentName, parameters, timeoutSeconds)
+                    .orElse(null);
+            if (result == null) {
+                invocation.setStatus("Pending");
+                invocation.setStatusDetails(statusDetails("Pending"));
+                invocationStore.put(invKey, invocation);
+                queueMessage(commandId, instanceId, documentName, parameters, timeoutSeconds, region);
+                updateCommandStatus(commandId, region);
+                return;
+            }
+            applyDirectResult(invocation, result);
+            invocationStore.put(invKey, invocation);
+            updateCommandStatus(commandId, region);
+        }, directExecutionExecutor);
+    }
+
+    private void applyDirectResult(CommandInvocation invocation, SsmDirectCommandExecutor.ExecutionResult result) {
+        invocation.setStatus(result.status());
+        invocation.setStatusDetails(statusDetails(result.status()));
+        invocation.setStandardOutputContent(truncateOutput(result.standardOutput(), MAX_STDOUT_CHARS));
+        invocation.setStandardErrorContent(truncateOutput(result.standardError(), MAX_STDERR_CHARS));
+        invocation.setResponseCode(result.responseCode());
+        invocation.setExecutionStartDateTime(result.executionStartDateTime());
+        invocation.setExecutionEndDateTime(result.executionEndDateTime());
+    }
+
+    private static String truncateOutput(String output, int maxChars) {
+        if (output == null) {
+            return "";
+        }
+        if (output.length() <= maxChars) {
+            return output;
+        }
+        return output.substring(0, maxChars);
+    }
 
     private void queueMessage(String commandId, String instanceId, String documentName,
                               Map<String, List<String>> parameters, int timeoutSeconds, String region) {
@@ -510,6 +593,7 @@ public class SsmCommandService {
         List<String> instanceIds = command.getInstanceIds();
         int completed = 0;
         int errors = 0;
+        int timedOut = 0;
         boolean anyInProgress = false;
 
         for (String iid : instanceIds) {
@@ -521,6 +605,9 @@ public class SsmCommandService {
             } else if ("Failed".equals(s) || "TimedOut".equals(s) || "Cancelled".equals(s)) {
                 completed++;
                 errors++;
+                if ("TimedOut".equals(s)) {
+                    timedOut++;
+                }
             } else if ("InProgress".equals(s) || "Pending".equals(s)) {
                 anyInProgress = true;
             }
@@ -530,11 +617,25 @@ public class SsmCommandService {
         command.setErrorCount(errors);
 
         if (!anyInProgress && completed == instanceIds.size()) {
-            command.setStatus(errors == 0 ? "Success" : (errors == instanceIds.size() ? "Failed" : "Success"));
-            command.setStatusDetails(command.getStatus());
+            String status = commandStatus(errors, timedOut, instanceIds.size());
+            command.setStatus(status);
+            command.setStatusDetails(statusDetails(command.getStatus()));
         }
 
         commandStore.put(commandKey(region, commandId), command);
+    }
+
+    private static String commandStatus(int errors, int timedOut, int targetCount) {
+        if (errors == 0) {
+            return "Success";
+        }
+        if (timedOut == targetCount) {
+            return "TimedOut";
+        }
+        if (errors == targetCount) {
+            return "Failed";
+        }
+        return "Success";
     }
 
     private static String toInvocationStatus(String agentStatus) {
@@ -547,6 +648,43 @@ public class SsmCommandService {
         };
     }
 
+    private static String statusDetails(String status) {
+        return switch (status) {
+            case "InProgress" -> "In Progress";
+            case "TimedOut" -> "Execution Timed Out";
+            default -> status;
+        };
+    }
+
+    private static Command copyCommand(Command source) {
+        Command copy = new Command();
+        copy.setCommandId(source.getCommandId());
+        copy.setDocumentName(source.getDocumentName());
+        copy.setDocumentVersion(source.getDocumentVersion());
+        copy.setComment(source.getComment());
+        copy.setExpiresAfter(source.getExpiresAfter());
+        copy.setParameters(source.getParameters());
+        copy.setInstanceIds(source.getInstanceIds() == null ? null : new ArrayList<>(source.getInstanceIds()));
+        copy.setRequestedDateTime(source.getRequestedDateTime());
+        copy.setStatus(source.getStatus());
+        copy.setStatusDetails(source.getStatusDetails());
+        copy.setTimeoutSeconds(source.getTimeoutSeconds());
+        copy.setTargetCount(source.getTargetCount());
+        copy.setCompletedCount(source.getCompletedCount());
+        copy.setErrorCount(source.getErrorCount());
+        copy.setOutputS3BucketName(source.getOutputS3BucketName());
+        copy.setOutputS3KeyPrefix(source.getOutputS3KeyPrefix());
+        copy.setOutputS3Region(source.getOutputS3Region());
+        copy.setRegion(source.getRegion());
+        return copy;
+    }
+
+    private record DirectExecutionRequest(
+            String instanceId,
+            String documentName,
+            Map<String, List<String>> parameters) {}
+
+    @SuppressWarnings("unchecked")
     private Map<String, List<String>> parseParameters(JsonNode parametersNode) {
         if (parametersNode == null || parametersNode.isNull() || !parametersNode.isObject()) {
             return Map.of();

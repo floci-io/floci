@@ -38,6 +38,7 @@ Floci emulates 58 AWS services. See the [Services Overview](services/index.md) f
 | RDS (PostgreSQL / MySQL) | Query + wire proxy |
 | RDS Data API | REST JSON |
 | Neptune (graph DB / Gremlin) | Query + WebSocket proxy |
+| DocumentDB (MongoDB-compatible) | Query + MongoDB wire |
 | MSK (Kafka / Redpanda) | REST JSON + Kafka |
 | Athena | JSON 1.1 |
 | Glue Data Catalog + Schema Registry | JSON 1.1 |
