@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -96,6 +97,56 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void startQueryFindsParamAcrossMultipleGroups() {
+        // The same params.id is logged from several service/engine groups.
+        String reportingSpark = "reporting/spark";
+        String reportingMysql = "reporting/mysql";
+        String dashboardMysql = "dashboard/mysql";
+        String invoiceSpark = "invoice/spark"; // matching event, but NOT queried — must be excluded
+        createGroupStream(service, reportingSpark, "s-1");
+        createGroupStream(service, reportingMysql, "s-1");
+        createGroupStream(service, dashboardMysql, "s-1");
+        createGroupStream(service, invoiceSpark, "s-1");
+
+        putRaw(service, reportingSpark, "s-1", BASE_MS + 2000, idLog("REQ-42", "spark-stage-done"));
+        putRaw(service, reportingMysql, "s-1", BASE_MS + 5000, idLog("REQ-42", "mysql-commit"));
+        putRaw(service, dashboardMysql, "s-1", BASE_MS + 3000, idLog("REQ-42", "dashboard-render"));
+        putRaw(service, reportingMysql, "s-1", BASE_MS + 1000, idLog("REQ-99", "unrelated-id"));   // different id → filtered
+        putRaw(service, invoiceSpark, "s-1", BASE_MS + 6000, idLog("REQ-42", "invoice-export"));   // matches, group not queried
+
+        String query = """
+                fields @timestamp, @message, params.id
+                | filter params.id = 'REQ-42'
+                | sort @timestamp desc
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        long endSec = startSec + 86400;
+        // Query spans three groups; the params.id filter finds REQ-42 wherever it was logged among them.
+        String queryId = service.startQuery(
+                List.of(reportingSpark, reportingMysql, dashboardMysql), startSec, endSec, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(3, state.rows().size(), "REQ-42 is found across all three queried groups");
+
+        // Every matched row carries the requested param, regardless of which group it came from.
+        for (LinkedHashMap<String, String> row : state.rows()) {
+            assertEquals("REQ-42", row.get("params.id"));
+        }
+
+        // Merged + globally sorted desc: mysql-commit(5000), dashboard-render(3000), spark-stage-done(2000).
+        assertTrue(state.rows().get(0).get("@message").contains("mysql-commit"));
+        assertTrue(state.rows().get(1).get("@message").contains("dashboard-render"));
+        assertTrue(state.rows().get(2).get("@message").contains("spark-stage-done"));
+
+        // A different params.id is filtered out; a matching REQ-42 in the un-queried invoice/spark is excluded.
+        for (LinkedHashMap<String, String> row : state.rows()) {
+            assertFalse(row.get("@message").contains("unrelated-id"));
+            assertFalse(row.get("@message").contains("invoice-export"));
+        }
+    }
+
+    @Test
     void queryResolvesNestedJsonObjectsAndDeepPaths() {
         String group = "/app/build/publish-logs";
         String stream = "publisher-1";
@@ -136,7 +187,7 @@ class CloudWatchLogsInsightsQueryTest {
 
     @Test
     void stopCompletedQueryThrowsInvalidParameter() {
-        String group = "/app/batch/job-logs";
+        String group = "/app/batch/spark-logs";
         String stream = "batch-1";
         createGroupStream(service, group, stream);
         // The default service has zero completion delay, so the query is Complete immediately.
@@ -243,6 +294,12 @@ class CloudWatchLogsInsightsQueryTest {
         return String.format(
                 "{\"level\":\"%s\",\"message\":\"%s\",\"params\":{\"job_id\":\"%s\"}}",
                 level, text, jobId);
+    }
+
+    private static String idLog(String id, String text) {
+        return String.format(
+                "{\"level\":\"INFO\",\"message\":\"%s\",\"params\":{\"id\":\"%s\"}}",
+                text, id);
     }
 
     private static String artifactLog(String jobId, String group, String artifact, String version) {
