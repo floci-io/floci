@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
+import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -315,6 +316,79 @@ class AutoScalingServiceTest {
 
         verify(ec2Service).terminateInstances(REGION, List.of("i-stale"));
         assertTrue(service.describeAutoScalingGroups(REGION, List.of("test-asg")).isEmpty());
+    }
+
+    @Test
+    void createAutoScalingGroupRejectsMixedInstancesPolicyWithoutLaunchTemplate() {
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+        MixedInstancesPolicy.InstancesDistribution distribution =
+                new MixedInstancesPolicy.InstancesDistribution();
+        distribution.setOnDemandBaseCapacity(1);
+        policy.setInstancesDistribution(distribution);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> createWithMixedInstancesPolicy("mixed-no-lt", policy));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createAutoScalingGroupRejectsMixedInstancesPolicyWithBlankLaunchTemplateIdentifiers() {
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+        MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                new MixedInstancesPolicy.LaunchTemplateSpecification();
+        specification.setLaunchTemplateId("");
+        specification.setLaunchTemplateName("  ");
+        launchTemplate.setLaunchTemplateSpecification(specification);
+        policy.setLaunchTemplate(launchTemplate);
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> createWithMixedInstancesPolicy("mixed-blank-lt", policy));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
+    void createAutoScalingGroupAcceptsMixedInstancesPolicyWithLaunchTemplate() {
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+        MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                new MixedInstancesPolicy.LaunchTemplateSpecification();
+        specification.setLaunchTemplateId("lt-mixed");
+        launchTemplate.setLaunchTemplateSpecification(specification);
+        policy.setLaunchTemplate(launchTemplate);
+
+        createWithMixedInstancesPolicy("mixed-with-lt", policy);
+
+        var group = service.describeAutoScalingGroups(REGION, List.of("mixed-with-lt")).getFirst();
+        assertEquals("lt-mixed",
+                group.getMixedInstancesPolicy().getLaunchTemplate()
+                        .getLaunchTemplateSpecification().getLaunchTemplateId());
+    }
+
+    private void createWithMixedInstancesPolicy(String name, MixedInstancesPolicy policy) {
+        service.createAutoScalingGroup(REGION,
+                name,
+                null,
+                null,
+                null,
+                null,
+                policy,
+                0,
+                3,
+                1,
+                300,
+                List.of("us-east-1a"),
+                List.of(),
+                List.of(),
+                List.of(),
+                "EC2",
+                0,
+                List.of("Default"),
+                java.util.Map.of());
     }
 
     private static final class AutoScalingGroupFixture {

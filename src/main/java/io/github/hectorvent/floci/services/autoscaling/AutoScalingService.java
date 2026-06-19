@@ -128,7 +128,8 @@ public class AutoScalingService {
         if (launchConfigName == null && launchTemplateId == null && launchTemplateName == null
                 && mixedInstancesPolicy == null) {
             throw new AwsException("ValidationError",
-                    "Either LaunchConfigurationName or LaunchTemplate must be specified.", 400);
+                    "Valid requests must contain either LaunchTemplate, LaunchConfigurationName, "
+                            + "InstanceId or MixedInstancesPolicy parameter.", 400);
         }
 
         AutoScalingGroup asg = new AutoScalingGroup();
@@ -642,6 +643,29 @@ public class AutoScalingService {
             throw new AwsException("ValidationError",
                     "LaunchConfigurationName, LaunchTemplate, and MixedInstancesPolicy are mutually exclusive.", 400);
         }
+        if (mixedInstancesPolicy != null && !hasUsableLaunchTemplate(mixedInstancesPolicy)) {
+            throw new AwsException("ValidationError",
+                    "A MixedInstancesPolicy must specify a LaunchTemplate with a LaunchTemplateId "
+                            + "or LaunchTemplateName.", 400);
+        }
+    }
+
+    private static boolean hasUsableLaunchTemplate(MixedInstancesPolicy mixedInstancesPolicy) {
+        MixedInstancesPolicy.LaunchTemplate launchTemplate = mixedInstancesPolicy.getLaunchTemplate();
+        if (launchTemplate == null) {
+            return false;
+        }
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                launchTemplate.getLaunchTemplateSpecification();
+        if (specification == null) {
+            return false;
+        }
+        return notBlank(specification.getLaunchTemplateId())
+                || notBlank(specification.getLaunchTemplateName());
+    }
+
+    private static boolean notBlank(String value) {
+        return value != null && !value.isBlank();
     }
 
     private static String instanceRefreshKey(String region, String asgName, String refreshId) {
