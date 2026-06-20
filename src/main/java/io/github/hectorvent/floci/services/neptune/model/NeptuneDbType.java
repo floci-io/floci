@@ -1,6 +1,6 @@
 package io.github.hectorvent.floci.services.neptune.model;
 
-import io.github.hectorvent.floci.core.common.AwsException;
+import java.util.Optional;
 
 /**
  * Backend graph database engine used to emulate a Neptune cluster.
@@ -36,18 +36,17 @@ public enum NeptuneDbType {
     /**
      * Resolves a configured db-type string (case-insensitive) to an engine.
      * Empty / null falls back to {@link #GREMLIN} to preserve historical behaviour.
-     *
-     * @throws AwsException for an unrecognised value
+     * An unrecognised value returns {@link Optional#empty()} so the caller can fall back
+     * to the default rather than failing the client's request over a server-side typo.
      */
-    public static NeptuneDbType fromConfig(String value) {
+    public static Optional<NeptuneDbType> fromConfig(String value) {
         if (value == null || value.isBlank()) {
-            return GREMLIN;
+            return Optional.of(GREMLIN);
         }
         return switch (value.trim().toLowerCase()) {
-            case "gremlin", "tinkerpop" -> GREMLIN;
-            case "neo4j", "opencypher", "cypher", "bolt" -> NEO4J;
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Unsupported Neptune db type: " + value + ". Supported: gremlin, neo4j.", 400);
+            case "gremlin", "tinkerpop" -> Optional.of(GREMLIN);
+            case "neo4j", "opencypher", "cypher", "bolt" -> Optional.of(NEO4J);
+            default -> Optional.empty();
         };
     }
 }

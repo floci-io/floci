@@ -63,7 +63,12 @@ public class NeptuneService {
         }
 
         int proxyPort = allocateProxyPort();
-        NeptuneDbType dbType = NeptuneDbType.fromConfig(config.services().neptune().dbType());
+        String configuredDbType = config.services().neptune().dbType();
+        NeptuneDbType dbType = NeptuneDbType.fromConfig(configuredDbType).orElseGet(() -> {
+            LOG.warnv("Unsupported Neptune db-type ''{0}'', falling back to {1}. Supported: gremlin, neo4j.",
+                    configuredDbType, NeptuneDbType.GREMLIN);
+            return NeptuneDbType.GREMLIN;
+        });
         String image = switch (dbType) {
             case GREMLIN -> config.services().neptune().defaultImage();
             case NEO4J -> config.services().neptune().defaultNeo4jImage();
