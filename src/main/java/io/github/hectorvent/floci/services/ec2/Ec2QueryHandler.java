@@ -276,6 +276,15 @@ public class Ec2QueryHandler {
         return tags;
     }
 
+    // Apply tags supplied inline on a create call (TagSpecification) to the resource, so
+    // they round-trip on the next Describe* — otherwise the provider sees phantom tag drift.
+    private void applyResourceTags(MultivaluedMap<String, String> p, String region, String resourceType, String resourceId) {
+        List<Tag> tagList = parseTagsForResource(p, resourceType);
+        if (!tagList.isEmpty()) {
+            service.createTags(region, List.of(resourceId), tagList);
+        }
+    }
+
     private Response xmlResponse(String xml) {
         return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
@@ -758,6 +767,7 @@ public class Ec2QueryHandler {
         String cidrBlock = p.getFirst("CidrBlock");
         String az = p.getFirst("AvailabilityZone");
         Subnet subnet = service.createSubnet(region, vpcId, cidrBlock, az);
+        applyResourceTags(p, region, "subnet", subnet.getSubnetId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSubnetResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -810,6 +820,7 @@ public class Ec2QueryHandler {
         String description = p.getFirst("GroupDescription");
         String vpcId = p.getFirst("VpcId");
         SecurityGroup sg = service.createSecurityGroup(region, groupName, description, vpcId);
+        applyResourceTags(p, region, "security-group", sg.getGroupId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateSecurityGroupResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -846,6 +857,13 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupIngress(region, groupId, perms);
+        List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
+        if (!ruleTags.isEmpty()) {
+            for (SecurityGroupRule rule : rules) {
+                service.createTags(region, List.of(rule.getSecurityGroupRuleId()), ruleTags);
+                rule.setTags(ruleTags);
+            }
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupIngressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -862,6 +880,13 @@ public class Ec2QueryHandler {
         String groupId = p.getFirst("GroupId");
         List<IpPermission> perms = parseIpPermissions(p, "IpPermissions");
         List<SecurityGroupRule> rules = service.authorizeSecurityGroupEgress(region, groupId, perms);
+        List<Tag> ruleTags = parseTagsForResource(p, "security-group-rule");
+        if (!ruleTags.isEmpty()) {
+            for (SecurityGroupRule rule : rules) {
+                service.createTags(region, List.of(rule.getSecurityGroupRuleId()), ruleTags);
+                rule.setTags(ruleTags);
+            }
+        }
         XmlBuilder xml = new XmlBuilder()
                 .start("AuthorizeSecurityGroupEgressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -889,10 +914,11 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeSecurityGroupRules(MultivaluedMap<String, String> p, String region) {
-        String groupId = p.getFirst("Filter.1.Value.1");
-        List<String> ruleIds = getList(p, "SecurityGroupRuleId");
-        List<SecurityGroupRule> rules = service.describeSecurityGroupRules(region,
-                groupId != null ? groupId : "", ruleIds);
+        Map<String, List<String>> filters = getFilters(p);
+        List<String> ruleIds = new ArrayList<>(getList(p, "SecurityGroupRuleId"));
+        ruleIds.addAll(filters.getOrDefault("security-group-rule-id", List.of()));
+        List<String> groupIds = filters.getOrDefault("group-id", List.of());
+        List<SecurityGroupRule> rules = service.describeSecurityGroupRules(region, groupIds, ruleIds);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSecurityGroupRulesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1075,6 +1101,7 @@ public class Ec2QueryHandler {
 
     private Response handleCreateInternetGateway(MultivaluedMap<String, String> p, String region) {
         InternetGateway igw = service.createInternetGateway(region);
+        applyResourceTags(p, region, "internet-gateway", igw.getInternetGatewayId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateInternetGatewayResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1118,6 +1145,7 @@ public class Ec2QueryHandler {
     private Response handleCreateRouteTable(MultivaluedMap<String, String> p, String region) {
         String vpcId = p.getFirst("VpcId");
         RouteTable rt = service.createRouteTable(region, vpcId);
+        applyResourceTags(p, region, "route-table", rt.getRouteTableId());
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateRouteTableResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1170,7 +1198,8 @@ public class Ec2QueryHandler {
         String rtId = p.getFirst("RouteTableId");
         String dest = p.getFirst("DestinationCidrBlock");
         String gwId = p.getFirst("GatewayId");
-        service.createRoute(region, rtId, dest, gwId);
+        String natGwId = p.getFirst("NatGatewayId");
+        service.createRoute(region, rtId, dest, gwId, natGwId);
         return booleanResponse("CreateRoute");
     }
 
@@ -1294,6 +1323,7 @@ public class Ec2QueryHandler {
 
     private Response handleAllocateAddress(MultivaluedMap<String, String> p, String region) {
         Address addr = service.allocateAddress(region);
+        applyResourceTags(p, region, "elastic-ip", addr.getAllocationId());
         XmlBuilder xml = new XmlBuilder()
                 .start("AllocateAddressResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())
@@ -1872,7 +1902,8 @@ public class Ec2QueryHandler {
         if (rule.getToPort() != null) xml.elem("toPort", String.valueOf(rule.getToPort()));
         xml.elem("cidrIpv4", rule.getCidrIpv4())
                 .elem("cidrIpv6", rule.getCidrIpv6())
-                .elem("description", rule.getDescription());
+                .elem("description", rule.getDescription())
+                .raw(tagSetXml(rule.getTags()));
         return xml.build();
     }
 
@@ -1902,6 +1933,7 @@ public class Ec2QueryHandler {
             xml.start("item")
                     .elem("destinationCidrBlock", r.getDestinationCidrBlock())
                     .elem("gatewayId", r.getGatewayId())
+                    .elem("natGatewayId", r.getNatGatewayId())
                     .elem("state", r.getState())
                     .elem("origin", r.getOrigin())
                     .end("item");
