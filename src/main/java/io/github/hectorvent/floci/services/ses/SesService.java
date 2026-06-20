@@ -695,6 +695,61 @@ public class SesService {
                 configSetName, region, metricsEnabled);
     }
 
+    private boolean isVerifiedDomainIdentity(String domain, String region) {
+        Identity identity = getIdentityVerificationAttributes(domain, region);
+        return identity != null && "Success".equals(identity.getVerificationStatus())
+                && "Domain".equals(identity.getIdentityType());
+    }
+
+    private void requireVerifiedRedirectDomain(String domain, String region) {
+        if (domain == null || domain.isBlank()) {
+            throw new AwsException("InvalidParameterValue", "CustomRedirectDomain is required.", 400);
+        }
+        if (!isVerifiedDomainIdentity(domain, region)) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
+        }
+    }
+
+    public void createConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
+                                                      String region) {
+        requireVerifiedRedirectDomain(customRedirectDomain, region);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() != null && cs.getTrackingOptions().getCustomRedirectDomain() != null) {
+            throw new AwsException("TrackingOptionsAlreadyExistsException",
+                    "Configuration set <" + configSetName + "> already has tracking options.", 400);
+        }
+        TrackingOptions options = new TrackingOptions();
+        options.setCustomRedirectDomain(customRedirectDomain);
+        cs.setTrackingOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Created TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void updateConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
+                                                      String region) {
+        requireVerifiedRedirectDomain(customRedirectDomain, region);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
+            throw new AwsException("TrackingOptionsDoesNotExistException",
+                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
+        }
+        cs.getTrackingOptions().setCustomRedirectDomain(customRedirectDomain);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void deleteConfigurationSetTrackingOptions(String configSetName, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
+            throw new AwsException("TrackingOptionsDoesNotExistException",
+                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
+        }
+        cs.setTrackingOptions(null);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Deleted TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
     public void setConfigurationSetArchivingOptions(String configSetName, ArchivingOptions options, String region) {
         ConfigurationSet cs = getConfigurationSet(configSetName, region);
         cs.setArchivingOptions(options);
@@ -752,13 +807,9 @@ public class SesService {
             throw new AwsException("BadRequestException",
                     "CustomRedirectDomain must be specified.", 400);
         }
-        if (domain != null) {
-            Identity identity = getIdentityVerificationAttributes(domain, region);
-            if (identity == null || !"Success".equals(identity.getVerificationStatus())
-                    || !"Domain".equals(identity.getIdentityType())) {
-                throw new AwsException("BadRequestException",
-                        "Domain <" + domain + "> is not verified under this account.", 400);
-            }
+        if (domain != null && !isVerifiedDomainIdentity(domain, region)) {
+            throw new AwsException("BadRequestException",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
         }
         if (httpsPolicy != null && !HTTPS_POLICIES.contains(httpsPolicy)) {
             throw new AwsException("BadRequestException",
