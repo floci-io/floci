@@ -420,14 +420,13 @@ public class Ec2ContainerManager {
             String logGroup = "/aws/ec2/" + instanceId;
             String logStream = logStreamer.generateLogStreamName("user-data");
 
-            // Execute the script and stream output to CloudWatch
-           
             List<String> shellScripts = userDataShellScripts(userData);
             if (shellScripts.isEmpty()) {
                 LOG.infov("UserData for EC2 instance {0} did not contain executable shellscript parts", instanceId);
                 return;
             }
 
+            // Execute the script and stream output to CloudWatch
             for (int i = 0; i < shellScripts.size(); i++) {
                 executeUserDataShellScript(
                     containerId, instanceId, shellScripts.get(i), i + 1, shellScripts.size(),
@@ -476,7 +475,7 @@ public class Ec2ContainerManager {
         });
 
         boolean completed = latch.await(30, TimeUnit.MINUTES);
-        if (!completed) {   
+        if (!completed) {
             LOG.warnv("UserData shellscript part {0}/{1} timed out for EC2 instance {2}", partNumber, partCount, instanceId);
             return;
         }
@@ -490,7 +489,6 @@ public class Ec2ContainerManager {
 
         LOG.infov("UserData shellscript part {0}/{1} completed for EC2 instance {2}: {3}",
                 partNumber, partCount, instanceId, summarizeUserDataOutput(output));
-        return;
     }
 
     static List<String> userDataShellScripts(String userData) {
