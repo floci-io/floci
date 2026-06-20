@@ -5225,6 +5225,66 @@ class CloudFormationIntegrationTest {
             .body("services[0].taskDefinition",
                     equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:2"));
     }
+    
+    @Test
+    void deleteStack_ec2SecurityGroup_leavesNoOrphans() {
+        String stackName = "sg-delete-cleanup-stack";
+        String groupName = "sg-delete-cleanup-group";
+
+        String template = """
+                {
+                  "Resources": {
+                    "AppSecurityGroup": {
+                      "Type": "AWS::EC2::SecurityGroup",
+                      "Properties": {
+                        "GroupName": "%s",
+                        "GroupDescription": "Security group created by CloudFormation",
+                        "VpcId": "vpc-default"
+                      }
+                    }
+                  }
+                }
+                """.formatted(groupName);
+
+        given()
+                .formParam("Action", "CreateStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeSecurityGroups")
+                .formParam("Version", "2016-11-15")
+                .formParam("GroupName.1", groupName)
+                .when().post("/")
+                .then().statusCode(200)
+                .body(containsString(groupName));
+
+        given()
+                .formParam("Action", "DeleteStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeSecurityGroups")
+                .formParam("Version", "2016-11-15")
+                .formParam("GroupName.1", groupName)
+                .when().post("/")
+                .then().statusCode(200)
+                .body(not(containsString(groupName)));
+
+        given()
+                .formParam("Action", "CreateStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+                .when().post("/")
+                .then().statusCode(200);
+    }
 
     @Test
     void deleteStack_ecs_leavesNoOrphans() {

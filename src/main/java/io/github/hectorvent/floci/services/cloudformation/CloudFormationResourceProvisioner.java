@@ -426,6 +426,7 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
                 case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
+                case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
                 case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
                 case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
                 case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
