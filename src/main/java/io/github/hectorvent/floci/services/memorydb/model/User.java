@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.memorydb.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -12,6 +13,7 @@ import java.util.List;
  * resolved from the users of the ACL it references.
  */
 @RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class User {
 
     private String name;
