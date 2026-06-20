@@ -31,7 +31,8 @@ class NeptuneOpenCypherIntegrationTest {
     private static final String FORM = "application/x-www-form-urlencoded";
     private static final String CLUSTER_ID = "opencypher-cluster";
 
-    // Fake SigV4 header whose credential scope service is "neptune" routes to NeptuneQueryHandler.
+    // Fake SigV4 header whose credential scope service is "neptune" routes the management
+    // request (CreateDBCluster/DeleteDBCluster) to the Neptune service.
     private static final String AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260516/us-east-1/neptune/aws4_request, " +
             "SignedHeaders=content-type;host, Signature=test";
@@ -71,7 +72,9 @@ class NeptuneOpenCypherIntegrationTest {
                     .contentType(FORM)
                     .formParam("Action", "DeleteDBCluster")
                     .formParam("DBClusterIdentifier", CLUSTER_ID)
-                .when().post("/");
+                .when().post("/")
+                .then()
+                    .statusCode(200);
         }
     }
 

@@ -12,10 +12,10 @@ Neptune supports multiple query languages. Floci backs each one with a different
 
 | `db-type` | Backend image | Query language | Wire protocol |
 |-----------|---------------|----------------|---------------|
-| `gremlin` _(default)_ | [Apache TinkerPop Gremlin Server](https://tinkerpop.apache.org/) | Gremlin | WebSocket (port 8182) |
-| `neo4j` | [Neo4j](https://neo4j.com/) | openCypher | Bolt (port 7687) |
+| `gremlin` _(default)_ | [Apache TinkerPop Gremlin Server](https://tinkerpop.apache.org/) | Gremlin | WebSocket |
+| `neo4j` | [Neo4j](https://neo4j.com/) | openCypher | Bolt |
 
-The proxy is a transparent byte relay, so the host-facing proxy port range is unchanged regardless of engine — only the protocol you connect with differs. The Neo4j backend runs with `NEO4J_AUTH=none`, matching Neptune's model of authenticating at the AWS edge (IAM) rather than at the graph protocol; connect your Bolt/openCypher driver with no auth.
+The proxy is a transparent byte relay, so the host-facing proxy port range is unchanged regardless of engine — only the protocol you connect with differs. Connect to a cluster's proxy port (from the `8182`–`8282` range, returned by `DescribeDBClusters`), not the backend's native port. The Neo4j backend runs with `NEO4J_AUTH=none`, matching Neptune's model of authenticating at the AWS edge (IAM) rather than at the graph protocol; connect your Bolt/openCypher driver with no auth.
 
 ## Supported Actions
 
