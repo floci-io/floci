@@ -14,12 +14,18 @@ import software.amazon.awssdk.services.codepipeline.model.ActionTypeId;
 import software.amazon.awssdk.services.codepipeline.model.ArtifactStore;
 import software.amazon.awssdk.services.codepipeline.model.ArtifactStoreType;
 import software.amazon.awssdk.services.codepipeline.model.CreatePipelineResponse;
+import software.amazon.awssdk.services.codepipeline.model.DeleteWebhookResponse;
 import software.amazon.awssdk.services.codepipeline.model.GetPipelineResponse;
 import software.amazon.awssdk.services.codepipeline.model.ListPipelinesResponse;
+import software.amazon.awssdk.services.codepipeline.model.ListWebhooksResponse;
 import software.amazon.awssdk.services.codepipeline.model.OutputArtifact;
 import software.amazon.awssdk.services.codepipeline.model.PipelineDeclaration;
+import software.amazon.awssdk.services.codepipeline.model.PutWebhookResponse;
 import software.amazon.awssdk.services.codepipeline.model.StageDeclaration;
 import software.amazon.awssdk.services.codepipeline.model.UpdatePipelineResponse;
+import software.amazon.awssdk.services.codepipeline.model.WebhookAuthenticationType;
+import software.amazon.awssdk.services.codepipeline.model.WebhookDefinition;
+import software.amazon.awssdk.services.codepipeline.model.WebhookFilterRule;
 
 import java.util.Map;
 
@@ -65,6 +71,33 @@ class CodePipelineTest {
 
     @Test
     @Order(3)
+    void webhookResponsesUseSdkModelShape() {
+        WebhookDefinition definition = WebhookDefinition.builder()
+                .name("sdk-webhook")
+                .targetPipeline(PIPELINE)
+                .targetAction("Source")
+                .authentication(WebhookAuthenticationType.UNAUTHENTICATED)
+                .filters(WebhookFilterRule.builder()
+                        .jsonPath("$.ref")
+                        .matchEquals("refs/heads/main")
+                        .build())
+                .build();
+
+        PutWebhookResponse created = codepipeline.putWebhook(r -> r.webhook(definition));
+        assertThat(created.webhook().definition()).isEqualTo(definition);
+        assertThat(created.webhook().arn()).endsWith(":webhook/sdk-webhook");
+
+        ListWebhooksResponse listed = codepipeline.listWebhooks();
+        assertThat(listed.webhooks()).singleElement()
+                .extracting(webhook -> webhook.definition().name())
+                .isEqualTo("sdk-webhook");
+
+        DeleteWebhookResponse deleted = codepipeline.deleteWebhook(r -> r.name("sdk-webhook"));
+        assertThat(deleted.sdkFields()).isEmpty();
+    }
+
+    @Test
+    @Order(4)
     void deletePipeline() {
         codepipeline.deletePipeline(r -> r.name(PIPELINE));
         assertThat(codepipeline.listPipelines().pipelines())

@@ -15,6 +15,7 @@ import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.nullValue;
 
 @QuarkusTest
 class CodePipelineIntegrationTest {
@@ -120,6 +121,29 @@ class CodePipelineIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("actionExecutionDetails", hasSize(2));
+
+        String rollbackExecutionId = post("RollbackStage", """
+                {
+                    "pipelineName": "%s",
+                    "stageName": "Deploy",
+                    "targetPipelineExecutionId": "%s"
+                }
+                """.formatted(pipelineName, executionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecutionId", notNullValue())
+                .extract().path("pipelineExecutionId");
+
+        waitForExecution(pipelineName, rollbackExecutionId, "Succeeded");
+
+        post("GetPipelineExecution", """
+                {"pipelineName": "%s", "pipelineExecutionId": "%s"}
+                """.formatted(pipelineName, rollbackExecutionId))
+                .then()
+                .statusCode(200)
+                .body("pipelineExecution.executionType", equalTo("ROLLBACK"))
+                .body("pipelineExecution.rollbackMetadata.rollbackTargetPipelineExecutionId", equalTo(executionId))
+                .body("pipelineExecution.rollbackTargetPipelineExecutionId", nullValue());
 
         post("TagResource", """
                 {
@@ -246,8 +270,10 @@ class CodePipelineIntegrationTest {
                 """)
                 .then()
                 .statusCode(200)
-                .body("webhook.name", equalTo("source-hook"))
-                .body("webhook.registrationStatus", equalTo("DEREGISTERED"));
+                .body("webhook.definition.name", equalTo("source-hook"))
+                .body("webhook.definition.targetPipeline", equalTo("pipeline"))
+                .body("webhook.definition.targetAction", equalTo("source"))
+                .body("webhook.registrationStatus", nullValue());
 
         post("RegisterWebhookWithThirdParty", """
                 {"webhookName": "source-hook"}
@@ -256,7 +282,16 @@ class CodePipelineIntegrationTest {
         post("ListWebhooks", "{}")
                 .then()
                 .statusCode(200)
-                .body("webhooks.name", hasItem("source-hook"));
+                .body("webhooks.definition.name", hasItem("source-hook"))
+                .body("webhooks[0].definition.filters[0].jsonPath", equalTo("$.ref"))
+                .body("webhooks[0].registrationStatus", nullValue());
+
+        post("DeleteWebhook", """
+                {"name": "source-hook"}
+                """)
+                .then()
+                .statusCode(200)
+                .body(equalTo("{}"));
 
         post("CreatePipeline", """
                 {"pipeline": {"name": "invalid", "roleArn": "role", "stages": []}}

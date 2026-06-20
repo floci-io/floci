@@ -613,19 +613,21 @@ public class CodePipelineService {
         if (name == null || name.isBlank()) {
             throw new AwsException("ValidationException", "webhook.name is required", 400);
         }
-        ObjectNode definition = webhook.deepCopy();
-        definition.put("url", "http://localhost:4566/codepipeline/webhooks/" + name);
-        definition.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, "webhook/" + name).toString());
-        definition.put("registrationStatus", "DEREGISTERED");
-        storeItem(account, region, "webhook", name, "DEREGISTERED", definition);
-        return mapper.createObjectNode().set("webhook", definition);
+        ObjectNode item = mapper.createObjectNode();
+        item.set("definition", webhook.deepCopy());
+        item.put("url", "http://localhost:4566/codepipeline/webhooks/" + name);
+        item.put("arn", AwsArnUtils.Arn.of("codepipeline", region, account, "webhook/" + name).toString());
+        if (request.path("tags").isArray() && !request.path("tags").isEmpty()) {
+            item.set("tags", request.path("tags").deepCopy());
+        }
+        storeItem(account, region, "webhook", name, "DEREGISTERED", item);
+        return mapper.createObjectNode().set("webhook", item);
     }
 
     private ObjectNode deleteWebhook(JsonNode request, String region, String account) {
         String name = text(request, "name");
-        boolean existed = itemStore.getForAccount(account, itemKey(region, "webhook", name)).isPresent();
         itemStore.deleteForAccount(account, itemKey(region, "webhook", name));
-        return mapper.createObjectNode().put("deletedWebhookName", existed ? name : "");
+        return mapper.createObjectNode();
     }
 
     private ObjectNode listWebhooks(JsonNode request, String region, String account) {
@@ -643,7 +645,6 @@ public class CodePipelineService {
                 account, region, "webhook", text(request, "webhookName"), "WebhookNotFoundException");
         webhook.setStatus(registered ? "REGISTERED" : "DEREGISTERED");
         webhook.setUpdated(now());
-        ((ObjectNode) webhook.getData()).put("registrationStatus", webhook.getStatus());
         putItem(webhook);
         return mapper.createObjectNode();
     }
@@ -1138,7 +1139,8 @@ public class CodePipelineService {
     private ObjectNode executionNode(CodePipelineExecution execution) {
         ObjectNode node = mapper.valueToTree(execution);
         node.remove(List.of("accountId", "region", "startTime", "lastUpdateTime",
-                "sourceRevisions", "actionExecutions", "currentStage", "stopRequested", "abandon"));
+                "sourceRevisions", "actionExecutions", "currentStage", "stopRequested", "abandon",
+                "rollbackTargetPipelineExecutionId"));
         if (execution.getRollbackTargetPipelineExecutionId() != null) {
             node.putObject("rollbackMetadata").put(
                     "rollbackTargetPipelineExecutionId", execution.getRollbackTargetPipelineExecutionId());
