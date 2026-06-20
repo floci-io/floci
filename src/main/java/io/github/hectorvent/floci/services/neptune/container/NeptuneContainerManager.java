@@ -176,7 +176,7 @@ public class NeptuneContainerManager {
                 out.flush();
                 byte[] buf = new byte[32];
                 int n = s.getInputStream().read(buf);
-                if (n > 0) {
+                if (probeIndicatesReady(dbType, buf, n)) {
                     if (attempt > 1) {
                         LOG.infov("Neptune {0} backend ready for cluster {1} after {2} probe attempt(s)",
                                 dbType, clusterId, attempt);
@@ -200,5 +200,22 @@ public class NeptuneContainerManager {
         throw new RuntimeException(
                 "Neptune " + dbType + " backend for cluster " + clusterId + " did not become ready on "
                         + host + ":" + port + " within " + BACKEND_READY_DEADLINE_MS + "ms");
+    }
+
+    /**
+     * Decides whether a probe response signals readiness. For Gremlin any reply confirms the
+     * server is listening. For Neo4j the Bolt handshake reply is the 4-byte agreed version;
+     * an all-zero version ({@code 0x00000000}) means the connector answered but rejected every
+     * proposed Bolt version, so the backend is reachable but unusable — treat it as not-ready
+     * and keep retrying rather than handing back a cluster whose sessions will fail.
+     */
+    private static boolean probeIndicatesReady(NeptuneDbType dbType, byte[] response, int n) {
+        if (n <= 0) {
+            return false;
+        }
+        return switch (dbType) {
+            case GREMLIN -> true;
+            case NEO4J -> n >= 4 && (response[0] | response[1] | response[2] | response[3]) != 0;
+        };
     }
 }
