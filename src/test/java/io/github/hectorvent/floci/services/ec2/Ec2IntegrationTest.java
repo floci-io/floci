@@ -2382,4 +2382,194 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .body("DescribeSpotInstanceRequestsResponse.spotInstanceRequestSet.item[0].state", equalTo("cancelled"));
     }
+
+    private String newVpc(String cidr) {
+        return given()
+            .formParam("Action", "CreateVpc")
+            .formParam("CidrBlock", cidr)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateVpcResponse.vpc.vpcId");
+    }
+
+    @Test
+    @Order(310)
+    void defaultNetworkAclCreatedWithVpc() {
+        String vpc = newVpc("10.30.0.0/16");
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpc)
+            .formParam("Filter.2.Name", "default")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.networkAclId", startsWith("acl-"))
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.vpcId", equalTo(vpc));
+    }
+
+    @Test
+    @Order(311)
+    void networkAclCreateEntryAndDelete() {
+        String vpc = newVpc("10.31.0.0/16");
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("CreateNetworkAclResponse.networkAcl.networkAclId", startsWith("acl-"))
+            .body("CreateNetworkAclResponse.networkAcl.vpcId", equalTo(vpc))
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .formParam("PortRange.From", "443")
+            .formParam("PortRange.To", "443")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateNetworkAclEntryResponse.return", equalTo("true"));
+
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.networkAclId", equalTo(aclId));
+
+        given()
+            .formParam("Action", "DeleteNetworkAcl")
+            .formParam("NetworkAclId", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DeleteNetworkAclResponse.return", equalTo("true"));
+    }
+
+    @Test
+    @Order(312)
+    void createNetworkAclEntryRejectsDuplicateButReplaceOverwrites() {
+        String vpc = newVpc("10.32.0.0/16");
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "allow")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("CreateNetworkAclEntryResponse.return", equalTo("true"));
+
+        // Re-creating the same rule number/direction must fail — only Replace may overwrite.
+        given()
+            .formParam("Action", "CreateNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "deny")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("NetworkAclEntryAlreadyExists"));
+
+        // Replace on the same rule number succeeds and overwrites the existing entry.
+        given()
+            .formParam("Action", "ReplaceNetworkAclEntry")
+            .formParam("NetworkAclId", aclId)
+            .formParam("RuleNumber", "100")
+            .formParam("Protocol", "6")
+            .formParam("RuleAction", "deny")
+            .formParam("Egress", "false")
+            .formParam("CidrBlock", "0.0.0.0/0")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("ReplaceNetworkAclEntryResponse.return", equalTo("true"));
+
+        // Confirm the rule was actually overwritten (allow -> deny), not just that the call succeeded.
+        given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("NetworkAclId.1", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .body("DescribeNetworkAclsResponse.networkAclSet.item.entrySet.item.find { it.ruleNumber == '100' }.ruleAction",
+                    equalTo("deny"));
+    }
+
+    @Test
+    @Order(313)
+    void deleteNetworkAclWithAssociationFails() {
+        String vpc = newVpc("10.33.0.0/16");
+        given()
+            .formParam("Action", "CreateSubnet")
+            .formParam("VpcId", vpc)
+            .formParam("CidrBlock", "10.33.1.0/24")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        // The subnet starts on the VPC's default NACL — grab that association ID.
+        String associationId = given()
+            .formParam("Action", "DescribeNetworkAcls")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", vpc)
+            .formParam("Filter.2.Name", "default")
+            .formParam("Filter.2.Value.1", "true")
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("DescribeNetworkAclsResponse.networkAclSet.item.associationSet.item.networkAclAssociationId");
+
+        String aclId = given()
+            .formParam("Action", "CreateNetworkAcl")
+            .formParam("VpcId", vpc)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateNetworkAclResponse.networkAcl.networkAclId");
+
+        // Move the subnet onto the custom NACL so it now has a live association.
+        given()
+            .formParam("Action", "ReplaceNetworkAclAssociation")
+            .formParam("AssociationId", associationId)
+            .formParam("NetworkAclId", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .formParam("Action", "DeleteNetworkAcl")
+            .formParam("NetworkAclId", aclId)
+            .header("Authorization", AUTH_HEADER)
+        .when().post("/")
+        .then().statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("DependencyViolation"));
+    }
 }

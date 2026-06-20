@@ -102,6 +102,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Default Security Group | `sg-default` | `groupName=default`, all-traffic egress |
 | Default Internet Gateway | `igw-default` | Attached to default VPC |
 | Main Route Table | `rtb-default` | Associated with default VPC |
+| Default Network ACL | `acl-default` | Allow-all, associated with the default subnets |
 
 ## Supported Actions
 
@@ -131,6 +132,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 
 ### Route Tables
 `CreateRouteTable` · `DescribeRouteTables` · `DeleteRouteTable` · `AssociateRouteTable` · `DisassociateRouteTable` · `CreateRoute` · `DeleteRoute`
+
+### Network ACLs
+`CreateNetworkAcl` · `DescribeNetworkAcls` · `DeleteNetworkAcl` · `CreateNetworkAclEntry` · `ReplaceNetworkAclEntry` · `DeleteNetworkAclEntry` · `ReplaceNetworkAclAssociation`
 
 ### NAT Gateways
 `CreateNatGateway` · `DescribeNatGateways` · `DeleteNatGateway`

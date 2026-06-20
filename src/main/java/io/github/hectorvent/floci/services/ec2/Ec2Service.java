@@ -47,6 +47,9 @@ import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplateData;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclAssociation;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAclEntry;
 import io.github.hectorvent.floci.services.ec2.model.Placement;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Route;
@@ -97,6 +100,7 @@ public class Ec2Service {
     private final StorageBackend<String, VpcEndpoint> vpcEndpoints;
     private final StorageBackend<String, NatGateway> natGateways;
     private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
+    private final StorageBackend<String, NetworkAcl> networkAcls;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -122,6 +126,7 @@ public class Ec2Service {
                 storageFactory.create("ec2", "ec2-vpc-endpoints.json", new TypeReference<Map<String, VpcEndpoint>>() {}),
                 storageFactory.create("ec2", "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
                 storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
+                storageFactory.create("ec2", "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -142,6 +147,7 @@ public class Ec2Service {
                StorageBackend<String, VpcEndpoint> vpcEndpoints,
                StorageBackend<String, NatGateway> natGateways,
                StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
+               StorageBackend<String, NetworkAcl> networkAcls,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -162,6 +168,7 @@ public class Ec2Service {
         this.vpcEndpoints = vpcEndpoints;
         this.natGateways = natGateways;
         this.spotInstanceRequests = spotInstanceRequests;
+        this.networkAcls = networkAcls;
         this.tags = tags;
     }
 
@@ -245,6 +252,20 @@ public class Ec2Service {
 
         createDefaultSecurityGroup(region, vpcId, "sg-default");
 
+        // Default NACL, with the default subnets associated to it.
+        String defaultAclId = createDefaultNetworkAcl(region, vpcId, "acl-default");
+        NetworkAcl defaultAcl = networkAcls.get(key(region, defaultAclId)).orElse(null);
+        if (defaultAcl != null) {
+            for (String subnetId : subnetIds) {
+                NetworkAclAssociation assoc = new NetworkAclAssociation();
+                assoc.setNetworkAclAssociationId("aclassoc-" + subnetId);
+                assoc.setNetworkAclId(defaultAclId);
+                assoc.setSubnetId(subnetId);
+                defaultAcl.getAssociations().add(assoc);
+            }
+            networkAcls.put(key(region, defaultAclId), defaultAcl);
+        }
+
         // Default internet gateway
         String igwId = "igw-default";
         InternetGateway igw = new InternetGateway();
@@ -296,6 +317,153 @@ public class Ec2Service {
 
         routeTables.put(key(region, routeTableId), mainRt);
         return routeTableId;
+    }
+
+    private NetworkAclEntry naclEntry(int ruleNumber, String protocol, String action, boolean egress, String cidr) {
+        NetworkAclEntry entry = new NetworkAclEntry();
+        entry.setRuleNumber(ruleNumber);
+        entry.setProtocol(protocol);
+        entry.setRuleAction(action);
+        entry.setEgress(egress);
+        entry.setCidrBlock(cidr);
+        return entry;
+    }
+
+    // The default NACL allows all traffic (rule 100) and ends with the implicit deny (32767),
+    // for both ingress and egress — matching what AWS provisions with every VPC.
+    private String createDefaultNetworkAcl(String region, String vpcId, String networkAclId) {
+        NetworkAcl acl = new NetworkAcl();
+        acl.setNetworkAclId(networkAclId);
+        acl.setVpcId(vpcId);
+        acl.setOwnerId(accountId);
+        acl.setRegion(region);
+        acl.setDefault(true);
+        acl.getEntries().add(naclEntry(100, "-1", "allow", false, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", false, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(100, "-1", "allow", true, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", true, "0.0.0.0/0"));
+        networkAcls.put(key(region, networkAclId), acl);
+        return networkAclId;
+    }
+
+    private NetworkAcl findDefaultNetworkAcl(String region, String vpcId) {
+        return networkAcls.scan(k -> true).stream()
+                .filter(a -> region.equals(a.getRegion()) && vpcId.equals(a.getVpcId()) && a.isDefault())
+                .findFirst().orElse(null);
+    }
+
+    private NetworkAcl getRequiredNetworkAcl(String region, String networkAclId) {
+        return networkAcls.get(key(region, networkAclId)).orElseThrow(() ->
+                new AwsException("InvalidNetworkAclID.NotFound",
+                        "The network ACL ID '" + networkAclId + "' does not exist", 400));
+    }
+
+    // A brand-new custom NACL starts closed: only the implicit deny rules, no allows.
+    public NetworkAcl createNetworkAcl(String region, String vpcId) {
+        ensureDefaultResources(region);
+        getRequiredVpc(region, vpcId);
+        String networkAclId = "acl-" + randomHex(17);
+        NetworkAcl acl = new NetworkAcl();
+        acl.setNetworkAclId(networkAclId);
+        acl.setVpcId(vpcId);
+        acl.setOwnerId(accountId);
+        acl.setRegion(region);
+        acl.setDefault(false);
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", false, "0.0.0.0/0"));
+        acl.getEntries().add(naclEntry(32767, "-1", "deny", true, "0.0.0.0/0"));
+        networkAcls.put(key(region, networkAclId), acl);
+        return acl;
+    }
+
+    public List<NetworkAcl> describeNetworkAcls(String region, List<String> ids, Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+        return networkAcls.scan(k -> true).stream()
+                .filter(a -> region.equals(a.getRegion()))
+                .filter(a -> ids.isEmpty() || ids.contains(a.getNetworkAclId()))
+                .filter(a -> matchesNetworkAclFilters(a, filters))
+                .collect(Collectors.toList());
+    }
+
+    private boolean matchesNetworkAclFilters(NetworkAcl acl, Map<String, List<String>> filters) {
+        for (Map.Entry<String, List<String>> f : filters.entrySet()) {
+            List<String> values = f.getValue();
+            boolean matches = switch (f.getKey()) {
+                case "network-acl-id" -> values.contains(acl.getNetworkAclId());
+                case "vpc-id" -> values.contains(acl.getVpcId());
+                case "default" -> values.contains(String.valueOf(acl.isDefault()));
+                case "association.subnet-id" ->
+                        acl.getAssociations().stream().anyMatch(a -> values.contains(a.getSubnetId()));
+                case "association.network-acl-association-id" ->
+                        acl.getAssociations().stream().anyMatch(a -> values.contains(a.getNetworkAclAssociationId()));
+                default -> true;
+            };
+            if (!matches) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    public synchronized void createNetworkAclEntry(String region, String networkAclId, int ruleNumber, String protocol,
+                                      String ruleAction, boolean egress, String cidrBlock, Integer from, Integer to,
+                                      boolean replace) {
+        NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+        boolean exists = acl.getEntries().stream()
+                .anyMatch(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+        if (!replace && exists) {
+            throw new AwsException("NetworkAclEntryAlreadyExists",
+                    "The network acl entry identified by " + ruleNumber + " already exists.", 400);
+        }
+        acl.getEntries().removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+        NetworkAclEntry entry = naclEntry(ruleNumber, protocol, ruleAction, egress, cidrBlock);
+        entry.setPortRangeFrom(from);
+        entry.setPortRangeTo(to);
+        acl.getEntries().add(entry);
+        networkAcls.put(key(region, networkAclId), acl);
+    }
+
+    public synchronized void deleteNetworkAclEntry(String region, String networkAclId, int ruleNumber, boolean egress) {
+        NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+        acl.getEntries().removeIf(e -> e.getRuleNumber() == ruleNumber && e.isEgress() == egress);
+        networkAcls.put(key(region, networkAclId), acl);
+    }
+
+    public synchronized NetworkAclAssociation replaceNetworkAclAssociation(String region, String associationId, String networkAclId) {
+        NetworkAcl target = getRequiredNetworkAcl(region, networkAclId);
+        for (NetworkAcl acl : networkAcls.scan(k -> true)) {
+            if (!region.equals(acl.getRegion())) {
+                continue;
+            }
+            for (NetworkAclAssociation existing : acl.getAssociations()) {
+                if (existing.getNetworkAclAssociationId().equals(associationId)) {
+                    String subnetId = existing.getSubnetId();
+                    acl.getAssociations().remove(existing);
+                    networkAcls.put(key(region, acl.getNetworkAclId()), acl);
+                    NetworkAclAssociation moved = new NetworkAclAssociation();
+                    moved.setNetworkAclAssociationId("aclassoc-" + randomHex(17));
+                    moved.setNetworkAclId(networkAclId);
+                    moved.setSubnetId(subnetId);
+                    target.getAssociations().add(moved);
+                    networkAcls.put(key(region, networkAclId), target);
+                    return moved;
+                }
+            }
+        }
+        throw new AwsException("InvalidAssociationID.NotFound",
+                "The network ACL association ID '" + associationId + "' does not exist", 400);
+    }
+
+    public void deleteNetworkAcl(String region, String networkAclId) {
+        NetworkAcl acl = getRequiredNetworkAcl(region, networkAclId);
+        if (acl.isDefault()) {
+            throw new AwsException("InvalidParameterValue",
+                    "The network ACL '" + networkAclId + "' is the default network ACL and cannot be deleted", 400);
+        }
+        if (!acl.getAssociations().isEmpty()) {
+            throw new AwsException("DependencyViolation",
+                    "The network ACL '" + networkAclId + "' has dependencies and cannot be deleted.", 400);
+        }
+        networkAcls.delete(key(region, networkAclId));
     }
 
     private String key(String region, String id) {
@@ -677,6 +845,7 @@ public class Ec2Service {
 
         createDefaultSecurityGroup(region, vpcId, "sg-" + randomHex(17));
         createMainRouteTable(region, vpc, "rtb-" + randomHex(17), "rtbassoc-" + randomHex(17));
+        createDefaultNetworkAcl(region, vpcId, "acl-" + randomHex(17));
         return vpc;
     }
 
@@ -841,6 +1010,18 @@ public class Ec2Service {
         subnet.setRegion(region);
         subnet.setSubnetArn(AwsArnUtils.Arn.of("ec2", region, accountId, "subnet/" + subnetId).toString());
         subnets.put(key(region, subnetId), subnet);
+
+        // Every subnet starts associated with its VPC's default NACL. ReplaceNetworkAclAssociation
+        // later moves it onto a custom NACL, so this association must exist for that lookup to work.
+        NetworkAcl defaultAcl = findDefaultNetworkAcl(region, vpcId);
+        if (defaultAcl != null) {
+            NetworkAclAssociation assoc = new NetworkAclAssociation();
+            assoc.setNetworkAclAssociationId("aclassoc-" + randomHex(17));
+            assoc.setNetworkAclId(defaultAcl.getNetworkAclId());
+            assoc.setSubnetId(subnetId);
+            defaultAcl.getAssociations().add(assoc);
+            networkAcls.put(key(region, defaultAcl.getNetworkAclId()), defaultAcl);
+        }
         return subnet;
     }
 
@@ -1488,7 +1669,9 @@ public class Ec2Service {
         VpcEndpoint endpoint = vpcEndpoints.get(storeKey).orElse(null);
         if (endpoint != null) { endpoint.setTags(new ArrayList<>(tagList)); vpcEndpoints.put(storeKey, endpoint); return; }
         NatGateway natGateway = natGateways.get(storeKey).orElse(null);
-        if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); natGateways.put(storeKey, natGateway); }
+        if (natGateway != null) { natGateway.setTags(new ArrayList<>(tagList)); natGateways.put(storeKey, natGateway); return; }
+        NetworkAcl networkAcl = networkAcls.get(storeKey).orElse(null);
+        if (networkAcl != null) { networkAcl.setTags(new ArrayList<>(tagList)); networkAcls.put(storeKey, networkAcl); }
     }
 
     public List<Map<String, String>> describeTags(String region, Map<String, List<String>> filters) {
