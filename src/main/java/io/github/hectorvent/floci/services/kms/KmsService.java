@@ -132,10 +132,10 @@ public class KmsService {
         String arn = regionResolver.buildArn("kms", region, "key/" + keyId);
 
         KmsKeyUsage effectiveUsage = Optional.ofNullable(keyUsage)
-                .map(KmsKeyUsage::valueOf)
+                .map(KmsKeyUsage::fromString)
                 .orElse(KmsKeyUsage.ENCRYPT_DECRYPT);
         KmsKeySpec effectiveSpec = Optional.of(keySpec)
-                .map(KmsKeySpec::valueOf)
+                .map(KmsKeySpec::fromString)
                 .orElse(KmsKeySpec.SYMMETRIC_DEFAULT);
         validateKeyUsageForSpec(effectiveUsage, effectiveSpec);
 
@@ -181,7 +181,6 @@ public class KmsService {
                     byte[] material = new byte[hmacKeyByteLength(spec)];
                     new SecureRandom().nextBytes(material);
                     key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
-            key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(material));
                 }
                 case SYMMETRIC -> {/* // Use existing mock behavior for symmetric keys */}
                 case RSA -> {
@@ -203,7 +202,6 @@ public class KmsService {
                             ? new KeyPairGeneratorSpi.EC()
                             : KeyPairGenerator.getInstance("EC");
                     generator.initialize(new ECGenParameterSpec(curveName));
-                generator.initialize(new ECGenParameterSpec(curveName));
                     KeyPair pair = generator.generateKeyPair();
                     key.setPrivateKeyEncoded(Base64.getEncoder().encodeToString(pair.getPrivate().getEncoded()));
                     key.setPublicKeyEncoded(Base64.getEncoder().encodeToString(pair.getPublic().getEncoded()));

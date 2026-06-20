@@ -315,7 +315,7 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
         String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
-        KmsMessageType messageType = KmsMessageType.valueOf(request.path("MessageType").asText("RAW"));
+        KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
         byte[] signature = service.sign(keyId, message, algorithm, messageType, region);
 
@@ -331,7 +331,7 @@ public class KmsJsonHandler {
         byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
         byte[] signature = Base64.getDecoder().decode(request.path("Signature").asText());
         String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
-        KmsMessageType messageType = KmsMessageType.valueOf(request.path("MessageType").asText("RAW"));
+        KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
         boolean valid = service.verify(keyId, message, signature, algorithm, messageType, region);
 
@@ -558,22 +558,23 @@ public class KmsJsonHandler {
 
     private void addAlgorithms(KmsKey key, ObjectNode response) {
         if (KmsKeyUsage.SIGN_VERIFY == key.getKeyUsage()) {
-            ArrayNode algs = response.putArray("SigningAlgorithms");
+            ArrayNode signingAlgorithms = response.putArray("SigningAlgorithms");
             key.getKeySpec().getAlgorithm()
                     .stream()
                     .filter(algorithm -> algorithm.getKeyUsage() == KmsKeyUsage.SIGN_VERIFY)
                     .map(KmsKeySpec.Algorithm::getAlgName)
                     .filter(Objects::nonNull)
-                    .forEach(algs::add);
+                    .forEach(signingAlgorithms::add);
         } else if (KmsKeyUsage.ENCRYPT_DECRYPT == key.getKeyUsage()) {
-            if (key.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA) {
-                ArrayNode algs = response.putArray("EncryptionAlgorithms");
+            if (key.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA
+                || key.getKeySpec().getKeyType() == KmsKeySpec.KeyType.SYMMETRIC) {
+                ArrayNode encryptionAlgorithms = response.putArray("EncryptionAlgorithms");
                 key.getKeySpec().getAlgorithm()
                         .stream()
                         .filter(algorithm -> algorithm.getKeyUsage() == KmsKeyUsage.ENCRYPT_DECRYPT)
                         .map(KmsKeySpec.Algorithm::getAlgName)
                         .filter(Objects::nonNull)
-                        .forEach(algs::add);
+                        .forEach(encryptionAlgorithms::add);
             }
         } else if (KmsKeyUsage.GENERATE_VERIFY_MAC == key.getKeyUsage()
                 && key.getKeySpec().getKeyType() == KmsKeySpec.KeyType.HMAC) {

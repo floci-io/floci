@@ -10,7 +10,7 @@ import java.util.List;
 @RegisterForReflection
 public enum KmsKeySpec {
 
-    SYMMETRIC_DEFAULT(KeyType.SYMMETRIC, List.of()),
+    SYMMETRIC_DEFAULT(KeyType.SYMMETRIC, List.of(Algorithm.SYMMETRIC_DEFAULT)),
     RSA_2048(KeyType.RSA, getRsaAlgos()),
     RSA_3072(KeyType.RSA, getRsaAlgos()),
     RSA_4096(KeyType.RSA, getRsaAlgos()),
@@ -18,7 +18,7 @@ public enum KmsKeySpec {
     ECC_NIST_P256(KeyType.ECC, Algorithm.ECDSA_SHA_256,"secp256r1"),
     ECC_NIST_P384(KeyType.ECC, Algorithm.ECDSA_SHA_384,"secp384r1"),
     ECC_NIST_P521(KeyType.ECC, Algorithm.ECDSA_SHA_512, "secp521r1"),
-    ECC_NIST_EDWARDS25519(KeyType.ECC, Algorithm.ED25519_SHA_512,"ed25519"),
+    ECC_NIST_EDWARDS25519(KeyType.ECC, List.of(Algorithm.ED25519_SHA_512, Algorithm.ED25519_PH_SHA_512),"secp521r1"),
     ECC_SECG_P256K1(KeyType.ECC, Algorithm.ECDSA_SHA_256,"secp256k1"),
 
     HMAC_224(KeyType.HMAC, Algorithm.HMAC_SHA_224),
@@ -38,7 +38,7 @@ public enum KmsKeySpec {
         this.curveName = null;
     }
 
-    KmsKeySpec(KeyType keyType, Algorithm algorithm,String curveName) {
+    KmsKeySpec(KeyType keyType, Algorithm algorithm, String curveName) {
         this.keyType = keyType;
         this.algorithm = List.of(algorithm);
         this.curveName = curveName;
@@ -49,10 +49,24 @@ public enum KmsKeySpec {
         this.algorithm = algorithm;
         this.curveName = null;
     }
+    KmsKeySpec(KeyType keyType, List<Algorithm> algorithm, String curveName) {
+        this.keyType = keyType;
+        this.algorithm = algorithm;
+        this.curveName = curveName;
+    }
 
     private final KeyType keyType;
     private final List<Algorithm> algorithm;
     private final String curveName;
+
+    public static KmsKeySpec fromString(String keySpec) {
+        try {
+            return KmsKeySpec.valueOf(keySpec);
+        } catch (IllegalArgumentException _) {
+            throw new AwsException("ValidationException",
+                    "1 validation error detected: Value '" + keySpec + "' at 'KeySpec' failed to satisfy constraint", 400);
+        }
+    }
 
     public KeyType getKeyType() {
         return keyType;
@@ -78,12 +92,13 @@ public enum KmsKeySpec {
     public static Algorithm getSignVerifyAlgorithm(String signingAlgorithm) {
         try {
            return Algorithm.valueOf(signingAlgorithm);
-        } catch (IllegalArgumentException e) {
+        } catch (IllegalArgumentException _) {
             throw new AwsException("InvalidSigningAlgorithmException", "Unsupported algorithm: " + signingAlgorithm, 400);
         }
     }
 
     public enum Algorithm  {
+        SYMMETRIC_DEFAULT("SYMMETRIC_DEFAULT", "", KmsKeyUsage.ENCRYPT_DECRYPT),
         RSASSA_PSS_SHA_256("RSASSA_PSS_SHA_256","SHA256withRSA/PSS", KmsKeyUsage.SIGN_VERIFY),
         RSASSA_PSS_SHA_384("RSASSA_PSS_SHA_384","SHA384withRSA/PSS", KmsKeyUsage.SIGN_VERIFY),
         RSASSA_PSS_SHA_512("RSASSA_PSS_SHA_512", "SHA512withRSA/PSS", KmsKeyUsage.SIGN_VERIFY),
@@ -98,7 +113,7 @@ public enum KmsKeySpec {
         ED25519_SHA_512("ED25519_SHA_512","Ed25519", KmsKeyUsage.SIGN_VERIFY),
         ED25519_PH_SHA_512("ED25519_PH_SHA_512", "Ed25519", KmsKeyUsage.SIGN_VERIFY),
         SM2_DSA("SM2DSA","", KmsKeyUsage.SIGN_VERIFY),
-        ML_DSA_SHAKE_256("ML_DSA_SHAKE_256",""),
+        ML_DSA_SHAKE_256("ML_DSA_SHAKE_256","", KmsKeyUsage.SIGN_VERIFY),
         HMAC_SHA_224("HMAC_SHA_224",""),
         HMAC_SHA_256("HMAC_SHA_256",""),
         HMAC_SHA_384("HMAC_SHA_384",""),

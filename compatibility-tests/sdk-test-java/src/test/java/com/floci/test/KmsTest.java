@@ -186,7 +186,9 @@ class KmsTest {
         String asymmetricKeyId = createResponse.keyMetadata().keyId();
 
         assertThat(createResponse.keyMetadata().keySpec()).isEqualTo(KeySpec.RSA_2048);
+        assertThat(createResponse.keyMetadata().signingAlgorithms()).contains(SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256);
         assertThat(createResponse.keyMetadata().customerMasterKeySpec().name()).isEqualTo(KeySpec.RSA_2048.name());
+        assertThat(createResponse.keyMetadata().keySpec().name()).isEqualTo(KeySpec.RSA_2048.name());
         SdkBytes msg = SdkBytes.fromString("message to sign", StandardCharsets.UTF_8);
 
         SignResponse signResponse = kms.sign(b -> b

@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.CreateKeyResponse;
+import software.amazon.awssdk.services.kms.model.EncryptionAlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.GetKeyPolicyResponse;
 import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
 
@@ -52,8 +53,8 @@ class KmsFeaturesTest {
                         software.amazon.awssdk.services.kms.model.Tag::tagKey,
                         software.amazon.awssdk.services.kms.model.Tag::tagValue));
 
-        assertThat(tagMap).containsEntry("env", "prod");
-        assertThat(tagMap).containsEntry("team", "platform");
+        assertThat(tagMap).containsEntry("env", "prod")
+                .containsEntry("team", "platform");
 
         kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
     }
@@ -159,8 +160,8 @@ class KmsFeaturesTest {
                 .keySpec("SYMMETRIC_DEFAULT"));
         String keyId = resp.keyMetadata().keyId();
 
-        // AWS KMS does not return EncryptionAlgorithms for SYMMETRIC_DEFAULT keys
-        assertThat(resp.keyMetadata().encryptionAlgorithms()).isEmpty();
+        assertThat(resp.keyMetadata().encryptionAlgorithms()).isNotEmpty();
+        assertThat(resp.keyMetadata().encryptionAlgorithms()).contains(EncryptionAlgorithmSpec.SYMMETRIC_DEFAULT);
         assertThat(resp.keyMetadata().signingAlgorithms()).isEmpty();
         assertThat(resp.keyMetadata().macAlgorithms()).isEmpty();
 
