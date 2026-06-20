@@ -90,6 +90,33 @@ class FlociUiManagerTest {
     }
 
     @Test
+    void hostPortUsesBoundEndpointPortNatively() {
+        // Native mode: EndpointInfo carries the actual bound host port, which may differ
+        // from the requested port when dynamic allocation (port=0) is used.
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        EndpointInfo endpoint = new EndpointInfo("localhost", 49160);
+
+        assertEquals(49160, newManager().resolveHostPort(endpoint, 0));
+    }
+
+    @Test
+    void hostPortKeepsConfiguredPublishedPortWhenContainerized() {
+        // Container mode: EndpointInfo carries the sidecar's internal port (4500), not the
+        // host binding, so the configured published port must win for the browser redirect.
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        EndpointInfo endpoint = new EndpointInfo("10.88.0.20", 4500);
+
+        assertEquals(8080, newManager().resolveHostPort(endpoint, 8080));
+    }
+
+    @Test
+    void hostPortFallsBackToConfiguredWhenEndpointMissing() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+
+        assertEquals(4500, newManager().resolveHostPort(null, 4500));
+    }
+
+    @Test
     void usesHttpsSchemeWhenTlsEnabled() {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
         when(config.port()).thenReturn(4566);
