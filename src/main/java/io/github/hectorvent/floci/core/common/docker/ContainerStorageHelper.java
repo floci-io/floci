@@ -41,7 +41,11 @@ public final class ContainerStorageHelper {
      * they are treated as named-volume mode.
      */
     public static boolean isNamedVolumeMode(EmulatorConfig config) {
-        return !config.storage().hostPersistentPath().startsWith("/");
+        String hostPath = config.storage().hostPersistentPath();
+        if (hostPath.equals("/var/lib/floci") || hostPath.equals("/app/data")) {
+            return true;
+        }
+        return !hostPath.startsWith("/");
     }
 
     /**

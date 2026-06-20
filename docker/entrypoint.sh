@@ -33,8 +33,16 @@ if [ "$(id -u)" = '0' ]; then
     if [ -d /app/data ]; then
         chown -R floci:root /app/data 2>/dev/null || true
     fi
+    if [ -d /var/lib/floci ]; then
+        chown -R floci:root /var/lib/floci 2>/dev/null || true
+    fi
 
     exec gosu floci "$0" "$@"
+fi
+
+if [ -d /var/lib/floci ]; then
+    export FLOCI_STORAGE_PERSISTENT_PATH="${FLOCI_STORAGE_PERSISTENT_PATH:-/var/lib/floci}"
+    export FLOCI_STORAGE_MODE="${FLOCI_STORAGE_MODE:-hybrid}"
 fi
 
 if [ "${LOCALSTACK_PARITY:-true}" != "false" ]; then
