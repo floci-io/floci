@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
 import java.net.URI;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
@@ -70,6 +72,19 @@ class PreSignedUrlIntegrationTest {
         assertTrue(url.contains("X-Amz-Expires=300"));
         assertTrue(url.contains("X-Amz-SignedHeaders=host"));
         assertTrue(url.contains("X-Amz-Signature="));
+
+        // Verify X-Amz-Credential uses request-scoped account ID, not the hardcoded placeholder
+        assertFalse(url.contains("AKIAIOSFODNN7EXAMPLE"),
+                "X-Amz-Credential must not contain hardcoded AKIAIOSFODNN7EXAMPLE");
+
+        int credStart = url.indexOf("X-Amz-Credential=");
+        int credEnd = url.indexOf("&", credStart);
+        String encodedCredential = credEnd > 0
+                ? url.substring(credStart + "X-Amz-Credential=".length(), credEnd)
+                : url.substring(credStart + "X-Amz-Credential=".length());
+        String credential = URLDecoder.decode(encodedCredential, StandardCharsets.UTF_8);
+        assertTrue(credential.startsWith("000000000000/"),
+                "X-Amz-Credential should start with 12-digit account ID, got: " + credential);
     }
 
     @Test

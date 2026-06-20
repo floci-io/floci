@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Iterator;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -394,5 +397,132 @@ class SamTransformProcessorTest {
         assertEquals("arn:aws:sqs:us-east-1:123456789012:my-queue",
                 esmProps.path("EventSourceArn").asText());
         assertEquals(10, esmProps.path("BatchSize").asInt());
+    }
+
+    @Test
+    void expandSamTemplate_generatesImplicitApiFromApiEvents() throws Exception {
+        // Functions with Api events and no explicit RestApiId must produce a full implicit REST API.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": { "Api": { "Name": "MyServiceApi" } },
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "Docs":  { "Type": "Api", "Properties": { "Path": "/docs",      "Method": "GET" } },
+                      "Proxy": { "Type": "Api", "Properties": { "Path": "/{proxy+}",  "Method": "ANY" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        // RestApi created, with the name from Globals.Api
+        assertEquals("AWS::ApiGateway::RestApi", resources.path("ServerlessRestApi").path("Type").asText());
+        assertEquals("MyServiceApi", resources.path("ServerlessRestApi").path("Properties").path("Name").asText());
+
+        // Deployment + Prod stage
+        assertEquals("AWS::ApiGateway::Deployment", resources.path("ServerlessRestApiDeployment").path("Type").asText());
+        assertEquals("Prod", resources.path("ServerlessRestApiProdStage").path("Properties").path("StageName").asText());
+
+        // A /docs resource exists, and there is a Method with an AWS_PROXY integration + a Lambda permission
+        boolean hasDocsResource = false;
+        boolean hasProxyMethod = false;
+        boolean hasPermission = false;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            JsonNode n = it.next().getValue();
+            String type = n.path("Type").asText();
+            if ("AWS::ApiGateway::Resource".equals(type) && "docs".equals(n.path("Properties").path("PathPart").asText())) {
+                hasDocsResource = true;
+            }
+            if ("AWS::ApiGateway::Method".equals(type)
+                    && "AWS_PROXY".equals(n.path("Properties").path("Integration").path("Type").asText())) {
+                hasProxyMethod = true;
+            }
+            if ("AWS::Lambda::Permission".equals(type)
+                    && "apigateway.amazonaws.com".equals(n.path("Properties").path("Principal").asText())) {
+                hasPermission = true;
+            }
+        }
+        assertTrue(hasDocsResource, "expected an API Gateway Resource for /docs");
+        assertTrue(hasProxyMethod, "expected an API Gateway Method with AWS_PROXY integration");
+        assertTrue(hasPermission, "expected a Lambda permission for apigateway.amazonaws.com");
+    }
+
+    @Test
+    void expandSamTemplate_dedupesDuplicateApiRoutes() throws Exception {
+        // Two events resolving to the same (path, method) must collapse to a single API Gateway Method.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "A": { "Type": "Api", "Properties": { "Path": "/docs", "Method": "GET" } },
+                      "B": { "Type": "Api", "Properties": { "Path": "/docs", "Method": "GET" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        int methods = 0;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            if ("AWS::ApiGateway::Method".equals(it.next().getValue().path("Type").asText())) {
+                methods++;
+            }
+        }
+        assertEquals(1, methods, "duplicate (path, method) routes must collapse to a single Method");
+    }
+
+    @Test
+    void expandSamTemplate_skipsApiRouteWithNonLiteralPath() throws Exception {
+        // A Path given as an intrinsic (Ref/Fn::Sub) can't be turned into a literal API Gateway
+        // resource path, so the route must be skipped rather than registered as the API root.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "A": { "Type": "Api", "Properties": { "Path": { "Ref": "SomePath" }, "Method": "GET" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        int methods = 0;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            if ("AWS::ApiGateway::Method".equals(it.next().getValue().path("Type").asText())) {
+                methods++;
+            }
+        }
+        assertEquals(0, methods, "a route with a non-literal Path must not be registered");
     }
 }

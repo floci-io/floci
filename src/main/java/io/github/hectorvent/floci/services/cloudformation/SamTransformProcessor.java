@@ -64,6 +64,9 @@ class SamTransformProcessor {
             }
         });
 
+        // Collect implicit-API routes from function Api events before the functions are expanded.
+        List<ApiRoute> apiRoutes = collectApiRoutes(samLogicalIds, resources);
+
         for (String logicalId : samLogicalIds) {
             JsonNode resDef = resources.get(logicalId);
             String type = resDef.path("Type").asText();
@@ -80,7 +83,221 @@ class SamTransformProcessor {
             }
         }
 
+        // Synthesize the implicit REST API (RestApi + resources + methods + AWS_PROXY integrations +
+        // deployment + stage + lambda permissions) for functions that declare Api events without an
+        // explicit RestApiId — matching SAM's implicit-API behavior so the deployed service is reachable.
+        if (!apiRoutes.isEmpty()) {
+            generateImplicitApi(apiRoutes, globals(template), expandedResources);
+        }
+
         return expanded;
+    }
+
+    private JsonNode globals(JsonNode template) {
+        return template.path("Globals");
+    }
+
+    private record ApiRoute(String functionLogicalId, String path, String httpMethod) {}
+
+    private List<ApiRoute> collectApiRoutes(List<String> samLogicalIds, JsonNode resources) {
+        List<ApiRoute> routes = new ArrayList<>();
+        for (String logicalId : samLogicalIds) {
+            JsonNode resDef = resources.get(logicalId);
+            if (!"AWS::Serverless::Function".equals(resDef.path("Type").asText())) {
+                continue;
+            }
+            JsonNode events = resDef.path("Properties").path("Events");
+            if (!events.isObject()) {
+                continue;
+            }
+            Iterator<Map.Entry<String, JsonNode>> it = events.fields();
+            while (it.hasNext()) {
+                JsonNode ev = it.next().getValue();
+                if (!"Api".equals(ev.path("Type").asText())) {
+                    continue;
+                }
+                JsonNode p = ev.path("Properties");
+                JsonNode restApiId = p.path("RestApiId");
+                if (!restApiId.isMissingNode() && !restApiId.isNull()) {
+                    continue; // bound to an explicit API — not an implicit-API route (null == implicit)
+                }
+                JsonNode pathNode = p.path("Path");
+                if (!pathNode.isTextual()) {
+                    continue; // implicit routing needs a literal path; skip intrinsics (Ref/Fn::Sub)
+                }
+                JsonNode methodNode = p.path("Method");
+                String method = methodNode.isTextual() ? methodNode.asText() : "ANY";
+                routes.add(new ApiRoute(logicalId, pathNode.asText(), method));
+            }
+        }
+        return routes;
+    }
+
+    private void generateImplicitApi(List<ApiRoute> routes, JsonNode globals, ObjectNode resources) {
+        // Collision-safe: reuse "ServerlessRestApi" when free, otherwise a suffixed id, so an existing
+        // resource with that logical id is never silently overwritten.
+        final String apiId = uniqueId("ServerlessRestApi", resources);
+
+        ObjectNode api = objectMapper.createObjectNode();
+        api.put("Type", "AWS::ApiGateway::RestApi");
+        ObjectNode apiProps = objectMapper.createObjectNode();
+        JsonNode globalName = globals.path("Api").path("Name");
+        if (globalName.isMissingNode() || globalName.isNull()) {
+            apiProps.put("Name", apiId);
+        } else {
+            apiProps.set("Name", globalName.deepCopy());
+        }
+        api.set("Properties", apiProps);
+        resources.set(apiId, api);
+
+        Map<String, String> pathToResource = new java.util.LinkedHashMap<>();
+        List<String> methodIds = new ArrayList<>();
+        java.util.Set<String> permissionFns = new java.util.LinkedHashSet<>();
+        java.util.Set<String> seenRoutes = new java.util.LinkedHashSet<>();
+
+        for (ApiRoute r : routes) {
+            String method = r.httpMethod().toUpperCase();
+            if (!seenRoutes.add(r.path() + " " + method)) {
+                continue; // API Gateway allows one method per verb per resource — skip duplicate (path, method)
+            }
+            String resourceId = ensureResourcePath(apiId, r.path(), pathToResource, resources);
+
+            String methodLogicalId = uniqueId(apiId + "Method" + sanitize(r.path()) + capitalize(method.toLowerCase()), resources);
+            ObjectNode m = objectMapper.createObjectNode();
+            m.put("Type", "AWS::ApiGateway::Method");
+            ObjectNode mp = objectMapper.createObjectNode();
+            mp.set("RestApiId", ref(apiId));
+            mp.set("ResourceId", resourceId == null ? getAtt(apiId, "RootResourceId") : ref(resourceId));
+            mp.put("HttpMethod", method);
+            mp.put("AuthorizationType", "NONE");
+            ObjectNode integ = objectMapper.createObjectNode();
+            integ.put("Type", "AWS_PROXY");
+            integ.put("IntegrationHttpMethod", "POST");
+            integ.set("Uri", lambdaInvokeUri(r.functionLogicalId()));
+            mp.set("Integration", integ);
+            m.set("Properties", mp);
+            resources.set(methodLogicalId, m);
+            methodIds.add(methodLogicalId);
+            permissionFns.add(r.functionLogicalId());
+        }
+
+        for (String fn : permissionFns) {
+            ObjectNode perm = objectMapper.createObjectNode();
+            perm.put("Type", "AWS::Lambda::Permission");
+            ObjectNode pp = objectMapper.createObjectNode();
+            pp.set("FunctionName", ref(fn));
+            pp.put("Action", "lambda:InvokeFunction");
+            pp.put("Principal", "apigateway.amazonaws.com");
+            perm.set("Properties", pp);
+            resources.set(uniqueId(fn + "ApiPermission", resources), perm);
+        }
+
+        String deploymentId = uniqueId(apiId + "Deployment", resources);
+        ObjectNode dep = objectMapper.createObjectNode();
+        dep.put("Type", "AWS::ApiGateway::Deployment");
+        ObjectNode dp = objectMapper.createObjectNode();
+        dp.set("RestApiId", ref(apiId));
+        dep.set("Properties", dp);
+        ArrayNode dependsOn = objectMapper.createArrayNode();
+        methodIds.forEach(dependsOn::add);
+        dep.set("DependsOn", dependsOn);
+        resources.set(deploymentId, dep);
+
+        ObjectNode stage = objectMapper.createObjectNode();
+        stage.put("Type", "AWS::ApiGateway::Stage");
+        ObjectNode sp = objectMapper.createObjectNode();
+        sp.set("RestApiId", ref(apiId));
+        sp.set("DeploymentId", ref(deploymentId));
+        sp.put("StageName", "Prod");
+        stage.set("Properties", sp);
+        resources.set(uniqueId(apiId + "ProdStage", resources), stage);
+    }
+
+    /** Builds the API Gateway resource chain for a path; returns the leaf resource logical id (null = root). */
+    private String ensureResourcePath(String apiId, String path, Map<String, String> pathToResource, ObjectNode resources) {
+        String trimmed = path.startsWith("/") ? path.substring(1) : path;
+        if (trimmed.isEmpty()) {
+            return null;
+        }
+        String cumulative = "";
+        String parentResourceId = null;
+        String leaf = null;
+        for (String segment : trimmed.split("/")) {
+            if (segment.isEmpty()) {
+                continue;
+            }
+            cumulative = cumulative + "/" + segment;
+            String resId = pathToResource.get(cumulative);
+            if (resId == null) {
+                resId = uniqueId(apiId + "Resource" + sanitize(cumulative), resources);
+                ObjectNode res = objectMapper.createObjectNode();
+                res.put("Type", "AWS::ApiGateway::Resource");
+                ObjectNode rp = objectMapper.createObjectNode();
+                rp.set("RestApiId", ref(apiId));
+                rp.set("ParentId", parentResourceId == null ? getAtt(apiId, "RootResourceId") : ref(parentResourceId));
+                rp.put("PathPart", segment);
+                res.set("Properties", rp);
+                resources.set(resId, res);
+                pathToResource.put(cumulative, resId);
+            }
+            parentResourceId = resId;
+            leaf = resId;
+        }
+        return leaf;
+    }
+
+    private ObjectNode ref(String logicalId) {
+        ObjectNode n = objectMapper.createObjectNode();
+        n.put("Ref", logicalId);
+        return n;
+    }
+
+    private ObjectNode getAtt(String logicalId, String attribute) {
+        ObjectNode n = objectMapper.createObjectNode();
+        ArrayNode a = objectMapper.createArrayNode();
+        a.add(logicalId);
+        a.add(attribute);
+        n.set("Fn::GetAtt", a);
+        return n;
+    }
+
+    /** Two-arg Fn::Sub producing the AWS_PROXY integration URI for a function (the form floci resolves). */
+    private ObjectNode lambdaInvokeUri(String functionLogicalId) {
+        ObjectNode sub = objectMapper.createObjectNode();
+        ArrayNode arr = objectMapper.createArrayNode();
+        arr.add("arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FnArn}/invocations");
+        ObjectNode vars = objectMapper.createObjectNode();
+        vars.set("FnArn", getAtt(functionLogicalId, "Arn"));
+        arr.add(vars);
+        sub.set("Fn::Sub", arr);
+        return sub;
+    }
+
+    private String sanitize(String s) {
+        StringBuilder b = new StringBuilder();
+        boolean upper = true;
+        for (char c : s.toCharArray()) {
+            if (Character.isLetterOrDigit(c)) {
+                b.append(upper ? Character.toUpperCase(c) : c);
+                upper = false;
+            } else {
+                upper = true;
+            }
+        }
+        return b.length() == 0 ? "Root" : b.toString();
+    }
+
+    private String capitalize(String s) {
+        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
+    }
+
+    private String uniqueId(String base, ObjectNode resources) {
+        String id = base;
+        int i = 2;
+        while (resources.has(id)) {
+            id = base + i++;
+        }
+        return id;
     }
 
     private void expandServerlessFunction(String logicalId, JsonNode properties, ObjectNode resources) {

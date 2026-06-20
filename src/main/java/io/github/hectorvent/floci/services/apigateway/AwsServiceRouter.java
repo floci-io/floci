@@ -13,10 +13,12 @@ import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
 import io.github.hectorvent.floci.services.sns.SnsJsonHandler;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
+import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
 import io.github.hectorvent.floci.services.ssm.SsmJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.StepFunctionsJsonHandler;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
 
@@ -35,6 +37,7 @@ public class AwsServiceRouter {
     private final StepFunctionsJsonHandler stepFunctionsHandler;
     private final DynamoDbJsonHandler dynamoDbHandler;
     private final SqsJsonHandler sqsHandler;
+    private final SqsQueryHandler sqsQueryHandler;
     private final SnsJsonHandler snsHandler;
     private final EventBridgeHandler eventBridgeHandler;
     private final SsmJsonHandler ssmHandler;
@@ -50,6 +53,7 @@ public class AwsServiceRouter {
     public AwsServiceRouter(StepFunctionsJsonHandler stepFunctionsHandler,
                             DynamoDbJsonHandler dynamoDbHandler,
                             SqsJsonHandler sqsHandler,
+                            SqsQueryHandler sqsQueryHandler,
                             SnsJsonHandler snsHandler,
                             EventBridgeHandler eventBridgeHandler,
                             SsmJsonHandler ssmHandler,
@@ -63,6 +67,7 @@ public class AwsServiceRouter {
         this.stepFunctionsHandler = stepFunctionsHandler;
         this.dynamoDbHandler = dynamoDbHandler;
         this.sqsHandler = sqsHandler;
+        this.sqsQueryHandler = sqsQueryHandler;
         this.snsHandler = snsHandler;
         this.eventBridgeHandler = eventBridgeHandler;
         this.ssmHandler = ssmHandler;
@@ -81,8 +86,16 @@ public class AwsServiceRouter {
     public record IntegrationTarget(String region, String service, String action) {}
 
     /**
-     * Parses an integration URI like
-     * {@code arn:aws:apigateway:us-east-1:states:action/StartExecution}.
+     * Parses an integration URI in either of the two forms AWS accepts:
+     *
+     * <ul>
+     *   <li><b>action</b> — {@code arn:aws:apigateway:{region}:{service}:action/{Action}}.
+     *       The action is encoded in the URI and the request template renders a JSON body.</li>
+     *   <li><b>path</b> — {@code arn:aws:apigateway:{region}:{service}:path/{resourcePath}}.
+     *       The action is not in the URI; it is carried in the rendered request body
+     *       (the AWS query protocol, e.g. {@code Action=SendMessage&...}). For this form
+     *       {@link IntegrationTarget#action()} is {@code null}.</li>
+     * </ul>
      *
      * @return parsed target, or null if the URI format is not recognized
      */
@@ -90,20 +103,27 @@ public class AwsServiceRouter {
         if (uri == null || !uri.startsWith("arn:aws:apigateway:")) {
             return null;
         }
-        // arn:aws:apigateway:{region}:{service}:action/{Action}
+        // arn:aws:apigateway:{region}:{service}:{action/{Action}|path/{resourcePath}}
         String[] parts = uri.split(":");
         if (parts.length < 6) {
             return null;
         }
         String region = parts[3];
         String service = parts[4];
-        // parts[5] should be "action/{ActionName}"
-        String actionPart = parts[5];
-        if (!actionPart.startsWith("action/")) {
-            return null;
+        // parts[5] is either "action/{ActionName}" or "path/{resourcePath}".
+        // A path may itself contain ':' (rare), so re-join the remainder.
+        String resourceSpec = parts.length > 6
+                ? String.join(":", java.util.Arrays.copyOfRange(parts, 5, parts.length))
+                : parts[5];
+        if (resourceSpec.startsWith("action/")) {
+            String action = resourceSpec.substring("action/".length());
+            return new IntegrationTarget(region, service, action);
         }
-        String action = actionPart.substring("action/".length());
-        return new IntegrationTarget(region, service, action);
+        if (resourceSpec.startsWith("path/")) {
+            // Action is supplied by the rendered request body (query protocol).
+            return new IntegrationTarget(region, service, null);
+        }
+        return null;
     }
 
     /**
@@ -135,6 +155,42 @@ public class AwsServiceRouter {
                 case "acm" -> acmHandler.handle(action, requestBody, region);
                 default -> throw new AwsException("UnknownService",
                         "Unsupported AWS service integration: " + service, 400);
+            };
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new AwsException("InternalError",
+                    e.getMessage() != null ? e.getMessage() : "Service invocation failed", 500);
+        }
+    }
+
+    /**
+     * Dispatches an AWS query-protocol (form-encoded) integration request.
+     *
+     * <p>Used for {@code path/}-style integration URIs whose VTL request template renders an
+     * {@code application/x-www-form-urlencoded} body in the AWS query protocol, e.g.
+     * {@code Action=SendMessage&QueueUrl=...&MessageBody=...}. The {@code Action} parameter
+     * selects the operation, mirroring {@link io.github.hectorvent.floci.core.common.AwsQueryController}.
+     *
+     * @param service the AWS service name from the URI (e.g., "sqs")
+     * @param params  the parsed form parameters, including {@code Action}
+     * @param region  the AWS region
+     * @return the service response (query-protocol XML)
+     */
+    public Response invokeQuery(String service, MultivaluedMap<String, String> params, String region) {
+        String action = params.getFirst("Action");
+        LOG.debugv("AWS query integration dispatch: {0}:{1} in {2}", service, action, region);
+
+        if (action == null || action.isBlank()) {
+            throw new AwsException("MissingAction",
+                    "The request must contain the parameter Action", 400);
+        }
+
+        try {
+            return switch (service) {
+                case "sqs" -> sqsQueryHandler.handle(action, params, region);
+                default -> throw new AwsException("UnknownService",
+                        "Unsupported AWS query-protocol service integration: " + service, 400);
             };
         } catch (AwsException e) {
             throw e;

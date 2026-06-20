@@ -2194,7 +2194,8 @@ given()
             .statusCode(200)
             .body("Table.DeletionProtectionEnabled", equalTo(true));
 
-        // DeleteTable is blocked
+        // DeleteTable is blocked. AWS returns a ValidationException (not
+        // ResourceInUseException) when deletion protection is enabled.
         given()
             .header("X-Amz-Target", "DynamoDB_20120810.DeleteTable")
             .contentType(DYNAMODB_CONTENT_TYPE)
@@ -2204,7 +2205,7 @@ given()
         .when().post("/")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("ResourceInUseException"));
+            .body("__type", equalTo("ValidationException"));
 
         // UpdateTable to disable deletion protection
         given()
