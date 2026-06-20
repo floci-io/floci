@@ -44,6 +44,10 @@ public class AutoScalingQueryHandler {
                 case "DeleteAutoScalingGroup"       -> handleDeleteAutoScalingGroup(p, region);
                 case "DescribeAutoScalingGroups"    -> handleDescribeAutoScalingGroups(p, region);
                 case "SetDesiredCapacity"           -> handleSetDesiredCapacity(p, region);
+                case "StartInstanceRefresh"         -> handleStartInstanceRefresh(p, region);
+                case "DescribeInstanceRefreshes"    -> handleDescribeInstanceRefreshes(p, region);
+                case "CreateOrUpdateTags"           -> handleCreateOrUpdateTags(p, region);
+                case "DeleteTags"                   -> handleDeleteTags(p, region);
                 // Instances
                 case "DescribeAutoScalingInstances" -> handleDescribeAutoScalingInstances(p, region);
                 case "AttachInstances"              -> handleAttachInstances(p, region);
@@ -149,13 +153,16 @@ public class AutoScalingQueryHandler {
         service.createAutoScalingGroup(region,
                 p.getFirst("AutoScalingGroupName"),
                 p.getFirst("LaunchConfigurationName"),
+                p.getFirst("LaunchTemplate.LaunchTemplateId"),
                 p.getFirst("LaunchTemplate.LaunchTemplateName"),
                 p.getFirst("LaunchTemplate.Version"),
+                parseMixedInstancesPolicy(p),
                 intParam(p, "MinSize", 0),
                 intParam(p, "MaxSize", 0),
                 intParam(p, "DesiredCapacity", intParam(p, "MinSize", 0)),
                 intParam(p, "DefaultCooldown", 300),
                 memberList(p, "AvailabilityZones"),
+                commaList(p.getFirst("VPCZoneIdentifier")),
                 memberList(p, "TargetGroupARNs"),
                 memberList(p, "LoadBalancerNames"),
                 p.getFirst("HealthCheckType"),
@@ -171,16 +178,20 @@ public class AutoScalingQueryHandler {
     private Response handleUpdateAutoScalingGroup(MultivaluedMap<String, String> p, String region) {
         List<String> azs = memberList(p, "AvailabilityZones");
         List<String> tps = memberList(p, "TerminationPolicies");
+        List<String> subnetIds = commaList(p.getFirst("VPCZoneIdentifier"));
         service.updateAutoScalingGroup(region,
                 p.getFirst("AutoScalingGroupName"),
                 p.getFirst("LaunchConfigurationName"),
+                p.getFirst("LaunchTemplate.LaunchTemplateId"),
                 p.getFirst("LaunchTemplate.LaunchTemplateName"),
                 p.getFirst("LaunchTemplate.Version"),
+                parseMixedInstancesPolicy(p),
                 p.getFirst("MinSize") != null ? Integer.parseInt(p.getFirst("MinSize")) : null,
                 p.getFirst("MaxSize") != null ? Integer.parseInt(p.getFirst("MaxSize")) : null,
                 p.getFirst("DesiredCapacity") != null ? Integer.parseInt(p.getFirst("DesiredCapacity")) : null,
                 p.getFirst("DefaultCooldown") != null ? Integer.parseInt(p.getFirst("DefaultCooldown")) : null,
                 azs.isEmpty() ? null : azs,
+                subnetIds.isEmpty() ? null : subnetIds,
                 p.getFirst("HealthCheckType"),
                 p.getFirst("HealthCheckGracePeriod") != null ? Integer.parseInt(p.getFirst("HealthCheckGracePeriod")) : null,
                 tps.isEmpty() ? null : tps);
@@ -233,18 +244,28 @@ public class AutoScalingQueryHandler {
         if (asg.getLaunchConfigurationName() != null) {
             xml.elem("LaunchConfigurationName", asg.getLaunchConfigurationName());
         }
-        if (asg.getLaunchTemplateName() != null) {
-            xml.start("LaunchTemplate")
-               .elem("LaunchTemplateName", asg.getLaunchTemplateName());
+        if (asg.getLaunchTemplateId() != null || asg.getLaunchTemplateName() != null) {
+            xml.start("LaunchTemplate");
+            if (asg.getLaunchTemplateId() != null) {
+                xml.elem("LaunchTemplateId", asg.getLaunchTemplateId());
+            }
+            if (asg.getLaunchTemplateName() != null) {
+                xml.elem("LaunchTemplateName", asg.getLaunchTemplateName());
+            }
             if (asg.getLaunchTemplateVersion() != null) {
                 xml.elem("Version", asg.getLaunchTemplateVersion());
             }
             xml.end("LaunchTemplate");
         }
+        appendMixedInstancesPolicyXml(xml, asg.getMixedInstancesPolicy());
 
         xml.start("AvailabilityZones");
         for (String az : asg.getAvailabilityZones()) { xml.elem("member", az); }
         xml.end("AvailabilityZones");
+
+        if (!asg.getSubnetIds().isEmpty()) {
+            xml.elem("VPCZoneIdentifier", String.join(",", asg.getSubnetIds()));
+        }
 
         xml.start("TargetGroupARNs");
         for (String arn : asg.getTargetGroupARNs()) { xml.elem("member", arn); }
@@ -269,6 +290,7 @@ public class AutoScalingQueryHandler {
             if (inst.getLaunchConfigurationName() != null) {
                 xml.elem("LaunchConfigurationName", inst.getLaunchConfigurationName());
             }
+            appendInstanceLaunchTemplateXml(xml, inst);
             if (inst.getInstanceType() != null) { xml.elem("InstanceType", inst.getInstanceType()); }
             xml.end("member");
         }
@@ -299,6 +321,115 @@ public class AutoScalingQueryHandler {
                 .end("SetDesiredCapacityResponse").build());
     }
 
+    private Response handleStartInstanceRefresh(MultivaluedMap<String, String> p, String region) {
+        InstanceRefresh refresh = service.startInstanceRefresh(region,
+                p.getFirst("AutoScalingGroupName"), parseInstanceRefresh(p));
+        return ok(new XmlBuilder()
+                .start("StartInstanceRefreshResponse", NS)
+                  .start("StartInstanceRefreshResult")
+                    .elem("InstanceRefreshId", refresh.getInstanceRefreshId())
+                  .end("StartInstanceRefreshResult")
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("StartInstanceRefreshResponse").build());
+    }
+
+    private Response handleDescribeInstanceRefreshes(MultivaluedMap<String, String> p, String region) {
+        AutoScalingService.InstanceRefreshPage page = service.describeInstanceRefreshes(region,
+                p.getFirst("AutoScalingGroupName"),
+                memberList(p, "InstanceRefreshIds"),
+                nullableIntParam(p, "MaxRecords"),
+                p.getFirst("NextToken"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeInstanceRefreshesResponse", NS)
+                  .start("DescribeInstanceRefreshesResult")
+                    .start("InstanceRefreshes");
+        for (InstanceRefresh refresh : page.instanceRefreshes()) {
+            appendInstanceRefreshXml(xml, refresh);
+        }
+        xml.end("InstanceRefreshes");
+        if (page.nextToken() != null) {
+            xml.elem("NextToken", page.nextToken());
+        }
+        xml.end("DescribeInstanceRefreshesResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("DescribeInstanceRefreshesResponse");
+        return ok(xml.build());
+    }
+
+    private void appendInstanceRefreshXml(XmlBuilder xml, InstanceRefresh refresh) {
+        xml.start("member")
+           .elem("InstanceRefreshId", refresh.getInstanceRefreshId())
+           .elem("AutoScalingGroupName", refresh.getAutoScalingGroupName())
+           .elem("Status", refresh.getStatus())
+           .elem("StatusReason", refresh.getStatusReason())
+           .elem("PercentageComplete", String.valueOf(refresh.getPercentageComplete()))
+           .elem("InstancesToUpdate", String.valueOf(refresh.getInstancesToUpdate()))
+           .elem("StartTime", ISO_FMT.format(refresh.getStartTime()));
+        if (refresh.getEndTime() != null) {
+            xml.elem("EndTime", ISO_FMT.format(refresh.getEndTime()));
+        }
+        if (refresh.getStrategy() != null) {
+            xml.elem("Strategy", refresh.getStrategy());
+        }
+        appendDesiredConfigurationXml(xml, refresh);
+        appendPreferencesXml(xml, refresh);
+        xml.end("member");
+    }
+
+    private void appendDesiredConfigurationXml(XmlBuilder xml, InstanceRefresh refresh) {
+        if (!refresh.hasDesiredConfiguration()) {
+            return;
+        }
+        xml.start("DesiredConfiguration")
+           .start("LaunchTemplate")
+           .elem("LaunchTemplateId", refresh.getDesiredLaunchTemplateId())
+           .elem("LaunchTemplateName", refresh.getDesiredLaunchTemplateName())
+           .elem("Version", refresh.getDesiredLaunchTemplateVersion())
+           .end("LaunchTemplate")
+           .end("DesiredConfiguration");
+    }
+
+    private void appendPreferencesXml(XmlBuilder xml, InstanceRefresh refresh) {
+        xml.start("Preferences")
+           .elem("MinHealthyPercentage", intString(refresh.getMinHealthyPercentage()))
+           .elem("MaxHealthyPercentage", intString(refresh.getMaxHealthyPercentage()))
+           .elem("InstanceWarmup", intString(refresh.getInstanceWarmup()))
+           .elem("SkipMatching", boolString(refresh.getSkipMatching()))
+           .elem("AutoRollback", boolString(refresh.getAutoRollback()))
+           .elem("ScaleInProtectedInstances", refresh.getScaleInProtectedInstances())
+           .elem("StandbyInstances", refresh.getStandbyInstances())
+           .elem("CheckpointDelay", intString(refresh.getCheckpointDelay()))
+           .elem("BakeTime", intString(refresh.getBakeTime()));
+        if (!refresh.getCheckpointPercentages().isEmpty()) {
+            xml.start("CheckpointPercentages");
+            for (Integer percentage : refresh.getCheckpointPercentages()) {
+                xml.elem("member", String.valueOf(percentage));
+            }
+            xml.end("CheckpointPercentages");
+        }
+        xml.end("Preferences");
+    }
+
+    private Response handleCreateOrUpdateTags(MultivaluedMap<String, String> p, String region) {
+        for (TagRequest tag : parseTagRequests(p)) {
+            service.createOrUpdateTags(region, tag.resourceId(), tag.resourceType(), Map.of(tag.key(), tag.value()));
+        }
+        return ok(new XmlBuilder()
+                .start("CreateOrUpdateTagsResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("CreateOrUpdateTagsResponse").build());
+    }
+
+    private Response handleDeleteTags(MultivaluedMap<String, String> p, String region) {
+        for (TagRequest tag : parseTagRequests(p)) {
+            service.deleteTags(region, tag.resourceId(), tag.resourceType(), List.of(tag.key()));
+        }
+        return ok(new XmlBuilder()
+                .start("DeleteTagsResponse", NS)
+                  .raw(AwsQueryResponse.responseMetadata())
+                .end("DeleteTagsResponse").build());
+    }
+
     // ── Instances ─────────────────────────────────────────────────────────────
 
     private Response handleDescribeAutoScalingInstances(MultivaluedMap<String, String> p, String region) {
@@ -318,14 +449,90 @@ public class AutoScalingQueryHandler {
             if (inst.getLaunchConfigurationName() != null) {
                 xml.elem("LaunchConfigurationName", inst.getLaunchConfigurationName());
             }
+            appendInstanceLaunchTemplateXml(xml, inst);
             if (inst.getInstanceType() != null) { xml.elem("InstanceType", inst.getInstanceType()); }
             xml.end("member");
         }
         xml.end("AutoScalingInstances")
            .end("DescribeAutoScalingInstancesResult")
-           .raw(AwsQueryResponse.responseMetadata())
-           .end("DescribeAutoScalingInstancesResponse");
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("DescribeAutoScalingInstancesResponse");
         return ok(xml.build());
+    }
+
+    private static void appendInstanceLaunchTemplateXml(XmlBuilder xml, AsgInstance inst) {
+        if (inst.getLaunchTemplateId() == null && inst.getLaunchTemplateName() == null) {
+            return;
+        }
+        xml.start("LaunchTemplate");
+        if (inst.getLaunchTemplateId() != null) {
+            xml.elem("LaunchTemplateId", inst.getLaunchTemplateId());
+        }
+        if (inst.getLaunchTemplateName() != null) {
+            xml.elem("LaunchTemplateName", inst.getLaunchTemplateName());
+        }
+        if (inst.getLaunchTemplateVersion() != null) {
+            xml.elem("Version", inst.getLaunchTemplateVersion());
+        }
+        xml.end("LaunchTemplate");
+    }
+
+    private static void appendMixedInstancesPolicyXml(XmlBuilder xml, MixedInstancesPolicy policy) {
+        if (policy == null) {
+            return;
+        }
+        xml.start("MixedInstancesPolicy");
+        MixedInstancesPolicy.LaunchTemplate launchTemplate = policy.getLaunchTemplate();
+        if (launchTemplate != null) {
+            xml.start("LaunchTemplate");
+            appendMixedLaunchTemplateSpecificationXml(xml, launchTemplate.getLaunchTemplateSpecification());
+            if (!launchTemplate.getOverrides().isEmpty()) {
+                xml.start("Overrides");
+                for (MixedInstancesPolicy.LaunchTemplateOverride override : launchTemplate.getOverrides()) {
+                    xml.start("member");
+                    if (override.getInstanceType() != null) {
+                        xml.elem("InstanceType", override.getInstanceType());
+                    }
+                    xml.end("member");
+                }
+                xml.end("Overrides");
+            }
+            xml.end("LaunchTemplate");
+        }
+        MixedInstancesPolicy.InstancesDistribution distribution = policy.getInstancesDistribution();
+        if (distribution != null) {
+            xml.start("InstancesDistribution");
+            if (distribution.getOnDemandBaseCapacity() != null) {
+                xml.elem("OnDemandBaseCapacity", String.valueOf(distribution.getOnDemandBaseCapacity()));
+            }
+            if (distribution.getOnDemandPercentageAboveBaseCapacity() != null) {
+                xml.elem("OnDemandPercentageAboveBaseCapacity",
+                        String.valueOf(distribution.getOnDemandPercentageAboveBaseCapacity()));
+            }
+            if (distribution.getSpotAllocationStrategy() != null) {
+                xml.elem("SpotAllocationStrategy", distribution.getSpotAllocationStrategy());
+            }
+            xml.end("InstancesDistribution");
+        }
+        xml.end("MixedInstancesPolicy");
+    }
+
+    private static void appendMixedLaunchTemplateSpecificationXml(
+            XmlBuilder xml, MixedInstancesPolicy.LaunchTemplateSpecification specification) {
+        if (specification == null) {
+            return;
+        }
+        xml.start("LaunchTemplateSpecification");
+        if (specification.getLaunchTemplateId() != null) {
+            xml.elem("LaunchTemplateId", specification.getLaunchTemplateId());
+        }
+        if (specification.getLaunchTemplateName() != null) {
+            xml.elem("LaunchTemplateName", specification.getLaunchTemplateName());
+        }
+        if (specification.getVersion() != null) {
+            xml.elem("Version", specification.getVersion());
+        }
+        xml.end("LaunchTemplateSpecification");
     }
 
     private Response handleAttachInstances(MultivaluedMap<String, String> p, String region) {
@@ -532,7 +739,9 @@ public class AutoScalingQueryHandler {
                 p.getFirst("PolicyType"),
                 p.getFirst("AdjustmentType"),
                 intParam(p, "ScalingAdjustment", 0),
-                intParam(p, "Cooldown", 300));
+                intParam(p, "Cooldown", 300),
+                nullableIntParam(p, "EstimatedInstanceWarmup"),
+                parseTargetTrackingConfiguration(p));
         return ok(new XmlBuilder()
                 .start("PutScalingPolicyResponse", NS)
                   .start("PutScalingPolicyResult")
@@ -567,6 +776,10 @@ public class AutoScalingQueryHandler {
                .elem("ScalingAdjustment", String.valueOf(policy.getScalingAdjustment()))
                .elem("Cooldown", String.valueOf(policy.getCooldown()));
             if (policy.getAdjustmentType() != null) { xml.elem("AdjustmentType", policy.getAdjustmentType()); }
+            if (policy.getEstimatedInstanceWarmup() != null) {
+                xml.elem("EstimatedInstanceWarmup", String.valueOf(policy.getEstimatedInstanceWarmup()));
+            }
+            appendTargetTrackingConfigurationXml(xml, policy.getTargetTrackingConfiguration());
             xml.end("member");
         }
         xml.end("ScalingPolicies")
@@ -574,6 +787,44 @@ public class AutoScalingQueryHandler {
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribePoliciesResponse");
         return ok(xml.build());
+    }
+
+    private static ScalingPolicy.TargetTrackingConfiguration parseTargetTrackingConfiguration(MultivaluedMap<String, String> p) {
+        String predefinedMetricType = p.getFirst("TargetTrackingConfiguration.PredefinedMetricSpecification.PredefinedMetricType");
+        Double targetValue = nullableDoubleParam(p, "TargetTrackingConfiguration.TargetValue");
+        if (predefinedMetricType == null && targetValue == null) {
+            return null;
+        }
+        ScalingPolicy.TargetTrackingConfiguration configuration = new ScalingPolicy.TargetTrackingConfiguration();
+        if (predefinedMetricType != null) {
+            ScalingPolicy.PredefinedMetricSpecification specification =
+                    new ScalingPolicy.PredefinedMetricSpecification();
+            specification.setPredefinedMetricType(predefinedMetricType);
+            configuration.setPredefinedMetricSpecification(specification);
+        }
+        configuration.setTargetValue(targetValue);
+        return configuration;
+    }
+
+    private static void appendTargetTrackingConfigurationXml(
+            XmlBuilder xml, ScalingPolicy.TargetTrackingConfiguration configuration) {
+        if (configuration == null) {
+            return;
+        }
+        xml.start("TargetTrackingConfiguration");
+        ScalingPolicy.PredefinedMetricSpecification predefinedMetric =
+                configuration.getPredefinedMetricSpecification();
+        if (predefinedMetric != null) {
+            xml.start("PredefinedMetricSpecification");
+            if (predefinedMetric.getPredefinedMetricType() != null) {
+                xml.elem("PredefinedMetricType", predefinedMetric.getPredefinedMetricType());
+            }
+            xml.end("PredefinedMetricSpecification");
+        }
+        if (configuration.getTargetValue() != null) {
+            xml.elem("TargetValue", String.valueOf(configuration.getTargetValue()));
+        }
+        xml.end("TargetTrackingConfiguration");
     }
 
     // ── Activities ────────────────────────────────────────────────────────────
@@ -709,6 +960,81 @@ public class AutoScalingQueryHandler {
         return result;
     }
 
+    private List<String> commaList(String value) {
+        if (value == null || value.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(value.split(","))
+                .map(String::trim)
+                .filter(item -> !item.isEmpty())
+                .toList();
+    }
+
+    private MixedInstancesPolicy parseMixedInstancesPolicy(MultivaluedMap<String, String> p) {
+        if (!hasAnyPrefix(p, "MixedInstancesPolicy.")) {
+            return null;
+        }
+        MixedInstancesPolicy policy = new MixedInstancesPolicy();
+
+        MixedInstancesPolicy.LaunchTemplate launchTemplate = new MixedInstancesPolicy.LaunchTemplate();
+        MixedInstancesPolicy.LaunchTemplateSpecification specification =
+                new MixedInstancesPolicy.LaunchTemplateSpecification();
+        specification.setLaunchTemplateId(p.getFirst(
+                "MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId"));
+        specification.setLaunchTemplateName(p.getFirst(
+                "MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName"));
+        specification.setVersion(p.getFirst(
+                "MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version"));
+        if (specification.getLaunchTemplateId() != null
+                || specification.getLaunchTemplateName() != null
+                || specification.getVersion() != null) {
+            launchTemplate.setLaunchTemplateSpecification(specification);
+        }
+        launchTemplate.setOverrides(parseMixedLaunchTemplateOverrides(p));
+        if (launchTemplate.getLaunchTemplateSpecification() != null || !launchTemplate.getOverrides().isEmpty()) {
+            policy.setLaunchTemplate(launchTemplate);
+        }
+
+        MixedInstancesPolicy.InstancesDistribution distribution =
+                new MixedInstancesPolicy.InstancesDistribution();
+        distribution.setOnDemandBaseCapacity(nullableIntParam(
+                p, "MixedInstancesPolicy.InstancesDistribution.OnDemandBaseCapacity"));
+        distribution.setOnDemandPercentageAboveBaseCapacity(nullableIntParam(
+                p, "MixedInstancesPolicy.InstancesDistribution.OnDemandPercentageAboveBaseCapacity"));
+        distribution.setSpotAllocationStrategy(
+                p.getFirst("MixedInstancesPolicy.InstancesDistribution.SpotAllocationStrategy"));
+        if (distribution.getOnDemandBaseCapacity() != null
+                || distribution.getOnDemandPercentageAboveBaseCapacity() != null
+                || distribution.getSpotAllocationStrategy() != null) {
+            policy.setInstancesDistribution(distribution);
+        }
+        return policy;
+    }
+
+    private static boolean hasAnyPrefix(MultivaluedMap<String, String> p, String prefix) {
+        for (String key : p.keySet()) {
+            if (key.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private List<MixedInstancesPolicy.LaunchTemplateOverride> parseMixedLaunchTemplateOverrides(
+            MultivaluedMap<String, String> p) {
+        List<MixedInstancesPolicy.LaunchTemplateOverride> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String instanceType = p.getFirst("MixedInstancesPolicy.LaunchTemplate.Overrides.member."
+                    + i + ".InstanceType");
+            if (instanceType == null) { break; }
+            MixedInstancesPolicy.LaunchTemplateOverride override =
+                    new MixedInstancesPolicy.LaunchTemplateOverride();
+            override.setInstanceType(instanceType);
+            result.add(override);
+        }
+        return result;
+    }
+
     private Map<String, String> parseTags(MultivaluedMap<String, String> p) {
         Map<String, String> result = new LinkedHashMap<>();
         for (int i = 1; ; i++) {
@@ -720,10 +1046,82 @@ public class AutoScalingQueryHandler {
         return result;
     }
 
+    private List<TagRequest> parseTagRequests(MultivaluedMap<String, String> p) {
+        List<TagRequest> result = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String key = p.getFirst("Tags.member." + i + ".Key");
+            if (key == null) { break; }
+            String resourceId = p.getFirst("Tags.member." + i + ".ResourceId");
+            String resourceType = p.getFirst("Tags.member." + i + ".ResourceType");
+            String value = p.getFirst("Tags.member." + i + ".Value");
+            result.add(new TagRequest(resourceId, resourceType, key, value != null ? value : ""));
+        }
+        return result;
+    }
+
+    private record TagRequest(String resourceId, String resourceType, String key, String value) {}
+
+    private InstanceRefresh parseInstanceRefresh(MultivaluedMap<String, String> p) {
+        InstanceRefresh refresh = new InstanceRefresh();
+        refresh.setStrategy(p.getFirst("Strategy"));
+        refresh.setDesiredLaunchTemplateId(p.getFirst("DesiredConfiguration.LaunchTemplate.LaunchTemplateId"));
+        refresh.setDesiredLaunchTemplateName(p.getFirst("DesiredConfiguration.LaunchTemplate.LaunchTemplateName"));
+        refresh.setDesiredLaunchTemplateVersion(p.getFirst("DesiredConfiguration.LaunchTemplate.Version"));
+        refresh.setMinHealthyPercentage(nullableIntParam(p, "Preferences.MinHealthyPercentage"));
+        refresh.setMaxHealthyPercentage(nullableIntParam(p, "Preferences.MaxHealthyPercentage"));
+        refresh.setInstanceWarmup(nullableIntParam(p, "Preferences.InstanceWarmup"));
+        refresh.setSkipMatching(nullableBoolParam(p, "Preferences.SkipMatching"));
+        refresh.setAutoRollback(nullableBoolParam(p, "Preferences.AutoRollback"));
+        refresh.setScaleInProtectedInstances(p.getFirst("Preferences.ScaleInProtectedInstances"));
+        refresh.setStandbyInstances(p.getFirst("Preferences.StandbyInstances"));
+        refresh.setCheckpointDelay(nullableIntParam(p, "Preferences.CheckpointDelay"));
+        refresh.setBakeTime(nullableIntParam(p, "Preferences.BakeTime"));
+        refresh.setCheckpointPercentages(memberIntList(p, "Preferences.CheckpointPercentages"));
+        return refresh;
+    }
+
+    private List<Integer> memberIntList(MultivaluedMap<String, String> p, String prefix) {
+        List<Integer> result = new ArrayList<>();
+        for (String value : memberList(p, prefix)) {
+            try {
+                result.add(Integer.parseInt(value));
+            } catch (NumberFormatException ignored) {
+                // Keep Query parsing permissive like the existing integer helpers.
+            }
+        }
+        return result;
+    }
+
     private int intParam(MultivaluedMap<String, String> p, String key, int defaultValue) {
         String val = p.getFirst(key);
         if (val == null || val.isBlank()) { return defaultValue; }
         try { return Integer.parseInt(val); } catch (NumberFormatException e) { return defaultValue; }
+    }
+
+    private Integer nullableIntParam(MultivaluedMap<String, String> p, String key) {
+        String val = p.getFirst(key);
+        if (val == null || val.isBlank()) { return null; }
+        try { return Integer.parseInt(val); } catch (NumberFormatException e) { return null; }
+    }
+
+    private static Double nullableDoubleParam(MultivaluedMap<String, String> p, String key) {
+        String val = p.getFirst(key);
+        if (val == null || val.isBlank()) { return null; }
+        try { return Double.parseDouble(val); } catch (NumberFormatException e) { return null; }
+    }
+
+    private Boolean nullableBoolParam(MultivaluedMap<String, String> p, String key) {
+        String val = p.getFirst(key);
+        if (val == null || val.isBlank()) { return null; }
+        return Boolean.parseBoolean(val);
+    }
+
+    private String intString(Integer value) {
+        return value != null ? String.valueOf(value) : null;
+    }
+
+    private String boolString(Boolean value) {
+        return value != null ? String.valueOf(value) : null;
     }
 
     private Response ok(String xml) {

@@ -813,6 +813,13 @@ public class ApiGatewayExecuteController {
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
                 resource.getPath(), requestId, regionResolver.getAccountId(), null);
 
+        // AWS selects the request template by the *incoming* request Content-Type. Capture it
+        // before parameter mapping runs, since an integration.request.header.Content-Type
+        // override (common for SQS query-protocol integrations) would otherwise clobber it and
+        // misdirect template selection.
+        String incomingContentType = headerMap.getOrDefault("Content-Type",
+                headerMap.getOrDefault("content-type", "application/json"));
+
         // Apply request parameter mapping (method.request.* → integration.request.*)
         Map<String, String> integrationReqParams = integration.getRequestParameters();
         if (integrationReqParams != null && !integrationReqParams.isEmpty()) {
@@ -835,8 +842,6 @@ public class ApiGatewayExecuteController {
         // Content-Type negotiation and passthrough behavior
         String transformedBody;
         Map<String, String> requestTemplates = integration.getRequestTemplates();
-        String incomingContentType = headerMap.getOrDefault("Content-Type",
-                headerMap.getOrDefault("content-type", "application/json"));
 
         if (requestTemplates != null && !requestTemplates.isEmpty()) {
             // Try exact match first, then wildcard fallback
@@ -879,13 +884,23 @@ public class ApiGatewayExecuteController {
             transformedBody = bodyStr != null ? bodyStr : "";
         }
 
-        // Dispatch to service
+        // Dispatch to service.
+        //
+        // A path-style integration URI (arn:...:{service}:path/...) carries no action: the
+        // rendered template body is the AWS query protocol (form-urlencoded,
+        // "Action=SendMessage&..."). Action-style URIs (arn:...:{service}:action/{Action})
+        // carry the action in the URI and render a JSON body.
         Response serviceResponse;
         String errorType = null;
         String errorMessage = null;
         try {
-            JsonNode requestJson = objectMapper.readTree(transformedBody);
-            serviceResponse = serviceRouter.invoke(target.service(), target.action(), requestJson, region);
+            if (target.action() == null) {
+                MultivaluedMap<String, String> formParams = parseFormUrlEncoded(transformedBody);
+                serviceResponse = serviceRouter.invokeQuery(target.service(), formParams, region);
+            } else {
+                JsonNode requestJson = objectMapper.readTree(transformedBody);
+                serviceResponse = serviceRouter.invoke(target.service(), target.action(), requestJson, region);
+            }
         } catch (AwsException e) {
             errorType = e.getErrorCode();
             errorMessage = e.getMessage();
@@ -1808,6 +1823,27 @@ public class ApiGatewayExecuteController {
 
     private String jsonMessage(String message) {
         return objectMapper.createObjectNode().put("message", message).toString();
+    }
+
+    /**
+     * Parses an {@code application/x-www-form-urlencoded} body into a {@link MultivaluedMap},
+     * matching the form parameters an AWS query-protocol handler expects. Both keys and values
+     * are URL-decoded. Parameters without a value (e.g. a bare {@code "Key"}) map to an empty string.
+     */
+    private MultivaluedMap<String, String> parseFormUrlEncoded(String body) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        if (body == null || body.isEmpty()) {
+            return params;
+        }
+        for (String pair : body.split("&")) {
+            if (pair.isEmpty()) continue;
+            int eq = pair.indexOf('=');
+            String key = eq >= 0 ? pair.substring(0, eq) : pair;
+            String value = eq >= 0 ? pair.substring(eq + 1) : "";
+            params.add(URLDecoder.decode(key, StandardCharsets.UTF_8),
+                    URLDecoder.decode(value, StandardCharsets.UTF_8));
+        }
+        return params;
     }
 
     // ──────────────────────────── Path matching ────────────────────────────

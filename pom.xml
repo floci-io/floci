@@ -6,7 +6,7 @@
 
     <groupId>io.github.hectorvent</groupId>
     <artifactId>floci</artifactId>
-    <version>1.5.25</version>
+    <version>1.5.26</version>
     <packaging>jar</packaging>
 
     <name>Floci</name>

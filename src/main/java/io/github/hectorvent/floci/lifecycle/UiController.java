@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.lifecycle;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager;
 import io.github.hectorvent.floci.services.floci.ui.FlociUiManager.UiStatus;
 import io.github.hectorvent.floci.services.floci.ui.UiPages;
+import io.quarkus.runtime.annotations.RegisterForReflection;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.GET;
 import jakarta.ws.rs.HeaderParam;
@@ -40,6 +41,7 @@ public class UiController {
         return Response.ok(uiPages.startingHtml()).build();
     }
 
+    @RegisterForReflection
     public record StatusResponse(boolean ready, String url, String error) {}
 
     @GET

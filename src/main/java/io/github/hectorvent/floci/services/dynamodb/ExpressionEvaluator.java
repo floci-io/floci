@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.dynamodb;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.JsonNodeFactory;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 
 import java.math.BigDecimal;
 import java.util.ArrayList;
@@ -371,6 +372,134 @@ final class ExpressionEvaluator {
                             .formatted(parser.peek().value(), parser.peek().pos()));
         }
         return expr;
+    }
+
+    // ── Structural / semantic validation ──
+
+    /**
+     * Validates an expression for the structural and semantic errors that DynamoDB rejects
+     * at parse time with a ValidationException, independent of the item being evaluated:
+     *   - redundant parentheses, e.g. {@code ((a = b))}
+     *   - {@code contains(x, x)} where the first operand is not distinct from the second
+     *   - {@code begins_with(path, value)} where the value operand is not a string/binary
+     *
+     * {@code exprType} is the label used in the {@code "Invalid <exprType>: ..."} prefix
+     * (e.g. "ConditionExpression", "FilterExpression", "KeyConditionExpression").
+     */
+    static void validateExpression(String expression, String exprType,
+                                   JsonNode exprAttrNames, JsonNode exprAttrValues) {
+        if (expression == null || expression.isBlank()) return;
+        List<Token> tokens = tokenize(expression.trim());
+        checkRedundantParentheses(tokens, exprType);
+        Expr expr;
+        try {
+            expr = parse(expression);
+        } catch (IllegalArgumentException e) {
+            // Other syntax errors are surfaced by the existing parse/evaluate paths.
+            return;
+        }
+        validateSemantics(expr, exprType, exprAttrNames, exprAttrValues);
+    }
+
+    // A pair of parentheses is redundant when its entire content is itself a single
+    // parenthesised group — i.e. "( ( ... ) )". Single wraps "(x)" and full wraps
+    // "(a AND b)" are legal; only the doubled form is rejected.
+    private static void checkRedundantParentheses(List<Token> tokens, String exprType) {
+        for (int i = 0; i + 1 < tokens.size(); i++) {
+            if (tokens.get(i).type() == TokenType.LPAREN
+                    && tokens.get(i + 1).type() == TokenType.LPAREN) {
+                int innerClose = matchingParen(tokens, i + 1);
+                if (innerClose >= 0 && innerClose + 1 < tokens.size()
+                        && tokens.get(innerClose + 1).type() == TokenType.RPAREN) {
+                    throw new AwsException("ValidationException",
+                            "Invalid " + exprType + ": The expression has redundant parentheses;", 400);
+                }
+            }
+        }
+    }
+
+    // Index of the RPAREN that matches the LPAREN at openIdx (function-call parens included).
+    private static int matchingParen(List<Token> tokens, int openIdx) {
+        int depth = 0;
+        for (int i = openIdx; i < tokens.size(); i++) {
+            if (tokens.get(i).type() == TokenType.LPAREN) depth++;
+            else if (tokens.get(i).type() == TokenType.RPAREN) {
+                if (--depth == 0) return i;
+            }
+        }
+        return -1;
+    }
+
+    private static void validateSemantics(Expr expr, String exprType,
+                                          JsonNode names, JsonNode values) {
+        if (expr == null) return;
+        switch (expr) {
+            case AndExpr a -> a.operands().forEach(o -> validateSemantics(o, exprType, names, values));
+            case OrExpr o -> o.operands().forEach(x -> validateSemantics(x, exprType, names, values));
+            case NotExpr n -> validateSemantics(n.operand(), exprType, names, values);
+            case FunctionCallExpr f -> validateFunction(f, exprType, names, values);
+            default -> {}
+        }
+    }
+
+    private static void validateFunction(FunctionCallExpr f, String exprType,
+                                         JsonNode names, JsonNode values) {
+        String name = f.functionName().toLowerCase();
+        if (name.equals("contains") && f.args().size() >= 2
+                && operandsIdentical(f.args().get(0), f.args().get(1), names)) {
+            throw new AwsException("ValidationException",
+                    "Invalid " + exprType + ": The first operand must be distinct from the remaining operands "
+                    + "for this operator or function; operator: contains, first operand: "
+                    + displayOperand(f.args().get(0), names), 400);
+        }
+        if (name.equals("begins_with") && f.args().size() >= 2) {
+            String type = operandValueType(f.args().get(1), values);
+            if (type != null && !type.equals("S") && !type.equals("B")) {
+                throw new AwsException("ValidationException",
+                        "Invalid " + exprType + ": Incorrect operand type for operator or function; "
+                        + "operator or function: begins_with, operand type: " + type, 400);
+            }
+        }
+    }
+
+    private static boolean operandsIdentical(Operand a, Operand b, JsonNode names) {
+        if (a instanceof PathOperand pa && b instanceof PathOperand pb) {
+            return resolvePathString(pa, names).equals(resolvePathString(pb, names));
+        }
+        if (a instanceof PlaceholderOperand xa && b instanceof PlaceholderOperand xb) {
+            return xa.name().equals(xb.name());
+        }
+        return false;
+    }
+
+    // The DynamoDB type code (S, N, B, ...) of a placeholder value operand, or null
+    // when the operand is a document path whose type can only be known at runtime.
+    private static String operandValueType(Operand operand, JsonNode values) {
+        if (operand instanceof PlaceholderOperand p && values != null) {
+            JsonNode v = values.get(p.name());
+            if (v != null && v.isObject() && v.fieldNames().hasNext()) {
+                return v.fieldNames().next();
+            }
+        }
+        return null;
+    }
+
+    // Renders a path operand the way DynamoDB does in operand errors, e.g. "[data]" or "[a, b]".
+    private static String displayOperand(Operand operand, JsonNode names) {
+        if (operand instanceof PathOperand path) {
+            var parts = new ArrayList<String>();
+            for (String seg : path.segments()) {
+                if (seg.startsWith("[")) {
+                    if (!parts.isEmpty()) parts.set(parts.size() - 1, parts.getLast() + seg);
+                    else parts.add(seg);
+                } else {
+                    parts.add(resolveAttributeName(seg, names));
+                }
+            }
+            return "[" + String.join(", ", parts) + "]";
+        }
+        if (operand instanceof PlaceholderOperand p) return p.name();
+        return operand.toString();
     }
 
     // ── Key condition splitting ──

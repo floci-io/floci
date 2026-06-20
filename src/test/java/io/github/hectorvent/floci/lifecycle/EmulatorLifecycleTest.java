@@ -9,6 +9,9 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
+import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
+import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
+import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
@@ -57,6 +60,9 @@ class EmulatorLifecycleTest {
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
     @Mock private RdsContainerManager rdsContainerManager;
     @Mock private RdsProxyManager rdsProxyManager;
+    @Mock private DocDbContainerManager docDbContainerManager;
+    @Mock private NeptuneContainerManager neptuneContainerManager;
+    @Mock private NeptuneProxyManager neptuneProxyManager;
     @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -82,7 +88,8 @@ class EmulatorLifecycleTest {
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
-                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager, rdsService,
+                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
+                docDbContainerManager, neptuneContainerManager, neptuneProxyManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
                 pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState);
     }
@@ -197,6 +204,7 @@ class EmulatorLifecycleTest {
         verify(storageFactory, never()).shutdownAll();
         verify(elastiCacheProxyManager, never()).stopAll();
         verify(rdsProxyManager, never()).stopAll();
+        verify(neptuneProxyManager, never()).stopAll();
     }
 
     @Test
@@ -244,8 +252,11 @@ class EmulatorLifecycleTest {
 
         verify(elastiCacheProxyManager).stopAll();
         verify(rdsProxyManager).stopAll();
+        verify(neptuneProxyManager).stopAll();
         verify(elastiCacheContainerManager).stopAll();
         verify(rdsContainerManager).stopAll();
+        verify(docDbContainerManager).stopAll();
+        verify(neptuneContainerManager).stopAll();
         verify(storageFactory).shutdownAll();
         // Hooks are handled by onPreShutdown, never from ShutdownEvent.
         verify(initializationHooksRunner, never()).run(InitializationHook.STOP);
@@ -262,8 +273,11 @@ class EmulatorLifecycleTest {
         verify(initializationHooksRunner).run(InitializationHook.STOP);
         verify(elastiCacheProxyManager).stopAll();
         verify(rdsProxyManager).stopAll();
+        verify(neptuneProxyManager).stopAll();
         verify(elastiCacheContainerManager).stopAll();
         verify(rdsContainerManager).stopAll();
+        verify(docDbContainerManager).stopAll();
+        verify(neptuneContainerManager).stopAll();
         verify(storageFactory).shutdownAll();
     }
 

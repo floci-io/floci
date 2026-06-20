@@ -621,6 +621,7 @@ public class RdsQueryHandler {
                .elem("Status", "active")
              .end("VpcSecurityGroupMembership")
            .end("VpcSecurityGroups")
+           .raw(dbParameterGroupsXml(i))
            .raw(dbSubnetGroupXml(dbSubnetGroupForInstance(i)))
            .elem("DbiResourceId", i.getDbiResourceId())
            .elem("DBInstanceArn", i.getDbInstanceArn());
@@ -640,6 +641,46 @@ public class RdsQueryHandler {
         writeTags(xml, i.getTags());
         xml.end("TagList");
         return xml.build();
+    }
+
+    private static String dbParameterGroupsXml(DbInstance instance) {
+        String name = dbParameterGroupName(instance);
+
+        XmlBuilder xml = new XmlBuilder().start("DBParameterGroups");
+        xml.start("DBParameterGroup")
+           .elem("DBParameterGroupName", name)
+           .elem("ParameterApplyStatus", "in-sync")
+           .end("DBParameterGroup");
+        return xml.end("DBParameterGroups").build();
+    }
+
+    private static String dbParameterGroupName(DbInstance instance) {
+        String name = instance.getParameterGroupName();
+        if (name != null && !name.isBlank()) {
+            return name;
+        }
+
+        String engine = instance.getEngine() != null
+                ? instance.getEngine().name().toLowerCase()
+                : "unknown";
+        return "default." + engine + dbEngineMajorVersion(instance);
+    }
+
+    private static String dbEngineMajorVersion(DbInstance instance) {
+        String engineVersion = instance.getEngineVersion();
+        if ((engineVersion == null || engineVersion.isBlank()) && instance.getEngine() != null) {
+            engineVersion = defaultEngineVersion(instance.getEngine().name());
+        }
+        if (engineVersion == null || engineVersion.isBlank()) {
+            return "";
+        }
+
+        String trimmed = engineVersion.trim();
+        int end = 0;
+        while (end < trimmed.length() && Character.isDigit(trimmed.charAt(end))) {
+            end++;
+        }
+        return end == 0 ? "" : trimmed.substring(0, end);
     }
 
     private static void writeTags(XmlBuilder xml, Map<String, String> tags) {

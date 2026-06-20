@@ -61,6 +61,9 @@ import io.github.hectorvent.floci.services.ec2.model.VolumeAttachment;
 import io.github.hectorvent.floci.services.ec2.model.Vpc;
 import io.github.hectorvent.floci.services.ec2.model.VpcCidrBlockAssociation;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
+import jakarta.annotation.PostConstruct;
+import io.github.hectorvent.floci.services.ec2.model.LaunchSpecification;
+import io.github.hectorvent.floci.services.ec2.model.SpotInstanceRequest;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -93,6 +96,7 @@ public class Ec2Service {
     private final StorageBackend<String, LaunchTemplate> launchTemplates;
     private final StorageBackend<String, VpcEndpoint> vpcEndpoints;
     private final StorageBackend<String, NatGateway> natGateways;
+    private final StorageBackend<String, SpotInstanceRequest> spotInstanceRequests;
     // resourceId → List<Tag>
     private final StorageBackend<String, List<Tag>> tags;
     private final Set<String> seededRegions = ConcurrentHashMap.newKeySet();
@@ -117,6 +121,7 @@ public class Ec2Service {
                 storageFactory.create("ec2", "ec2-launch-templates.json", new TypeReference<Map<String, LaunchTemplate>>() {}),
                 storageFactory.create("ec2", "ec2-vpc-endpoints.json", new TypeReference<Map<String, VpcEndpoint>>() {}),
                 storageFactory.create("ec2", "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
+                storageFactory.create("ec2", "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
                 storageFactory.create("ec2", "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 
@@ -136,6 +141,7 @@ public class Ec2Service {
                StorageBackend<String, LaunchTemplate> launchTemplates,
                StorageBackend<String, VpcEndpoint> vpcEndpoints,
                StorageBackend<String, NatGateway> natGateways,
+               StorageBackend<String, SpotInstanceRequest> spotInstanceRequests,
                StorageBackend<String, List<Tag>> tags) {
         this.accountId = config.defaultAccountId();
         this.config = config;
@@ -155,7 +161,39 @@ public class Ec2Service {
         this.launchTemplates = launchTemplates;
         this.vpcEndpoints = vpcEndpoints;
         this.natGateways = natGateways;
+        this.spotInstanceRequests = spotInstanceRequests;
         this.tags = tags;
+    }
+
+    @PostConstruct
+    void restoreMetadataRegistrations() {
+        if (config.services().ec2().mock()) {
+            return;
+        }
+
+        int restored = 0;
+        for (String key : instances.keys()) {
+            Instance instance = instances.get(key).orElse(null);
+            if (!needsMetadataRegistration(instance)) {
+                continue;
+            }
+            if (containerManager.restoreMetadataRegistration(instance)) {
+                instances.put(key, instance);
+                restored++;
+            }
+        }
+        if (restored > 0) {
+            LOG.infov("Restored IMDS metadata registration for {0} EC2 container(s)", restored);
+        }
+    }
+
+    private static boolean needsMetadataRegistration(Instance instance) {
+        if (instance == null || instance.getDockerContainerId() == null) {
+            return false;
+        }
+        String state = instance.getState() != null ? instance.getState().getName() : null;
+        return state == null
+                || (!"shutting-down".equals(state) && !"terminated".equals(state) && !"stopping".equals(state));
     }
 
     // ─── Default resource seeding ──────────────────────────────────────────────
@@ -440,7 +478,10 @@ public class Ec2Service {
         if (config.services().ec2().mock()) {
             instances.scan(k -> true).stream()
                     .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
-                    .forEach(i -> i.setState(InstanceState.running()));
+                    .forEach(i -> {
+                        i.setState(InstanceState.running());
+                        instances.put(key(i.getRegion(), i.getInstanceId()), i);
+                    });
         }
         List<Instance> matched = instances.scan(k -> true).stream()
                 .filter(i -> i.getRegion().equals(region))
@@ -578,7 +619,10 @@ public class Ec2Service {
             instances.scan(k -> true).stream()
                     .filter(i -> i.getRegion().equals(region) && "pending".equals(i.getState().getName()))
                     .filter(i -> instanceIds.isEmpty() || instanceIds.contains(i.getInstanceId()))
-                    .forEach(i -> i.setState(InstanceState.running()));
+                    .forEach(i -> {
+                        i.setState(InstanceState.running());
+                        instances.put(key(i.getRegion(), i.getInstanceId()), i);
+                    });
         }
         return instances.scan(k -> true).stream()
                 .filter(i -> i.getRegion().equals(region))
@@ -1070,7 +1114,15 @@ public class Ec2Service {
 
     public boolean isInstanceContainerRunning(String instanceId) {
         Instance instance = findInstanceById(instanceId);
-        return instance != null && containerManager.isContainerRunning(instance.getDockerContainerId());
+        if (instance == null) {
+            return false;
+        }
+        if (config.services().ec2().mock()) {
+            String state = instance.getState() != null ? instance.getState().getName() : null;
+            return state == null
+                    || (!"shutting-down".equals(state) && !"terminated".equals(state) && !"stopping".equals(state));
+        }
+        return containerManager.isContainerRunning(instance.getDockerContainerId());
     }
 
     public KeyPair findKeyPair(String region, String keyName) {
@@ -1104,7 +1156,7 @@ public class Ec2Service {
     public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
                                                String instanceType, String keyName,
                                                List<String> securityGroupIds, String userData,
-                                               List<Tag> launchTemplateTags) {
+                                               List<Tag> launchTemplateTags, List<Tag> instanceTags) {
         ensureDefaultResources(region);
         if (name == null || name.isBlank()) {
             throw new AwsException("MissingParameter", "The request must contain the parameter LaunchTemplateName", 400);
@@ -1133,17 +1185,22 @@ public class Ec2Service {
             launchTemplate.setTags(new ArrayList<>(launchTemplateTags));
             tags.put(launchTemplate.getLaunchTemplateId(), new ArrayList<>(launchTemplateTags));
         }
+        if (instanceTags != null && !instanceTags.isEmpty()) {
+            launchTemplate.setInstanceTags(new ArrayList<>(instanceTags));
+        }
         launchTemplate.getVersions().put("1", dataFrom(launchTemplate));
         launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
     public LaunchTemplate createLaunchTemplateVersion(String region, String id, String name,
+                                                      String sourceVersion,
                                                       String imageId, String instanceType, String keyName,
                                                       List<String> securityGroupIds, String userData,
-                                                      String sourceVersion) {
+                                                      List<Tag> instanceTags) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        ensureLaunchTemplateVersions(launchTemplate);
         int latestVersion = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber()) + 1;
         LaunchTemplateData data = new LaunchTemplateData(versionData(launchTemplate,
                 resolveLaunchTemplateVersion(launchTemplate, sourceVersion, launchTemplate.getLatestVersionNumber())));
@@ -1163,8 +1220,12 @@ public class Ec2Service {
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             data.setSecurityGroupIds(securityGroupIds);
         }
+        if (instanceTags != null && !instanceTags.isEmpty()) {
+            data.setInstanceTags(instanceTags);
+        }
         launchTemplate.getVersions().put(String.valueOf(latestVersion), data);
         applyData(launchTemplate, data);
+        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
@@ -1192,6 +1253,7 @@ public class Ec2Service {
     public LaunchTemplate modifyLaunchTemplate(String region, String id, String name, String defaultVersion) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        ensureLaunchTemplateVersions(launchTemplate);
         if (defaultVersion != null && !defaultVersion.isBlank()) {
             String resolved = switch (defaultVersion) {
                 case "$Latest" -> launchTemplate.getLatestVersionNumber();
@@ -1200,12 +1262,14 @@ public class Ec2Service {
             };
             int requested = parseLaunchTemplateVersion(resolved);
             int latest = parseLaunchTemplateVersion(launchTemplate.getLatestVersionNumber());
-            if (requested < 1 || requested > latest) {
+            if (requested < 1 || requested > latest
+                    || !launchTemplate.getVersions().containsKey(String.valueOf(requested))) {
                 throw new AwsException("InvalidLaunchTemplateVersion.NotFound",
                         "The specified launch template version does not exist.", 400);
             }
             launchTemplate.setDefaultVersionNumber(String.valueOf(requested));
         }
+        launchTemplates.put(key(region, launchTemplate.getLaunchTemplateId()), launchTemplate);
         return launchTemplate;
     }
 
@@ -1254,11 +1318,17 @@ public class Ec2Service {
         }
     }
 
+    private void ensureLaunchTemplateVersions(LaunchTemplate launchTemplate) {
+        if (!launchTemplate.getVersions().isEmpty()) {
+            return;
+        }
+        launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(), dataFrom(launchTemplate));
+        launchTemplates.put(key(launchTemplate.getRegion(), launchTemplate.getLaunchTemplateId()), launchTemplate);
+    }
+
     private String resolveLaunchTemplateVersion(LaunchTemplate launchTemplate, String requestedVersion,
                                                 String defaultWhenMissing) {
-        if (launchTemplate.getVersions().isEmpty()) {
-            launchTemplate.getVersions().put(launchTemplate.getLatestVersionNumber(), dataFrom(launchTemplate));
-        }
+        ensureLaunchTemplateVersions(launchTemplate);
         String candidate = requestedVersion == null || requestedVersion.isBlank() ? defaultWhenMissing : requestedVersion;
         String resolved = switch (candidate) {
             case "$Latest" -> launchTemplate.getLatestVersionNumber();
@@ -1285,6 +1355,7 @@ public class Ec2Service {
         data.setKeyName(launchTemplate.getKeyName());
         data.setUserData(launchTemplate.getUserData());
         data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
+        data.setInstanceTags(launchTemplate.getInstanceTags());
         return data;
     }
 
@@ -1294,6 +1365,7 @@ public class Ec2Service {
         launchTemplate.setKeyName(data.getKeyName());
         launchTemplate.setUserData(data.getUserData());
         launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
+        launchTemplate.setInstanceTags(data.getInstanceTags());
     }
 
     private LaunchTemplate copyForVersion(LaunchTemplate source, String versionNumber) {
@@ -2030,6 +2102,8 @@ public class Ec2Service {
                 case "group-id" -> ni.getGroups().stream()
                         .anyMatch(g -> matchesValue(values, g.getGroupId()));
                 case "status" -> matchesValue(values, ni.getStatus());
+                case "attachment.instance-id" -> ni.getAttachment() != null
+                        && matchesValue(values, ni.getAttachment().getInstanceId());
                 case "private-ip-address" ->
                     matchesValue(values, ni.getPrivateIpAddress()) ||
                     ni.getPrivateIpAddresses().stream()
@@ -2038,6 +2112,14 @@ public class Ec2Service {
                 case "owner-id" -> matchesValue(values, ni.getOwnerId());
                 case "mac-address" -> matchesValue(values, ni.getMacAddress());
                 case "private-dns-name" -> matchesValue(values, ni.getPrivateDnsName());
+                default -> true;
+            };
+        }
+        if (resource instanceof SpotInstanceRequest sir) {
+            return switch (filterName) {
+                case "spot-instance-request-id" -> matchesValue(values, sir.getSpotInstanceRequestId());
+                case "state" -> matchesValue(values, sir.getState());
+                case "instance-id" -> matchesValue(values, sir.getInstanceId());
                 default -> true;
             };
         }
@@ -2058,6 +2140,7 @@ public class Ec2Service {
         if (resource instanceof LaunchTemplate lt) return lt.getTags();
         if (resource instanceof VpcEndpoint endpoint) return endpoint.getTags();
         if (resource instanceof NatGateway natGateway) return natGateway.getTags();
+        if (resource instanceof SpotInstanceRequest sir) return sir.getTags();
         return Collections.emptyList();
     }
 
@@ -2261,5 +2344,108 @@ public class Ec2Service {
         return addresses.scan(k -> true).stream()
                 .filter(a -> instanceId.equals(a.getInstanceId()) && a.getAssociationId() != null)
                 .findFirst();
+    }
+
+    public List<SpotInstanceRequest> requestSpotInstances(String region, String spotPrice, Integer instanceCount,
+                                                         String type, String productDescription, String imageId, String instanceType,
+                                                         String keyName, String subnetId, List<String> securityGroupIds,
+                                                         String userData, String iamInstanceProfileArn,
+                                                         List<Tag> spotRequestTags, List<Tag> instanceTags) {
+        ensureDefaultResources(region);
+
+        int count = instanceCount != null ? instanceCount : 1;
+        String finalType = type != null ? type : "one-time";
+
+        List<SpotInstanceRequest> requests = new ArrayList<>();
+
+        for (int i = 0; i < count; i++) {
+            String spotRequestId = "sir-" + randomHex(8);
+
+            Reservation reservation = runInstances(region, imageId, instanceType, 1, 1, keyName,
+                    securityGroupIds, subnetId, null, instanceTags, userData, iamInstanceProfileArn);
+
+            Instance launchedInstance = reservation.getInstances().get(0);
+
+            LaunchSpecification spec = new LaunchSpecification();
+            spec.setImageId(launchedInstance.getImageId());
+            spec.setInstanceType(launchedInstance.getInstanceType());
+            spec.setKeyName(launchedInstance.getKeyName());
+            spec.setSubnetId(launchedInstance.getSubnetId());
+            spec.setUserData(userData);
+            spec.setIamInstanceProfileArn(iamInstanceProfileArn);
+
+            if (launchedInstance.getSecurityGroups() != null) {
+                spec.setSecurityGroups(new ArrayList<>(launchedInstance.getSecurityGroups()));
+            }
+
+            SpotInstanceRequest sir = new SpotInstanceRequest();
+            sir.setSpotInstanceRequestId(spotRequestId);
+            sir.setSpotPrice(spotPrice);
+            sir.setType(finalType);
+            sir.setState("active");
+            sir.setStatusCode("fulfilled");
+            sir.setStatusMessage("Your Spot Instance request is fulfilled.");
+            sir.setStatusUpdateTime(Instant.now());
+            sir.setInstanceId(launchedInstance.getInstanceId());
+            sir.setCreateTime(Instant.now());
+            sir.setLaunchSpecification(spec);
+            sir.setRegion(region);
+            if (productDescription != null && !productDescription.isBlank()) {
+                sir.setProductDescription(productDescription);
+            } else {
+                sir.setProductDescription("Linux/UNIX");
+            }
+
+            if (spotRequestTags != null && !spotRequestTags.isEmpty()) {
+                sir.setTags(new ArrayList<>(spotRequestTags));
+                tags.put(spotRequestId, new ArrayList<>(spotRequestTags));
+            }
+
+            spotInstanceRequests.put(key(region, spotRequestId), sir);
+            requests.add(sir);
+        }
+
+        return requests;
+    }
+
+    public List<SpotInstanceRequest> describeSpotInstanceRequests(String region, List<String> spotRequestIds, Map<String, List<String>> filters) {
+        ensureDefaultResources(region);
+
+        if (!spotRequestIds.isEmpty()) {
+            for (String id : spotRequestIds) {
+                if (spotInstanceRequests.get(key(region, id)).isEmpty()) {
+                    throw new AwsException("InvalidSpotInstanceRequestID.NotFound",
+                            "The spot instance request ID '" + id + "' does not exist", 400);
+                }
+            }
+        }
+
+        return spotInstanceRequests.scan(k -> true).stream()
+                .filter(sir -> sir.getRegion().equals(region))
+                .filter(sir -> spotRequestIds.isEmpty() || spotRequestIds.contains(sir.getSpotInstanceRequestId()))
+                .filter(sir -> matchesFilters(sir, filters, region))
+                .collect(Collectors.toList());
+    }
+
+    public List<SpotInstanceRequest> cancelSpotInstanceRequests(String region, List<String> spotRequestIds) {
+        ensureDefaultResources(region);
+
+        List<SpotInstanceRequest> result = new ArrayList<>();
+        for (String id : spotRequestIds) {
+            SpotInstanceRequest sir = spotInstanceRequests.get(key(region, id)).orElse(null);
+            if (sir == null) {
+                throw new AwsException("InvalidSpotInstanceRequestID.NotFound",
+                        "The spot instance request ID '" + id + "' does not exist", 400);
+            }
+
+            sir.setState("cancelled");
+            sir.setStatusCode("request-canceled-and-instance-running");
+            sir.setStatusMessage("Spot Instance request canceled. Associated Spot Instance is still running.");
+            sir.setStatusUpdateTime(Instant.now());
+            spotInstanceRequests.put(key(region, id), sir);
+            result.add(sir);
+        }
+
+        return result;
     }
 }
