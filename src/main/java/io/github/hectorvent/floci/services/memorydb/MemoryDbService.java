@@ -237,7 +237,7 @@ public class MemoryDbService {
                 return port;
             }
         }
-        throw new AwsException("InsufficientClusterCapacity",
+        throw new AwsException("InsufficientClusterCapacityFault",
                 "No available proxy ports in range " + base + "-" + max, 503);
     }
 
