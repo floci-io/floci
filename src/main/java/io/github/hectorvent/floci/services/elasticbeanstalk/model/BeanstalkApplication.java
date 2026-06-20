@@ -9,6 +9,7 @@ import java.util.Map;
 public class BeanstalkApplication {
 
     private String applicationName;
+    private String applicationArn;
     private String description;
     private Instant dateCreated;
     private Instant dateUpdated;
@@ -22,6 +23,14 @@ public class BeanstalkApplication {
 
     public void setApplicationName(String applicationName) {
         this.applicationName = applicationName;
+    }
+
+    public String getApplicationArn() {
+        return applicationArn;
+    }
+
+    public void setApplicationArn(String applicationArn) {
+        this.applicationArn = applicationArn;
     }
 
     public String getDescription() {

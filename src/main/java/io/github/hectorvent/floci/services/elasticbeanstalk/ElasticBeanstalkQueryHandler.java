@@ -210,6 +210,7 @@ public class ElasticBeanstalkQueryHandler {
     private static String applicationInnerXml(BeanstalkApplication app) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("ApplicationName", app.getApplicationName())
+                .elem("ApplicationArn", app.getApplicationArn())
                 .elem("Description", app.getDescription())
                 .elem("DateCreated", ISO_FMT.format(app.getDateCreated()))
                 .elem("DateUpdated", ISO_FMT.format(app.getDateUpdated()))

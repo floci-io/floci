@@ -50,6 +50,7 @@ public class ElasticBeanstalkService {
         Instant now = Instant.now();
         BeanstalkApplication app = new BeanstalkApplication();
         app.setApplicationName(name);
+        app.setApplicationArn(regionResolver.buildArn("elasticbeanstalk", region, "application/" + name));
         app.setDescription(description);
         app.setDateCreated(now);
         app.setDateUpdated(now);
@@ -284,7 +285,7 @@ public class ElasticBeanstalkService {
                                                                           String templateName) {
         requireApplication(region, applicationName);
         if ((environmentName == null || environmentName.isBlank()) && (templateName == null || templateName.isBlank())) {
-            throw new AwsException("MissingRequiredParameter",
+            throw new AwsException("MissingParameter",
                     "Either EnvironmentName or TemplateName must be specified.", 400);
         }
         if (environmentName != null && templateName != null) {
@@ -327,7 +328,7 @@ public class ElasticBeanstalkService {
 
     private BeanstalkEnvironment requireEnvironment(String region, String environmentName, String environmentId) {
         if ((environmentName == null || environmentName.isBlank()) && (environmentId == null || environmentId.isBlank())) {
-            throw new AwsException("MissingRequiredParameter",
+            throw new AwsException("MissingParameter",
                     "Either EnvironmentName or EnvironmentId must be specified.", 400);
         }
         if (environmentName != null && !environmentName.isBlank()) {
@@ -361,7 +362,7 @@ public class ElasticBeanstalkService {
 
     private static void requireName(String value, String field) {
         if (value == null || value.isBlank()) {
-            throw new AwsException("MissingRequiredParameter", field + " is required.", 400);
+            throw new AwsException("MissingParameter", field + " is required.", 400);
         }
     }
 

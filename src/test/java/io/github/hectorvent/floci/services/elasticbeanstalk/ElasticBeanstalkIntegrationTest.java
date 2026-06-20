@@ -36,6 +36,8 @@ class ElasticBeanstalkIntegrationTest {
                 .statusCode(200)
                 .contentType("application/xml")
                 .body("CreateApplicationResponse.CreateApplicationResult.Application.ApplicationName", equalTo(APP))
+                .body("CreateApplicationResponse.CreateApplicationResult.Application.ApplicationArn",
+                        equalTo("arn:aws:elasticbeanstalk:us-east-1:000000000000:application/" + APP))
                 .body("CreateApplicationResponse.CreateApplicationResult.Application.ConfigurationTemplates.member",
                         equalTo("default"));
     }
@@ -76,6 +78,8 @@ class ElasticBeanstalkIntegrationTest {
                 .statusCode(200)
                 .body("DescribeApplicationsResponse.DescribeApplicationsResult.Applications.member.ApplicationName",
                         equalTo(APP))
+                .body("DescribeApplicationsResponse.DescribeApplicationsResult.Applications.member.ApplicationArn",
+                        equalTo("arn:aws:elasticbeanstalk:us-east-1:000000000000:application/" + APP))
                 .body("DescribeApplicationsResponse.DescribeApplicationsResult.Applications.member.Versions.member",
                         equalTo("v1"));
     }
@@ -232,5 +236,37 @@ class ElasticBeanstalkIntegrationTest {
             .then()
                 .statusCode(200)
                 .body(containsString("Amazon Linux 2023"));
+    }
+
+    @Test
+    @Order(10)
+    void missingRequiredParametersUseAwsMissingParameterCode() {
+        given()
+                .formParam("Action", "CreateApplication")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("MissingParameter"));
+
+        given()
+                .formParam("Action", "DescribeConfigurationSettings")
+                .formParam("ApplicationName", APP)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("MissingParameter"));
+
+        given()
+                .formParam("Action", "UpdateEnvironment")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(400)
+                .body("ErrorResponse.Error.Code", equalTo("MissingParameter"));
     }
 }
