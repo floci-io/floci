@@ -50,6 +50,7 @@ import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.codebuild.CodeBuildClient;
 import software.amazon.awssdk.services.codedeploy.CodeDeployClient;
+import software.amazon.awssdk.services.codepipeline.CodePipelineClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.eks.EksClient;
 import software.amazon.awssdk.services.scheduler.SchedulerClient;
@@ -666,6 +667,14 @@ public final class TestFixtures {
 
     public static CodeDeployClient codeDeployClient() {
         return CodeDeployClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static CodePipelineClient codePipelineClient() {
+        return CodePipelineClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

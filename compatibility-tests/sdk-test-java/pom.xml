@@ -271,6 +271,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>codedeploy</artifactId>
         </dependency>
+        <!-- CodePipeline client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>codepipeline</artifactId>
+        </dependency>
         <!-- AWS Backup client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

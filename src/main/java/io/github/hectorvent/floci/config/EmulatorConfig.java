@@ -174,6 +174,7 @@ public interface EmulatorConfig {
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
+        CodePipelineStorageConfig codepipeline();
     }
 
     interface SsmStorageConfig {
@@ -305,6 +306,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface CodePipelineStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -367,6 +375,7 @@ public interface EmulatorConfig {
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
+        CodePipelineServiceConfig codepipeline();
         AutoScalingServiceConfig autoscaling();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
@@ -451,6 +460,11 @@ public interface EmulatorConfig {
     }
 
     interface CodeDeployServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CodePipelineServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
