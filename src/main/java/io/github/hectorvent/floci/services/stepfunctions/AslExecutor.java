@@ -499,7 +499,7 @@ public class AslExecutor {
                 Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
                 JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
                 DynamoDbService.ScanResult scanResult = dynamoDbService.scan(
-                        tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null, region);
+                        tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null, null, region);
                 ObjectNode response = objectMapper.createObjectNode();
                 com.fasterxml.jackson.databind.node.ArrayNode items = objectMapper.createArrayNode();
                 scanResult.items().forEach(items::add);

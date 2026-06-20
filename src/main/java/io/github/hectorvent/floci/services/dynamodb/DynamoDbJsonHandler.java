@@ -175,6 +175,20 @@ public class DynamoDbJsonHandler {
             table.setBillingMode("PROVISIONED");
         }
 
+        if (request.has("TableClass")) {
+            table.setTableClass(request.get("TableClass").asText());
+        }
+
+        JsonNode onDemand = request.path("OnDemandThroughput");
+        if (onDemand.isObject()) {
+            if (onDemand.has("MaxReadRequestUnits")) {
+                table.setOnDemandMaxReadRequestUnits(onDemand.get("MaxReadRequestUnits").asInt());
+            }
+            if (onDemand.has("MaxWriteRequestUnits")) {
+                table.setOnDemandMaxWriteRequestUnits(onDemand.get("MaxWriteRequestUnits").asInt());
+            }
+        }
+
         // Store tags from CreateTable request
         JsonNode tagsNode = request.path("Tags");
         if (tagsNode.isArray()) {
@@ -209,8 +223,9 @@ public class DynamoDbJsonHandler {
         String tableName = request.path("TableName").asText();
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         if (table.isDeletionProtectionEnabled()) {
-            throw new AwsException("ResourceInUseException",
-                    "Table " + tableName + " can't be deleted while DeletionProtectionEnabled is set to true", 400);
+            throw new AwsException("ValidationException",
+                    "Table " + tableName + " is protected against deletion. To delete the table, "
+                    + "DeletionProtectionEnabled must be set to false.", 400);
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
@@ -887,7 +902,8 @@ public class DynamoDbJsonHandler {
         }
 
         DynamoDbService.ScanResult result = dynamoDbService.scan(
-                tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit, exclusiveStartKey, region);
+                tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit,
+                exclusiveStartKey, indexNameScan, region);
 
         List<JsonNode> scanItems = result.items();
         // Apply parallel scan segment partitioning
@@ -1145,6 +1161,20 @@ public class DynamoDbJsonHandler {
             if ("PAY_PER_REQUEST".equals(billingMode)) {
                 table.getProvisionedThroughput().setReadCapacityUnits(0L);
                 table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+            }
+        }
+
+        if (request.has("TableClass")) {
+            table.setTableClass(request.get("TableClass").asText());
+        }
+
+        JsonNode onDemand = request.path("OnDemandThroughput");
+        if (onDemand.isObject()) {
+            if (onDemand.has("MaxReadRequestUnits")) {
+                table.setOnDemandMaxReadRequestUnits(onDemand.get("MaxReadRequestUnits").asInt());
+            }
+            if (onDemand.has("MaxWriteRequestUnits")) {
+                table.setOnDemandMaxWriteRequestUnits(onDemand.get("MaxWriteRequestUnits").asInt());
             }
         }
 
@@ -1789,6 +1819,7 @@ public class DynamoDbJsonHandler {
     private ObjectNode tableToNode(TableDefinition table) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("TableName", table.getTableName());
+        node.put("TableId", table.getTableId());
         node.put("TableStatus", table.getTableStatus());
         node.put("TableArn", table.getTableArn());
         node.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
@@ -1802,6 +1833,24 @@ public class DynamoDbJsonHandler {
             billing.put("LastUpdateToPayPerRequestDateTime",
                     table.getCreationDateTime().getEpochSecond());
             node.set("BillingModeSummary", billing);
+        }
+
+        // TableClassSummary always present; defaults to STANDARD.
+        ObjectNode tableClassSummary = objectMapper.createObjectNode();
+        tableClassSummary.put("TableClass",
+                table.getTableClass() != null ? table.getTableClass() : "STANDARD");
+        node.set("TableClassSummary", tableClassSummary);
+
+        if (table.getOnDemandMaxReadRequestUnits() != null
+                || table.getOnDemandMaxWriteRequestUnits() != null) {
+            ObjectNode odt = objectMapper.createObjectNode();
+            if (table.getOnDemandMaxReadRequestUnits() != null) {
+                odt.put("MaxReadRequestUnits", table.getOnDemandMaxReadRequestUnits());
+            }
+            if (table.getOnDemandMaxWriteRequestUnits() != null) {
+                odt.put("MaxWriteRequestUnits", table.getOnDemandMaxWriteRequestUnits());
+            }
+            node.set("OnDemandThroughput", odt);
         }
 
         ObjectNode warmThroughput = objectMapper.createObjectNode();
