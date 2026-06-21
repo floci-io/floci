@@ -29,9 +29,8 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * For CUSTOM_AUTH, dispatches Cognito Lambda triggers
  * (DefineAuthChallenge, CreateAuthChallenge, VerifyAuthChallengeResponse).
- * When a trigger is not configured (or invocation fails), falls back to a
- * deterministic stub: single CUSTOM_CHALLENGE round, accept any non-empty
- * answer (or match {@code custom:expectedAuthAnswer} attribute if set).
+ * CUSTOM_AUTH is trigger-driven: if any required trigger is not configured,
+ * invocation fails, or the response is incomplete, authentication fails.
  *
  * Calls back into {@link CognitoService} for user/pool lookup and token
  * generation.
@@ -485,11 +484,7 @@ final class CognitoAuthFlowHandler {
 
         CognitoUser user = service.adminGetUser(pool.getId(), state.username);
 
-        Boolean answerCorrect = verifyAuthChallenge(pool, client, user, state, answer);
-        if (answerCorrect == null) {
-            String expected = user.getAttributes() == null ? null : user.getAttributes().get("custom:expectedAuthAnswer");
-            answerCorrect = (expected == null) || expected.equals(answer);
-        }
+        boolean answerCorrect = verifyAuthChallenge(pool, client, user, state, answer);
         if (!state.history.isEmpty()) {
             state.history.get(state.history.size() - 1).put("challengeResult", answerCorrect);
         }
@@ -593,21 +588,17 @@ final class CognitoAuthFlowHandler {
         req.put("session", new ArrayList<>(state.history));
         req.put("userNotFound", false);
         req.put("clientMetadata", state.clientMetadata == null ? Map.of() : state.clientMetadata);
-        Map<String, Object> resp = invokeTrigger(pool, client, user, "DefineAuthChallenge",
-                "DefineAuthChallenge_Authentication", req).response();
-        if (resp != null) return resp;
-
-        Map<String, Object> fallback = new HashMap<>();
-        boolean anyCorrect = state.history.stream().anyMatch(h -> Boolean.TRUE.equals(h.get("challengeResult")));
-        boolean anyWrong = state.history.stream().anyMatch(h -> Boolean.FALSE.equals(h.get("challengeResult")));
-        if (anyCorrect) {
-            fallback.put("issueTokens", true);
-        } else if (anyWrong && state.history.size() >= 3) {
-            fallback.put("failAuthentication", true);
-        } else {
-            fallback.put("challengeName", "CUSTOM_CHALLENGE");
+        Map<String, Object> resp = requireCustomAuthTriggerResponse(
+                invokeTrigger(pool, client, user, "DefineAuthChallenge",
+                        "DefineAuthChallenge_Authentication", req),
+                "DefineAuthChallenge");
+        if (!resp.containsKey("challengeName")
+                && !Boolean.TRUE.equals(resp.get("issueTokens"))
+                && !Boolean.TRUE.equals(resp.get("failAuthentication"))) {
+            throw customAuthTriggerFailure("InvalidLambdaResponseException",
+                    "DefineAuthChallenge trigger returned no challenge decision");
         }
-        return fallback;
+        return resp;
     }
 
     private Map<String, Object> createAuthChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
@@ -616,22 +607,29 @@ final class CognitoAuthFlowHandler {
         req.put("challengeName", challengeName);
         req.put("session", new ArrayList<>(state.history));
         req.put("clientMetadata", state.clientMetadata == null ? Map.of() : state.clientMetadata);
-        return invokeTrigger(pool, client, user, "CreateAuthChallenge",
-                "CreateAuthChallenge_Authentication", req).response();
+        return requireCustomAuthTriggerResponse(
+                invokeTrigger(pool, client, user, "CreateAuthChallenge",
+                        "CreateAuthChallenge_Authentication", req),
+                "CreateAuthChallenge");
     }
 
-    private Boolean verifyAuthChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
+    private boolean verifyAuthChallenge(UserPool pool, UserPoolClient client, CognitoUser user,
                                          CustomAuthSession state, String answer) {
         Map<String, Object> req = new HashMap<>();
         req.put("challengeAnswer", answer);
         req.put("privateChallengeParameters",
                 state.privateChallengeParameters == null ? Map.of() : state.privateChallengeParameters);
         req.put("clientMetadata", state.clientMetadata == null ? Map.of() : state.clientMetadata);
-        Map<String, Object> resp = invokeTrigger(pool, client, user, "VerifyAuthChallengeResponse",
-                "VerifyAuthChallengeResponse_Authentication", req).response();
-        if (resp == null) return null;
+        Map<String, Object> resp = requireCustomAuthTriggerResponse(
+                invokeTrigger(pool, client, user, "VerifyAuthChallengeResponse",
+                        "VerifyAuthChallengeResponse_Authentication", req),
+                "VerifyAuthChallengeResponse");
         Object v = resp.get("answerCorrect");
-        return v instanceof Boolean b ? b : null;
+        if (v instanceof Boolean b) {
+            return b;
+        }
+        throw customAuthTriggerFailure("InvalidLambdaResponseException",
+                "VerifyAuthChallengeResponse trigger returned no answerCorrect flag");
     }
 
     private Map<String, Object> applyCreateResponse(CustomAuthSession state, String challengeName,
@@ -656,10 +654,23 @@ final class CognitoAuthFlowHandler {
         return entry;
     }
 
-    private record TriggerResult(Map<String, Object> response, String errorMessage, boolean configured) {
-        static TriggerResult notConfigured() { return new TriggerResult(null, null, false); }
-        static TriggerResult success(Map<String, Object> response) { return new TriggerResult(response, null, true); }
-        static TriggerResult error(String msg) { return new TriggerResult(null, msg, true); }
+    private enum TriggerErrorKind {
+        NOT_CONFIGURED,
+        INVOCATION_FAILED,
+        INVALID_RESPONSE
+    }
+
+    private record TriggerResult(Map<String, Object> response, String errorMessage, boolean configured,
+                                 TriggerErrorKind errorKind) {
+        static TriggerResult notConfigured() {
+            return new TriggerResult(null, null, false, TriggerErrorKind.NOT_CONFIGURED);
+        }
+        static TriggerResult success(Map<String, Object> response) {
+            return new TriggerResult(response, null, true, null);
+        }
+        static TriggerResult error(TriggerErrorKind kind, String msg) {
+            return new TriggerResult(null, msg, true, kind);
+        }
         boolean errored() { return configured && errorMessage != null; }
     }
 
@@ -696,7 +707,7 @@ final class CognitoAuthFlowHandler {
                 String msg = String.format("trigger %s (%s) returned error: %s",
                         triggerKey, functionRef, result.getFunctionError());
                 LOG.warnv("Cognito {0}", msg);
-                return TriggerResult.error(msg);
+                return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, msg);
             }
             if (result.getPayload() == null || result.getPayload().length == 0) {
                 return TriggerResult.success(Map.of());
@@ -707,11 +718,33 @@ final class CognitoAuthFlowHandler {
             return TriggerResult.success(respMap);
         } catch (AwsException ae) {
             LOG.warnv("Cognito trigger {0} not invokable: {1}", triggerKey, ae.getMessage());
-            return TriggerResult.error(ae.getMessage());
+            return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, ae.getMessage());
         } catch (Exception e) {
             LOG.warnv(e, "Cognito trigger {0} invocation failed", triggerKey);
-            return TriggerResult.error(e.getMessage());
+            return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, e.getMessage());
         }
+    }
+
+    private Map<String, Object> requireCustomAuthTriggerResponse(TriggerResult result, String triggerName) {
+        if (!result.configured()) {
+            throw customAuthTriggerFailure("InvalidUserPoolConfigurationException",
+                    triggerName + " trigger is not configured");
+        }
+        if (result.errored()) {
+            String errorCode = result.errorKind() == TriggerErrorKind.INVALID_RESPONSE
+                    ? "InvalidLambdaResponseException"
+                    : "UnexpectedLambdaException";
+            throw customAuthTriggerFailure(errorCode, triggerName + " trigger failed: " + result.errorMessage());
+        }
+        if (result.response() == null) {
+            throw customAuthTriggerFailure("InvalidLambdaResponseException",
+                    triggerName + " trigger returned no response");
+        }
+        return result.response();
+    }
+
+    private AwsException customAuthTriggerFailure(String errorCode, String message) {
+        return new AwsException(errorCode, message, 400);
     }
 
     // ──────────────────────────── Pre/Post/PreToken/UserMigration ────────────────────────────
