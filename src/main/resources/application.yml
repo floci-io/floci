@@ -94,6 +94,8 @@ floci:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
+      s3vectors:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
@@ -193,6 +195,12 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+    memorydb:
+      enabled: true
+      mock: false
+      proxy-base-port: 6400
+      proxy-max-port: 6419
+      default-image: "valkey/valkey:8"
     rds:
       enabled: true
       proxy-base-port: 7001
@@ -207,7 +215,9 @@ floci:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
+      db-type: "gremlin"
       default-image: "tinkerpop/gremlin-server:3.7.3"
+      default-neo4j-image: "neo4j:5-community"
     eventbridge:
       enabled: true
     cloudmap:
@@ -351,3 +361,6 @@ floci:
       enabled: true
     appsync:
       enabled: true
+    s3vectors:
+      enabled: true
+

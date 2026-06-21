@@ -5284,6 +5284,15 @@ class CloudFormationIntegrationTest {
                 .formParam("TemplateBody", template)
                 .when().post("/")
                 .then().statusCode(200);
+
+        // Tear the recreated stack back down so the security group is not left behind in the
+        // shared in-memory EC2 store, where it would pollute other tests' DescribeSecurityGroups.
+        given()
+                .formParam("Action", "DeleteStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .when().post("/")
+                .then().statusCode(200);
     }
 
     @Test

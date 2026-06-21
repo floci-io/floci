@@ -19,6 +19,8 @@ import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerMan
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.pipes.PipesService;
 import io.github.hectorvent.floci.services.rds.RdsService;
+import io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager;
+import io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.quarkus.runtime.Quarkus;
@@ -62,6 +64,8 @@ public class EmulatorLifecycle {
     private final ElastiCacheProxyManager elastiCacheProxyManager;
     private final RdsContainerManager rdsContainerManager;
     private final RdsProxyManager rdsProxyManager;
+    private final MemoryDbContainerManager memoryDbContainerManager;
+    private final MemoryDbProxyManager memoryDbProxyManager;
     private final DocDbContainerManager docDbContainerManager;
     private final NeptuneContainerManager neptuneContainerManager;
     private final NeptuneProxyManager neptuneProxyManager;
@@ -84,6 +88,8 @@ public class EmulatorLifecycle {
                              ElastiCacheProxyManager elastiCacheProxyManager,
                              RdsContainerManager rdsContainerManager,
                              RdsProxyManager rdsProxyManager,
+                             MemoryDbContainerManager memoryDbContainerManager,
+                             MemoryDbProxyManager memoryDbProxyManager,
                              DocDbContainerManager docDbContainerManager,
                              NeptuneContainerManager neptuneContainerManager,
                              NeptuneProxyManager neptuneProxyManager,
@@ -105,6 +111,8 @@ public class EmulatorLifecycle {
         this.elastiCacheProxyManager = elastiCacheProxyManager;
         this.rdsContainerManager = rdsContainerManager;
         this.rdsProxyManager = rdsProxyManager;
+        this.memoryDbContainerManager = memoryDbContainerManager;
+        this.memoryDbProxyManager = memoryDbProxyManager;
         this.docDbContainerManager = docDbContainerManager;
         this.neptuneContainerManager = neptuneContainerManager;
         this.neptuneProxyManager = neptuneProxyManager;
@@ -230,10 +238,12 @@ public class EmulatorLifecycle {
         }
         elastiCacheProxyManager.stopAll();
         rdsProxyManager.stopAll();
+        memoryDbProxyManager.stopAll();
         neptuneProxyManager.stopAll();
         elastiCacheContainerManager.stopAll();
         elastiCacheMemcachedContainerManager.stopAll();
         rdsContainerManager.stopAll();
+        memoryDbContainerManager.stopAll();
         docDbContainerManager.stopAll();
         neptuneContainerManager.stopAll();
         ecrRegistryManager.shutdown();

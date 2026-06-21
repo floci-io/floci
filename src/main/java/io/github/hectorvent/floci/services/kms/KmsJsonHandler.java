@@ -11,14 +11,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.kms.model.KmsKeySpec;
+import io.github.hectorvent.floci.services.kms.model.KmsKeyUsage;
+import io.github.hectorvent.floci.services.kms.model.KmsMessageType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
 
-import java.util.Base64;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 @ApplicationScoped
 public class KmsJsonHandler {
@@ -81,16 +81,16 @@ public class KmsJsonHandler {
     private Response handleCreateKey(JsonNode request, String region) {
         String description = request.path("Description").asText(null);
         String keyUsage = request.path("KeyUsage").asText("ENCRYPT_DECRYPT");
-        String customerMasterKeySpec = !request.path("KeySpec").isMissingNode()
+        String keySpec = !request.path("KeySpec").isMissingNode()
                 ? request.path("KeySpec").asText("SYMMETRIC_DEFAULT")
                 : request.path("CustomerMasterKeySpec").asText("SYMMETRIC_DEFAULT");
         String policy = request.path("Policy").isMissingNode() ? null : request.path("Policy").asText(null);
         Map<String, String> tags = new HashMap<>();
         request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
         
-        KmsKey key = service.createKey(description, keyUsage, customerMasterKeySpec, policy, tags, region);
+        KmsKey key = service.createKey(description, keyUsage, keySpec, policy, tags, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("KeyMetadata", keyToNode(key));
+        response.set("KeyMetadata", addKeyMetadata(key));
         return Response.ok(response).build();
     }
 
@@ -101,30 +101,11 @@ public class KmsJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("KeyId", key.getArn());
         response.put("PublicKey", key.getPublicKeyEncoded());
-        response.put("CustomerMasterKeySpec", key.getCustomerMasterKeySpec());
-        response.put("KeyUsage", key.getKeyUsage());
+        response.put("CustomerMasterKeySpec", key.getKeySpec().name());
+        response.put("KeySpec", key.getKeySpec().name());
+        response.put("KeyUsage", key.getKeyUsage().name());
         
-        if ("SIGN_VERIFY".equals(key.getKeyUsage())) {
-            ArrayNode algs = response.putArray("SigningAlgorithms");
-            if (key.getCustomerMasterKeySpec().startsWith("RSA")) {
-                algs.add("RSASSA_PSS_SHA_256");
-                algs.add("RSASSA_PSS_SHA_384");
-                algs.add("RSASSA_PSS_SHA_512");
-                algs.add("RSASSA_PKCS1_V1_5_SHA_256");
-                algs.add("RSASSA_PKCS1_V1_5_SHA_384");
-                algs.add("RSASSA_PKCS1_V1_5_SHA_512");
-            } else {
-                algs.add("ECDSA_SHA_256");
-                algs.add("ECDSA_SHA_384");
-                algs.add("ECDSA_SHA_512");
-            }
-        } else {
-            ArrayNode algs = response.putArray("EncryptionAlgorithms");
-            if (key.getCustomerMasterKeySpec().startsWith("RSA")) {
-                algs.add("RSAES_OAEP_SHA_1");
-                algs.add("RSAES_OAEP_SHA_256");
-            }
-        }
+        addAlgorithms(key, response);
         
         return Response.ok(response).build();
     }
@@ -133,7 +114,7 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         KmsKey key = service.describeKey(keyId, region);
         ObjectNode response = objectMapper.createObjectNode();
-        response.set("KeyMetadata", keyToNode(key));
+        response.set("KeyMetadata", addKeyMetadata(key));
         return Response.ok(response).build();
     }
 
@@ -334,7 +315,7 @@ public class KmsJsonHandler {
         String keyId = request.path("KeyId").asText();
         byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
         String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
-        String messageType = request.path("MessageType").asText("RAW");
+        KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
         byte[] signature = service.sign(keyId, message, algorithm, messageType, region);
 
@@ -350,7 +331,7 @@ public class KmsJsonHandler {
         byte[] message = Base64.getDecoder().decode(request.path("Message").asText());
         byte[] signature = Base64.getDecoder().decode(request.path("Signature").asText());
         String algorithm = request.path("SigningAlgorithm").asText("RSASSA_PSS_SHA_256");
-        String messageType = request.path("MessageType").asText("RAW");
+        KmsMessageType messageType = KmsMessageType.fromString(request.path("MessageType").asText("RAW"));
 
         boolean valid = service.verify(keyId, message, signature, algorithm, messageType, region);
 
@@ -547,28 +528,25 @@ public class KmsJsonHandler {
         return Response.ok(response).build();
     }
 
-    private ObjectNode keyToNode(KmsKey k) {
-        ObjectNode node = objectMapper.createObjectNode();
-        node.put("AWSAccountId", regionResolver.getAccountId());
-        node.put("KeyId", k.getKeyId());
-        node.put("Arn", k.getArn());
-        node.put("CreationDate", k.getCreationDate());
-        node.put("Enabled", k.isEnabled());
-        node.put("Description", k.getDescription());
-        node.put("KeyUsage", k.getKeyUsage());
-        node.put("KeyState", k.getKeyState());
-        node.put("Origin", "AWS_KMS");
-        node.put("KeyManager", "CUSTOMER");
-        node.put("CustomerMasterKeySpec", k.getCustomerMasterKeySpec());
-        node.put("KeySpec", k.getCustomerMasterKeySpec());
-        String macAlgo = KmsService.macAlgorithmFor(k.getCustomerMasterKeySpec());
-        if (macAlgo != null) {
-            node.putArray("MacAlgorithms").add(macAlgo);
-        }
+    private ObjectNode addKeyMetadata(KmsKey k) {
+        ObjectNode keyMetadata = objectMapper.createObjectNode();
+        keyMetadata.put("AWSAccountId", regionResolver.getAccountId());
+        keyMetadata.put("KeyId", k.getKeyId());
+        keyMetadata.put("Arn", k.getArn());
+        keyMetadata.put("CreationDate", k.getCreationDate());
+        keyMetadata.put("Enabled", k.isEnabled());
+        keyMetadata.put("Description", k.getDescription());
+        keyMetadata.put("KeyUsage", k.getKeyUsage().name());
+        keyMetadata.put("KeyState", k.getKeyState());
+        keyMetadata.put("Origin", "AWS_KMS");
+        keyMetadata.put("KeyManager", "CUSTOMER");
+        keyMetadata.put("CustomerMasterKeySpec", k.getKeySpec().name());
+        keyMetadata.put("KeySpec", k.getKeySpec().name());
+        addAlgorithms(k, keyMetadata);
         if (k.getDeletionDate() > 0) {
-            node.put("DeletionDate", k.getDeletionDate());
+            keyMetadata.put("DeletionDate", k.getDeletionDate());
         }
-        return node;
+        return keyMetadata;
     }
 
     private ObjectNode errorResponse(String code, String message) {
@@ -576,5 +554,31 @@ public class KmsJsonHandler {
         error.put("__type", code);
         error.put("message", message);
         return error;
+    }
+
+    private void addAlgorithms(KmsKey key, ObjectNode response) {
+        if (KmsKeyUsage.SIGN_VERIFY == key.getKeyUsage()) {
+            ArrayNode signingAlgorithms = response.putArray("SigningAlgorithms");
+            key.getKeySpec().getAlgorithm()
+                    .stream()
+                    .filter(algorithm -> algorithm.getKeyUsage() == KmsKeyUsage.SIGN_VERIFY)
+                    .map(KmsKeySpec.Algorithm::getAlgName)
+                    .filter(Objects::nonNull)
+                    .forEach(signingAlgorithms::add);
+        } else if (KmsKeyUsage.ENCRYPT_DECRYPT == key.getKeyUsage()) {
+            if (key.getKeySpec().getKeyType() == KmsKeySpec.KeyType.RSA
+                || key.getKeySpec().getKeyType() == KmsKeySpec.KeyType.SYMMETRIC) {
+                ArrayNode encryptionAlgorithms = response.putArray("EncryptionAlgorithms");
+                key.getKeySpec().getAlgorithm()
+                        .stream()
+                        .filter(algorithm -> algorithm.getKeyUsage() == KmsKeyUsage.ENCRYPT_DECRYPT)
+                        .map(KmsKeySpec.Algorithm::getAlgName)
+                        .filter(Objects::nonNull)
+                        .forEach(encryptionAlgorithms::add);
+            }
+        } else if (KmsKeyUsage.GENERATE_VERIFY_MAC == key.getKeyUsage()
+                && key.getKeySpec().getKeyType() == KmsKeySpec.KeyType.HMAC) {
+                    response.putArray("MacAlgorithms").add(key.getKeySpec().getAlgorithm().getFirst().getAlgName());
+            }
     }
 }
