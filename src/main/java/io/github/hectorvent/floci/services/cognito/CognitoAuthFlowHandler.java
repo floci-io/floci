@@ -656,6 +656,7 @@ final class CognitoAuthFlowHandler {
 
     private enum TriggerErrorKind {
         NOT_CONFIGURED,
+        USER_VALIDATION,
         INVOCATION_FAILED,
         INVALID_RESPONSE
     }
@@ -707,13 +708,17 @@ final class CognitoAuthFlowHandler {
                 String msg = String.format("trigger %s (%s) returned error: %s",
                         triggerKey, functionRef, result.getFunctionError());
                 LOG.warnv("Cognito {0}", msg);
-                return TriggerResult.error(TriggerErrorKind.INVOCATION_FAILED, msg);
+                return TriggerResult.error(TriggerErrorKind.USER_VALIDATION, result.getFunctionError());
             }
             if (result.getPayload() == null || result.getPayload().length == 0) {
                 return TriggerResult.success(Map.of());
             }
             Map<String, Object> parsed = MAPPER.readValue(result.getPayload(), new TypeReference<>() {});
             Object response = parsed.get("response");
+            if (response != null && !(response instanceof Map<?, ?>)) {
+                return TriggerResult.error(TriggerErrorKind.INVALID_RESPONSE,
+                        triggerKey + " trigger returned a non-object response");
+            }
             Map<String, Object> respMap = response instanceof Map<?, ?> m ? (Map<String, Object>) m : Map.of();
             return TriggerResult.success(respMap);
         } catch (AwsException ae) {
@@ -731,6 +736,10 @@ final class CognitoAuthFlowHandler {
                     triggerName + " trigger is not configured");
         }
         if (result.errored()) {
+            if (result.errorKind() == TriggerErrorKind.USER_VALIDATION) {
+                throw customAuthTriggerFailure("UserLambdaValidationException",
+                        triggerName + " failed with error " + result.errorMessage());
+            }
             String errorCode = result.errorKind() == TriggerErrorKind.INVALID_RESPONSE
                     ? "InvalidLambdaResponseException"
                     : "UnexpectedLambdaException";
