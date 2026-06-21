@@ -93,6 +93,8 @@ class S3WebsiteIntegrationTest {
         .then()
             .statusCode(404)
             .contentType("text/html")
+            .header("x-amz-error-code", "NoSuchKey")
+            .header("x-amz-error-message", "The specified key does not exist.")
             .body(equalTo("<html><body>Custom Error</body></html>"));
     }
 
@@ -129,11 +131,38 @@ class S3WebsiteIntegrationTest {
         .then()
             .statusCode(404)
             .contentType("text/html")
+            .header("x-amz-error-code", "NoSuchKey")
+            .header("x-amz-error-message", "The specified key does not exist.")
             .body(equalTo("<html><body>Custom Error</body></html>"));
     }
 
     @Test
     @Order(10)
+    void missingErrorDocumentServesHtmlFallback() {
+        given().delete("/" + BUCKET + "/error.html");
+
+        given()
+        .when()
+            .get("/" + BUCKET + "/missing-page")
+        .then()
+            .statusCode(404)
+            .contentType("text/html")
+            .header("x-amz-error-code", "NoSuchKey")
+            .header("x-amz-error-message", "The specified key does not exist.")
+            .body(containsString("404 Not Found"))
+            .body(containsString("NoSuchKey"));
+
+        given()
+            .contentType("text/html")
+            .body("<html><body>Custom Error</body></html>")
+        .when()
+            .put("/" + BUCKET + "/error.html")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
     void deleteWebsiteConfiguration() {
         given()
             .queryParam("website", "")
@@ -151,7 +180,7 @@ class S3WebsiteIntegrationTest {
     }
 
     @Test
-    @Order(11)
+    @Order(12)
     void cleanup() {
         given().delete("/" + BUCKET + "/index.html");
         given().delete("/" + BUCKET + "/error.html");

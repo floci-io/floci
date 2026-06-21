@@ -372,17 +372,8 @@ public class S3Controller {
                                     .header("x-amz-website-redirect-location", "index")
                                     .build();
                         } catch (AwsException e) {
-                            if (webConfig.getErrorDocument() != null) {
-                                try {
-                                    S3Object errorObj = s3Service.getObject(bucket, webConfig.getErrorDocument());
-                                    return Response.status(404)
-                                            .entity(errorObj.getData())
-                                            .type(errorObj.getContentType())
-                                            .header("Content-Length", errorObj.getSize())
-                                            .build();
-                                } catch (AwsException ignored) {
-                                }
-                            }
+                            Response r = serveErrorDocument(bucket, webConfig);
+                            if (r != null) return r;
                         }
                     }
                 } catch (AwsException e) {
@@ -638,17 +629,8 @@ public class S3Controller {
             if ("NoSuchKey".equals(e.getErrorCode())) {
                 try {
                     WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
-                    if (webConfig.getErrorDocument() != null) {
-                        try {
-                            S3Object errorObj = s3Service.getObject(bucket, webConfig.getErrorDocument());
-                            return Response.status(404)
-                                    .entity(errorObj.getData())
-                                    .type(errorObj.getContentType())
-                                    .header("Content-Length", errorObj.getSize())
-                                    .build();
-                        } catch (AwsException ignored) {
-                        }
-                    }
+                    Response r = serveErrorDocument(bucket, webConfig);
+                    if (r != null) return r;
                 } catch (AwsException ignored) {
                 }
             }
@@ -2003,6 +1985,29 @@ public class S3Controller {
         String crc64nvme = httpHeaders.getHeaderString("x-amz-checksum-crc64nvme");
         if (crc64nvme != null && !crc64nvme.equals(S3Checksum.crc64NvmeBase64(data))) {
             throw new AwsException("BadDigest", "The CRC64NVME checksum you specified did not match the payload.", 400);
+        }
+    }
+
+    private Response serveErrorDocument(String bucket, WebsiteConfiguration cfg) {
+        if (cfg.getErrorDocument() == null) {
+            return null;
+        }
+        try {
+            S3Object err = s3Service.getObject(bucket, cfg.getErrorDocument());
+            return Response.status(404)
+                    .entity(err.getData())
+                    .type(err.getContentType())
+                    .header("Content-Length", err.getSize())
+                    .header("x-amz-error-code", "NoSuchKey")
+                    .header("x-amz-error-message", "The specified key does not exist.")
+                    .build();
+        } catch (AwsException ignored) {
+            return Response.status(404)
+                    .entity("<html><head><title>404 Not Found</title></head>\n<body><h1>404 Not Found</h1>\n<ul><li>Code: NoSuchKey</li><li>Message: The specified key does not exist.</li></ul></body></html>")
+                    .type(MediaType.TEXT_HTML)
+                    .header("x-amz-error-code", "NoSuchKey")
+                    .header("x-amz-error-message", "The specified key does not exist.")
+                    .build();
         }
     }
 
