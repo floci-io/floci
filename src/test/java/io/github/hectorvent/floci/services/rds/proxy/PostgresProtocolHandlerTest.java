@@ -209,6 +209,7 @@ assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
 
             int length = in.readInt();
             int proto = in.readInt();
+            assertEquals(STARTUP_PROTOCOL_VERSION, proto);
             byte[] payload = in.readNBytes(length - 8);
             backendDatabase.set(parseStartupParams(payload).get("database"));
 
