@@ -432,7 +432,7 @@ public class Ec2ContainerManager {
                     containerId, instanceId, shellScripts.get(i), i + 1, shellScripts.size(),
                     logGroup, logStream, region
                 );
-            }     
+            }
         } catch (Exception e) {
             LOG.warnv("UserData execution failed for EC2 instance {0}: {1}", instanceId, e.getMessage());
         }
@@ -463,7 +463,10 @@ public class Ec2ContainerManager {
         dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
-                String line = new String(frame.getPayload(), StandardCharsets.UTF_8).stripTrailing();
+                byte[] payload = frame.getPayload();
+                if (payload == null) return;
+                try { output.write(payload); } catch (IOException ignored) {}
+                String line = new String(payload, StandardCharsets.UTF_8).stripTrailing();
                 if (!line.isEmpty()) {
                     logStreamer.streamToCloudWatchLogs(logGroup, logStream, region, line);
                 }
