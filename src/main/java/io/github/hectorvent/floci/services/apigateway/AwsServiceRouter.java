@@ -21,6 +21,8 @@ import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import org.jboss.logging.Logger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Routes API Gateway AWS integration requests to the correct internal service handler.
@@ -80,10 +82,21 @@ public class AwsServiceRouter {
         this.acmHandler = acmHandler;
     }
 
+    private static final Pattern ACTION_URI_PATTERN = Pattern.compile(
+            "^arn:aws:apigateway:([^:]+):([^:]+):action/(.+)$"
+    );
+    private static final Pattern PATH_URI_PATTERN = Pattern.compile(
+            "^arn:aws:apigateway:([^:]+):([^:]+):path/(.+)$"
+    );
+
     /**
      * Parsed components of an API Gateway AWS integration URI.
      */
-    public record IntegrationTarget(String region, String service, String action) {}
+    public record IntegrationTarget(String region, String service, String action, String path) {
+        public IntegrationTarget(String region, String service, String action) {
+            this(region, service, action, null);
+        }
+    }
 
     /**
      * Parses an integration URI in either of the two forms AWS accepts:

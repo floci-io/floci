@@ -92,8 +92,16 @@ class Ec2IntegrationTest {
     @Test
     @Order(3)
     void describeDefaultSecurityGroup() {
+        // Filter to the default VPC's default group rather than assuming it is item[0] of an
+        // unfiltered list: DescribeSecurityGroups returns groups in the store's iteration order,
+        // so any other group in this region (e.g. one left behind by another test class sharing
+        // the in-memory EC2 store) could otherwise land at item[0] and flake this assertion.
         given()
             .formParam("Action", "DescribeSecurityGroups")
+            .formParam("Filter.1.Name", "group-name")
+            .formParam("Filter.1.Value.1", "default")
+            .formParam("Filter.2.Name", "vpc-id")
+            .formParam("Filter.2.Value.1", "vpc-default")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")

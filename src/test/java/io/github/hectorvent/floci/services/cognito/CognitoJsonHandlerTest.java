@@ -34,6 +34,7 @@ class CognitoJsonHandlerTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(), // revokedTokenStore
                 "http://localhost:4566",
                 regionResolver,
                 null

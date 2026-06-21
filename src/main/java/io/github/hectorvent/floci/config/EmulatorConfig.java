@@ -167,6 +167,7 @@ public interface EmulatorConfig {
         AppConfigStorageConfig appconfig();
         AppConfigDataStorageConfig appconfigdata();
         ElastiCacheStorageConfig elasticache();
+        MemoryDbStorageConfig memorydb();
         RdsStorageConfig rds();
         Ec2StorageConfig ec2();
         NeptuneStorageConfig neptune();
@@ -175,6 +176,7 @@ public interface EmulatorConfig {
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
         CodePipelineStorageConfig codepipeline();
+        S3VectorsStorageConfig s3vectors();
     }
 
     interface SsmStorageConfig {
@@ -269,6 +271,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface MemoryDbStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface RdsStorageConfig {
         Optional<String> mode();
     }
@@ -313,6 +322,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface S3VectorsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -341,6 +357,7 @@ public interface EmulatorConfig {
         IamServiceConfig iam();
         MskServiceConfig msk();
         ElastiCacheServiceConfig elasticache();
+        MemoryDbServiceConfig memorydb();
         RdsServiceConfig rds();
         RdsDataServiceConfig rdsData();
         EventBridgeServiceConfig eventbridge();
@@ -395,9 +412,15 @@ public interface EmulatorConfig {
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
         UiServiceConfig ui();
+        S3VectorsServiceConfig s3vectors();
     }
 
     interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface S3VectorsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -556,6 +579,26 @@ public interface EmulatorConfig {
         Optional<String> dockerNetwork();
     }
 
+    interface MemoryDbServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean mock();
+
+        @WithDefault("6400")
+        int proxyBasePort();
+
+        @WithDefault("6419")
+        int proxyMaxPort();
+
+        @WithDefault("valkey/valkey:8")
+        String defaultImage();
+
+        /** Docker network to attach MemoryDB containers to. Empty = default bridge. */
+        Optional<String> dockerNetwork();
+    }
+
     interface RdsServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -599,8 +642,21 @@ public interface EmulatorConfig {
         @WithDefault("8282")
         int proxyMaxPort();
 
+        /**
+         * Backend graph engine and query language: {@code gremlin} (Apache TinkerPop, Gremlin
+         * over WebSocket) or {@code neo4j} (Neo4j, openCypher over Bolt). Mirrors LocalStack's
+         * {@code NEPTUNE_DB_TYPE}.
+         */
+        @WithDefault("gremlin")
+        String dbType();
+
+        /** Image used when {@code db-type=gremlin}. */
         @WithDefault("tinkerpop/gremlin-server:3.7.3")
         String defaultImage();
+
+        /** Image used when {@code db-type=neo4j} (openCypher / Bolt). */
+        @WithDefault("neo4j:5-community")
+        String defaultNeo4jImage();
 
         Optional<String> dockerNetwork();
     }
