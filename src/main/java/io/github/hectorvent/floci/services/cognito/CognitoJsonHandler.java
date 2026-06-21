@@ -526,17 +526,23 @@ public class CognitoJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("UserConfirmed", "CONFIRMED".equals(user.getUserStatus()));
         response.put("UserSub", user.getAttributes().get("sub"));
-        ObjectNode delivery = response.putObject("CodeDeliveryDetails");
-        delivery.put("AttributeName", "email");
-        delivery.put("DeliveryMedium", "EMAIL");
-        delivery.put("Destination", user.getAttributes().getOrDefault("email", "****"));
+        if (!"CONFIRMED".equals(user.getUserStatus())) {
+            Map<String, String> deliveryDetails = service.signUpCodeDeliveryDetails(user);
+            if (!deliveryDetails.isEmpty()) {
+                ObjectNode delivery = response.putObject("CodeDeliveryDetails");
+                delivery.put("AttributeName", deliveryDetails.get("AttributeName"));
+                delivery.put("DeliveryMedium", deliveryDetails.get("DeliveryMedium"));
+                delivery.put("Destination", deliveryDetails.get("Destination"));
+            }
+        }
         return Response.ok(response).build();
     }
 
     private Response handleConfirmSignUp(JsonNode request) {
         service.confirmSignUp(
                 request.path("ClientId").asText(),
-                request.path("Username").asText()
+                request.path("Username").asText(),
+                request.path("ConfirmationCode").asText()
         );
         return Response.ok(objectMapper.createObjectNode()).build();
     }

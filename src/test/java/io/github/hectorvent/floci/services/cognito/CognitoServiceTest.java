@@ -8,6 +8,9 @@ import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -20,6 +23,12 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class CognitoServiceTest {
 
@@ -1046,6 +1055,94 @@ class CognitoServiceTest {
         assertTrue(user.getAttributes().containsKey("sub"),
                 "signUp should auto-generate a sub attribute");
         assertFalse(user.getAttributes().get("sub").isBlank());
+    }
+
+    @Test
+    void signUpWithoutDeliveryTargetFailsBeforePersistingUser() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                verificationCodeService,
+                messageDispatcher
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        pool.setAutoVerifiedAttributes(List.of("email"));
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "test-client",
+                false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!", Map.of()));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+
+        AwsException lookupEx = assertThrows(AwsException.class, () ->
+                serviceWithVerification.adminGetUser(pool.getId(), "carol"));
+        assertEquals("UserNotFoundException", lookupEx.getErrorCode());
+    }
+
+    @Test
+    void signUpRollsBackUserWhenDispatchFails() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("123456");
+        doThrow(new RuntimeException("SES unavailable")).when(messageDispatcher)
+                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any());
+
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                verificationCodeService,
+                messageDispatcher
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        pool.setAutoVerifiedAttributes(List.of("email"));
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "test-client",
+                false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!",
+                        Map.of("email", "carol@example.com")));
+        assertEquals("CodeDeliveryFailureException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("Failed to deliver the message.", ex.getMessage());
+
+        AwsException lookupEx = assertThrows(AwsException.class, () ->
+                serviceWithVerification.adminGetUser(pool.getId(), "carol"));
+        assertEquals("UserNotFoundException", lookupEx.getErrorCode());
+        verify(verificationCodeService).invalidatePrevious(pool.getId(), "carol",
+                VerificationCode.Purpose.SIGNUP_CONFIRMATION);
+    }
+
+    @Test
+    void signUpReturnsResourceNotFoundAsBadRequestWhenClientMissing() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.signUp("missing-client", "carol", "Pass1234!", Map.of("email", "carol@example.com")));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void confirmSignUpReturnsResourceNotFoundAsBadRequestWhenClientMissing() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.confirmSignUp("missing-client", "carol", "123456"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     @Test
