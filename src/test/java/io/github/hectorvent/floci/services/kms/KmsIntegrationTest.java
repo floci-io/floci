@@ -4,15 +4,19 @@ import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
+import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.hamcrest.Matchers.startsWith;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 
 @QuarkusTest
 class KmsIntegrationTest {
@@ -26,7 +30,7 @@ class KmsIntegrationTest {
 
     @Test
     void updateKeyDescriptionRoundTripThroughJsonHandler() {
-        String keyId = given()
+        var key = given()
             .header("X-Amz-Target", "TrentService.CreateKey")
             .contentType(KMS_CONTENT_TYPE)
             .body("""
@@ -39,7 +43,12 @@ class KmsIntegrationTest {
         .then()
             .statusCode(200)
             .body("KeyMetadata.KeyId", notNullValue())
-            .extract().jsonPath().getString("KeyMetadata.KeyId");
+            .extract().jsonPath();
+
+        String keyId = key.getString("KeyMetadata.KeyId");
+        assertNotNull(keyId);
+        List<String> encryptionAlgorithms = key.getList("KeyMetadata.EncryptionAlgorithms");
+        assertEquals(List.of("SYMMETRIC_DEFAULT"), encryptionAlgorithms);
 
         given()
             .header("X-Amz-Target", "TrentService.UpdateKeyDescription")
@@ -67,7 +76,8 @@ class KmsIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("KeyMetadata.Description", equalTo("new description"));
+            .body("KeyMetadata.Description", equalTo("new description"))
+            .body("KeyMetadata.EncryptionAlgorithms", equalTo(List.of("SYMMETRIC_DEFAULT")));
     }
 
     @Test
@@ -954,5 +964,146 @@ class KmsIntegrationTest {
                 .then()
                 .statusCode(400)
                 .body("__type", equalTo("ValidationException"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, EncryptionAlgorithms, SYMMETRIC_DEFAULT",
+            "RSA_2048, ENCRYPT_DECRYPT, EncryptionAlgorithms, 'RSAES_OAEP_SHA_1,RSAES_OAEP_SHA_256'",
+            "RSA_2048, SIGN_VERIFY, SigningAlgorithms, 'RSASSA_PKCS1_V1_5_SHA_256,RSASSA_PKCS1_V1_5_SHA_384,RSASSA_PKCS1_V1_5_SHA_512,RSASSA_PSS_SHA_256,RSASSA_PSS_SHA_384,RSASSA_PSS_SHA_512'",
+            "RSA_3072, ENCRYPT_DECRYPT, EncryptionAlgorithms, 'RSAES_OAEP_SHA_1,RSAES_OAEP_SHA_256'",
+            "RSA_3072, SIGN_VERIFY, SigningAlgorithms, 'RSASSA_PKCS1_V1_5_SHA_256,RSASSA_PKCS1_V1_5_SHA_384,RSASSA_PKCS1_V1_5_SHA_512,RSASSA_PSS_SHA_256,RSASSA_PSS_SHA_384,RSASSA_PSS_SHA_512'",
+            "RSA_4096, ENCRYPT_DECRYPT, EncryptionAlgorithms, 'RSAES_OAEP_SHA_1,RSAES_OAEP_SHA_256'",
+            "RSA_4096, SIGN_VERIFY, SigningAlgorithms, 'RSASSA_PKCS1_V1_5_SHA_256,RSASSA_PKCS1_V1_5_SHA_384,RSASSA_PKCS1_V1_5_SHA_512,RSASSA_PSS_SHA_256,RSASSA_PSS_SHA_384,RSASSA_PSS_SHA_512'",
+            "ECC_NIST_P256, SIGN_VERIFY, SigningAlgorithms, ECDSA_SHA_256",
+            "ECC_NIST_P384, SIGN_VERIFY, SigningAlgorithms, ECDSA_SHA_384",
+            "ECC_NIST_P521, SIGN_VERIFY, SigningAlgorithms, ECDSA_SHA_512",
+            "ECC_SECG_P256K1, SIGN_VERIFY, SigningAlgorithms, ECDSA_SHA_256",
+            "HMAC_224, GENERATE_VERIFY_MAC, MacAlgorithms, HMAC_SHA_224",
+            "HMAC_256, GENERATE_VERIFY_MAC, MacAlgorithms, HMAC_SHA_256",
+            "HMAC_384, GENERATE_VERIFY_MAC, MacAlgorithms, HMAC_SHA_384",
+            "HMAC_512, GENERATE_VERIFY_MAC, MacAlgorithms, HMAC_SHA_512"
+    })
+    void createKeyWithAllImplementedCombinations(String keySpec, String keyUsage, String algorithmField, String expectedAlgorithms) {
+        List<String> expectedList = List.of(expectedAlgorithms.split(","));
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                {
+                    "Description": "test key",
+                    "KeyUsage": "%s",
+                    "CustomerMasterKeySpec": "%s"
+                }
+                """.formatted(keyUsage, keySpec))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("KeyMetadata.%s".formatted(algorithmField), equalTo(expectedList));
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "SYMMETRIC_DEFAULT, ENCRYPT_DECRYPT, 200",
+            "SYMMETRIC_DEFAULT, SIGN_VERIFY, 200",
+            "SYMMETRIC_DEFAULT, GENERATE_VERIFY_MAC, 400",
+            "SYMMETRIC_DEFAULT, KEY_AGREEMENT, 200",
+
+            "RSA_2048, ENCRYPT_DECRYPT, 200",
+            "RSA_2048, SIGN_VERIFY, 200",
+            "RSA_2048, GENERATE_VERIFY_MAC, 400",
+            "RSA_2048, KEY_AGREEMENT, 200",
+
+            "RSA_3072, ENCRYPT_DECRYPT, 200",
+            "RSA_3072, SIGN_VERIFY, 200",
+            "RSA_3072, GENERATE_VERIFY_MAC, 400",
+            "RSA_3072, KEY_AGREEMENT, 200",
+
+            "RSA_4096, ENCRYPT_DECRYPT, 200",
+            "RSA_4096, SIGN_VERIFY, 200",
+            "RSA_4096, GENERATE_VERIFY_MAC, 400",
+            "RSA_4096, KEY_AGREEMENT, 200",
+
+            "ECC_NIST_P256, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P256, SIGN_VERIFY, 200",
+            "ECC_NIST_P256, GENERATE_VERIFY_MAC, 400",
+            "ECC_NIST_P256, KEY_AGREEMENT, 200",
+
+            "ECC_NIST_P384, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P384, SIGN_VERIFY, 200",
+            "ECC_NIST_P384, GENERATE_VERIFY_MAC, 400",
+            "ECC_NIST_P384, KEY_AGREEMENT, 200",
+
+            "ECC_NIST_P521, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_P521, SIGN_VERIFY, 200",
+            "ECC_NIST_P521, GENERATE_VERIFY_MAC, 400",
+            "ECC_NIST_P521, KEY_AGREEMENT, 200",
+
+            "ECC_NIST_EDWARDS25519, ENCRYPT_DECRYPT, 200",
+            "ECC_NIST_EDWARDS25519, SIGN_VERIFY, 200",
+            "ECC_NIST_EDWARDS25519, GENERATE_VERIFY_MAC, 400",
+            "ECC_NIST_EDWARDS25519, KEY_AGREEMENT, 200",
+
+            "ECC_SECG_P256K1, ENCRYPT_DECRYPT, 200",
+            "ECC_SECG_P256K1, SIGN_VERIFY, 200",
+            "ECC_SECG_P256K1, GENERATE_VERIFY_MAC, 400",
+            "ECC_SECG_P256K1, KEY_AGREEMENT, 200",
+
+            "HMAC_224, ENCRYPT_DECRYPT, 400",
+            "HMAC_224, SIGN_VERIFY, 400",
+            "HMAC_224, GENERATE_VERIFY_MAC, 200",
+            "HMAC_224, KEY_AGREEMENT, 400",
+
+            "HMAC_256, ENCRYPT_DECRYPT, 400",
+            "HMAC_256, SIGN_VERIFY, 400",
+            "HMAC_256, GENERATE_VERIFY_MAC, 200",
+            "HMAC_256, KEY_AGREEMENT, 400",
+
+            "HMAC_384, ENCRYPT_DECRYPT, 400",
+            "HMAC_384, SIGN_VERIFY, 400",
+            "HMAC_384, GENERATE_VERIFY_MAC, 200",
+            "HMAC_384, KEY_AGREEMENT, 400",
+
+            "HMAC_512, ENCRYPT_DECRYPT, 400",
+            "HMAC_512, SIGN_VERIFY, 400",
+            "HMAC_512, GENERATE_VERIFY_MAC, 200",
+            "HMAC_512, KEY_AGREEMENT, 400",
+
+            "SM2, ENCRYPT_DECRYPT, 400", // Not implemented
+            "SM2, SIGN_VERIFY, 400",
+            "SM2, GENERATE_VERIFY_MAC, 400",
+            "SM2, KEY_AGREEMENT, 400",
+
+            "ML_DSA_44, ENCRYPT_DECRYPT, 400", // Not implemented
+            "ML_DSA_44, SIGN_VERIFY, 400",
+            "ML_DSA_44, GENERATE_VERIFY_MAC, 400",
+            "ML_DSA_44, KEY_AGREEMENT, 400",
+
+            "ML_DSA_65, ENCRYPT_DECRYPT, 400",
+            "ML_DSA_65, SIGN_VERIFY, 400",
+            "ML_DSA_65, GENERATE_VERIFY_MAC, 400",
+            "ML_DSA_65, KEY_AGREEMENT, 400",
+
+            "ML_DSA_87, ENCRYPT_DECRYPT, 400",
+            "ML_DSA_87, SIGN_VERIFY, 400",
+            "ML_DSA_87, GENERATE_VERIFY_MAC, 400",
+            "ML_DSA_87, KEY_AGREEMENT, 400"
+    })
+    void createKeyWithCombinations(String keySpec, String keyUsage, int expectedStatusCode) {
+        given()
+                .header("X-Amz-Target", "TrentService.CreateKey")
+                .contentType(KMS_CONTENT_TYPE)
+                .body("""
+                {
+                    "Description": "test key",
+                    "KeyUsage": "%s",
+                    "KeySpec": "%s"
+                }
+                """.formatted(keyUsage, keySpec))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(expectedStatusCode);
     }
 }

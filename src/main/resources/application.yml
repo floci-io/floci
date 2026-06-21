@@ -94,6 +94,8 @@ floci:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
+      s3vectors:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
@@ -359,3 +361,6 @@ floci:
       enabled: true
     appsync:
       enabled: true
+    s3vectors:
+      enabled: true
+

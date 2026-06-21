@@ -150,6 +150,7 @@ public class EventBridgeService {
         );
         if (tags != null) {
             bus.getTags().putAll(tags);
+            resourceGroupsTaggingService.tagResources(List.of(bus.getArn()), tags, region);
         }
         busStore.put(key, bus);
         LOG.infov("Created event bus: {0} in region {1}", name, region);
@@ -166,7 +167,7 @@ public class EventBridgeService {
             throw new AwsException("ValidationException", "Cannot delete the default event bus.", 400);
         }
         String key = busKey(region, effectiveName);
-        busStore.get(key)
+        EventBus bus = busStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "EventBus not found: " + effectiveName, 404));
         String rulePrefix = ruleKeyPrefix(region, effectiveName);
@@ -176,6 +177,7 @@ public class EventBridgeService {
                     "Cannot delete event bus with existing rules: " + name, 400);
         }
         busStore.delete(key);
+        resourceGroupsTaggingService.deleteResources(List.of(bus.getArn()), region);
         LOG.infov("Deleted event bus: {0}", name);
     }
 
@@ -1092,11 +1094,12 @@ public class EventBridgeService {
 
     public void deleteArchive(String archiveName, String region) {
         String key = archiveKey(region, archiveName);
-        archiveStore.get(key)
+        Archive archive = archiveStore.get(key)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Archive not found: " + archiveName, 404));
         archiveStore.delete(key);
         archivedEventStore.delete(archivedEventKey(region, archiveName));
+        resourceGroupsTaggingService.deleteResources(List.of(archive.getArchiveArn()), region);
         LOG.infov("Deleted archive: {0}", archiveName);
     }
 

@@ -281,6 +281,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appsync</artifactId>
         </dependency>
+        <!-- S3 Vectors client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3vectors</artifactId>
+        </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

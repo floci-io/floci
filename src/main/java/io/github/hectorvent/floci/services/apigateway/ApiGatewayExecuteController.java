@@ -22,6 +22,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaArnUtils;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import io.github.hectorvent.floci.services.sqs.SqsQueryHandler;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -72,6 +73,7 @@ public class ApiGatewayExecuteController {
     private final AwsServiceRouter serviceRouter;
     private final WebSocketConnectionManager webSocketConnectionManager;
     private final ElbV2Service elbV2Service;
+    private final SqsQueryHandler sqsQueryHandler;
 
     @Inject
     public ApiGatewayExecuteController(ApiGatewayService apiGatewayService, ApiGatewayV2Service apiGatewayV2Service,
@@ -79,7 +81,8 @@ public class ApiGatewayExecuteController {
                                        ObjectMapper objectMapper, VtlTemplateEngine vtlEngine,
                                        AwsServiceRouter serviceRouter,
                                        WebSocketConnectionManager webSocketConnectionManager,
-                                       ElbV2Service elbV2Service) {
+                                       ElbV2Service elbV2Service,
+                                       SqsQueryHandler sqsQueryHandler) {
         this.apiGatewayService = apiGatewayService;
         this.apiGatewayV2Service = apiGatewayV2Service;
         this.lambdaService = lambdaService;
@@ -89,6 +92,7 @@ public class ApiGatewayExecuteController {
         this.serviceRouter = serviceRouter;
         this.webSocketConnectionManager = webSocketConnectionManager;
         this.elbV2Service = elbV2Service;
+        this.sqsQueryHandler = sqsQueryHandler;
     }
 
     /** Matches an ELBv2 listener ARN (ALB {@code app/} or NLB {@code net/}); group 1 = region. */
@@ -782,6 +786,26 @@ public class ApiGatewayExecuteController {
 
     // ──────────────────────────── AWS (non-proxy) ────────────────────────────
 
+    private MultivaluedMap<String, String> parseFormEncodedBody(String body) {
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        if (body == null || body.isEmpty()) {
+            return params;
+        }
+        String[] pairs = body.split("&");
+        for (String pair : pairs) {
+            int idx = pair.indexOf("=");
+            if (idx > 0) {
+                String key = URLDecoder.decode(pair.substring(0, idx), StandardCharsets.UTF_8);
+                String value = URLDecoder.decode(pair.substring(idx + 1), StandardCharsets.UTF_8);
+                params.add(key, value);
+            } else if (idx == -1 && !pair.isEmpty()) {
+                String key = URLDecoder.decode(pair, StandardCharsets.UTF_8);
+                params.add(key, "");
+            }
+        }
+        return params;
+    }
+
     private Response invokeAwsIntegration(String region, String httpMethod, String path, String proxy,
                                           String stageName, ApiGatewayResource resource,
                                           Integration integration, HttpHeaders headers,
@@ -809,6 +833,9 @@ public class ApiGatewayExecuteController {
         if (proxy != null && !proxy.isEmpty()) pathMap.put("proxy", proxy);
         pathMap.putAll(extractPathParams(resource.getPath(), path));
 
+        String incomingContentType = headerMap.getOrDefault("Content-Type",
+                headerMap.getOrDefault("content-type", "application/json"));
+
         VtlTemplateEngine.VtlContext vtlCtx = new VtlTemplateEngine.VtlContext(
                 bodyStr, headerMap, queryMap, pathMap, stageName, httpMethod,
                 resource.getPath(), requestId, regionResolver.getAccountId(), null);
@@ -817,8 +844,6 @@ public class ApiGatewayExecuteController {
         // before parameter mapping runs, since an integration.request.header.Content-Type
         // override (common for SQS query-protocol integrations) would otherwise clobber it and
         // misdirect template selection.
-        String incomingContentType = headerMap.getOrDefault("Content-Type",
-                headerMap.getOrDefault("content-type", "application/json"));
 
         // Apply request parameter mapping (method.request.* → integration.request.*)
         Map<String, String> integrationReqParams = integration.getRequestParameters();

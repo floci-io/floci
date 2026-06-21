@@ -3,6 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.services.kms.KmsClient;
 import software.amazon.awssdk.services.kms.model.CreateKeyResponse;
+import software.amazon.awssdk.services.kms.model.EncryptionAlgorithmSpec;
 import software.amazon.awssdk.services.kms.model.GetKeyPolicyResponse;
 import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
 
@@ -15,6 +16,7 @@ import static org.assertj.core.api.Assertions.*;
  *   #269 — CreateKey applies Tags at creation time
  *   #258 — GetKeyPolicy returns the stored policy
  *   #259 — PutKeyPolicy updates the key policy
+ *   #DescribeKey — Returns proper EncryptionAlgorithms, SigningAlgorithms, and MacAlgorithms
  */
 @DisplayName("KMS features (#258 #259 #269)")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -51,8 +53,8 @@ class KmsFeaturesTest {
                         software.amazon.awssdk.services.kms.model.Tag::tagKey,
                         software.amazon.awssdk.services.kms.model.Tag::tagValue));
 
-        assertThat(tagMap).containsEntry("env", "prod");
-        assertThat(tagMap).containsEntry("team", "platform");
+        assertThat(tagMap).containsEntry("env", "prod")
+                .containsEntry("team", "platform");
 
         kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
     }
@@ -143,6 +145,59 @@ class KmsFeaturesTest {
         // Verify change persisted
         assertThat(kms.getKeyPolicy(b -> b.keyId(keyId)).policy()).isEqualTo(updated);
         assertThat(kms.getKeyPolicy(b -> b.keyId(keyId)).policy()).isNotEqualTo(initial);
+
+        kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+    }
+
+    // ── DescribeKey Responses ────────────────────────────────────────────────
+
+    @Test
+    @Order(40)
+    void describeSymmetricKeyReturnsNoEncryptionAlgorithms() {
+        CreateKeyResponse resp = kms.createKey(b -> b
+                .description("symmetric-key")
+                .keyUsage("ENCRYPT_DECRYPT")
+                .keySpec("SYMMETRIC_DEFAULT"));
+        String keyId = resp.keyMetadata().keyId();
+
+        assertThat(resp.keyMetadata().encryptionAlgorithms()).isNotEmpty();
+        assertThat(resp.keyMetadata().encryptionAlgorithms()).contains(EncryptionAlgorithmSpec.SYMMETRIC_DEFAULT);
+        assertThat(resp.keyMetadata().signingAlgorithms()).isEmpty();
+        assertThat(resp.keyMetadata().macAlgorithms()).isEmpty();
+
+        kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+    }
+
+    @Test
+    @Order(41)
+    void describeAsymmetricRsaSignKeyReturnsSigningAlgorithms() {
+        CreateKeyResponse resp = kms.createKey(b -> b
+                .description("rsa-sign-key")
+                .keyUsage("SIGN_VERIFY")
+                .keySpec("RSA_2048"));
+        String keyId = resp.keyMetadata().keyId();
+
+        assertThat(resp.keyMetadata().signingAlgorithms())
+                .contains(software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256,
+                        software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec.RSASSA_PSS_SHA_256);
+        assertThat(resp.keyMetadata().encryptionAlgorithms()).isEmpty();
+
+        kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
+    }
+
+    @Test
+    @Order(42)
+    void describeHmacKeyReturnsMacAlgorithms() {
+        CreateKeyResponse resp = kms.createKey(b -> b
+                .description("hmac-key")
+                .keyUsage("GENERATE_VERIFY_MAC")
+                .keySpec("HMAC_256"));
+        String keyId = resp.keyMetadata().keyId();
+
+        assertThat(resp.keyMetadata().macAlgorithms())
+                .containsExactly(software.amazon.awssdk.services.kms.model.MacAlgorithmSpec.HMAC_SHA_256);
+        assertThat(resp.keyMetadata().signingAlgorithms()).isEmpty();
+        assertThat(resp.keyMetadata().encryptionAlgorithms()).isEmpty();
 
         kms.scheduleKeyDeletion(b -> b.keyId(keyId).pendingWindowInDays(7));
     }
