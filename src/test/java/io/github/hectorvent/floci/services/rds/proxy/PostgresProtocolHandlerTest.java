@@ -87,8 +87,10 @@ class PostgresProtocolHandlerTest {
                 readAuthenticationOk(clientIn);
                 readReadyForQuery(clientIn);
 
-                authThread.join(5_000);
-                backendThread.join(5_000);
+authThread.join(5_000);
+backendThread.join(5_000);
+assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
             }
 
             assertEquals("auth_db", backendDatabase.get());
