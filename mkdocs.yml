@@ -118,6 +118,7 @@ nav:
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
+    - CodePipeline: services/codepipeline.md
     - AWS Backup: services/backup.md
     - CloudFront: services/cloudfront.md
     - Route53: services/route53.md

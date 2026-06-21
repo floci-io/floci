@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployJsonHandler;
+import io.github.hectorvent.floci.services.codepipeline.CodePipelineJsonHandler;
 import io.github.hectorvent.floci.services.ecr.EcrJsonHandler;
 import io.github.hectorvent.floci.services.transfer.TransferHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -78,6 +79,7 @@ public class AwsJson11Controller {
     private final ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler;
     private final CodeBuildJsonHandler codeBuildJsonHandler;
     private final CodeDeployJsonHandler codeDeployJsonHandler;
+    private final CodePipelineJsonHandler codePipelineJsonHandler;
     private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
     private final TransferHandler transferHandler;
     private final TextractJsonHandler textractJsonHandler;
@@ -109,6 +111,7 @@ public class AwsJson11Controller {
                                ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler,
                                CodeBuildJsonHandler codeBuildJsonHandler,
                                CodeDeployJsonHandler codeDeployJsonHandler,
+                               CodePipelineJsonHandler codePipelineJsonHandler,
                                Ec2MessagesJsonHandler ec2MessagesJsonHandler,
                                TransferHandler transferHandler,
                                TextractJsonHandler textractJsonHandler,
@@ -143,6 +146,7 @@ public class AwsJson11Controller {
         this.resourceGroupsTaggingJsonHandler = resourceGroupsTaggingJsonHandler;
         this.codeBuildJsonHandler = codeBuildJsonHandler;
         this.codeDeployJsonHandler = codeDeployJsonHandler;
+        this.codePipelineJsonHandler = codePipelineJsonHandler;
         this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
         this.transferHandler = transferHandler;
         this.textractJsonHandler = textractJsonHandler;
@@ -202,6 +206,8 @@ public class AwsJson11Controller {
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
                 case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
                 case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
+                case "codepipeline" -> codePipelineJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
                 case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
                 case "transfer" -> transferHandler.handle(action, request, region);
                 case "textract" -> textractJsonHandler.handle(action, request, region);

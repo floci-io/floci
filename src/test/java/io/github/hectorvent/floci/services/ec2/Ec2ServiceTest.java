@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.ec2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -15,6 +16,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -35,6 +37,20 @@ class Ec2ServiceTest {
         service.terminateInstances("us-east-1", List.of(instanceId));
         assertFalse(service.isInstanceContainerRunning(instanceId));
         verifyNoInteractions(containerManager);
+    }
+
+    @Test
+    void runInstancesRequiresImageIdInsteadOfDefaulting() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.runInstances(
+                "us-east-1", null, "t3.micro", 1, 1, null, List.of(), null, null,
+                List.of(), null, null));
+
+        assertEquals("MissingParameter", error.getErrorCode());
+        assertEquals("The request must contain the parameter ImageId", error.getMessage());
+        assertEquals(400, error.getHttpStatus());
     }
 
     @Test

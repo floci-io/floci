@@ -6,6 +6,10 @@ import io.github.hectorvent.floci.services.autoscaling.model.AsgInstance;
 import io.github.hectorvent.floci.services.autoscaling.model.InstanceRefresh;
 import io.github.hectorvent.floci.services.autoscaling.model.MixedInstancesPolicy;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -15,6 +19,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class AutoScalingServiceTest {
 
@@ -86,6 +91,184 @@ class AutoScalingServiceTest {
         assertEquals("lt-updated", group.getLaunchTemplateId());
         assertEquals("2", group.getLaunchTemplateVersion());
         assertNull(group.getLaunchConfigurationName());
+    }
+
+    @Test
+    void createAutoScalingGroupRejectsResolvedLaunchTemplateWithoutImageId() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+        LaunchTemplate version = new LaunchTemplate();
+        version.setImageId(null);
+        when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("1")))
+                .thenReturn(List.of(version));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createAutoScalingGroup(REGION,
+                "missing-image-asg",
+                null,
+                "lt-no-image",
+                null,
+                "1",
+                null,
+                0,
+                1,
+                1,
+                300,
+                List.of("us-east-1a"),
+                List.of(),
+                List.of(),
+                List.of(),
+                "EC2",
+                0,
+                List.of("Default"),
+                java.util.Map.of()));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeAutoScalingGroups(REGION, List.of("missing-image-asg")).isEmpty());
+    }
+
+    @Test
+    void createLaunchConfigurationRejectsMissingImageOrInstanceTypeWithoutInstanceId() {
+        AwsException missingImage = assertThrows(AwsException.class, () -> service.createLaunchConfiguration(REGION,
+                "lc-no-image",
+                null,
+                "",
+                "t3.micro",
+                null,
+                List.of(),
+                null,
+                null,
+                false));
+
+        assertEquals("ValidationError", missingImage.getErrorCode());
+        assertEquals(AutoScalingService.INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE, missingImage.getMessage());
+        assertEquals(400, missingImage.getHttpStatus());
+        assertTrue(service.describeLaunchConfigurations(REGION, List.of("lc-no-image")).isEmpty());
+
+        AwsException missingInstanceType = assertThrows(AwsException.class,
+                () -> service.createLaunchConfiguration(REGION,
+                        "lc-no-instance-type",
+                        null,
+                        "ami-12345678",
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        null,
+                        false));
+
+        assertEquals("ValidationError", missingInstanceType.getErrorCode());
+        assertEquals(AutoScalingService.INVALID_LAUNCH_CONFIGURATION_PARAMETERS_MESSAGE,
+                missingInstanceType.getMessage());
+        assertEquals(400, missingInstanceType.getHttpStatus());
+        assertTrue(service.describeLaunchConfigurations(REGION, List.of("lc-no-instance-type")).isEmpty());
+    }
+
+    @Test
+    void createLaunchConfigurationWithInstanceIdCopiesSourceInstanceLaunchAttributes() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+        Instance source = new Instance();
+        source.setInstanceId("i-1234567890abcdef0");
+        source.setImageId("ami-from-instance");
+        source.setInstanceType("m7g.large");
+        source.setKeyName("source-key");
+        source.setSecurityGroups(List.of(new GroupIdentifier("sg-source", "default")));
+        source.setUserData("source-user-data");
+        source.setIamInstanceProfileArn("arn:aws:iam::000000000000:instance-profile/source");
+        Reservation reservation = new Reservation();
+        reservation.getInstances().add(source);
+        when(ec2Service.describeInstances(REGION, List.of("i-1234567890abcdef0"), java.util.Map.of()))
+                .thenReturn(List.of(reservation));
+
+        var launchConfiguration = service.createLaunchConfiguration(REGION,
+                "lc-from-instance",
+                "i-1234567890abcdef0",
+                null,
+                null,
+                null,
+                List.of(),
+                null,
+                null,
+                false);
+
+        assertEquals("ami-from-instance", launchConfiguration.getImageId());
+        assertEquals("m7g.large", launchConfiguration.getInstanceType());
+        assertEquals("source-key", launchConfiguration.getKeyName());
+        assertEquals(List.of("sg-source"), launchConfiguration.getSecurityGroups());
+        assertEquals("source-user-data", launchConfiguration.getUserData());
+        assertEquals("arn:aws:iam::000000000000:instance-profile/source",
+                launchConfiguration.getIamInstanceProfile());
+        assertEquals(launchConfiguration,
+                service.describeLaunchConfigurations(REGION, List.of("lc-from-instance")).getFirst());
+    }
+
+    @Test
+    void createAutoScalingGroupRejectsUnresolvedLaunchTemplateBeforeMutation() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+        when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-missing", null, List.of("1")))
+                .thenReturn(List.of());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.createAutoScalingGroup(REGION,
+                "missing-template-asg",
+                null,
+                "lt-missing",
+                null,
+                "1",
+                null,
+                0,
+                1,
+                1,
+                300,
+                List.of("us-east-1a"),
+                List.of(),
+                List.of(),
+                List.of(),
+                "EC2",
+                0,
+                List.of("Default"),
+                java.util.Map.of()));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(AutoScalingService.INVALID_LAUNCH_TEMPLATE_MESSAGE, error.getMessage());
+        assertEquals(400, error.getHttpStatus());
+        assertTrue(service.describeAutoScalingGroups(REGION, List.of("missing-template-asg")).isEmpty());
+    }
+
+    @Test
+    void updateAutoScalingGroupRejectsResolvedLaunchTemplateWithoutImageIdBeforeMutation() {
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        service.ec2Service = ec2Service;
+        LaunchTemplate version = new LaunchTemplate();
+        version.setImageId("");
+        when(ec2Service.describeLaunchTemplateVersions(REGION, "lt-no-image", null, List.of("2")))
+                .thenReturn(List.of(version));
+
+        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(
+                REGION,
+                "test-asg",
+                null,
+                "lt-no-image",
+                null,
+                "2",
+                null,
+                null,
+                5,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals("lt-original", group.getLaunchTemplateId());
+        assertEquals(3, group.getMaxSize());
     }
 
     @Test

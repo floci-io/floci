@@ -38,6 +38,8 @@ floci:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
+      codepipeline:
+        flush-interval-ms: 60000
       s3vectors:
         flush-interval-ms: 60000
       cloudfront:
@@ -201,6 +203,8 @@ floci:
       runner-mode: immediate
     codedeploy:
       enabled: true
+    codepipeline:
+      enabled: true
     autoscaling:
       enabled: true
     transfer:
@@ -230,4 +234,3 @@ floci:
       enabled: true
     s3vectors:
       enabled: true
-

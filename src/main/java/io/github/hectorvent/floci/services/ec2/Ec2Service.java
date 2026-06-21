@@ -318,6 +318,9 @@ public class Ec2Service {
                                     List<String> securityGroupIds, String subnetId,
                                     String clientToken, List<Tag> instanceTags,
                                     String userData, String iamInstanceProfileArn) {
+        if (imageId == null || imageId.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter ImageId", 400);
+        }
         ensureDefaultResources(region);
 
         // Resolve subnet
@@ -363,7 +366,7 @@ public class Ec2Service {
 
             Instance inst = new Instance();
             inst.setInstanceId(instanceId);
-            inst.setImageId(imageId != null ? imageId : "ami-default");
+            inst.setImageId(imageId);
             inst.setState(InstanceState.pending());
             inst.setInstanceType(instanceType != null ? instanceType : "t2.micro");
             inst.setPlacement(new Placement(az));

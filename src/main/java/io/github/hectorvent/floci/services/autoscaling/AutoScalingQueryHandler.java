@@ -95,6 +95,7 @@ public class AutoScalingQueryHandler {
     private Response handleCreateLaunchConfiguration(MultivaluedMap<String, String> p, String region) {
         service.createLaunchConfiguration(region,
                 p.getFirst("LaunchConfigurationName"),
+                p.getFirst("InstanceId"),
                 p.getFirst("ImageId"),
                 p.getFirst("InstanceType"),
                 p.getFirst("KeyName"),
@@ -121,10 +122,10 @@ public class AutoScalingQueryHandler {
             xml.start("member")
                .elem("LaunchConfigurationName", lc.getLaunchConfigurationName())
                .elem("LaunchConfigurationARN", lc.getLaunchConfigurationArn())
-               .elem("ImageId", lc.getImageId() != null ? lc.getImageId() : "")
-               .elem("InstanceType", lc.getInstanceType() != null ? lc.getInstanceType() : "t3.micro")
                .elem("CreatedTime", ISO_FMT.format(lc.getCreatedTime()))
                .elem("AssociatePublicIpAddress", String.valueOf(lc.isAssociatePublicIpAddress()));
+            if (lc.getImageId() != null) { xml.elem("ImageId", lc.getImageId()); }
+            if (lc.getInstanceType() != null) { xml.elem("InstanceType", lc.getInstanceType()); }
             if (lc.getKeyName() != null) { xml.elem("KeyName", lc.getKeyName()); }
             if (lc.getUserData() != null) { xml.elem("UserData", lc.getUserData()); }
             if (lc.getIamInstanceProfile() != null) { xml.elem("IamInstanceProfile", lc.getIamInstanceProfile()); }

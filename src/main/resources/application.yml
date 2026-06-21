@@ -94,6 +94,8 @@ floci:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
+      codepipeline:
+        flush-interval-ms: 5000
       s3vectors:
         flush-interval-ms: 5000
       rds:
@@ -330,6 +332,8 @@ floci:
       # docker-network: floci-network
     codedeploy:
       enabled: true
+    codepipeline:
+      enabled: true
     autoscaling:
       enabled: true
     backup:
@@ -363,4 +367,3 @@ floci:
       enabled: true
     s3vectors:
       enabled: true
-

@@ -46,6 +46,10 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `UpdateConfigurationSetEventDestination` | Update an existing event destination on a configuration set |
 | `DeleteConfigurationSetEventDestination` | Remove an event destination from a configuration set      |
 | `UpdateConfigurationSetSendingEnabled`   | Enable or disable email sending through a configuration set |
+| `CreateConfigurationSetTrackingOptions`  | Set the custom open/click tracking redirect domain |
+| `UpdateConfigurationSetTrackingOptions`  | Change the custom tracking redirect domain |
+| `DeleteConfigurationSetTrackingOptions`  | Remove the custom tracking redirect domain |
+| `UpdateConfigurationSetReputationMetricsEnabled` | Enable or disable reputation metrics for a configuration set |
 
 ## Configuration
 
