@@ -174,6 +174,33 @@ class SesConfigurationSetTrackingOptionsV1IntegrationTest {
     }
 
     @Test
+    @Order(13)
+    void createTrackingOptions_missingDomain_returnsValidationError() {
+        // No TrackingOptions.CustomRedirectDomain param at all: AWS treats the
+        // tracking-options member as null and returns a framework ValidationError.
+        query("CreateConfigurationSetTrackingOptions")
+            .formParam("ConfigurationSetName", CS)
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("<Code>ValidationError</Code>"))
+            .body(containsString("Member must not be null"));
+    }
+
+    @Test
+    @Order(14)
+    void createTrackingOptions_blankDomain_returnsInvalidTrackingOptions() {
+        // Present but empty CustomRedirectDomain: the structure is non-null but has
+        // no usable field, so AWS reports InvalidTrackingOptions instead.
+        query("CreateConfigurationSetTrackingOptions")
+            .formParam("ConfigurationSetName", CS)
+            .formParam("TrackingOptions.CustomRedirectDomain", "")
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("<Code>InvalidTrackingOptions</Code>"))
+            .body(containsString("At least one field of TrackingOptions must contain a value"));
+    }
+
+    @Test
     @Order(11)
     void updateReputationMetricsEnabled_togglesAndReflectsInDescribe() {
         query("UpdateConfigurationSetReputationMetricsEnabled")

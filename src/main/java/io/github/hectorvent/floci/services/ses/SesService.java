@@ -702,8 +702,14 @@ public class SesService {
     }
 
     private void requireVerifiedRedirectDomain(String domain, String region) {
-        if (domain == null || domain.isBlank()) {
-            throw new AwsException("InvalidParameterValue", "CustomRedirectDomain is required.", 400);
+        if (domain == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'trackingOptions' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (domain.isBlank()) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "At least one field of TrackingOptions must contain a value.", 400);
         }
         if (!isVerifiedDomainIdentity(domain, region)) {
             throw new AwsException("InvalidTrackingOptions",
