@@ -91,6 +91,7 @@ nav:
     - IAM: services/iam.md
     - STS: services/sts.md
     - ElastiCache: services/elasticache.md
+    - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
     - MSK (Kafka): services/msk.md

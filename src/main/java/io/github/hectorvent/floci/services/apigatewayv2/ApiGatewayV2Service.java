@@ -125,6 +125,22 @@ public class ApiGatewayV2Service {
     public void deleteApi(String region, String apiId) {
         getApi(region, apiId);
         apiStore.delete(apiKey(region, apiId));
+        // Cascade-delete every child resource keyed under region::apiId::*.
+        // VpcLink is region-scoped (region::vpcLinkId, shared across APIs) and excluded.
+        String prefix = region + "::" + apiId + "::";
+        deleteByPrefix(routeStore, prefix);
+        deleteByPrefix(integrationStore, prefix);
+        deleteByPrefix(authorizerStore, prefix);
+        deleteByPrefix(deploymentStore, prefix);
+        deleteByPrefix(stageStore, prefix);
+        deleteByPrefix(modelStore, prefix);
+        deleteByPrefix(routeResponseStore, prefix);
+        deleteByPrefix(integrationResponseStore, prefix);
+        LOG.infov("Deleted HTTP API: {0} in {1}", apiId, region);
+    }
+
+    private static void deleteByPrefix(StorageBackend<String, ?> store, String prefix) {
+        store.keys().stream().filter(k -> k.startsWith(prefix)).forEach(store::delete);
     }
 
     public Api updateApi(String region, String apiId, Map<String, Object> request) {
@@ -220,6 +236,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<Authorizer> getAuthorizers(String region, String apiId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return authorizerStore.scan(k -> k.startsWith(prefix));
     }
@@ -296,6 +313,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<Route> getRoutes(String region, String apiId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return routeStore.scan(k -> k.startsWith(prefix));
     }
@@ -433,6 +451,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<Integration> getIntegrations(String region, String apiId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return integrationStore.scan(k -> k.startsWith(prefix));
     }
@@ -516,6 +535,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<Stage> getStages(String region, String apiId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return stageStore.scan(k -> k.startsWith(prefix));
     }
@@ -583,6 +603,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<Deployment> getDeployments(String region, String apiId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return deploymentStore.scan(k -> k.startsWith(prefix));
     }
@@ -634,6 +655,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<RouteResponse> getRouteResponses(String region, String apiId, String routeId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::" + routeId + "::";
         return routeResponseStore.scan(k -> k.startsWith(prefix));
     }
@@ -698,6 +720,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<IntegrationResponse> getIntegrationResponses(String region, String apiId, String integrationId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::" + integrationId + "::";
         return integrationResponseStore.scan(k -> k.startsWith(prefix));
     }
@@ -754,6 +777,7 @@ public class ApiGatewayV2Service {
     }
 
     public List<Model> getModels(String region, String apiId) {
+        getApi(region, apiId);
         String prefix = region + "::" + apiId + "::";
         return modelStore.scan(k -> k.startsWith(prefix));
     }

@@ -239,6 +239,13 @@
             <version>2.3.232</version>
             <scope>test</scope>
         </dependency>
+        <!-- openCypher/Bolt client for the Neptune neo4j db-type integration test -->
+        <dependency>
+            <groupId>org.neo4j.driver</groupId>
+            <artifactId>neo4j-java-driver</artifactId>
+            <version>5.28.5</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

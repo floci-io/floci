@@ -10,6 +10,7 @@ import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.nullValue;
 
 /**
  * Integration tests for SES V2 ConfigurationSet endpoints under /v2/email/configuration-sets.
@@ -663,5 +664,506 @@ class SesConfigurationSetV2IntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("SerializationException"))
             .body("message", equalTo("Expected null"));
+    }
+
+    // ─────────── Reputation / Tracking / Delivery / Archiving options ───────────
+    // Behavior verified against real AWS SES V2 on 2026-06-17.
+
+    @Test
+    @Order(30)
+    void getConfigurationSet_reputationOptions_defaultsEnabled() {
+        putConfigSet("v2-cs-rep-default");
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-rep-default")
+        .then().statusCode(200)
+            .body("ReputationOptions.ReputationMetricsEnabled", equalTo(true));
+    }
+
+    @Test
+    @Order(31)
+    void putReputationOptions_disables_andEchoes() {
+        putConfigSet("v2-cs-rep");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ReputationMetricsEnabled\": false}")
+        .when().put("/v2/email/configuration-sets/v2-cs-rep/reputation-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-rep")
+        .then().statusCode(200)
+            .body("ReputationOptions.ReputationMetricsEnabled", equalTo(false));
+    }
+
+    @Test
+    @Order(32)
+    void createConfigurationSet_inlineReputation_echoed() {
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("""
+                {"ConfigurationSetName": "v2-cs-rep-inline",
+                 "ReputationOptions": {"ReputationMetricsEnabled": false}}
+                """)
+        .when().post("/v2/email/configuration-sets").then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-rep-inline")
+        .then().statusCode(200)
+            .body("ReputationOptions.ReputationMetricsEnabled", equalTo(false));
+    }
+
+    @Test
+    @Order(33)
+    void putDeliveryOptions_echoed() {
+        putConfigSet("v2-cs-delivery");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"REQUIRE\", \"MaxDeliverySeconds\": 300}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery/delivery-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-delivery")
+        .then().statusCode(200)
+            .body("DeliveryOptions.TlsPolicy", equalTo("REQUIRE"))
+            .body("DeliveryOptions.MaxDeliverySeconds", equalTo(300));
+    }
+
+    @Test
+    @Order(34)
+    void putDeliveryOptions_nonexistentPool_returns400() {
+        putConfigSet("v2-cs-delivery-pool");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"OPTIONAL\", \"SendingPoolName\": \"ghost-pool\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-pool/delivery-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("SendingPool <ghost-pool> doesn't exist"));
+    }
+
+    @Test
+    @Order(35)
+    void putArchivingOptions_validArn_echoed() {
+        putConfigSet("v2-cs-archiving");
+        String arn = "arn:aws:ses:us-east-1:123456789012:mailmanager-archive/a-abcdefghijklmnopqrstuvwx";
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ArchiveArn\": \"" + arn + "\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-archiving/archiving-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-archiving")
+        .then().statusCode(200)
+            .body("ArchivingOptions.ArchiveArn", equalTo(arn));
+    }
+
+    @Test
+    @Order(36)
+    void putArchivingOptions_arbitraryArn_accepted() {
+        // Floci does not model Mail Manager archives, so the ArchiveArn is not
+        // validated — any value is stored and echoed (matching the store-only
+        // behaviour of other local AWS emulators).
+        String arn = "not-an-arn";
+        putConfigSet("v2-cs-archiving-any");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ArchiveArn\": \"" + arn + "\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-archiving-any/archiving-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-archiving-any")
+        .then().statusCode(200)
+            .body("ArchivingOptions.ArchiveArn", equalTo(arn));
+    }
+
+    @Test
+    @Order(37)
+    void putTrackingOptions_verifiedDomain_echoed() {
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"EmailIdentity\": \"track.floci.test\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+        putConfigSet("v2-cs-tracking");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"track.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking/tracking-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-tracking")
+        .then().statusCode(200)
+            .body("TrackingOptions.CustomRedirectDomain", equalTo("track.floci.test"))
+            .body("TrackingOptions.HttpsPolicy", equalTo("REQUIRE"));
+    }
+
+    @Test
+    @Order(38)
+    void putTrackingOptions_unverifiedDomain_returns400() {
+        putConfigSet("v2-cs-tracking-unverified");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"never-verified.example.com\", \"HttpsPolicy\": \"REQUIRE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-unverified/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Domain <never-verified.example.com> is not verified under this account."));
+    }
+
+    @Test
+    @Order(39)
+    void putTrackingOptions_invalidHttpsPolicy_returns400() {
+        // AWS validates the HttpsPolicy enum only after CustomRedirectDomain
+        // presence and verification, so the domain must be verified to reach it.
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"EmailIdentity\": \"track-enum.floci.test\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+        putConfigSet("v2-cs-tracking-enum");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"track-enum.floci.test\", \"HttpsPolicy\": \"BOGUS\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-enum/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("1 validation error detected: Value at "
+                    + "'httpsPolicy' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]"));
+    }
+
+    @Test
+    @Order(40)
+    void putReputationOptions_emptyBody_disables() {
+        // AWS treats a PutConfigurationSetReputationOptions with no
+        // ReputationMetricsEnabled member as "false" (verified against real AWS
+        // SES V2 on 2026-06-17) — it is not required and does not error.
+        putConfigSet("v2-cs-rep-empty");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when().put("/v2/email/configuration-sets/v2-cs-rep-empty/reputation-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-rep-empty")
+        .then().statusCode(200)
+            .body("ReputationOptions.ReputationMetricsEnabled", equalTo(false));
+    }
+
+    @Test
+    @Order(41)
+    void putDeliveryOptions_invalidTlsPolicy_returns400() {
+        putConfigSet("v2-cs-delivery-tls");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"MAYBE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-tls/delivery-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("1 validation error detected: Value at "
+                    + "'tlsPolicy' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]"));
+    }
+
+    @Test
+    @Order(42)
+    void putDeliveryOptions_nonNumericMaxDeliverySeconds_returns400() {
+        putConfigSet("v2-cs-delivery-max");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"REQUIRE\", \"MaxDeliverySeconds\": \"soon\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-max/delivery-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("MaxDeliverySeconds must be a number."));
+    }
+
+    @Test
+    @Order(43)
+    void putTrackingOptions_nonStringHttpsPolicy_returns400() {
+        putConfigSet("v2-cs-tracking-type");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"HttpsPolicy\": 123}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-type/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("HttpsPolicy must be a JSON string."));
+    }
+
+    @Test
+    @Order(44)
+    void putArchivingOptions_nonStringArn_returns400() {
+        putConfigSet("v2-cs-archiving-type");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ArchiveArn\": true}")
+        .when().put("/v2/email/configuration-sets/v2-cs-archiving-type/archiving-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("ArchiveArn must be a JSON string."));
+    }
+
+    @Test
+    @Order(48)
+    void putDeliveryOptions_fractionalMaxDeliverySeconds_returns400() {
+        // MaxDeliverySeconds is an integer; a fractional value must not be
+        // silently truncated.
+        putConfigSet("v2-cs-delivery-frac");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"REQUIRE\", \"MaxDeliverySeconds\": 1.5}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-frac/delivery-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("MaxDeliverySeconds must be an integer."));
+    }
+
+    @Test
+    @Order(45)
+    void putTrackingOptions_httpsPolicyWithoutDomain_returns400() {
+        // AWS requires CustomRedirectDomain whenever HttpsPolicy is set
+        // (verified against real AWS 2026-06-17); an empty body is accepted.
+        putConfigSet("v2-cs-tracking-nodomain");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"HttpsPolicy\": \"REQUIRE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-nodomain/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("CustomRedirectDomain must be specified."));
+    }
+
+    @Test
+    @Order(46)
+    void putTrackingOptions_unverifiedDomainPrecedesEnum_returns400() {
+        // AWS checks domain verification before the HttpsPolicy enum, so an
+        // unverified domain wins over an invalid enum value.
+        putConfigSet("v2-cs-tracking-order");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"unverified-order.example.com\", \"HttpsPolicy\": \"BOGUS\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-order/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Domain <unverified-order.example.com> is not verified under this account."));
+    }
+
+    @Test
+    @Order(47)
+    void putTrackingOptions_verifiedEmailIdentityAsDomain_returns400() {
+        // CustomRedirectDomain must be a verified *domain* identity; a verified
+        // email-address identity does not qualify.
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"EmailIdentity\": \"redirect@floci.test\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+        putConfigSet("v2-cs-tracking-email-id");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"redirect@floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-email-id/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Domain <redirect@floci.test> is not verified under this account."));
+    }
+
+    @Test
+    @Order(49)
+    void putTrackingOptions_blankDomain_returns400() {
+        // AWS rejects a present-but-blank CustomRedirectDomain rather than
+        // storing it (verified against real AWS 2026-06-17), even with no
+        // HttpsPolicy set.
+        putConfigSet("v2-cs-tracking-blank");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"   \"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-blank/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("CustomRedirectDomain must be specified."));
+    }
+
+    @Test
+    @Order(50)
+    void putTrackingOptions_unverifiedDomainWithoutHttpsPolicy_returns400() {
+        // AWS verifies CustomRedirectDomain even when HttpsPolicy is omitted.
+        putConfigSet("v2-cs-tracking-nopolicy");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"never-verified-nopolicy.example.com\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-nopolicy/tracking-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Domain <never-verified-nopolicy.example.com> is not verified under this account."));
+    }
+
+    @Test
+    @Order(51)
+    void putTrackingOptions_emptyBody_clears() {
+        // An empty PUT body clears tracking options rather than persisting an
+        // empty block that GetConfigurationSet would echo as {}.
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"EmailIdentity\": \"clear.floci.test\"}")
+        .when().post("/v2/email/identities").then().statusCode(200);
+        putConfigSet("v2-cs-tracking-clear");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"CustomRedirectDomain\": \"clear.floci.test\", \"HttpsPolicy\": \"REQUIRE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-clear/tracking-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-tracking-clear")
+        .then().statusCode(200).body("TrackingOptions.HttpsPolicy", equalTo("REQUIRE"));
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when().put("/v2/email/configuration-sets/v2-cs-tracking-clear/tracking-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-tracking-clear")
+        .then().statusCode(200).body("TrackingOptions", nullValue());
+    }
+
+    @Test
+    @Order(52)
+    void putDeliveryOptions_emptyBody_clears() {
+        putConfigSet("v2-cs-delivery-clear");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"REQUIRE\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-clear/delivery-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-delivery-clear")
+        .then().statusCode(200).body("DeliveryOptions.TlsPolicy", equalTo("REQUIRE"));
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-clear/delivery-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-delivery-clear")
+        .then().statusCode(200).body("DeliveryOptions", nullValue());
+    }
+
+    @Test
+    @Order(53)
+    void putDeliveryOptions_blankSendingPool_returns400() {
+        // AWS rejects a blank SendingPoolName with a distinct message (verified
+        // against real AWS 2026-06-17), separate from the non-existent-pool case.
+        putConfigSet("v2-cs-delivery-blankpool");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"SendingPoolName\": \"   \"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-blankpool/delivery-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("sendingPoolName can't be blank."));
+    }
+
+    @Test
+    @Order(54)
+    void putDeliveryOptions_maxDeliverySecondsBelowMinimum_returns400() {
+        putConfigSet("v2-cs-delivery-min");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"MaxDeliverySeconds\": 5}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-min/delivery-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("1 validation error detected: Value at "
+                    + "'maxDeliverySeconds' failed to satisfy constraint: "
+                    + "Member must have value greater than or equal to 300"));
+    }
+
+    @Test
+    @Order(55)
+    void putDeliveryOptions_maxDeliverySecondsAboveMaximum_returns400() {
+        putConfigSet("v2-cs-delivery-overmax");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"MaxDeliverySeconds\": 999999}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-overmax/delivery-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("1 validation error detected: Value at "
+                    + "'maxDeliverySeconds' failed to satisfy constraint: "
+                    + "Member must have value less than or equal to 50400"));
+    }
+
+    @Test
+    @Order(56)
+    void putVdmOptions_echoed() {
+        putConfigSet("v2-cs-vdm");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"ENABLED\"}, "
+                    + "\"GuardianOptions\": {\"OptimizedSharedDelivery\": \"DISABLED\"}}}")
+        .when().put("/v2/email/configuration-sets/v2-cs-vdm/vdm-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-vdm")
+        .then().statusCode(200)
+            .body("VdmOptions.DashboardOptions.EngagementMetrics", equalTo("ENABLED"))
+            .body("VdmOptions.GuardianOptions.OptimizedSharedDelivery", equalTo("DISABLED"));
+    }
+
+    @Test
+    @Order(57)
+    void putVdmOptions_invalidEngagementMetrics_returns400() {
+        putConfigSet("v2-cs-vdm-bad");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"NONSENSE\"}}}")
+        .when().put("/v2/email/configuration-sets/v2-cs-vdm-bad/vdm-options")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("1 validation error detected: Value at "
+                    + "'vdmOptions.dashboardOptions.engagementMetrics' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [ENABLED, DISABLED]"));
+    }
+
+    @Test
+    @Order(58)
+    void createConfigurationSet_inlineVdm_echoed() {
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"v2-cs-vdm-inline\", "
+                    + "\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"DISABLED\"}}}")
+        .when().post("/v2/email/configuration-sets").then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-vdm-inline")
+        .then().statusCode(200)
+            .body("VdmOptions.DashboardOptions.EngagementMetrics", equalTo("DISABLED"));
+    }
+
+    @Test
+    @Order(59)
+    void putVdmOptions_emptyBody_clears() {
+        putConfigSet("v2-cs-vdm-clear");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"ENABLED\"}}}")
+        .when().put("/v2/email/configuration-sets/v2-cs-vdm-clear/vdm-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-vdm-clear")
+        .then().statusCode(200).body("VdmOptions.DashboardOptions.EngagementMetrics", equalTo("ENABLED"));
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{}")
+        .when().put("/v2/email/configuration-sets/v2-cs-vdm-clear/vdm-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-vdm-clear")
+        .then().statusCode(200).body("VdmOptions", nullValue());
+    }
+
+    @Test
+    @Order(60)
+    void createConfigurationSet_invalidInlineVdm_returns400_andDoesNotCreate() {
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"v2-cs-vdm-inline-bad\", "
+                    + "\"VdmOptions\": {\"DashboardOptions\": {\"EngagementMetrics\": \"NONSENSE\"}}}")
+        .when().post("/v2/email/configuration-sets")
+        .then().statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("1 validation error detected: Value at "
+                    + "'vdmOptions.dashboardOptions.engagementMetrics' failed to satisfy constraint: "
+                    + "Member must satisfy enum value set: [ENABLED, DISABLED]"));
+
+        // Validation happens before the store write, so the set must not exist.
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-vdm-inline-bad")
+        .then().statusCode(404)
+            .body("__type", equalTo("NotFoundException"));
+    }
+
+    @Test
+    @Order(61)
+    void putDeliveryOptions_existingSendingPool_roundTrips() {
+        // A SendingPoolName that refers to a dedicated IP pool created via
+        // CreateDedicatedIpPool is accepted and echoed (verified against real
+        // AWS 2026-06-18).
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"PoolName\": \"v2-cs-pool-ref\"}")
+        .when().post("/v2/email/dedicated-ip-pools").then().statusCode(200);
+        putConfigSet("v2-cs-delivery-poolref");
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"TlsPolicy\": \"REQUIRE\", \"SendingPoolName\": \"v2-cs-pool-ref\"}")
+        .when().put("/v2/email/configuration-sets/v2-cs-delivery-poolref/delivery-options")
+        .then().statusCode(200);
+        given().header("Authorization", AUTH_HEADER)
+        .when().get("/v2/email/configuration-sets/v2-cs-delivery-poolref")
+        .then().statusCode(200)
+            .body("DeliveryOptions.SendingPoolName", equalTo("v2-cs-pool-ref"));
+    }
+
+    private static void putConfigSet(String name) {
+        given().contentType("application/json").header("Authorization", AUTH_HEADER)
+            .body("{\"ConfigurationSetName\": \"" + name + "\"}")
+        .when().post("/v2/email/configuration-sets").then().statusCode(200);
     }
 }
