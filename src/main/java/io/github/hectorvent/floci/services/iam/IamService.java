@@ -447,18 +447,22 @@ public class IamService {
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
-        int nextVersionNum = policy.getVersions().size() + 1;
-        if (nextVersionNum > 5) {
-            throw new AwsException("LimitExceeded",
-                    "A managed policy can have up to 5 versions.", 409);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        PolicyVersion version;
+        synchronized (versions) {
+            int nextVersionNum = versions.size() + 1;
+            if (nextVersionNum > 5) {
+                throw new AwsException("LimitExceeded",
+                        "A managed policy can have up to 5 versions.", 409);
+            }
+            String versionId = "v" + nextVersionNum;
+            version = new PolicyVersion(versionId, document, setAsDefault);
+            if (setAsDefault) {
+                versions.values().forEach(v -> v.setDefaultVersion(false));
+                policy.setDefaultVersionId(versionId);
+            }
+            versions.put(versionId, version);
         }
-        String versionId = "v" + nextVersionNum;
-        PolicyVersion version = new PolicyVersion(versionId, document, setAsDefault);
-        if (setAsDefault) {
-            policy.getVersions().values().forEach(v -> v.setDefaultVersion(false));
-            policy.setDefaultVersionId(versionId);
-        }
-        policy.getVersions().put(versionId, version);
         policy.setUpdateDate(Instant.now());
         policies.put(policyArn, policy);
         return version;
@@ -481,27 +485,36 @@ public class IamService {
             throw new AwsException("DeleteConflict",
                     "Cannot delete the default version of a policy.", 409);
         }
-        if (!policy.getVersions().containsKey(versionId)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            if (!versions.containsKey(versionId)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy version " + versionId + " does not exist.", 404);
+            }
+            versions.remove(versionId);
         }
-        policy.getVersions().remove(versionId);
         policies.put(policyArn, policy);
     }
 
     public List<PolicyVersion> listPolicyVersions(String policyArn) {
-        return new ArrayList<>(getPolicy(policyArn).getVersions().values());
+        Map<String, PolicyVersion> versions = getPolicy(policyArn).getVersions();
+        synchronized (versions) {
+            return new ArrayList<>(versions.values());
+        }
     }
 
     public void setDefaultPolicyVersion(String policyArn, String versionId) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
-        if (!policy.getVersions().containsKey(versionId)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            if (!versions.containsKey(versionId)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy version " + versionId + " does not exist.", 404);
+            }
+            versions.values().forEach(v -> v.setDefaultVersion(false));
+            versions.get(versionId).setDefaultVersion(true);
         }
-        policy.getVersions().values().forEach(v -> v.setDefaultVersion(false));
-        policy.getVersions().get(versionId).setDefaultVersion(true);
         policy.setDefaultVersionId(versionId);
         policies.put(policyArn, policy);
     }
@@ -826,13 +839,16 @@ public class IamService {
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         getRole(roleName); // validates existence
-        if (!profile.getRoleNames().contains(roleName)) {
-            if (!profile.getRoleNames().isEmpty()) {
-                throw new AwsException("LimitExceeded",
-                        "An instance profile can contain at most 1 role.", 409);
+        List<String> roleNames = profile.getRoleNames();
+        synchronized (roleNames) {
+            if (!roleNames.contains(roleName)) {
+                if (!roleNames.isEmpty()) {
+                    throw new AwsException("LimitExceeded",
+                            "An instance profile can contain at most 1 role.", 409);
+                }
+                roleNames.add(roleName);
+                instanceProfiles.put(instanceProfileName, profile);
             }
-            profile.getRoleNames().add(roleName);
-            instanceProfiles.put(instanceProfileName, profile);
         }
     }
 

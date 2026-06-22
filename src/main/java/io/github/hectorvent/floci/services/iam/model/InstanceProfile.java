@@ -4,8 +4,8 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -16,7 +16,7 @@ public class InstanceProfile {
     private String path;
     private String arn;
     private Instant createDate;
-    private List<String> roleNames = new ArrayList<>();
+    private List<String> roleNames = new CopyOnWriteArrayList<>();
 
     public InstanceProfile() {}
 
@@ -45,5 +45,7 @@ public class InstanceProfile {
     public void setCreateDate(Instant createDate) { this.createDate = createDate; }
 
     public List<String> getRoleNames() { return roleNames; }
-    public void setRoleNames(List<String> roleNames) { this.roleNames = roleNames; }
+    public void setRoleNames(List<String> roleNames) {
+        this.roleNames = new CopyOnWriteArrayList<>(roleNames);
+    }
 }
