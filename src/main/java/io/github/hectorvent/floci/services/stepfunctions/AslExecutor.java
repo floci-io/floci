@@ -124,6 +124,7 @@ public class AslExecutor {
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
         // This can be optimized further
+        // TODO Set WebclientOptions useragent to Amazon|StepFunctions|HttpInvoke|{{{{region}}}}
         this.webClient = WebClient.wrap(vertx.createHttpClient());
     }
 
@@ -1326,8 +1327,6 @@ public class AslExecutor {
         if (defaultContentType != null && headerValue(headers, "Content-Type") == null) {
             requestHeaders.add("Content-Type", defaultContentType);
         }
-        requestHeaders.set("User-Agent", "Amazon|StepFunctions|HttpInvoke|" + region);
-        requestHeaders.set("Range", "bytes=0-262144");
         return requestHeaders;
     }
 
