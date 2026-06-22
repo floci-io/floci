@@ -252,6 +252,55 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void assignedVariablesSurviveBeyondNextStateOutput() throws Exception {
+        String definition = """
+                {
+                    "QueryLanguage": "JSONata",
+                    "StartAt": "AssignVariables",
+                    "States": {
+                        "AssignVariables": {
+                            "Type": "Pass",
+                            "Assign": {
+                                "CheckpointCount": "0",
+                                "ExecutionWaitTimeInSeconds": "3"
+                            },
+                            "Output": {
+                                "transient": 3
+                            },
+                            "Next": "UseAndReplaceOutput"
+                        },
+                        "UseAndReplaceOutput": {
+                            "Type": "Pass",
+                            "Output": {
+                                "fromAssignedVariable": "{% $ExecutionWaitTimeInSeconds %}",
+                                "fromPreviousOutput": "{% $states.input.transient %}"
+                            },
+                            "Next": "UseAssignedAgain"
+                        },
+                        "UseAssignedAgain": {
+                            "Type": "Pass",
+                            "Output": {
+                                "checkpoint": "{% $CheckpointCount %}",
+                                "fromAssignedVariable": "{% $ExecutionWaitTimeInSeconds %}",
+                                "previousTransientStillPresent": "{% $exists($states.input.transient) %}"
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("jsonata-assign-vars-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"checkpoint\":\"0\"") || output.contains("\"checkpoint\": \"0\""));
+        assertTrue(output.contains("\"fromAssignedVariable\":\"3\"") || output.contains("\"fromAssignedVariable\": \"3\""));
+        assertTrue(output.contains("\"previousTransientStillPresent\":false")
+                || output.contains("\"previousTransientStillPresent\": false"));
+    }
+
+    @Test
     void mixedModeDefaultJsonPathWithPerStateJsonata() throws Exception {
         // Default JSONPath (no top-level QueryLanguage) with one state overriding to JSONata
         String definition = """

@@ -111,6 +111,7 @@ public class AslExecutor {
             String topLevelQueryLanguage = definition.path("QueryLanguage").asText("JSONPath");
             JsonNode currentInput = parseInput(exec.getInput());
             JsonNode execContext = buildContext(exec, sm);
+            ObjectNode variables = objectMapper.createObjectNode();
 
             String currentStateName = startAt;
             while (currentStateName != null) {
@@ -129,7 +130,7 @@ public class AslExecutor {
                 try {
                     boolean jsonata = isJsonata(stateDef, topLevelQueryLanguage);
                     StateResult stateResult = executeState(currentStateName, type, stateDef, currentInput,
-                            history, eventId, sm, jsonata, topLevelQueryLanguage, execContext);
+                            history, eventId, sm, jsonata, topLevelQueryLanguage, execContext, variables);
                     addEvent(history, eventId, stateExitedEventType(type), eventId.get() - 1,
                             Map.of("name", currentStateName, "output", stateResult.output().toString()));
 
@@ -182,25 +183,28 @@ public class AslExecutor {
 
     private StateResult executeState(String name, String type, JsonNode stateDef, JsonNode input,
                                      List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
-                                     boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
+                                     boolean jsonata, String topLevelQueryLanguage, JsonNode context,
+                                     ObjectNode variables) throws Exception {
         return switch (type) {
-            case "Pass" -> executePassState(stateDef, input, jsonata, context);
-            case "Task" -> executeTaskState(name, stateDef, input, history, eventId, sm, jsonata, context);
-            case "Choice" -> executeChoiceState(stateDef, input, jsonata, context);
-            case "Wait" -> executeWaitState(stateDef, input, jsonata, context);
-            case "Succeed" -> executeSucceedState(stateDef, input, jsonata, context);
-            case "Fail" -> executeFail(stateDef, input, jsonata, context);
-            case "Parallel" -> executeParallelState(name, stateDef, input, sm, jsonata, topLevelQueryLanguage, context);
-            case "Map" -> executeMapState(name, stateDef, input, sm, jsonata, topLevelQueryLanguage, context);
+            case "Pass" -> executePassState(stateDef, input, jsonata, context, variables);
+            case "Task" -> executeTaskState(name, stateDef, input, history, eventId, sm, jsonata, context, variables);
+            case "Choice" -> executeChoiceState(stateDef, input, jsonata, context, variables);
+            case "Wait" -> executeWaitState(stateDef, input, jsonata, context, variables);
+            case "Succeed" -> executeSucceedState(stateDef, input, jsonata, context, variables);
+            case "Fail" -> executeFail(stateDef, input, jsonata, context, variables);
+            case "Parallel" -> executeParallelState(name, stateDef, input, sm, jsonata, topLevelQueryLanguage, context, variables);
+            case "Map" -> executeMapState(name, stateDef, input, sm, jsonata, topLevelQueryLanguage, context, variables);
             default -> new StateResult(input, stateDef.path("Next").asText(null));
         };
     }
 
-    private StateResult executePassState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context) throws Exception {
+    private StateResult executePassState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+                                         ObjectNode variables) throws Exception {
         if (jsonata) {
             JsonNode result = stateDef.has("Result") ? stateDef.get("Result") : input;
-            JsonNode output = applyJsonataOutput(stateDef, input, result, context);
-            return new StateResult(output, stateDef.path("Next").asText(null));
+            JsonataOutput jsonataOutput = applyJsonataOutput(stateDef, input, result, context, variables);
+            return new StateResult(jsonataOutput.output(), stateDef.path("Next").asText(null),
+                    jsonataOutput.assignedVariables());
         }
 
         JsonNode effectiveInput = applyInputPath(stateDef, input);
@@ -219,7 +223,7 @@ public class AslExecutor {
 
     private StateResult executeTaskState(String stateName, JsonNode stateDef, JsonNode input,
                                          List<HistoryEvent> history, AtomicLong eventId, StateMachine sm,
-                                         boolean jsonata, JsonNode context) throws Exception {
+                                         boolean jsonata, JsonNode context, ObjectNode variables) throws Exception {
         String resource = stateDef.path("Resource").asText();
         boolean isWaitForToken = resource.endsWith(".waitForTaskToken");
         String effectiveResource = isWaitForToken
@@ -240,7 +244,7 @@ public class AslExecutor {
         if (jsonata) {
             JsonNode effectiveInput = input;
             if (stateDef.has("Arguments")) {
-                JsonNode statesVar = buildStatesVar(input, null, context);
+                JsonNode statesVar = buildStatesVar(input, null, context, variables);
                 effectiveInput = jsonataEvaluator.resolveTemplate(stateDef.get("Arguments"), statesVar);
             }
             taskResult = invokeResource(effectiveResource, effectiveInput, sm, taskToken);
@@ -257,8 +261,9 @@ public class AslExecutor {
         }
 
         if (jsonata) {
-            JsonNode output = applyJsonataOutput(stateDef, input, taskResult, context);
-            return new StateResult(output, stateDef.path("Next").asText(null));
+            JsonataOutput jsonataOutput = applyJsonataOutput(stateDef, input, taskResult, context, variables);
+            return new StateResult(jsonataOutput.output(), stateDef.path("Next").asText(null),
+                    jsonataOutput.assignedVariables());
         } else {
             JsonNode output = mergeResult(stateDef, input, taskResult);
             output = applyOutputPath(stateDef, input, output);
@@ -499,7 +504,7 @@ public class AslExecutor {
                 Integer limit = input.has("Limit") ? input.get("Limit").asInt() : null;
                 JsonNode scanFilter = input.has("ScanFilter") ? input.get("ScanFilter") : null;
                 DynamoDbService.ScanResult scanResult = dynamoDbService.scan(
-                        tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null, null, region);
+                        tableName, filterExpression, exprAttrNames, exprAttrValues, scanFilter, limit, null, region);
                 ObjectNode response = objectMapper.createObjectNode();
                 com.fasterxml.jackson.databind.node.ArrayNode items = objectMapper.createArrayNode();
                 scanResult.items().forEach(items::add);
@@ -652,9 +657,10 @@ public class AslExecutor {
         };
     }
 
-    private StateResult executeChoiceState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context) throws Exception {
+    private StateResult executeChoiceState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+                                           ObjectNode variables) throws Exception {
         if (jsonata) {
-            JsonNode statesVar = buildStatesVar(input, null, context);
+            JsonNode statesVar = buildStatesVar(input, null, context, variables);
             JsonNode choices = stateDef.path("Choices");
             for (JsonNode choice : choices) {
                 String condition = choice.path("Condition").asText(null);
@@ -767,13 +773,14 @@ public class AslExecutor {
         return false;
     }
 
-    private StateResult executeWaitState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context) throws InterruptedException {
+    private StateResult executeWaitState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+                                         ObjectNode variables) throws InterruptedException {
         int seconds = 0;
         if (jsonata) {
             if (stateDef.has("Seconds")) {
                 JsonNode secondsNode = stateDef.get("Seconds");
                 if (secondsNode.isTextual() && JsonataEvaluator.isExpression(secondsNode.asText())) {
-                    JsonNode statesVar = buildStatesVar(input, null, context);
+                    JsonNode statesVar = buildStatesVar(input, null, context, variables);
                     JsonNode result = jsonataEvaluator.evaluate(secondsNode.asText(), statesVar);
                     seconds = Math.min(result.asInt(), MAX_WAIT_SECONDS);
                 } else {
@@ -795,19 +802,21 @@ public class AslExecutor {
         return new StateResult(input, stateDef.path("Next").asText(null));
     }
 
-    private StateResult executeSucceedState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context) {
+    private StateResult executeSucceedState(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+                                            ObjectNode variables) {
         if (jsonata) {
-            JsonNode output = applyJsonataOutput(stateDef, input, input, context);
-            return new StateResult(output, null);
+            JsonataOutput jsonataOutput = applyJsonataOutput(stateDef, input, input, context, variables);
+            return new StateResult(jsonataOutput.output(), null, jsonataOutput.assignedVariables());
         }
         return new StateResult(applyOutputPath(stateDef, input, input), null);
     }
 
-    private StateResult executeFail(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context) {
+    private StateResult executeFail(JsonNode stateDef, JsonNode input, boolean jsonata, JsonNode context,
+ ObjectNode variables) {
         String error = stateDef.path("Error").asText(null);
         String cause = stateDef.path("Cause").asText(null);
         if (jsonata) {
-            JsonNode statesVar = buildStatesVar(input, null, context);
+            JsonNode statesVar = buildStatesVar(input, null, context, variables);
             if (error != null && JsonataEvaluator.isExpression(error)) {
                 error = jsonataEvaluator.evaluate(error, statesVar).asText();
             }
@@ -819,7 +828,8 @@ public class AslExecutor {
     }
 
     private StateResult executeParallelState(String name, JsonNode stateDef, JsonNode input, StateMachine sm,
-                                              boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
+                                              boolean jsonata, String topLevelQueryLanguage, JsonNode context,
+                                              ObjectNode variables) throws Exception {
         JsonNode branches = stateDef.path("Branches");
         List<Future<JsonNode>> futures = new ArrayList<>();
 
@@ -828,7 +838,9 @@ public class AslExecutor {
             JsonNode branchStates = branch.path("States");
             JsonNode capturedInput = input;
 
-            futures.add(executor.submit(() -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context)));
+            ObjectNode branchVariables = variables.deepCopy();
+            futures.add(executor.submit(() -> executeBranch(startAt, branchStates, capturedInput, sm,
+                    topLevelQueryLanguage, context, branchVariables)));
         }
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
@@ -854,8 +866,9 @@ public class AslExecutor {
         }
 
         if (jsonata) {
-            JsonNode output = applyJsonataOutput(stateDef, input, results, context);
-            return new StateResult(output, stateDef.path("Next").asText(null));
+            JsonataOutput jsonataOutput = applyJsonataOutput(stateDef, input, results, context, variables);
+            return new StateResult(jsonataOutput.output(), stateDef.path("Next").asText(null),
+                    jsonataOutput.assignedVariables());
         }
 
         JsonNode output = mergeResult(stateDef, input, results);
@@ -864,12 +877,13 @@ public class AslExecutor {
     }
 
     private StateResult executeMapState(String name, JsonNode stateDef, JsonNode input, StateMachine sm,
-                                         boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
+                                         boolean jsonata, String topLevelQueryLanguage, JsonNode context,
+                                         ObjectNode variables) throws Exception {
         JsonNode items;
         if (jsonata && stateDef.has("Items")) {
             JsonNode itemsNode = stateDef.get("Items");
             if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
-                JsonNode statesVar = buildStatesVar(input, null, context);
+                JsonNode statesVar = buildStatesVar(input, null, context, variables);
                 items = jsonataEvaluator.evaluate(itemsNode.asText(), statesVar);
             } else {
                 items = itemsNode;
@@ -911,13 +925,15 @@ public class AslExecutor {
                 iterContext.set("Map", mapCtx);
                 iterInput = resolveParameters(itemTransform, mapInput, iterContext);
             }
-            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, context));
+            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, context,
+                    variables.deepCopy()));
             index++;
         }
 
         if (jsonata) {
-            JsonNode output = applyJsonataOutput(stateDef, input, results, context);
-            return new StateResult(output, stateDef.path("Next").asText(null));
+            JsonataOutput jsonataOutput = applyJsonataOutput(stateDef, input, results, context, variables);
+            return new StateResult(jsonataOutput.output(), stateDef.path("Next").asText(null),
+                    jsonataOutput.assignedVariables());
         }
 
         JsonNode output = mergeResult(stateDef, input, results);
@@ -926,7 +942,7 @@ public class AslExecutor {
     }
 
     private JsonNode executeBranch(String startAt, JsonNode states, JsonNode input, StateMachine sm,
-                                    String topLevelQueryLanguage, JsonNode context) throws Exception {
+                                    String topLevelQueryLanguage, JsonNode context, ObjectNode variables) throws Exception {
         List<HistoryEvent> ignored = new ArrayList<>();
         AtomicLong eventId = new AtomicLong(0);
         JsonNode currentInput = input;
@@ -942,7 +958,7 @@ public class AslExecutor {
             StateResult result;
             try {
                 result = executeState(currentState, type, stateDef, currentInput, ignored, eventId, sm,
-                        stateJsonata, topLevelQueryLanguage, context);
+                        stateJsonata, topLevelQueryLanguage, context, variables);
             } catch (FailStateException e) {
                 StateResult caught = handleCatch(stateDef, currentInput, e);
                 if (caught == null) {
@@ -971,6 +987,10 @@ public class AslExecutor {
     }
 
     private JsonNode buildStatesVar(JsonNode input, JsonNode result, JsonNode context) {
+        return buildStatesVar(input, result, context, null);
+    }
+
+    private JsonNode buildStatesVar(JsonNode input, JsonNode result, JsonNode context, JsonNode variables) {
         ObjectNode states = objectMapper.createObjectNode();
         states.set("input", input);
         if (result != null) {
@@ -978,6 +998,9 @@ public class AslExecutor {
         }
         if (context != null) {
             states.set("context", context);
+        }
+        if (variables != null) {
+            states.set("variables", variables);
         }
         return states;
     }
@@ -1018,15 +1041,31 @@ public class AslExecutor {
     }
 
     /**
-     * Apply JSONata Output field. If Output is present, resolve it as a template with $states bound.
-     * If absent, use the result directly (or input if result is null).
+     * Apply JSONata Assign and Output fields. Assign updates execution-scoped variables;
+     * Output remains the next state's input.
      */
-    private JsonNode applyJsonataOutput(JsonNode stateDef, JsonNode input, JsonNode result, JsonNode context) {
-        if (!stateDef.has("Output")) {
-            return result != null ? result : input;
+    private JsonataOutput applyJsonataOutput(JsonNode stateDef, JsonNode input, JsonNode result, JsonNode context,
+                                             ObjectNode variables) {
+        JsonNode statesVar = buildStatesVar(input, result, context, variables);
+        JsonNode output = stateDef.has("Output")
+                ? jsonataEvaluator.resolveTemplate(stateDef.get("Output"), statesVar)
+                : result != null ? result : input;
+        ObjectNode assignedVariables = objectMapper.createObjectNode();
+
+        if (stateDef.has("Assign")) {
+            JsonNode assigned = jsonataEvaluator.resolveTemplate(stateDef.get("Assign"), statesVar);
+            if (assigned == null || !assigned.isObject()) {
+                throw new FailStateException("States.Runtime", "Assign must evaluate to an object");
+            }
+            Iterator<Map.Entry<String, JsonNode>> fields = assigned.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                assignedVariables.set(entry.getKey(), entry.getValue());
+                variables.set(entry.getKey(), entry.getValue());
+            }
         }
-        JsonNode statesVar = buildStatesVar(input, result, context);
-        return jsonataEvaluator.resolveTemplate(stateDef.get("Output"), statesVar);
+
+        return new JsonataOutput(output, assignedVariables);
     }
 
     // ──────────────────────────── Path resolution ────────────────────────────
@@ -1402,7 +1441,13 @@ public class AslExecutor {
         return AwsArnUtils.regionOrDefault(arn, "us-east-1");
     }
 
-    record StateResult(JsonNode output, String nextState) {}
+    record JsonataOutput(JsonNode output, ObjectNode assignedVariables) {}
+
+    record StateResult(JsonNode output, String nextState, ObjectNode assignedVariables) {
+        StateResult(JsonNode output, String nextState) {
+            this(output, nextState, null);
+        }
+    }
 
     static class FailStateException extends RuntimeException {
         final String error;
