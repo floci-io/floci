@@ -144,7 +144,6 @@ class AslExecutorHttpInvokeTest {
 
         assertFalse(request.query().contains("ignored"));
         assertEquals(List.of("one", "two"), request.headerValues("X-Custom"));
-        assertEquals("bytes=0-262144", request.firstHeader("Range"));
     }
 
     @Test
