@@ -303,9 +303,10 @@ public class S3Controller {
                                 @QueryParam("encoding-type") String encodingType,
                                 @QueryParam("key-marker") String keyMarker,
                                 @QueryParam("marker") String marker,
-                                @Context UriInfo uriInfo) {
+                                @Context UriInfo uriInfo,
+                                @Context HttpHeaders httpHeaders) {
+        validateRawUri();
         try {
-            validateRawUri();
             if (hasQueryParam(uriInfo, "uploads")) {
                 return handleListMultipartUploads(bucket);
             }
@@ -359,7 +360,7 @@ public class S3Controller {
             }
 
             // --- Website Hosting Redirection Logic ---
-            if (uriInfo.getQueryParameters().isEmpty() || (uriInfo.getQueryParameters().size() == 1 && hasQueryParam(uriInfo, "list-type"))) {
+            if (isWebsiteRequest(httpHeaders) && (uriInfo.getQueryParameters().isEmpty() || (uriInfo.getQueryParameters().size() == 1 && hasQueryParam(uriInfo, "list-type")))) {
                 try {
                     WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
                     if (webConfig.getIndexDocument() != null) {
@@ -626,7 +627,7 @@ public class S3Controller {
 
             return fullObjectResponse(bucket, key, versionId, obj, overrides);
         } catch (AwsException e) {
-            if ("NoSuchKey".equals(e.getErrorCode())) {
+            if ("NoSuchKey".equals(e.getErrorCode()) && isWebsiteRequest(httpHeaders)) {
                 try {
                     WebsiteConfiguration webConfig = s3Service.getBucketWebsite(bucket);
                     Response r = serveErrorDocument(bucket, webConfig);
@@ -1986,6 +1987,11 @@ public class S3Controller {
         if (crc64nvme != null && !crc64nvme.equals(S3Checksum.crc64NvmeBase64(data))) {
             throw new AwsException("BadDigest", "The CRC64NVME checksum you specified did not match the payload.", 400);
         }
+    }
+
+    private static boolean isWebsiteRequest(HttpHeaders httpHeaders) {
+        String host = httpHeaders.getHeaderString("Host");
+        return host != null && host.contains("s3-website");
     }
 
     private Response serveErrorDocument(String bucket, WebsiteConfiguration cfg) {
