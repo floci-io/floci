@@ -42,6 +42,8 @@ floci:
         flush-interval-ms: 60000
       s3vectors:
         flush-interval-ms: 60000
+      ecs:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
