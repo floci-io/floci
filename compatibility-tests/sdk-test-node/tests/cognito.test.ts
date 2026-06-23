@@ -23,7 +23,7 @@ import {
   AdminRemoveUserFromGroupCommand,
   AdminListGroupsForUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { makeClient, uniqueName, ENDPOINT } from './setup';
+import { makeClient, uniqueName, fetchLatestSesVerificationCode } from './setup';
 
 describe('Cognito', () => {
   let cognito: CognitoIdentityProviderClient;
@@ -111,19 +111,21 @@ describe('Cognito', () => {
   });
 
   it('should sign up and confirm user', async () => {
+    const email = 'testuser2@example.com';
     await cognito.send(
       new SignUpCommand({
         ClientId: clientId,
         Username: 'testuser2',
         Password: 'Pass789!',
-        UserAttributes: [{ Name: 'email', Value: 'testuser2@example.com' }],
+        UserAttributes: [{ Name: 'email', Value: email }],
       })
     );
+    const confirmationCode = await fetchLatestSesVerificationCode(email);
     await cognito.send(
       new ConfirmSignUpCommand({
         ClientId: clientId,
         Username: 'testuser2',
-        ConfirmationCode: '123456',
+        ConfirmationCode: confirmationCode,
       })
     );
   });
