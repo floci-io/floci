@@ -179,6 +179,10 @@ public class S3Controller {
             if (hasQueryParam(uriInfo, "website")) {
                 return handlePutBucketWebsite(bucket, body);
             }
+            if (hasQueryParam(uriInfo, "logging")) {
+                s3Service.putBucketLogging(bucket, new String(body, StandardCharsets.UTF_8));
+                return Response.ok().build();
+            }
             if (hasQueryParam(uriInfo, "policy")) {
                 s3Service.putBucketPolicy(bucket, new String(body, StandardCharsets.UTF_8));
                 return Response.ok().build();
@@ -329,6 +333,11 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "website")) {
                 return handleGetBucketWebsite(bucket);
+            }
+            if (hasQueryParam(uriInfo, "logging")) {
+                return Response.ok(s3Service.getBucketLogging(bucket))
+                        .type("application/xml")
+                        .build();
             }
             if (hasQueryParam(uriInfo, "policy")) {
                 return Response.ok(s3Service.getBucketPolicy(bucket)).build();
