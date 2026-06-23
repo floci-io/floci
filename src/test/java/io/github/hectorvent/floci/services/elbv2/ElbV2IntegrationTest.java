@@ -935,7 +935,8 @@ class ElbV2IntegrationTest {
                 .body("DescribeSSLPoliciesResponse.DescribeSSLPoliciesResult.SslPolicies.member.size()",
                         greaterThanOrEqualTo(7))
                 .body("DescribeSSLPoliciesResponse.DescribeSSLPoliciesResult.SslPolicies.member.Name",
-                        hasItem("ELBSecurityPolicy-2016-08"));
+                        hasItem("ELBSecurityPolicy-2016-08"))
+                .body(not(containsString("NextMarker")));
     }
 
     @Test
