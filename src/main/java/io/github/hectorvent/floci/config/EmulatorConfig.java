@@ -179,6 +179,7 @@ public interface EmulatorConfig {
         S3VectorsStorageConfig s3vectors();
         EcsStorageConfig ecs();
         CodeBuildStorageConfig codebuild();
+        ConfigStorageConfig config();
     }
 
     interface SsmStorageConfig {
@@ -339,6 +340,13 @@ public interface EmulatorConfig {
     }
 
     interface CodeBuildStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface ConfigStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
