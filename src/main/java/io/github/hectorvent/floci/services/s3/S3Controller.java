@@ -305,8 +305,8 @@ public class S3Controller {
                                 @QueryParam("marker") String marker,
                                 @Context UriInfo uriInfo,
                                 @Context HttpHeaders httpHeaders) {
-        validateRawUri();
         try {
+            validateRawUri();
             if (hasQueryParam(uriInfo, "uploads")) {
                 return handleListMultipartUploads(bucket);
             }
