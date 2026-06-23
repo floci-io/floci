@@ -74,24 +74,25 @@ public class CognitoService {
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
             RegionResolver regionResolver, LambdaService lambdaService, SesService sesService,
             SnsService snsService, Clock clock) {
-        this.poolStore = storageFactory.create("cognito", "cognito-pools.json",
-                new TypeReference<Map<String, UserPool>>() {});
-        this.clientStore = storageFactory.create("cognito", "cognito-clients.json",
-                new TypeReference<Map<String, UserPoolClient>>() {});
-        this.resourceServerStore = storageFactory.create("cognito", "cognito-resource-servers.json",
-                new TypeReference<Map<String, ResourceServer>>() {});
-        this.userStore = storageFactory.create("cognito", "cognito-users.json",
-                new TypeReference<Map<String, CognitoUser>>() {});
-        this.groupStore = storageFactory.create("cognito", "cognito-groups.json",
-                new TypeReference<Map<String, CognitoGroup>>() {});
-        this.revokedTokenStore = storageFactory.create("cognito", "cognito-revoked-tokens.json",
-                new TypeReference<Map<String, RevokedTokenInfo>>() {});
-        this.baseUrl = trimTrailingSlash(emulatorConfig.baseUrl());
-        this.regionResolver = regionResolver;
-        this.lambdaService = lambdaService;
-        this.verificationCodeService = new VerificationCodeService(storageFactory, clock);
-        this.messageDispatcher = new CognitoMessageDispatcher(sesService, snsService);
-        this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
+        this(
+                storageFactory.create("cognito", "cognito-pools.json",
+                        new TypeReference<Map<String, UserPool>>() {}),
+                storageFactory.create("cognito", "cognito-clients.json",
+                        new TypeReference<Map<String, UserPoolClient>>() {}),
+                storageFactory.create("cognito", "cognito-resource-servers.json",
+                        new TypeReference<Map<String, ResourceServer>>() {}),
+                storageFactory.create("cognito", "cognito-users.json",
+                        new TypeReference<Map<String, CognitoUser>>() {}),
+                storageFactory.create("cognito", "cognito-groups.json",
+                        new TypeReference<Map<String, CognitoGroup>>() {}),
+                storageFactory.create("cognito", "cognito-revoked-tokens.json",
+                        new TypeReference<Map<String, RevokedTokenInfo>>() {}),
+                trimTrailingSlash(emulatorConfig.baseUrl()),
+                regionResolver,
+                lambdaService,
+                new VerificationCodeService(storageFactory, clock),
+                new CognitoMessageDispatcher(sesService, snsService)
+        );
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -103,7 +104,7 @@ public class CognitoService {
                    String baseUrl,
                    RegionResolver regionResolver,
                    LambdaService lambdaService) {
-        this(poolStore, clientStore, resourceServerStore, userStore, groupStore, baseUrl,
+        this(poolStore, clientStore, resourceServerStore, userStore, groupStore, revokedTokenStore, baseUrl,
                 regionResolver, lambdaService, null, null);
     }
 
@@ -112,6 +113,7 @@ public class CognitoService {
             StorageBackend<String, ResourceServer> resourceServerStore,
             StorageBackend<String, CognitoUser> userStore,
             StorageBackend<String, CognitoGroup> groupStore,
+            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
             String baseUrl,
             RegionResolver regionResolver, LambdaService lambdaService,
             VerificationCodeService verificationCodeService,
@@ -2455,7 +2457,7 @@ public class CognitoService {
         return value;
     }
 
-    private String trimTrailingSlash(String value) {
+    private static String trimTrailingSlash(String value) {
         if (value.endsWith("/")) {
             return value.substring(0, value.length() - 1);
         }

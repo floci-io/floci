@@ -1067,6 +1067,7 @@ class CognitoServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 "http://localhost:4566",
                 regionResolver,
                 null,
@@ -1098,6 +1099,7 @@ class CognitoServiceTest {
                 .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any());
 
         CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
