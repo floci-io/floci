@@ -23,7 +23,7 @@ import {
   AdminRemoveUserFromGroupCommand,
   AdminListGroupsForUserCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { makeClient, uniqueName, fetchLatestSesVerificationCode } from './setup';
+import { makeClient, uniqueName, ENDPOINT, fetchLatestSesVerificationCode } from './setup';
 
 describe('Cognito', () => {
   let cognito: CognitoIdentityProviderClient;
@@ -46,7 +46,10 @@ describe('Cognito', () => {
 
   it('should create user pool', async () => {
     const response = await cognito.send(
-      new CreateUserPoolCommand({ PoolName: `test-pool-${uniqueName()}` })
+      new CreateUserPoolCommand({
+        PoolName: `test-pool-${uniqueName()}`,
+        AutoVerifiedAttributes: ['email'],
+      })
     );
     poolId = response.UserPool!.Id!;
     expect(poolId).toBeTruthy();

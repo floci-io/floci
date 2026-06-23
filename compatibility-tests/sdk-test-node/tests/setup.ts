@@ -51,7 +51,11 @@ export async function fetchLatestSesVerificationCode(recipient: string): Promise
   const payload = (await response.json()) as {
     messages?: Array<{ Body?: { text_part?: string } }>;
   };
-  const body = payload.messages?.[0]?.Body?.text_part ?? '';
+  const firstMessage = payload.messages?.[0];
+  const body =
+    firstMessage?.Body?.text_part ??
+    (firstMessage?.Body as { html_part?: string } | undefined)?.html_part ??
+    '';
   const match = body.match(SIX_DIGIT_CODE);
   if (!match) {
     throw new Error('verification code email should contain a 6-digit code');

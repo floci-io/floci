@@ -1135,8 +1135,11 @@ public class CognitoService {
         UserPoolClient client = clientStore.get(clientId)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
                         400));
+        UserPool pool = poolStore.get(client.getUserPoolId())
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "User pool not found", 400));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
-        if (verificationCodeService != null) {
+        if (verificationCodeService != null && isSignUpConfirmationEnabled(pool)) {
             try {
                 verificationCodeService.consume(client.getUserPoolId(), user.getUsername(),
                         VerificationCode.Purpose.SIGNUP_CONFIRMATION,
@@ -1148,10 +1151,6 @@ public class CognitoService {
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(client.getUserPoolId(), user.getUsername()), user);
-
-        UserPool pool = poolStore.get(client.getUserPoolId())
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "User pool not found", 400));
         authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
     }
 
