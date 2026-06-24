@@ -114,6 +114,7 @@ public class AwsQueryController {
             "CreateLaunchConfiguration", "DescribeLaunchConfigurations", "DeleteLaunchConfiguration",
             "CreateAutoScalingGroup", "UpdateAutoScalingGroup", "DeleteAutoScalingGroup",
             "DescribeAutoScalingGroups", "SetDesiredCapacity",
+            "StartInstanceRefresh", "DescribeInstanceRefreshes",
             "CreateOrUpdateTags", "DeleteTags",
             "DescribeAutoScalingInstances", "AttachInstances", "DetachInstances",
             "TerminateInstanceInAutoScalingGroup",
@@ -147,6 +148,7 @@ public class AwsQueryController {
             "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
             "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
             "DescribeVpcEndpointServices", "CreateVpcEndpoint", "DescribeVpcEndpoints", "DeleteVpcEndpoints",
+            "DescribePrefixLists",
             "CreateDefaultVpc", "AssociateVpcCidrBlock", "DisassociateVpcCidrBlock",
             "CreateSubnet", "DescribeSubnets", "DeleteSubnet", "ModifySubnetAttribute",
             "CreateSecurityGroup", "DescribeSecurityGroups", "DeleteSecurityGroup",
@@ -161,6 +163,9 @@ public class AwsQueryController {
             "AttachInternetGateway", "DetachInternetGateway",
             "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
             "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
+            "CreateNetworkAcl", "DescribeNetworkAcls", "DeleteNetworkAcl",
+            "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
+            "ReplaceNetworkAclAssociation",
             "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
             "DescribeAddressesAttribute",
@@ -376,7 +381,11 @@ public class AwsQueryController {
             "CreateConfigurationSetEventDestination",
             "UpdateConfigurationSetEventDestination",
             "DeleteConfigurationSetEventDestination",
-            "UpdateConfigurationSetSendingEnabled"
+            "UpdateConfigurationSetSendingEnabled",
+            "CreateConfigurationSetTrackingOptions",
+            "UpdateConfigurationSetTrackingOptions",
+            "DeleteConfigurationSetTrackingOptions",
+            "UpdateConfigurationSetReputationMetricsEnabled"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(

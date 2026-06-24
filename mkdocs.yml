@@ -91,6 +91,7 @@ nav:
     - IAM: services/iam.md
     - STS: services/sts.md
     - ElastiCache: services/elasticache.md
+    - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
     - RDS Data API: services/rds-data.md
     - MSK (Kafka): services/msk.md
@@ -118,6 +119,7 @@ nav:
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
+    - CodePipeline: services/codepipeline.md
     - AWS Backup: services/backup.md
     - CloudFront: services/cloudfront.md
     - Route53: services/route53.md

@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
@@ -65,6 +66,54 @@ class FlociUiManagerTest {
         when(dockerHostResolver.resolve()).thenReturn("host.docker.internal");
 
         assertEquals("http://host.docker.internal:4566", newManager().resolveFlociEndpoint());
+    }
+
+    @Test
+    void probeUsesSidecarContainerIpWhenContainerized() {
+        // In a container the published host port is not reachable via localhost; the
+        // probe must target the sidecar's container IP on the shared Docker network.
+        EndpointInfo endpoint = new EndpointInfo("10.88.0.20", 4500);
+
+        assertEquals("http://10.88.0.20:4500/", newManager().resolveProbeUrl(endpoint, 4500));
+    }
+
+    @Test
+    void probeUsesLocalhostHostPortNatively() {
+        EndpointInfo endpoint = new EndpointInfo("localhost", 4500);
+
+        assertEquals("http://localhost:4500/", newManager().resolveProbeUrl(endpoint, 4500));
+    }
+
+    @Test
+    void probeFallsBackToLocalhostWhenEndpointMissing() {
+        assertEquals("http://localhost:4500/", newManager().resolveProbeUrl(null, 4500));
+    }
+
+    @Test
+    void hostPortUsesBoundEndpointPortNatively() {
+        // Native mode: EndpointInfo carries the actual bound host port, which may differ
+        // from the requested port when dynamic allocation (port=0) is used.
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+        EndpointInfo endpoint = new EndpointInfo("localhost", 49160);
+
+        assertEquals(49160, newManager().resolveHostPort(endpoint, 0));
+    }
+
+    @Test
+    void hostPortKeepsConfiguredPublishedPortWhenContainerized() {
+        // Container mode: EndpointInfo carries the sidecar's internal port (4500), not the
+        // host binding, so the configured published port must win for the browser redirect.
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        EndpointInfo endpoint = new EndpointInfo("10.88.0.20", 4500);
+
+        assertEquals(8080, newManager().resolveHostPort(endpoint, 8080));
+    }
+
+    @Test
+    void hostPortFallsBackToConfiguredWhenEndpointMissing() {
+        when(containerDetector.isRunningInContainer()).thenReturn(false);
+
+        assertEquals(4500, newManager().resolveHostPort(null, 4500));
     }
 
     @Test

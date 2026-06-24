@@ -17,6 +17,7 @@ import io.github.hectorvent.floci.services.route53.Route53Controller;
 import io.github.hectorvent.floci.services.ses.SesController;
 import io.github.hectorvent.floci.services.appsync.AppSyncController;
 import io.github.hectorvent.floci.services.rdsdata.RdsDataController;
+import io.github.hectorvent.floci.services.s3vectors.S3VectorsController;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -86,6 +87,11 @@ public class ResolvedServiceCatalog {
                         config.storage().services().elasticache().flushIntervalMs(), AwsNamespaces.EC, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("elasticache"), Set.of(), Set.of()),
+                descriptor("memorydb", "memorydb", config.services().memorydb().enabled(), true,
+                        "memorydb", storageMode(config.storage().services().memorydb().mode(), config.storage().mode()),
+                        config.storage().services().memorydb().flushIntervalMs(), null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("AmazonMemoryDB."), Set.of("memorydb"), Set.of(), Set.of()),
                 descriptor("rds", "rds", config.services().rds().enabled(), true,
                         "rds", storageMode(config.storage().services().rds().mode(), config.storage().mode()),
                         5000L, AwsNamespaces.RDS, ServiceProtocol.QUERY,
@@ -200,7 +206,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("ec2"), Set.of(), Set.of()),
                 descriptor("ecs", "ecs", config.services().ecs().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "ecs", storageMode(config.storage().services().ecs().mode(), config.storage().mode()),
+                        config.storage().services().ecs().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("AmazonEC2ContainerServiceV20141113."), Set.of("ecs"), Set.of(), Set.of()),
                 descriptor("appconfig", "appconfig", config.services().appconfig().enabled(), true,
@@ -245,7 +252,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("elasticloadbalancing"), Set.of(), Set.of()),
                 descriptor("codebuild", "codebuild", config.services().codebuild().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "codebuild", storageMode(config.storage().services().codebuild().mode(), config.storage().mode()),
+                        config.storage().services().codebuild().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodeBuild_20161006."), Set.of("codebuild"), Set.of(), Set.of()),
                 descriptor("batch", "batch", config.services().batch().enabled(), true,
@@ -257,8 +265,15 @@ public class ResolvedServiceCatalog {
                         null, null, 5000L, null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodeDeploy_20141006."), Set.of("codedeploy"), Set.of(), Set.of()),
+                descriptor("codepipeline", "codepipeline", config.services().codepipeline().enabled(), true,
+                        "codepipeline",
+                        storageMode(config.storage().services().codepipeline().mode(), config.storage().mode()),
+                        config.storage().services().codepipeline().flushIntervalMs(), null, ServiceProtocol.JSON,
+                        protocols(ServiceProtocol.JSON),
+                        Set.of("CodePipeline_20150709."), Set.of("codepipeline"), Set.of(), Set.of()),
                 descriptor("config", "configservice", config.services().configservice().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "config", storageMode(config.storage().services().config().mode(), config.storage().mode()),
+                        config.storage().services().config().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("StarlingDoveService."), Set.of("config"), Set.of(), Set.of()),
                 descriptor("cloudtrail", "cloudtrail", config.services().cloudtrail().enabled(), true,
@@ -326,7 +341,12 @@ public class ResolvedServiceCatalog {
                         "appsync", storageMode(config.storage().services().appsync().mode(), config.storage().mode()),
                         config.storage().services().appsync().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("appsync"), Set.of(), Set.of(AppSyncController.class))
+                        Set.of(), Set.of("appsync"), Set.of(), Set.of(AppSyncController.class)),
+                descriptor("s3vectors", "s3vectors", config.services().s3vectors().enabled(), true,
+                        "s3vectors", storageMode(config.storage().services().s3vectors().mode(), config.storage().mode()),
+                        config.storage().services().s3vectors().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("s3vectors"), Set.of(), Set.of(S3VectorsController.class))
         ));
     }
 

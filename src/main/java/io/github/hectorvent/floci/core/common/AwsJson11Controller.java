@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.services.acm.AcmJsonHandler;
 import io.github.hectorvent.floci.services.athena.AthenaJsonHandler;
 import io.github.hectorvent.floci.services.codebuild.CodeBuildJsonHandler;
 import io.github.hectorvent.floci.services.codedeploy.CodeDeployJsonHandler;
+import io.github.hectorvent.floci.services.codepipeline.CodePipelineJsonHandler;
 import io.github.hectorvent.floci.services.ecr.EcrJsonHandler;
 import io.github.hectorvent.floci.services.transfer.TransferHandler;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
@@ -26,6 +27,7 @@ import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
 import io.github.hectorvent.floci.services.cloudmap.CloudMapHandler;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeHandler;
 import io.github.hectorvent.floci.services.emr.EmrHandler;
+import io.github.hectorvent.floci.services.memorydb.MemoryDbHandler;
 import io.github.hectorvent.floci.services.wafv2.WafV2Handler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
@@ -60,6 +62,7 @@ public class AwsJson11Controller {
     private final EventBridgeHandler eventBridgeHandler;
     private final CloudMapHandler cloudMapHandler;
     private final EmrHandler emrHandler;
+    private final MemoryDbHandler memoryDbHandler;
     private final WafV2Handler wafV2Handler;
     private final CloudWatchLogsHandler cloudWatchLogsHandler;
     private final SecretsManagerJsonHandler secretsManagerJsonHandler;
@@ -76,6 +79,7 @@ public class AwsJson11Controller {
     private final ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler;
     private final CodeBuildJsonHandler codeBuildJsonHandler;
     private final CodeDeployJsonHandler codeDeployJsonHandler;
+    private final CodePipelineJsonHandler codePipelineJsonHandler;
     private final Ec2MessagesJsonHandler ec2MessagesJsonHandler;
     private final TransferHandler transferHandler;
     private final TextractJsonHandler textractJsonHandler;
@@ -93,6 +97,7 @@ public class AwsJson11Controller {
                                SsmJsonHandler ssmJsonHandler, EventBridgeHandler eventBridgeHandler,
                                CloudMapHandler cloudMapHandler,
                                EmrHandler emrHandler,
+                               MemoryDbHandler memoryDbHandler,
                                WafV2Handler wafV2Handler,
                                CloudWatchLogsHandler cloudWatchLogsHandler,
                                SecretsManagerJsonHandler secretsManagerJsonHandler,
@@ -106,6 +111,7 @@ public class AwsJson11Controller {
                                ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler,
                                CodeBuildJsonHandler codeBuildJsonHandler,
                                CodeDeployJsonHandler codeDeployJsonHandler,
+                               CodePipelineJsonHandler codePipelineJsonHandler,
                                Ec2MessagesJsonHandler ec2MessagesJsonHandler,
                                TransferHandler transferHandler,
                                TextractJsonHandler textractJsonHandler,
@@ -123,6 +129,7 @@ public class AwsJson11Controller {
         this.eventBridgeHandler = eventBridgeHandler;
         this.cloudMapHandler = cloudMapHandler;
         this.emrHandler = emrHandler;
+        this.memoryDbHandler = memoryDbHandler;
         this.wafV2Handler = wafV2Handler;
         this.cloudWatchLogsHandler = cloudWatchLogsHandler;
         this.secretsManagerJsonHandler = secretsManagerJsonHandler;
@@ -139,6 +146,7 @@ public class AwsJson11Controller {
         this.resourceGroupsTaggingJsonHandler = resourceGroupsTaggingJsonHandler;
         this.codeBuildJsonHandler = codeBuildJsonHandler;
         this.codeDeployJsonHandler = codeDeployJsonHandler;
+        this.codePipelineJsonHandler = codePipelineJsonHandler;
         this.ec2MessagesJsonHandler = ec2MessagesJsonHandler;
         this.transferHandler = transferHandler;
         this.textractJsonHandler = textractJsonHandler;
@@ -182,6 +190,7 @@ public class AwsJson11Controller {
                 case "servicediscovery" -> cloudMapHandler.handle(action, request, region);
                 case "elasticmapreduce" -> emrHandler.handle(action, request, region);
                 case "wafv2" -> wafV2Handler.handle(action, request, region);
+                case "memorydb" -> memoryDbHandler.handle(action, request, region);
                 case "logs" -> cloudWatchLogsHandler.handle(action, request, region);
                 case "secretsmanager" -> secretsManagerJsonHandler.handle(action, request, region);
                 case "kinesis" -> kinesisJsonHandler.handle(action, request, region);
@@ -197,6 +206,8 @@ public class AwsJson11Controller {
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);
                 case "codebuild" -> codeBuildJsonHandler.handle(action, request, region, regionResolver.getAccountId());
                 case "codedeploy" -> codeDeployJsonHandler.handle(action, request, region);
+                case "codepipeline" -> codePipelineJsonHandler.handle(
+                        action, request, region, regionResolver.getAccountId());
                 case "ec2messages" -> ec2MessagesJsonHandler.handle(action, request, region);
                 case "transfer" -> transferHandler.handle(action, request, region);
                 case "textract" -> textractJsonHandler.handle(action, request, region);

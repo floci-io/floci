@@ -90,6 +90,14 @@ public class SesQueryHandler {
                         handleDeleteConfigurationSetEventDestination(params, region);
                 case "UpdateConfigurationSetSendingEnabled" ->
                         handleUpdateConfigurationSetSendingEnabled(params, region);
+                case "CreateConfigurationSetTrackingOptions" ->
+                        handleCreateConfigurationSetTrackingOptions(params, region);
+                case "UpdateConfigurationSetTrackingOptions" ->
+                        handleUpdateConfigurationSetTrackingOptions(params, region);
+                case "DeleteConfigurationSetTrackingOptions" ->
+                        handleDeleteConfigurationSetTrackingOptions(params, region);
+                case "UpdateConfigurationSetReputationMetricsEnabled" ->
+                        handleUpdateConfigurationSetReputationMetricsEnabled(params, region);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
             };
@@ -549,7 +557,9 @@ public class SesQueryHandler {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ConfigurationSet.Name is required.", 400);
         }
-        sesService.createConfigurationSet(new ConfigurationSet(name), region);
+        ConfigurationSet configSet = new ConfigurationSet(name);
+        configSet.setReputationMetricsEnabled(false);
+        sesService.createConfigurationSet(configSet, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult("CreateConfigurationSet", AwsNamespaces.SES)).build();
     }
 
@@ -579,7 +589,14 @@ public class SesQueryHandler {
         if (attrs.contains("reputationOptions")) {
             xml.start("ReputationOptions")
                 .elem("SendingEnabled", String.valueOf(cs.isSendingEnabledEffective()))
+                .elem("ReputationMetricsEnabled", String.valueOf(cs.isReputationMetricsEnabledEffective()))
                .end("ReputationOptions");
+        }
+        if (attrs.contains("trackingOptions") && cs.getTrackingOptions() != null
+                && cs.getTrackingOptions().getCustomRedirectDomain() != null) {
+            xml.start("TrackingOptions")
+                .elem("CustomRedirectDomain", cs.getTrackingOptions().getCustomRedirectDomain())
+               .end("TrackingOptions");
         }
         return Response.ok(AwsQueryResponse.envelope("DescribeConfigurationSet",
                 AwsNamespaces.SES, xml.build())).build();
@@ -699,6 +716,41 @@ public class SesQueryHandler {
         sesService.setConfigurationSetSendingEnabled(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetSendingEnabled", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleCreateConfigurationSetTrackingOptions(MultivaluedMap<String, String> params,
+                                                                 String region) {
+        String configSet = requireParam(params, "ConfigurationSetName");
+        String domain = getParam(params, "TrackingOptions.CustomRedirectDomain");
+        sesService.createConfigurationSetTrackingOptions(configSet, domain, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "CreateConfigurationSetTrackingOptions", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleUpdateConfigurationSetTrackingOptions(MultivaluedMap<String, String> params,
+                                                                 String region) {
+        String configSet = requireParam(params, "ConfigurationSetName");
+        String domain = getParam(params, "TrackingOptions.CustomRedirectDomain");
+        sesService.updateConfigurationSetTrackingOptions(configSet, domain, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "UpdateConfigurationSetTrackingOptions", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleDeleteConfigurationSetTrackingOptions(MultivaluedMap<String, String> params,
+                                                                 String region) {
+        String configSet = requireParam(params, "ConfigurationSetName");
+        sesService.deleteConfigurationSetTrackingOptions(configSet, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "DeleteConfigurationSetTrackingOptions", AwsNamespaces.SES)).build();
+    }
+
+    private Response handleUpdateConfigurationSetReputationMetricsEnabled(MultivaluedMap<String, String> params,
+                                                                          String region) {
+        String configSet = requireParam(params, "ConfigurationSetName");
+        boolean enabled = parseRequiredBoolean(params, "Enabled");
+        sesService.setConfigurationSetReputationOptions(configSet, enabled, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "UpdateConfigurationSetReputationMetricsEnabled", AwsNamespaces.SES)).build();
     }
 
     /**

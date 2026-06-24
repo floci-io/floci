@@ -223,14 +223,22 @@ class DynamoDbFilterExpressionIntegrationTest {
 
     @Test
     void scanFilterDoubleNestedParens() {
-        // ((category = :a)) should work like category = :a → u1, u3
-        scanWithFilter(
-                "((category = :a))",
-                """
-                {":a": {"S": "A"}}
-                """,
-                null,
-                2);
+        // AWS DynamoDB rejects redundant (doubled) parentheses such as ((category = :a))
+        // with a ValidationException at parse time — verified against moto/AWS DDB parity,
+        // where ((a < b)) fails but ((a = :b) OR (c = :d)) is allowed.
+        given()
+            .header("X-Amz-Target", "DynamoDB_20120810.Scan")
+            .contentType(DYNAMODB_CONTENT_TYPE)
+            .body("""
+                {"TableName": "%s", "FilterExpression": "((category = :a))", \
+"ExpressionAttributeValues": {":a": {"S": "A"}}}
+                """.formatted(TABLE_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", containsString("ValidationException"))
+            .body(containsString("redundant parentheses"));
     }
 
     // ---- Parenthesized BETWEEN in KeyConditionExpression ----

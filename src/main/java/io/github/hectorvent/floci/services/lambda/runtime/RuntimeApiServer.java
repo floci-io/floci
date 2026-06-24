@@ -36,6 +36,11 @@ public class RuntimeApiServer {
     private static final byte[] CONTAINER_STOPPED_PAYLOAD =
             "{\"errorMessage\":\"Container stopped\",\"errorType\":\"ContainerStopped\"}".getBytes();
 
+    // Acknowledgement body for the /response, /error and /init/error endpoints. Some
+    // runtime clients (e.g. .NET's Amazon.Lambda.RuntimeSupport) deserialize it and
+    // fail on an empty body.
+    private static final String STATUS_OK_BODY = "{\"status\":\"OK\"}";
+
     private final Vertx vertx;
     private final int port;
 
@@ -110,7 +115,7 @@ public class RuntimeApiServer {
                 InvokeResult result = new InvokeResult(200, null, payload, null, requestId);
                 invocation.getResultFuture().complete(result);
             }
-            ctx.response().setStatusCode(202).end();
+            sendStatusOk(ctx);
         });
 
         // POST /runtime/invocation/{requestId}/error — failure
@@ -124,13 +129,13 @@ public class RuntimeApiServer {
                 InvokeResult result = new InvokeResult(200, functionError, payload, null, requestId);
                 invocation.getResultFuture().complete(result);
             }
-            ctx.response().setStatusCode(202).end();
+            sendStatusOk(ctx);
         });
 
         // POST /runtime/init/error — runtime initialization failure
         router.post(INIT_ERROR_PATH).handler(ctx -> {
             LOG.warnv("Lambda runtime reported init error on port {0}", String.valueOf(port));
-            ctx.response().setStatusCode(202).end();
+            sendStatusOk(ctx);
         });
 
         long deadline = System.currentTimeMillis() + 5000;
@@ -235,6 +240,13 @@ public class RuntimeApiServer {
                     new InvokeResult(200, "Unhandled", CONTAINER_STOPPED_PAYLOAD, null, invocation.getRequestId()));
         }
         return invocation.getResultFuture();
+    }
+
+    private void sendStatusOk(RoutingContext ctx) {
+        ctx.response()
+                .setStatusCode(202)
+                .putHeader("Content-Type", "application/json")
+                .end(STATUS_OK_BODY);
     }
 
     private void sendInvocation(RoutingContext ctx, PendingInvocation invocation) {

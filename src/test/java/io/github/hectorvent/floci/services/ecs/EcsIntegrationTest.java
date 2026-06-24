@@ -646,6 +646,70 @@ class EcsIntegrationTest {
                 .body("message", containsString("Creation of service was not idempotent."));
     }
 
+    // ── Negative desiredCount validation (issue #1382) ───────────────────────
+
+    @Test
+    @Order(36)
+    void createServiceRejectsNegativeDesiredCount() {
+        ecs("CreateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "negative-count-svc",
+                    "taskDefinition": "%s",
+                    "desiredCount": -5,
+                    "launchType": "FARGATE"
+                }
+                """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("desiredCount cannot be a negative number."));
+    }
+
+
+
+    @Test
+    @Order(38)
+    void updateServiceRejectsNegativeDesiredCount() {
+        ecs("UpdateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "service": "%s",
+                    "desiredCount": -3
+                }
+                """.formatted(CLUSTER_NAME, SERVICE_NAME))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(400)
+                .body("__type", containsString("InvalidParameterException"))
+                .body("message", containsString("desiredCount cannot be a negative number."));
+    }
+
+    @Test
+    @Order(39)
+    void createServiceAcceptsZeroDesiredCount() {
+        ecs("CreateService")
+                .body("""
+                {
+                    "cluster": "%s",
+                    "serviceName": "zero-count-svc",
+                    "taskDefinition": "%s",
+                    "desiredCount": 0,
+                    "launchType": "FARGATE"
+                }
+                """.formatted(CLUSTER_NAME, TASK_DEF_FAMILY))
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("service.desiredCount", equalTo(0));
+    }
+
     // ── Tags ─────────────────────────────────────────────────────────────────
 
     @Test

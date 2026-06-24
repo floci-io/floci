@@ -46,6 +46,10 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `UpdateConfigurationSetEventDestination` | Update an existing event destination on a configuration set |
 | `DeleteConfigurationSetEventDestination` | Remove an event destination from a configuration set      |
 | `UpdateConfigurationSetSendingEnabled`   | Enable or disable email sending through a configuration set |
+| `CreateConfigurationSetTrackingOptions`  | Set the custom open/click tracking redirect domain |
+| `UpdateConfigurationSetTrackingOptions`  | Change the custom tracking redirect domain |
+| `DeleteConfigurationSetTrackingOptions`  | Remove the custom tracking redirect domain |
+| `UpdateConfigurationSetReputationMetricsEnabled` | Enable or disable reputation metrics for a configuration set |
 
 ## Configuration
 
@@ -193,6 +197,15 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `DELETE` | `/v2/email/configuration-sets/{name}/event-destinations/{eventDestinationName}` | `DeleteConfigurationSetEventDestination` |
 | `PUT` | `/v2/email/configuration-sets/{name}/suppression-options` | `PutConfigurationSetSuppressionOptions` |
 | `PUT` | `/v2/email/configuration-sets/{name}/sending` | `PutConfigurationSetSendingOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/reputation-options` | `PutConfigurationSetReputationOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/tracking-options` | `PutConfigurationSetTrackingOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/delivery-options` | `PutConfigurationSetDeliveryOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/archiving-options` | `PutConfigurationSetArchivingOptions` |
+| `PUT` | `/v2/email/configuration-sets/{name}/vdm-options` | `PutConfigurationSetVdmOptions` |
+| `POST` | `/v2/email/dedicated-ip-pools` | `CreateDedicatedIpPool` |
+| `GET` | `/v2/email/dedicated-ip-pools` | `ListDedicatedIpPools` |
+| `GET` | `/v2/email/dedicated-ip-pools/{PoolName}` | `GetDedicatedIpPool` |
+| `DELETE` | `/v2/email/dedicated-ip-pools/{PoolName}` | `DeleteDedicatedIpPool` |
 | `PUT` | `/v2/email/suppression/addresses` | `PutSuppressedDestination` |
 | `GET` | `/v2/email/suppression/addresses/{EmailAddress}` | `GetSuppressedDestination` |
 | `DELETE` | `/v2/email/suppression/addresses/{EmailAddress}` | `DeleteSuppressedDestination` |

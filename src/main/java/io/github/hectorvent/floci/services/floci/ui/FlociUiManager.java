@@ -16,6 +16,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.EndpointInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
@@ -54,6 +55,15 @@ public class FlociUiManager {
     private volatile String containerId;
     private volatile Closeable logStream;
     private volatile String lastError;
+    /**
+     * URL the readiness probe connects to, resolved from the Docker API at start time.
+     * Published host ports (e.g. {@code -p 4500:4500}) only exist on the host's network
+     * namespace, so when Floci itself runs in a container it cannot reach the sidecar at
+     * {@code localhost:hostPort} — it must use the sidecar's container IP on the shared
+     * Docker network. {@link EndpointInfo} resolves the right address for both cases:
+     * {@code localhost:hostPort} natively, {@code <containerIp>:4500} in a container.
+     */
+    private volatile String probeUrl;
 
     private final ExecutorService starter = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "floci-ui-starter");
@@ -122,11 +132,13 @@ public class FlociUiManager {
 
             ContainerSpec spec = specBuilder.build();
             ContainerInfo info = lifecycleManager.createAndStart(spec);
+            EndpointInfo endpoint = info.getEndpoint(CONTAINER_INTERNAL_PORT);
             this.containerId = info.containerId();
-            this.hostPort = chosenPort;
+            this.hostPort = resolveHostPort(endpoint, chosenPort);
+            this.probeUrl = resolveProbeUrl(endpoint, hostPort);
             this.started = true;
             this.lastError = null;
-            LOG.infov("Started floci-ui sidecar {0} on host port {1}", name, String.valueOf(chosenPort));
+            LOG.infov("Started floci-ui sidecar {0} on host port {1}", name, String.valueOf(hostPort));
             attachLogStream();
         } catch (Exception e) {
             this.lastError = "Could not start the Floci UI from image '" + image + "': " + e.getMessage()
@@ -225,10 +237,40 @@ public class FlociUiManager {
         return Optional.empty();
     }
 
+    /**
+     * The host port the browser-facing redirect ({@code /_floci/ui/status}) should target.
+     * In native mode the resolved {@link EndpointInfo} reflects the actual bound host port,
+     * which may differ from {@code configuredPort} when dynamic allocation ({@code port=0})
+     * is used — so prefer it. In container mode the endpoint reflects the sidecar's internal
+     * port (4500), not the host binding, so the configured published port is authoritative.
+     */
+    int resolveHostPort(EndpointInfo endpoint, int configuredPort) {
+        if (!containerDetector.isRunningInContainer() && endpoint != null) {
+            return endpoint.port();
+        }
+        return configuredPort;
+    }
+
+    /**
+     * Resolves the URL the readiness probe should connect to from the sidecar's
+     * resolved endpoint. {@link EndpointInfo} already returns a Floci-reachable
+     * address — {@code localhost:hostPort} when Floci runs natively, or the
+     * sidecar's container IP on the shared Docker network when Floci runs in a
+     * container (where the published host port is not reachable from inside).
+     * Falls back to {@code localhost:hostPort} if the endpoint is unavailable.
+     */
+    String resolveProbeUrl(EndpointInfo endpoint, int fallbackHostPort) {
+        if (endpoint != null) {
+            return "http://" + endpoint.host() + ":" + endpoint.port() + "/";
+        }
+        return "http://localhost:" + fallbackHostPort + "/";
+    }
+
     private boolean probeReady() {
-        String url = containerDetector.isRunningInContainer()
-                ? "http://" + config.services().ui().containerName() + ":" + CONTAINER_INTERNAL_PORT + "/"
-                : "http://localhost:" + hostPort + "/";
+        String url = probeUrl;
+        if (url == null) {
+            return false;
+        }
         try {
             HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
             conn.setConnectTimeout(800);
@@ -246,10 +288,9 @@ public class FlociUiManager {
         this.containerId = existing.getId();
         try {
             ContainerInfo info = lifecycleManager.adopt(containerId, List.of(CONTAINER_INTERNAL_PORT));
-            var endpoint = info.getEndpoint(CONTAINER_INTERNAL_PORT);
-            if (endpoint != null) {
-                this.hostPort = endpoint.port();
-            }
+            EndpointInfo endpoint = info.getEndpoint(CONTAINER_INTERNAL_PORT);
+            this.hostPort = resolveHostPort(endpoint, config.services().ui().port());
+            this.probeUrl = resolveProbeUrl(endpoint, hostPort);
             this.started = true;
             this.lastError = null;
             LOG.infov("Adopted existing floci-ui sidecar {0} on host port {1}",
