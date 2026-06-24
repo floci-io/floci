@@ -159,6 +159,19 @@ class Ec2Tests {
     }
 
     @Test
+    @Order(7)
+    @DisplayName("DescribeInstanceTypes - processor architectures")
+    void describeInstanceTypeProcessorArchitectures() {
+        DescribeInstanceTypesResponse resp = ec2.describeInstanceTypes(DescribeInstanceTypesRequest.builder()
+                .instanceTypes(InstanceType.fromValue("m6gd.2xlarge"))
+                .build());
+
+        assertThat(resp.instanceTypes()).hasSize(1);
+        assertThat(resp.instanceTypes().get(0).processorInfo().supportedArchitecturesAsStrings())
+                .containsExactly("arm64");
+    }
+
+    @Test
     @Order(8)
     @DisplayName("CreateVpc - create VPC with CIDR")
     void createVpc() {

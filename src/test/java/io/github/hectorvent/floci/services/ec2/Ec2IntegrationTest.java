@@ -234,13 +234,16 @@ class Ec2IntegrationTest {
     void describeInstanceTypes() {
         given()
             .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "m6gd.2xlarge")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", greaterThan(0));
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceType", equalTo("m6gd.2xlarge"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
+                    equalTo("arm64"));
     }
 
     @Test
