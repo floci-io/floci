@@ -69,8 +69,17 @@ public class SecretsManagerJsonHandler {
             request.path("SecretIdList").forEach(id -> secretIdList.add(id.asText()));
         }
 
-        // Filters are not fully implemented yet, but for now we only support SecretIdList
-        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(secretIdList, region);
+        List<SecretsManagerService.Filter> filters = new ArrayList<>();
+        if (request.has("Filters")) {
+            for (JsonNode filterNode : request.get("Filters")) {
+                String key = filterNode.path("Key").asText(null);
+                List<String> values = new ArrayList<>();
+                filterNode.path("Values").forEach(v -> values.add(v.asText()));
+                filters.add(new SecretsManagerService.Filter(key, values));
+            }
+        }
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(secretIdList, filters, region);
 
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode secretValues = objectMapper.createArrayNode();

@@ -362,6 +362,204 @@ class SecretsManagerServiceTest {
     }
 
     @Test
+    void batchGetSecretValueByNameFilterReturnsPrefixMatches() {
+        service.createSecret("production/db", "prod-pass", null, null, null, null, REGION);
+        service.createSecret("production/api", "prod-api", null, null, null, null, REGION);
+        service.createSecret("staging/db", "stage-pass", null, null, null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("name", List.of("production/"))),
+                REGION);
+
+        assertEquals(2, values.size());
+        assertTrue(values.stream().allMatch(v -> v.name().startsWith("production/")));
+    }
+
+    @Test
+    void batchGetSecretValueByNameFilterIsCaseInsensitive() {
+        service.createSecret("ProductionDb", "prod-pass", null, null, null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("name", List.of("PRODUCTION"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("ProductionDb", values.getFirst().name());
+    }
+
+    @Test
+    void batchGetSecretValueByDescriptionFilter() {
+        service.createSecret("alpha", "v1", null, "Primary RDS credentials", null, null, REGION);
+        service.createSecret("beta", "v2", null, "Cache token", null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("description", List.of("Primary"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("alpha", values.getFirst().name());
+    }
+
+    @Test
+    void batchGetSecretValueByTagKeyFilter() {
+        service.createSecret("tagged", "v1", null, null, null,
+                List.of(new Secret.Tag("env", "prod")), REGION);
+        service.createSecret("untagged", "v2", null, null, null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("tag-key", List.of("env"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("tagged", values.getFirst().name());
+    }
+
+    @Test
+    void batchGetSecretValueByTagValueFilter() {
+        service.createSecret("prodSecret", "v1", null, null, null,
+                List.of(new Secret.Tag("env", "prod")), REGION);
+        service.createSecret("devSecret", "v2", null, null, null,
+                List.of(new Secret.Tag("env", "dev")), REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("tag-value", List.of("prod"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("prodSecret", values.getFirst().name());
+    }
+
+    @Test
+    void batchGetSecretValueByAllFilterMatchesNameOrTag() {
+        service.createSecret("namedMatch", "v1", null, null, null, null, REGION);
+        service.createSecret("otherSecret", "v2", null, null, null,
+                List.of(new Secret.Tag("environment", "namedSomething")), REGION);
+        service.createSecret("unrelated", "v3", null, null, null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("all", List.of("named"))),
+                REGION);
+
+        assertEquals(2, values.size());
+        assertTrue(values.stream().anyMatch(v -> "namedMatch".equals(v.name())));
+        assertTrue(values.stream().anyMatch(v -> "otherSecret".equals(v.name())));
+    }
+
+    @Test
+    void batchGetSecretValueFilterValuesAreOrCombined() {
+        service.createSecret("prodApi", "v1", null, null, null, null, REGION);
+        service.createSecret("stagingApi", "v2", null, null, null, null, REGION);
+        service.createSecret("devApi", "v3", null, null, null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("name", List.of("prod", "staging"))),
+                REGION);
+
+        assertEquals(2, values.size());
+        assertTrue(values.stream().anyMatch(v -> "prodApi".equals(v.name())));
+        assertTrue(values.stream().anyMatch(v -> "stagingApi".equals(v.name())));
+    }
+
+    @Test
+    void batchGetSecretValueMultipleFiltersAreAndCombined() {
+        service.createSecret("prodWithTag", "v1", null, null, null,
+                List.of(new Secret.Tag("env", "prod")), REGION);
+        service.createSecret("prodNoTag", "v2", null, null, null, null, REGION);
+        service.createSecret("devWithTag", "v3", null, null, null,
+                List.of(new Secret.Tag("env", "dev")), REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(
+                        new SecretsManagerService.Filter("name", List.of("prod")),
+                        new SecretsManagerService.Filter("tag-key", List.of("env"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("prodWithTag", values.getFirst().name());
+    }
+
+    @Test
+    void batchGetSecretValueNegationPrefixExcludes() {
+        service.createSecret("prodAlpha", "v1", null, null, null, null, REGION);
+        service.createSecret("stagingAlpha", "v2", null, null, null, null, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("name", List.of("!prod"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("stagingAlpha", values.getFirst().name());
+    }
+
+    @Test
+    void batchGetSecretValueFilterSkipsDeletedSecrets() {
+        service.createSecret("prodAlpha", "v1", null, null, null, null, REGION);
+        service.createSecret("prodBeta", "v2", null, null, null, null, REGION);
+        service.deleteSecret("prodAlpha", 7, false, REGION);
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("name", List.of("prod"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("prodBeta", values.getFirst().name());
+    }
+
+    @Test
+    void batchGetSecretValueFilterIsScopedToRegion() {
+        service.createSecret("regional", "v1", null, null, null, null, REGION);
+        service.createSecret("regional", "v2", null, null, null, null, "eu-west-1");
+
+        List<SecretsManagerService.BatchSecretValue> values = service.batchGetSecretValue(
+                null,
+                List.of(new SecretsManagerService.Filter("name", List.of("regional"))),
+                REGION);
+
+        assertEquals(1, values.size());
+        assertEquals("v1", values.getFirst().secretString());
+    }
+
+    @Test
+    void batchGetSecretValueRejectsBothSecretIdListAndFilters() {
+        service.createSecret("alpha", "v1", null, null, null, null, REGION);
+        assertThrows(AwsException.class, () ->
+                service.batchGetSecretValue(
+                        List.of("alpha"),
+                        List.of(new SecretsManagerService.Filter("name", List.of("alpha"))),
+                        REGION));
+    }
+
+    @Test
+    void batchGetSecretValueRejectsUnknownFilterKey() {
+        service.createSecret("alpha", "v1", null, null, null, null, REGION);
+        assertThrows(AwsException.class, () ->
+                service.batchGetSecretValue(
+                        null,
+                        List.of(new SecretsManagerService.Filter("not-a-real-key", List.of("alpha"))),
+                        REGION));
+    }
+
+    @Test
+    void batchGetSecretValueRejectsEmptyFilterValues() {
+        service.createSecret("alpha", "v1", null, null, null, null, REGION);
+        assertThrows(AwsException.class, () ->
+                service.batchGetSecretValue(
+                        null,
+                        List.of(new SecretsManagerService.Filter("name", List.of())),
+                        REGION));
+    }
+
+    @Test
     void getSecretValueByPartialArnSucceeds() {
         Secret secret = service.createSecret("my-secret", "value", null, null, null, null, REGION);
         // Full ARN: arn:aws:secretsmanager:us-east-1:000000000000:secret:my-secret-XXXXXX

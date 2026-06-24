@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.secretsmanager;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import jakarta.ws.rs.core.Response;
@@ -321,5 +322,62 @@ class SecretsManagerJsonHandlerTest {
         assertThat(body.has("RotationRules"), is(true));
         assertThat(body.get("RotationRules").get("AutomaticallyAfterDays").asInt(), is(45));
         assertThat(body.get("RotationRules").get("Duration").asText(), is("2h"));
+    }
+
+    @Test
+    void batchGetSecretValueByFilterReturnsMatchingSecrets() {
+        ObjectNode createReq1 = MAPPER.createObjectNode();
+        createReq1.put("Name", "production/db");
+        createReq1.put("SecretString", "prod-pass");
+        handler.handle("CreateSecret", createReq1, REGION);
+
+        ObjectNode createReq2 = MAPPER.createObjectNode();
+        createReq2.put("Name", "staging/db");
+        createReq2.put("SecretString", "stage-pass");
+        handler.handle("CreateSecret", createReq2, REGION);
+
+        ObjectNode batchReq = MAPPER.createObjectNode();
+        ArrayNode filters = batchReq.putArray("Filters");
+        ObjectNode nameFilter = filters.addObject();
+        nameFilter.put("Key", "name");
+        nameFilter.putArray("Values").add("production/");
+
+        Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(1));
+        assertThat(body.get("SecretValues").get(0).get("Name").asText(), is("production/db"));
+        assertThat(body.get("SecretValues").get(0).get("SecretString").asText(), is("prod-pass"));
+    }
+
+    @Test
+    void batchGetSecretValueByTagKeyFilterReturnsMatchingSecrets() {
+        ObjectNode createTagged = MAPPER.createObjectNode();
+        createTagged.put("Name", "tagged-secret");
+        createTagged.put("SecretString", "tagged-value");
+        ArrayNode tags = createTagged.putArray("Tags");
+        ObjectNode tag = tags.addObject();
+        tag.put("Key", "env");
+        tag.put("Value", "prod");
+        handler.handle("CreateSecret", createTagged, REGION);
+
+        ObjectNode createUntagged = MAPPER.createObjectNode();
+        createUntagged.put("Name", "untagged-secret");
+        createUntagged.put("SecretString", "untagged-value");
+        handler.handle("CreateSecret", createUntagged, REGION);
+
+        ObjectNode batchReq = MAPPER.createObjectNode();
+        ArrayNode filters = batchReq.putArray("Filters");
+        ObjectNode tagFilter = filters.addObject();
+        tagFilter.put("Key", "tag-key");
+        tagFilter.putArray("Values").add("env");
+
+        Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
+
+        assertThat(response.getStatus(), is(200));
+        ObjectNode body = (ObjectNode) response.getEntity();
+        assertThat(body.get("SecretValues").size(), is(1));
+        assertThat(body.get("SecretValues").get(0).get("Name").asText(), is("tagged-secret"));
     }
 }

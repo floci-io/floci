@@ -25,8 +25,10 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -38,6 +40,19 @@ public class SecretsManagerService {
     private static final String AWSCURRENT = "AWSCURRENT";
     private static final String AWSPREVIOUS = "AWSPREVIOUS";
     private static final String ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+
+    static final String FILTER_KEY_NAME = "name";
+    static final String FILTER_KEY_DESCRIPTION = "description";
+    static final String FILTER_KEY_TAG_KEY = "tag-key";
+    static final String FILTER_KEY_TAG_VALUE = "tag-value";
+    static final String FILTER_KEY_PRIMARY_REGION = "primary-region";
+    static final String FILTER_KEY_OWNING_SERVICE = "owning-service";
+    static final String FILTER_KEY_ALL = "all";
+    private static final Set<String> ALLOWED_FILTER_KEYS = Set.of(
+            FILTER_KEY_NAME, FILTER_KEY_DESCRIPTION, FILTER_KEY_TAG_KEY,
+            FILTER_KEY_TAG_VALUE, FILTER_KEY_PRIMARY_REGION,
+            FILTER_KEY_OWNING_SERVICE, FILTER_KEY_ALL);
+    private static final String NEGATION_PREFIX = "!";
 
     private final StorageBackend<String, Secret> store;
     private final int defaultRecoveryWindowDays;
@@ -488,38 +503,153 @@ public class SecretsManagerService {
     }
 
     public List<BatchSecretValue> batchGetSecretValue(List<String> secretIdList, String region) {
+        return batchGetSecretValue(secretIdList, null, region);
+    }
+
+    public List<BatchSecretValue> batchGetSecretValue(List<String> secretIdList,
+                                                      List<Filter> filters,
+                                                      String region) {
+        boolean hasIds = secretIdList != null && !secretIdList.isEmpty();
+        boolean hasFilters = filters != null && !filters.isEmpty();
+        if (hasIds && hasFilters) {
+            throw new AwsException("InvalidParameterException",
+                    "Either SecretIdList or Filters must be provided, but not both.", 400);
+        }
+        if (hasFilters) {
+            validateFilters(filters);
+            return batchGetByFilters(filters, region);
+        }
+        return batchGetByIds(secretIdList, region);
+    }
+
+    private List<BatchSecretValue> batchGetByIds(List<String> secretIdList, String region) {
         List<BatchSecretValue> result = new ArrayList<>();
         if (secretIdList == null) {
             return result;
         }
-
         for (String secretId : secretIdList) {
-            try {
-                Secret secret = resolveSecret(secretId, region);
-                if (secret.getDeletedDate() != null) {
-                    continue;
-                }
-                SecretVersion version = findVersionByStage(secret, AWSCURRENT);
-                if (version != null) {
-                    result.add(new BatchSecretValue(
-                            secret.getArn(),
-                            secret.getName(),
-                            version.getSecretString(),
-                            version.getSecretBinary(),
-                            version.getVersionId(),
-                            version.getVersionStages(),
-                            version.getCreatedDate()
-                    ));
-                }
-            } catch (AwsException e) {
-                // AWS documentation says: "Secrets Manager doesn't return an error if a secret in the SecretIdList doesn't exist."
-                // Wait, let me re-check that. 
-                // Actually, "If any of the secrets in the SecretIdList don't exist, Secrets Manager returns an error."
-                // Let me verify this in the AWS docs.
-                throw e;
+            Secret secret = resolveSecret(secretId, region);
+            if (secret.getDeletedDate() != null) {
+                continue;
+            }
+            addCurrentVersion(result, secret);
+        }
+        return result;
+    }
+
+    private List<BatchSecretValue> batchGetByFilters(List<Filter> filters, String region) {
+        List<BatchSecretValue> result = new ArrayList<>();
+        String prefix = region + "::";
+        List<Secret> candidates = store.scan(key -> key.startsWith(prefix));
+        for (Secret secret : candidates) {
+            if (secret.getDeletedDate() != null) {
+                continue;
+            }
+            if (matchesAllFilters(secret, filters, region)) {
+                addCurrentVersion(result, secret);
             }
         }
         return result;
+    }
+
+    private void addCurrentVersion(List<BatchSecretValue> result, Secret secret) {
+        SecretVersion version = findVersionByStage(secret, AWSCURRENT);
+        if (version == null) {
+            return;
+        }
+        result.add(new BatchSecretValue(
+                secret.getArn(),
+                secret.getName(),
+                version.getSecretString(),
+                version.getSecretBinary(),
+                version.getVersionId(),
+                version.getVersionStages(),
+                version.getCreatedDate()
+        ));
+    }
+
+    private static void validateFilters(List<Filter> filters) {
+        for (Filter filter : filters) {
+            if (filter == null || filter.key() == null || filter.key().isEmpty()) {
+                throw new AwsException("InvalidParameterException",
+                        "Filter Key is required.", 400);
+            }
+            if (!ALLOWED_FILTER_KEYS.contains(filter.key())) {
+                throw new AwsException("ValidationException",
+                        "1 validation error detected: Value '" + filter.key()
+                                + "' at 'filters' failed to satisfy constraint: Member must satisfy enum value set: "
+                                + ALLOWED_FILTER_KEYS, 400);
+            }
+            if (filter.values() == null || filter.values().isEmpty()) {
+                throw new AwsException("InvalidParameterException",
+                        "Filter Values must not be empty for key '" + filter.key() + "'.", 400);
+            }
+        }
+    }
+
+    private static boolean matchesAllFilters(Secret secret, List<Filter> filters, String region) {
+        for (Filter filter : filters) {
+            if (!matchesFilter(secret, filter, region)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static boolean matchesFilter(Secret secret, Filter filter, String region) {
+        for (String rawValue : filter.values()) {
+            if (rawValue == null) {
+                continue;
+            }
+            boolean negate = rawValue.startsWith(NEGATION_PREFIX);
+            String value = negate ? rawValue.substring(NEGATION_PREFIX.length()) : rawValue;
+            if (value.isEmpty()) {
+                continue;
+            }
+            boolean hit = matchesValue(secret, filter.key(), value, region);
+            if (negate ? !hit : hit) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean matchesValue(Secret secret, String key, String value, String region) {
+        return switch (key) {
+            case FILTER_KEY_NAME -> startsWithIgnoreCase(secret.getName(), value);
+            case FILTER_KEY_DESCRIPTION -> startsWithIgnoreCase(secret.getDescription(), value);
+            case FILTER_KEY_TAG_KEY -> anyTag(secret, tag -> startsWithIgnoreCase(tag.key(), value));
+            case FILTER_KEY_TAG_VALUE -> anyTag(secret, tag -> startsWithIgnoreCase(tag.value(), value));
+            case FILTER_KEY_PRIMARY_REGION -> startsWithIgnoreCase(region, value);
+            case FILTER_KEY_OWNING_SERVICE -> false;
+            case FILTER_KEY_ALL -> startsWithIgnoreCase(secret.getName(), value)
+                    || startsWithIgnoreCase(secret.getDescription(), value)
+                    || anyTag(secret, tag -> startsWithIgnoreCase(tag.key(), value))
+                    || anyTag(secret, tag -> startsWithIgnoreCase(tag.value(), value));
+            default -> false;
+        };
+    }
+
+    private static boolean anyTag(Secret secret, java.util.function.Predicate<Secret.Tag> predicate) {
+        if (secret.getTags() == null) {
+            return false;
+        }
+        for (Secret.Tag tag : secret.getTags()) {
+            if (tag != null && predicate.test(tag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean startsWithIgnoreCase(String haystack, String needle) {
+        if (haystack == null || needle == null) {
+            return false;
+        }
+        return haystack.toLowerCase(Locale.ROOT).startsWith(needle.toLowerCase(Locale.ROOT));
+    }
+
+    public record Filter(String key, List<String> values) {
     }
 
     public Secret updateSecretVersionStage(String secretId, String moveToVersionId, String removeFromVersionId, String versionStage, String region) {
