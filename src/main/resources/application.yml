@@ -141,6 +141,9 @@ floci:
     # extra-cors-allowed-headers:
     # extra-cors-expose-headers:
     disable-cors-headers: false
+    # Grant Private Network Access preflights (Access-Control-Allow-Private-Network)
+    # so a page on a public/secure origin can reach this loopback backend.
+    cors-allow-private-network: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
