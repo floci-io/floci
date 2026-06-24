@@ -240,3 +240,6 @@ floci:
       enabled: true
     s3vectors:
       enabled: true
+    iot:
+      enabled: true
+      broker-enabled: false

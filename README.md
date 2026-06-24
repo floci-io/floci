@@ -225,7 +225,7 @@ Floci supports local emulation for application services, data services, eventing
 | Containers and compute | ECS, EC2, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, ELB v2 |
 | Data, analytics, and AI | Athena, Glue, EMR, Firehose, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
-| Messaging and transfer | SES, Kinesis, MSK, Transfer Family |
+| Messaging and transfer | SES, Kinesis, MSK, Transfer Family, IoT Core |
 | Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
@@ -295,6 +295,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
 | Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
+| IoT Core | In-process + embedded MQTT broker | Embedded MQTT/WebSocket broker (Moquette) over plain and TLS (`tcp`/`ws`/`ssl`/`wss`) with token-based custom authorizers that invoke your authorizer Lambda and enforce the returned IAM policy for connect/publish/subscribe; HTTP publish, endpoint discovery, presence/lifecycle events (`$aws/events/presence/*`) and Last Will & Testament |
 | Textract | In-process stub | API-compatible stubs, dummy block data, async job simulation |
 | Transcribe | In-process stub | Transcription jobs and custom vocabularies; jobs complete immediately, no real audio processing |
 | Pricing | In-process with static snapshot | Product discovery, attributes, price list files, pagination |

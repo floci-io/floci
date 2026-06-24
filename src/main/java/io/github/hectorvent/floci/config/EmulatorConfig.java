@@ -437,6 +437,56 @@ public interface EmulatorConfig {
         BatchServiceConfig batch();
         UiServiceConfig ui();
         S3VectorsServiceConfig s3vectors();
+        IotServiceConfig iot();
+    }
+
+    interface IotServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("true")
+        boolean brokerEnabled();
+
+        @WithDefault("0.0.0.0")
+        String brokerHost();
+
+        @WithDefault("1883")
+        int brokerTcpBasePort();
+
+        @WithDefault("1899")
+        int brokerTcpMaxPort();
+
+        @WithDefault("8083")
+        int brokerWsBasePort();
+
+        @WithDefault("8099")
+        int brokerWsMaxPort();
+
+        @WithDefault("/mqtt")
+        String brokerWsPath();
+
+        @WithDefault("true")
+        boolean brokerTlsEnabled();
+
+        @WithDefault("8883")
+        int brokerMqttsBasePort();
+
+        @WithDefault("8899")
+        int brokerMqttsMaxPort();
+
+        @WithDefault("8443")
+        int brokerWssBasePort();
+
+        @WithDefault("8459")
+        int brokerWssMaxPort();
+
+        Optional<String> brokerTlsKeystorePath();
+
+        @WithDefault("floci-iot")
+        String brokerTlsKeystorePassword();
+
+        @WithDefault("true")
+        boolean brokerLifecycleEventsEnabled();
     }
 
     interface CloudTrailServiceConfig {

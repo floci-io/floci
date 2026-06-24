@@ -373,3 +373,20 @@ floci:
       enabled: true
     s3vectors:
       enabled: true
+    iot:
+      enabled: true
+      broker-enabled: true
+      broker-host: 0.0.0.0
+      broker-tcp-base-port: 1883
+      broker-tcp-max-port: 1899
+      broker-ws-base-port: 8083
+      broker-ws-max-port: 8099
+      broker-ws-path: /mqtt
+      broker-tls-enabled: true
+      broker-mqtts-base-port: 8883
+      broker-mqtts-max-port: 8899
+      broker-wss-base-port: 8443
+      broker-wss-max-port: 8459
+      # broker-tls-keystore-path:          # Optional PKCS12 keystore; auto-generated self-signed if unset
+      broker-tls-keystore-password: floci-iot
+      broker-lifecycle-events-enabled: true

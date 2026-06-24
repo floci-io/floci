@@ -246,6 +246,25 @@
             <version>5.28.5</version>
             <scope>test</scope>
         </dependency>
+        <!-- Embedded MQTT broker for AWS IoT Core data plane -->
+        <dependency>
+            <groupId>io.moquette</groupId>
+            <artifactId>moquette-broker</artifactId>
+            <version>0.17</version>
+            <exclusions>
+                <exclusion>
+                    <groupId>org.slf4j</groupId>
+                    <artifactId>slf4j-api</artifactId>
+                </exclusion>
+            </exclusions>
+        </dependency>
+        <!-- MQTT client for IoT broker integration tests -->
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.client.mqttv3</artifactId>
+            <version>1.2.5</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

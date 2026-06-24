@@ -135,6 +135,7 @@ nav:
     - Cost Explorer: services/ce.md
     - Cost and Usage Reports: services/cur.md
     - BCM Data Exports: services/bcm-data-exports.md
+    - IoT Core: services/iot.md
   - Testcontainers:
     - Overview: testcontainers/index.md
     - Java: testcontainers/java.md
