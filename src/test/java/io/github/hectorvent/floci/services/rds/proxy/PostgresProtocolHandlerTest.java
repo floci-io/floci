@@ -199,6 +199,56 @@ class PostgresProtocolHandlerTest {
         assertEquals(42, serverRead.poll(5, TimeUnit.SECONDS));
     }
 
+    @Test
+    void closesClientWhenBackendClosesDuringBridge() throws Exception {
+        try (ServerSocket backendServer = new ServerSocket(0);
+             ServerSocket clientServer = new ServerSocket(0)) {
+
+            Thread backendThread = Thread.ofVirtual().start(() -> {
+                try {
+                    mockBackendClosesDuringBridge(backendServer);
+                } catch (IOException e) {
+                    throw new RuntimeException(e);
+                }
+            });
+
+            try (Socket ourClient = new Socket("localhost", clientServer.getLocalPort())) {
+                ourClient.setSoTimeout(5_000);
+                Socket proxyClient = clientServer.accept();
+                Socket backend = new Socket("localhost", backendServer.getLocalPort());
+
+                Thread authThread = Thread.ofVirtual().start(() -> {
+                    try {
+                        PostgresProtocolHandler.handleAuth(
+                                proxyClient, backend,
+                                "dbadmin", "adminpass", "postgres",
+                                false, testSigV4Validator(),
+                                (user, pass) -> true);
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
+                    }
+                });
+
+                DataOutputStream clientOut = new DataOutputStream(ourClient.getOutputStream());
+                DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
+
+                writeStartup(clientOut, "dbadmin", "auth_db");
+                readCleartextPasswordChallenge(clientIn);
+                writePassword(clientOut, "adminpass");
+                readAuthenticationOk(clientIn);
+                readReadyForQuery(clientIn);
+
+                writeSimpleQuery(clientOut, "select 1");
+
+                assertEquals(-1, clientIn.read(), "backend close must be visible to the client");
+                authThread.join(5_000);
+                backendThread.join(5_000);
+                assertEquals(false, authThread.isAlive(), "authThread did not terminate");
+                assertEquals(false, backendThread.isAlive(), "backendThread did not terminate");
+            }
+        }
+    }
+
     private static RdsSigV4Validator testSigV4Validator() {
         return new RdsSigV4Validator(IamServiceTestHelper.iamServiceWithAccessKey("AKIATEST", "secret"));
     }
@@ -240,6 +290,39 @@ class PostgresProtocolHandlerTest {
         }
     }
 
+    private static void mockBackendClosesDuringBridge(ServerSocket server) throws IOException {
+        try (Socket socket = server.accept()) {
+            DataInputStream in = new DataInputStream(socket.getInputStream());
+            DataOutputStream out = new DataOutputStream(socket.getOutputStream());
+
+            int length = in.readInt();
+            int proto = in.readInt();
+            assertEquals(STARTUP_PROTOCOL_VERSION, proto);
+            in.readNBytes(length - 8);
+
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(3);
+            out.flush();
+
+            assertEquals('p', in.readByte());
+            int pwLength = in.readInt();
+            in.readNBytes(pwLength - 4);
+
+            out.writeByte('R');
+            out.writeInt(8);
+            out.writeInt(0);
+            out.writeByte('Z');
+            out.writeInt(5);
+            out.writeByte('I');
+            out.flush();
+
+            assertEquals('Q', in.readByte());
+            int queryLength = in.readInt();
+            in.readNBytes(queryLength - 4);
+        }
+    }
+
     private static void writeStartup(DataOutputStream out, String user, String database) throws IOException {
         byte[] userKey = "user".getBytes(StandardCharsets.UTF_8);
         byte[] userVal = user.getBytes(StandardCharsets.UTF_8);
@@ -270,6 +353,15 @@ class PostgresProtocolHandlerTest {
         out.writeByte('p');
         out.writeInt(4 + pw.length + 1);
         out.write(pw);
+        out.writeByte(0);
+        out.flush();
+    }
+
+    private static void writeSimpleQuery(DataOutputStream out, String query) throws IOException {
+        byte[] queryBytes = query.getBytes(StandardCharsets.UTF_8);
+        out.writeByte('Q');
+        out.writeInt(4 + queryBytes.length + 1);
+        out.write(queryBytes);
         out.writeByte(0);
         out.flush();
     }
