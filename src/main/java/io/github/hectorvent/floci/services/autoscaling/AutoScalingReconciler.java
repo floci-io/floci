@@ -394,7 +394,7 @@ public class AutoScalingReconciler {
                     version.getSecurityGroupIds(),
                     version.getInstanceTags(),
                     version.getUserData(),
-                    null,
+                    version.getIamInstanceProfileArn(),
                     asg.getLaunchTemplateId(),
                     asg.getLaunchTemplateName(),
                     resolvedVersion);
@@ -423,7 +423,7 @@ public class AutoScalingReconciler {
                         version.getSecurityGroupIds(),
                         version.getInstanceTags(),
                         version.getUserData(),
-                        null,
+                        version.getIamInstanceProfileArn(),
                         specification.getLaunchTemplateId() == null
                                 ? mixedLaunchTemplate.getLaunchTemplateId()
                                 : specification.getLaunchTemplateId(),

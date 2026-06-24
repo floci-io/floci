@@ -714,6 +714,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
             .formParam("LaunchTemplateData.InstanceType", "t3.micro")
             .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
@@ -772,6 +773,8 @@ class Ec2IntegrationTest {
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
                     equalTo("#!/bin/sh\necho launch-template\n"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
                     equalTo("instance"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:ClusterId' }.value",
@@ -792,6 +795,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
             .formParam("LaunchTemplateData.InstanceType", "t3.small")
             .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile-v2")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
@@ -812,6 +816,8 @@ class Ec2IntegrationTest {
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
                     equalTo("#!/bin/sh\necho launch-template-version\n"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
                     equalTo("WORKER"));
 

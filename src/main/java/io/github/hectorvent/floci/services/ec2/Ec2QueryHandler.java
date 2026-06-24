@@ -1505,6 +1505,7 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseTagsForResource(p, "launch-template"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
@@ -1526,6 +1527,7 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
@@ -1823,11 +1825,15 @@ public class Ec2QueryHandler {
     }
 
     private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p) {
-        String arn = p.getFirst("IamInstanceProfile.Arn");
+        return resolveIamInstanceProfileArn(p, "IamInstanceProfile");
+    }
+
+    private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p, String prefix) {
+        String arn = p.getFirst(prefix + ".Arn");
         if (arn != null && !arn.isBlank()) {
             return arn;
         }
-        String name = p.getFirst("IamInstanceProfile.Name");
+        String name = p.getFirst(prefix + ".Name");
         if (name == null || name.isBlank()) {
             return null;
         }
@@ -2041,6 +2047,11 @@ public class Ec2QueryHandler {
         }
         if (launchTemplate.getUserData() != null) {
             xml.elem("userData", launchTemplate.getUserData());
+        }
+        if (launchTemplate.getIamInstanceProfileArn() != null) {
+            xml.start("iamInstanceProfile")
+                    .elem("arn", launchTemplate.getIamInstanceProfileArn())
+                    .end("iamInstanceProfile");
         }
         xml.start("securityGroupIdSet");
         for (String securityGroupId : launchTemplate.getSecurityGroupIds()) {

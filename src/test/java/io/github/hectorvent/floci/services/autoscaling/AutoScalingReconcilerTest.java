@@ -75,6 +75,7 @@ class AutoScalingReconcilerTest {
         version.setLatestVersionNumber("1");
         version.setImageId("ami-version-1");
         version.setInstanceType("t3.micro");
+        version.setIamInstanceProfileArn("arn:aws:iam::000000000000:instance-profile/app-profile");
         List<Tag> instanceTags = List.of(new Tag("app.ClusterId", "development"));
         version.setInstanceTags(instanceTags);
         when(ec2Service.describeLaunchTemplates("us-east-1", List.of("lt-123"), List.of(), Map.of()))
@@ -87,7 +88,7 @@ class AutoScalingReconcilerTest {
         reservation.setInstances(List.of(ec2Instance));
         when(ec2Service.runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(instanceTags), eq(null), eq(null))).thenReturn(reservation);
+                eq(instanceTags), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"))).thenReturn(reservation);
 
         reconciler.reconcile(asg);
 
@@ -97,7 +98,7 @@ class AutoScalingReconcilerTest {
         assertEquals("1", asg.getInstances().getFirst().getLaunchTemplateVersion());
         verify(ec2Service).runInstances(eq("us-east-1"), eq("ami-version-1"), eq("t3.micro"),
                 eq(1), eq(1), eq(null), eq(List.of()), eq(null), eq(null),
-                eq(instanceTags), eq(null), eq(null));
+                eq(instanceTags), eq(null), eq("arn:aws:iam::000000000000:instance-profile/app-profile"));
     }
 
     @Test
