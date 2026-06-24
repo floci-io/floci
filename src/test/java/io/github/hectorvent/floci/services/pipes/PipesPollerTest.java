@@ -20,11 +20,11 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.nio.charset.StandardCharsets;
-import java.util.Base64;
 import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyMap;
@@ -78,10 +78,12 @@ class PipesPollerTest {
         assertEquals("orders", delivered.path("topic").asText());
         assertTrue(delivered.path("partition").isInt());
         assertEquals("broker-1:9092", delivered.path("bootstrapServers").asText());
-        assertEquals(Base64.getEncoder().encodeToString(key), delivered.path("key").asText());
-        assertEquals(Base64.getEncoder().encodeToString(value), delivered.path("value").asText());
-        assertEquals(Base64.getEncoder().encodeToString("abc123".getBytes(StandardCharsets.UTF_8)),
-                delivered.path("headers").get(0).path("traceId").asText());
+        assertEquals("Y3VzdG9tZXItMTIz", delivered.path("key").asText());
+        assertEquals("eyJzdGF0dXMiOiJhY3RpdmUiLCJpZCI6Im9yZGVyLTEifQ==", delivered.path("value").asText());
+        assertTrue(delivered.path("headers").get(0).path("traceId").isArray());
+        assertEquals(List.of(97, 98, 99, 49, 50, 51),
+                MAPPER.convertValue(delivered.path("headers").get(0).path("traceId"), List.class));
+        assertFalse(delivered.has("eventSourceKey"));
         assertTrue(delivered.path("value").isTextual());
     }
 

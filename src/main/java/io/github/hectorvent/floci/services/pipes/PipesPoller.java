@@ -639,7 +639,6 @@ public class PipesPoller {
             } else {
                 node.put("bootstrapServers", bootstrapServers);
             }
-            node.put("eventSourceKey", record.topic() + "-" + record.partition());
             node.put("topic", record.topic());
             node.put("partition", record.partition());
             node.put("offset", record.offset());
@@ -655,7 +654,10 @@ public class PipesPoller {
                 if (headerValue == null) {
                     headerNode.putNull(header.key());
                 } else {
-                    headerNode.put(header.key(), base64(headerValue));
+                    var values = headerNode.putArray(header.key());
+                    for (byte b : headerValue) {
+                        values.add(b & 0xFF);
+                    }
                 }
                 headersNode.add(headerNode);
             }
