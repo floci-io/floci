@@ -52,6 +52,7 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -309,6 +310,20 @@ public class CloudWatchLogsHandler {
         String filterName = request.path("filterName").asText();
         logsService.deleteSubscriptionFilter(logGroupName, filterName, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetDataProtectionPolicy(JsonNode request, String region) {
+        // Data-protection policies are not modeled. Real AWS returns
+        // ResourceNotFoundException when a log group has no policy, but the Steampipe
+        // aws_cloudwatch_log_group hydrate does not tolerate errors, so return an
+        // empty policy (HTTP 200) to let per-group collection succeed.
+        String identifier = resolveLogGroupName(request);
+        ObjectNode response = objectMapper.createObjectNode();
+        if (identifier != null) {
+            response.put("logGroupIdentifier", identifier);
+        }
+        // policyDocument intentionally omitted -> no data-protection policy
+        return Response.ok(response).build();
     }
 
     private String resolveLogGroupName(JsonNode request) {

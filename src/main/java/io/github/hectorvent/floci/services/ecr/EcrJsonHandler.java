@@ -42,6 +42,8 @@ public class EcrJsonHandler {
         return switch (action) {
             case "CreateRepository" -> handleCreateRepository(request, region);
             case "DescribeRepositories" -> handleDescribeRepositories(request, region);
+            case "BatchGetRepositoryScanningConfiguration" ->
+                    handleBatchGetRepositoryScanningConfiguration(request, region);
             case "DeleteRepository" -> handleDeleteRepository(request, region);
             case "GetAuthorizationToken" -> handleGetAuthorizationToken(request);
             case "ListImages" -> handleListImages(request, region);
@@ -96,6 +98,32 @@ public class EcrJsonHandler {
             arr.add(buildRepository(r));
         }
         response.set("repositories", arr);
+        return Response.ok(response).build();
+    }
+
+    private Response handleBatchGetRepositoryScanningConfiguration(JsonNode request, String region) {
+        // Scanning configuration is not modeled. Reuse describeRepositories (which
+        // resolves names and throws RepositoryNotFoundException for misses) and return
+        // a wire-accurate scanning config so Steampipe per-repo hydration
+        // (aws_ecr_repository) succeeds instead of failing on UnsupportedOperation.
+        List<String> names = parseStringList(request.path("repositoryNames"));
+        String registryId = request.path("registryId").asText(null);
+
+        List<Repository> repos = service.describeRepositories(names, registryId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode configs = objectMapper.createArrayNode();
+        for (Repository r : repos) {
+            ObjectNode cfg = objectMapper.createObjectNode();
+            cfg.put("repositoryArn", r.getRepositoryArn());
+            cfg.put("repositoryName", r.getRepositoryName());
+            cfg.put("scanOnPush", r.isScanOnPush());
+            cfg.put("scanFrequency", r.isScanOnPush() ? "SCAN_ON_PUSH" : "MANUAL");
+            cfg.set("appliedScanFilters", objectMapper.createArrayNode());
+            configs.add(cfg);
+        }
+        response.set("scanningConfigurations", configs);
+        response.set("failures", objectMapper.createArrayNode());
         return Response.ok(response).build();
     }
 
