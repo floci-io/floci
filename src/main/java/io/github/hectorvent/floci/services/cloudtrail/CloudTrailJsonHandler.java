@@ -47,7 +47,8 @@ public class CloudTrailJsonHandler {
         String name = req.path("Name").asText(null);
         String s3BucketName = req.path("S3BucketName").asText(null);
         String s3KeyPrefix = req.has("S3KeyPrefix") ? req.path("S3KeyPrefix").asText(null) : null;
-        String snsTopicArn = req.has("SnsTopicName") ? req.path("SnsTopicName").asText(null) : null;
+        String snsTopicArn = req.has("SnsTopicARN") ? req.path("SnsTopicARN").asText(null)
+                : req.has("SnsTopicName") ? req.path("SnsTopicName").asText(null) : null;
         boolean includeGlobal = req.path("IncludeGlobalServiceEvents").asBoolean(true);
         boolean isMultiRegion = req.path("IsMultiRegionTrail").asBoolean(false);
         boolean enableLogFileValidation = req.path("EnableLogFileValidation").asBoolean(false);
@@ -60,7 +61,10 @@ public class CloudTrailJsonHandler {
         resp.put("Name", trail.name());
         resp.put("S3BucketName", trail.s3BucketName());
         if (trail.s3KeyPrefix() != null) resp.put("S3KeyPrefix", trail.s3KeyPrefix());
-        if (trail.snsTopicArn() != null) resp.put("SnsTopicName", trail.snsTopicArn());
+        if (trail.snsTopicArn() != null) {
+            resp.put("SnsTopicARN", trail.snsTopicArn());
+            resp.put("SnsTopicName", trail.snsTopicArn());
+        }
         resp.put("IncludeGlobalServiceEvents", trail.includeGlobalServiceEvents());
         resp.put("IsMultiRegionTrail", trail.isMultiRegionTrail());
         resp.put("TrailARN", trail.trailArn());
@@ -79,7 +83,8 @@ public class CloudTrailJsonHandler {
         String name = req.path("Name").asText(null);
         String s3BucketName = req.has("S3BucketName") ? req.path("S3BucketName").asText(null) : null;
         String s3KeyPrefix = req.has("S3KeyPrefix") ? req.path("S3KeyPrefix").asText(null) : null;
-        String snsTopicName = req.has("SnsTopicName") ? req.path("SnsTopicName").asText(null) : null;
+        String snsTopicName = req.has("SnsTopicARN") ? req.path("SnsTopicARN").asText(null)
+                : req.has("SnsTopicName") ? req.path("SnsTopicName").asText(null) : null;
         Boolean includeGlobal = req.has("IncludeGlobalServiceEvents")
                 ? req.path("IncludeGlobalServiceEvents").asBoolean() : null;
         Boolean isMultiRegion = req.has("IsMultiRegionTrail")
@@ -96,7 +101,10 @@ public class CloudTrailJsonHandler {
         resp.put("Name", trail.name());
         resp.put("S3BucketName", trail.s3BucketName());
         if (trail.s3KeyPrefix() != null) resp.put("S3KeyPrefix", trail.s3KeyPrefix());
-        if (trail.snsTopicArn() != null) resp.put("SnsTopicName", trail.snsTopicArn());
+        if (trail.snsTopicArn() != null) {
+            resp.put("SnsTopicARN", trail.snsTopicArn());
+            resp.put("SnsTopicName", trail.snsTopicArn());
+        }
         resp.put("IncludeGlobalServiceEvents", trail.includeGlobalServiceEvents());
         resp.put("IsMultiRegionTrail", trail.isMultiRegionTrail());
         resp.put("TrailARN", trail.trailArn());
