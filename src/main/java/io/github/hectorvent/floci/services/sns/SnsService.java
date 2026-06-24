@@ -8,9 +8,11 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.sns.model.PlatformApplication;
 import io.github.hectorvent.floci.services.sns.model.PlatformEndpoint;
 import io.github.hectorvent.floci.services.sns.model.PushNotification;
+import io.github.hectorvent.floci.services.sns.model.SentSms;
 import io.github.hectorvent.floci.services.sns.model.Subscription;
 import io.github.hectorvent.floci.services.sns.model.Topic;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -59,12 +61,15 @@ public class SnsService {
     /** Mobile-push platforms Floci mocks. iOS and Android only — anything else is rejected. */
     private static final Set<String> SUPPORTED_PUSH_PLATFORMS = Set.of(
             "APNS", "APNS_SANDBOX", "GCM", "FCM");
+    private static final java.util.regex.Pattern PLATFORM_APP_NAME_PATTERN =
+            java.util.regex.Pattern.compile("[a-zA-Z0-9_.\\-]{1,256}");
 
     private final StorageBackend<String, Topic> topicStore;
     private final StorageBackend<String, Subscription> subscriptionStore;
     private final StorageBackend<String, PlatformApplication> platformAppStore;
     private final StorageBackend<String, PlatformEndpoint> platformEndpointStore;
     private final Deque<PushNotification> pushCapture = new ConcurrentLinkedDeque<>();
+    private final StorageBackend<String, SentSms> smsStore;
     private final RegionResolver regionResolver;
     private final SqsService sqsService;
     private final LambdaService lambdaService;
@@ -91,6 +96,9 @@ public class SnsService {
                 storageFactory.create("sns", "sns-platform-endpoints.json",
                         new TypeReference<Map<String, PlatformEndpoint>>() {
                         }),
+                storageFactory.create("sns", "sns-sms.json",
+                        new TypeReference<Map<String, SentSms>>() {
+                        }),
                 regionResolver,
                 sqsService,
                 lambdaService,
@@ -107,8 +115,8 @@ public class SnsService {
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService) {
         this(topicStore, subscriptionStore,
-                new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
-                new io.github.hectorvent.floci.core.storage.InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
                 regionResolver, sqsService, lambdaService);
     }
 
@@ -122,6 +130,7 @@ public class SnsService {
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
+        this.smsStore = new InMemoryStorage<>();
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -134,12 +143,14 @@ public class SnsService {
                StorageBackend<String, Subscription> subscriptionStore,
                StorageBackend<String, PlatformApplication> platformAppStore,
                StorageBackend<String, PlatformEndpoint> platformEndpointStore,
+               StorageBackend<String, SentSms> smsStore,
                RegionResolver regionResolver, SqsService sqsService,
                LambdaService lambdaService, String baseUrl, ObjectMapper objectMapper) {
         this.topicStore = topicStore;
         this.subscriptionStore = subscriptionStore;
         this.platformAppStore = platformAppStore;
         this.platformEndpointStore = platformEndpointStore;
+        this.smsStore = smsStore;
         this.regionResolver = regionResolver;
         this.sqsService = sqsService;
         this.lambdaService = lambdaService;
@@ -355,7 +366,13 @@ public class SnsService {
 
         // Send SMS
         if (phoneNumber != null) {
-            return UUID.randomUUID().toString();
+            String messageId = UUID.randomUUID().toString();
+            String effectiveRegion = region != null ? region : "us-east-1";
+            SentSms sms = new SentSms(messageId, effectiveRegion, phoneNumber,
+                    message, subject, Instant.now());
+            smsStore.put("sms::" + effectiveRegion + "::" + messageId, sms);
+            LOG.infov("SNS SMS published: messageId={0} phone={1}", messageId, phoneNumber);
+            return messageId;
         }
 
         // Send a message to topic or directly to a target ARN
@@ -424,6 +441,13 @@ public class SnsService {
                                                           Map<String, String> attributes, String region) {
         if (name == null || name.isBlank()) {
             throw new AwsException("InvalidParameter", "Name is required.", 400);
+        }
+        if (!PLATFORM_APP_NAME_PATTERN.matcher(name).matches()) {
+            throw new AwsException("InvalidParameter",
+                    "Invalid parameter: Name Reason: must be made up of only uppercase and"
+                            + " lowercase ASCII letters, numbers, underscores, hyphens, and"
+                            + " periods, and must be between 1 and 256 characters long.",
+                    400);
         }
         if (platform == null || !SUPPORTED_PUSH_PLATFORMS.contains(platform)) {
             throw new AwsException("InvalidParameter",
@@ -494,7 +518,7 @@ public class SnsService {
                 .orElseThrow(() -> new AwsException("NotFound",
                         "PlatformApplication does not exist.", 404));
         if ("false".equalsIgnoreCase(app.getAttributes().get("Enabled"))) {
-            throw new AwsException("PlatformApplicationDisabledException",
+            throw new AwsException("PlatformApplicationDisabled",
                     "Platform application is disabled.", 400);
         }
 
@@ -548,7 +572,11 @@ public class SnsService {
         String key = endpointKey(region, endpointArn);
         PlatformEndpoint endpoint = platformEndpointStore.get(key)
                 .orElseThrow(() -> new AwsException("NotFound", "Endpoint does not exist.", 404));
-        if (attributes != null) endpoint.getAttributes().putAll(attributes);
+        if (attributes != null) {
+            endpoint.getAttributes().putAll(attributes);
+            String newToken = attributes.get("Token");
+            if (newToken != null) endpoint.setToken(newToken);
+        }
         platformEndpointStore.put(key, endpoint);
     }
 
@@ -585,14 +613,14 @@ public class SnsService {
         PlatformEndpoint endpoint = platformEndpointStore.get(endpointKey(region, endpointArn))
                 .orElseThrow(() -> new AwsException("NotFound", "Endpoint does not exist.", 404));
         if (!"true".equalsIgnoreCase(endpoint.getAttributes().getOrDefault("Enabled", "true"))) {
-            throw new AwsException("EndpointDisabledException",
+            throw new AwsException("EndpointDisabled",
                     "Endpoint " + endpointArn + " disabled", 400);
         }
         PlatformApplication app = platformAppStore.get(platformAppKey(region, endpoint.getPlatformApplicationArn()))
                 .orElseThrow(() -> new AwsException("NotFound",
                         "PlatformApplication does not exist.", 404));
         if ("false".equalsIgnoreCase(app.getAttributes().get("Enabled"))) {
-            throw new AwsException("PlatformApplicationDisabledException",
+            throw new AwsException("PlatformApplicationDisabled",
                     "Platform application is disabled.", 400);
         }
         String payload = resolvePushPayload(app.getPlatform(), message, messageStructure);
@@ -621,16 +649,23 @@ public class SnsService {
             throw new AwsException("InvalidParameter",
                     "Invalid parameter: Message Reason: Message is not valid JSON.", 400);
         }
-        if (!root.isObject() || !root.has("default")) {
+        if (!root.isObject()) {
             throw new AwsException("InvalidParameter",
-                    "Invalid parameter: Message Reason: Messages must be a JSON object with a 'default' key.",
+                    "Invalid parameter: Message Reason: Messages must be a JSON object.",
                     400);
         }
         JsonNode platformValue = root.get(platform);
         if (platformValue != null && !platformValue.isNull()) {
             return platformValue.isTextual() ? platformValue.asText() : platformValue.toString();
         }
-        return root.get("default").asText();
+        JsonNode defaultValue = root.get("default");
+        if (defaultValue != null && !defaultValue.isNull()) {
+            return defaultValue.isTextual() ? defaultValue.asText() : defaultValue.toString();
+        }
+        throw new AwsException("InvalidParameter",
+                "Invalid parameter: Message Reason: Messages must have a '" + platform
+                        + "' or 'default' key.",
+                400);
     }
 
     private void recordPushNotification(PushNotification notification) {
@@ -1481,5 +1516,20 @@ public class SnsService {
 
     private static String subKey(String region, String subscriptionArn) {
         return "sub::" + region + "::" + subscriptionArn;
+    }
+
+    /** All SMS messages published since last clear. Used by SnsInspectionController. */
+    public List<SentSms> getSentMessages() {
+        return smsStore.scan(k -> k.startsWith("sms::"));
+    }
+
+    /** Drop all stored SMS records. Used by SnsInspectionController. */
+    public void clearSentMessages() {
+        for (String key : smsStore.keys()) {
+            if (key.startsWith("sms::")) {
+                smsStore.delete(key);
+            }
+        }
+        LOG.info("Cleared all SNS SMS records");
     }
 }

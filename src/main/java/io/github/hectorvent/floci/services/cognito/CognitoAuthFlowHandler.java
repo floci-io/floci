@@ -234,14 +234,20 @@ final class CognitoAuthFlowHandler {
         if (parts != null) {
             String username = parts[1];
             String tokenClientId = parts[2];
+            long iat = parts.length > 3 && !parts[3].isEmpty() ? Long.parseLong(parts[3]) : 0L;
+            String refreshTokenUuid = parts.length > 4 ? parts[4] : null;
+            
+            // Check revocation before issuing new tokens
+            service.validateRefreshTokenNotRevoked(refreshTokenUuid, pool.getId(), username, iat);
+            
             try {
                 CognitoUser user = service.adminGetUser(pool.getId(), username);
                 CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user,
                         clientMetadata, "TokenGeneration_RefreshTokens");
                 Map<String, Object> auth = new HashMap<>();
-                auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", tokenClientId, override));
-                auth.put("IdToken", service.generateSignedJwt(user, pool, "id", tokenClientId, override));
-                auth.put("ExpiresIn", 3600);
+                auth.put("AccessToken", service.generateSignedJwt(user, pool, "access", client, override, refreshTokenUuid));
+                auth.put("IdToken", service.generateSignedJwt(user, pool, "id", client, override, refreshTokenUuid));
+                auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
                 auth.put("TokenType", "Bearer");
                 Map<String, Object> result = new HashMap<>();
                 result.put("AuthenticationResult", auth);
@@ -249,9 +255,9 @@ final class CognitoAuthFlowHandler {
             } catch (AwsException ignored) { }
         }
         Map<String, Object> auth = new HashMap<>();
-        auth.put("AccessToken", service.generateTokenString("access", "unknown", pool, client.getClientId()));
-        auth.put("IdToken", service.generateTokenString("id", "unknown", pool, client.getClientId()));
-        auth.put("ExpiresIn", 3600);
+        auth.put("AccessToken", service.generateTokenString("access", "unknown", pool, client));
+        auth.put("IdToken", service.generateTokenString("id", "unknown", pool, client));
+        auth.put("ExpiresIn", service.getAccessTokenExpiresInSeconds(client));
         auth.put("TokenType", "Bearer");
         Map<String, Object> result = new HashMap<>();
         result.put("AuthenticationResult", auth);
@@ -348,6 +354,7 @@ final class CognitoAuthFlowHandler {
                 "SALT", user.getSrpSalt(),
                 "SRP_B", bPublicHex,
                 "SECRET_BLOCK", secretBlockBase64,
+                "USERNAME", user.getUsername(),
                 "USER_ID_FOR_SRP", user.getUsername()
         ));
         return result;
@@ -765,7 +772,6 @@ final class CognitoAuthFlowHandler {
                 Boolean.TRUE.equals(resp.get("autoVerifyPhone")));
     }
 
-    @SuppressWarnings("unchecked")
     private CognitoService.ClaimsOverride firePreTokenGeneration(UserPool pool, UserPoolClient client, CognitoUser user,
                                                                   Map<String, String> clientMetadata, String triggerSource) {
         Map<String, Object> req = new HashMap<>();
@@ -791,7 +797,6 @@ final class CognitoAuthFlowHandler {
         return null;
     }
 
-    @SuppressWarnings("unchecked")
     private static CognitoService.ClaimsOverride parseV1Override(Map<?, ?> details) {
         Map<String, Object> claimsToAddOrOverride = asStringObjectMap(details.get("claimsToAddOrOverride"));
         List<String> claimsToSuppress = asStringList(details.get("claimsToSuppress"));
@@ -817,7 +822,6 @@ final class CognitoAuthFlowHandler {
                 groupsToOverride, iamRolesToOverride, preferredRole);
     }
 
-    @SuppressWarnings("unchecked")
     private static CognitoService.ClaimsOverride parseV2Override(Map<?, ?> details) {
         Map<String, Object> idAdd = null;
         List<String> idSuppress = null;
@@ -879,7 +883,6 @@ final class CognitoAuthFlowHandler {
         return cfg;
     }
 
-    @SuppressWarnings("unchecked")
     private CognitoUser tryUserMigration(UserPool pool, UserPoolClient client, String username, String password,
                                           Map<String, String> validationData, Map<String, String> clientMetadata,
                                           String triggerSource) {
@@ -937,7 +940,7 @@ final class CognitoAuthFlowHandler {
                                              String triggerSource, Map<String, String> clientMetadata) {
         firePostAuthentication(pool, client, user, clientMetadata, false);
         CognitoService.ClaimsOverride override = firePreTokenGeneration(pool, client, user, clientMetadata, triggerSource);
-        return service.generateAuthResult(user, pool, client.getClientId(), override);
+        return service.generateAuthResult(user, pool, client, override);
     }
 
     CognitoService.ClaimsOverride preTokenGenerationForRefresh(UserPool pool, UserPoolClient client, CognitoUser user) {

@@ -3,16 +3,24 @@ package io.github.hectorvent.floci.services.ses;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
+import io.github.hectorvent.floci.services.ses.model.DashboardOptions;
+import io.github.hectorvent.floci.services.ses.model.GuardianOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
+import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
+import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
 import io.github.hectorvent.floci.services.ses.model.Tag;
+import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
+import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
@@ -609,6 +617,51 @@ public class SesController {
             if (parsedTags != null) {
                 cs.setTags(parsedTags);
             }
+            JsonNode suppressionNode = request.path("SuppressionOptions");
+            if (!suppressionNode.isMissingNode() && !suppressionNode.isNull()) {
+                if (!suppressionNode.isObject()) {
+                    throw new AwsException("SerializationException", "Expected null", 400);
+                }
+                JsonNode reasonsNode = suppressionNode.path("SuppressedReasons");
+                if (reasonsNode.isMissingNode() || reasonsNode.isNull()) {
+                    throw new AwsException("InternalFailure",
+                            "An internal failure has occurred.", 500);
+                }
+                SuppressionOptions options = new SuppressionOptions();
+                options.setSuppressedReasons(parseSuppressedReasons(reasonsNode));
+                cs.setSuppressionOptions(options);
+            }
+            JsonNode sendingNode = request.path("SendingOptions");
+            if (!sendingNode.isMissingNode() && !sendingNode.isNull()) {
+                if (!sendingNode.isObject()) {
+                    throw new AwsException("SerializationException", "Expected null", 400);
+                }
+                cs.setSendingEnabled(parseSendingEnabled(sendingNode.path("SendingEnabled")));
+            }
+            JsonNode reputationNode = request.path("ReputationOptions");
+            if (!reputationNode.isMissingNode() && !reputationNode.isNull()) {
+                requireOptionObject(reputationNode);
+                Boolean rme = parseReputationMetricsEnabled(reputationNode.path("ReputationMetricsEnabled"));
+                if (rme != null) {
+                    cs.setReputationMetricsEnabled(rme);
+                }
+            }
+            JsonNode trackingNode = request.path("TrackingOptions");
+            if (!trackingNode.isMissingNode() && !trackingNode.isNull()) {
+                cs.setTrackingOptions(parseTrackingOptions(trackingNode));
+            }
+            JsonNode deliveryNode = request.path("DeliveryOptions");
+            if (!deliveryNode.isMissingNode() && !deliveryNode.isNull()) {
+                cs.setDeliveryOptions(parseDeliveryOptions(deliveryNode));
+            }
+            JsonNode archivingNode = request.path("ArchivingOptions");
+            if (!archivingNode.isMissingNode() && !archivingNode.isNull()) {
+                cs.setArchivingOptions(parseArchivingOptions(archivingNode));
+            }
+            JsonNode vdmNode = request.path("VdmOptions");
+            if (!vdmNode.isMissingNode() && !vdmNode.isNull()) {
+                cs.setVdmOptions(parseVdmOptions(vdmNode));
+            }
             sesService.createConfigurationSet(cs, region);
             LOG.infov("SES V2 CreateConfigurationSet: {0}", name);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -655,6 +708,25 @@ public class SesController {
                     reasons.add(r);
                 }
             }
+            ObjectNode sendingNode = result.putObject("SendingOptions");
+            sendingNode.put("SendingEnabled", cs.isSendingEnabledEffective());
+            // AWS always returns ReputationOptions (true by default), like SendingOptions.
+            ObjectNode reputationNode = result.putObject("ReputationOptions");
+            reputationNode.put("ReputationMetricsEnabled", cs.isReputationMetricsEnabledEffective());
+            // The option models carry @JsonProperty/@JsonInclude(NON_NULL), so let
+            // Jackson shape the response and omit unset members.
+            if (cs.getTrackingOptions() != null) {
+                result.set("TrackingOptions", objectMapper.valueToTree(cs.getTrackingOptions()));
+            }
+            if (cs.getDeliveryOptions() != null) {
+                result.set("DeliveryOptions", objectMapper.valueToTree(cs.getDeliveryOptions()));
+            }
+            if (cs.getArchivingOptions() != null) {
+                result.set("ArchivingOptions", objectMapper.valueToTree(cs.getArchivingOptions()));
+            }
+            if (cs.getVdmOptions() != null) {
+                result.set("VdmOptions", objectMapper.valueToTree(cs.getVdmOptions()));
+            }
             return Response.ok(result).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
@@ -672,21 +744,7 @@ public class SesController {
                     ? objectMapper.createObjectNode()
                     : objectMapper.readTree(body);
             requireJsonObject(request);
-            JsonNode reasonsNode = request.path("SuppressedReasons");
-            List<String> reasons = new ArrayList<>();
-            if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
-                if (!reasonsNode.isArray()) {
-                    throw new AwsException("BadRequestException",
-                            "SuppressedReasons must be an array.", 400);
-                }
-                for (JsonNode r : reasonsNode) {
-                    if (r.isNull() || !r.isTextual()) {
-                        throw new AwsException("BadRequestException",
-                                "SuppressedReasons entries must be strings.", 400);
-                    }
-                    reasons.add(r.asText());
-                }
-            }
+            List<String> reasons = parseSuppressedReasons(request.path("SuppressedReasons"));
             sesService.putConfigurationSetSuppressionOptions(name, reasons, region);
             LOG.infov("SES V2 PutConfigurationSetSuppressionOptions: {0} on {1}", reasons, name);
             return Response.ok(objectMapper.createObjectNode()).build();
@@ -695,6 +753,237 @@ public class SesController {
         } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
             throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/sending")
+    public Response putConfigurationSetSendingOptions(@Context HttpHeaders headers,
+                                                       @PathParam("configurationSetName") String name,
+                                                       String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            JsonNode enabledNode = request.path("SendingEnabled");
+            if (enabledNode.isMissingNode() || enabledNode.isNull() || !enabledNode.isBoolean()) {
+                throw new AwsException("BadRequestException",
+                        "SendingEnabled must be present and must be a boolean.", 400);
+            }
+            sesService.setConfigurationSetSendingEnabled(name, enabledNode.booleanValue(), region);
+            LOG.infov("SES V2 PutConfigurationSetSendingOptions: {0} on {1}",
+                    enabledNode.booleanValue(), name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/reputation-options")
+    public Response putConfigurationSetReputationOptions(@Context HttpHeaders headers,
+                                                         @PathParam("configurationSetName") String name,
+                                                         String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            Boolean enabled = parseReputationMetricsEnabled(request.path("ReputationMetricsEnabled"));
+            boolean effectiveEnabled = enabled != null && enabled;
+            sesService.setConfigurationSetReputationOptions(name, effectiveEnabled, region);
+            LOG.infov("SES V2 PutConfigurationSetReputationOptions: {0} on {1}", effectiveEnabled, name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/tracking-options")
+    public Response putConfigurationSetTrackingOptions(@Context HttpHeaders headers,
+                                                       @PathParam("configurationSetName") String name,
+                                                       String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            sesService.setConfigurationSetTrackingOptions(name, parseTrackingOptions(request), region);
+            LOG.infov("SES V2 PutConfigurationSetTrackingOptions on {0}", name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/delivery-options")
+    public Response putConfigurationSetDeliveryOptions(@Context HttpHeaders headers,
+                                                       @PathParam("configurationSetName") String name,
+                                                       String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            sesService.setConfigurationSetDeliveryOptions(name, parseDeliveryOptions(request), region);
+            LOG.infov("SES V2 PutConfigurationSetDeliveryOptions on {0}", name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/archiving-options")
+    public Response putConfigurationSetArchivingOptions(@Context HttpHeaders headers,
+                                                        @PathParam("configurationSetName") String name,
+                                                        String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            sesService.setConfigurationSetArchivingOptions(name, parseArchivingOptions(request), region);
+            LOG.infov("SES V2 PutConfigurationSetArchivingOptions on {0}", name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    @PUT
+    @Path("/configuration-sets/{configurationSetName}/vdm-options")
+    public Response putConfigurationSetVdmOptions(@Context HttpHeaders headers,
+                                                  @PathParam("configurationSetName") String name,
+                                                  String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            JsonNode request = readOptionBody(body);
+            JsonNode vdmNode = request.path("VdmOptions");
+            VdmOptions options = (vdmNode.isMissingNode() || vdmNode.isNull())
+                    ? null : parseVdmOptions(vdmNode);
+            sesService.setConfigurationSetVdmOptions(name, options, region);
+            LOG.infov("SES V2 PutConfigurationSetVdmOptions on {0}", name);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        }
+    }
+
+    /** Reject a non-object option block, mirroring the AWS deserialization layer. */
+    private static void requireOptionObject(JsonNode node) {
+        if (!node.isObject()) {
+            throw new AwsException("SerializationException", "Expected null", 400);
+        }
+    }
+
+    /** Parse a configuration-set option PUT body into a JSON object, treating an empty body as {}. */
+    private JsonNode readOptionBody(String body) {
+        try {
+            JsonNode request = (body == null || body.isBlank())
+                    ? objectMapper.createObjectNode()
+                    : objectMapper.readTree(body);
+            requireJsonObject(request);
+            return request;
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    private static Boolean parseReputationMetricsEnabled(JsonNode node) {
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isBoolean()) {
+            throw new AwsException("BadRequestException",
+                    "ReputationMetricsEnabled must be a boolean.", 400);
+        }
+        return node.booleanValue();
+    }
+
+    /** Read an optional string member, rejecting a non-string value the way the AWS deserialization layer does. */
+    private static String parseOptionString(JsonNode node, String field) {
+        if (node.isMissingNode() || node.isNull()) {
+            return null;
+        }
+        if (!node.isTextual()) {
+            throw new AwsException("BadRequestException", field + " must be a JSON string.", 400);
+        }
+        return node.asText();
+    }
+
+    private static TrackingOptions parseTrackingOptions(JsonNode node) {
+        requireOptionObject(node);
+        TrackingOptions t = new TrackingOptions();
+        t.setCustomRedirectDomain(parseOptionString(node.path("CustomRedirectDomain"), "CustomRedirectDomain"));
+        t.setHttpsPolicy(parseOptionString(node.path("HttpsPolicy"), "HttpsPolicy"));
+        // An all-null block (e.g. an empty PUT body) clears the options rather
+        // than persisting an empty object that GetConfigurationSet would echo.
+        if (t.getCustomRedirectDomain() == null && t.getHttpsPolicy() == null) {
+            return null;
+        }
+        return t;
+    }
+
+    private static DeliveryOptions parseDeliveryOptions(JsonNode node) {
+        requireOptionObject(node);
+        DeliveryOptions d = new DeliveryOptions();
+        d.setTlsPolicy(parseOptionString(node.path("TlsPolicy"), "TlsPolicy"));
+        d.setSendingPoolName(parseOptionString(node.path("SendingPoolName"), "SendingPoolName"));
+        JsonNode max = node.path("MaxDeliverySeconds");
+        if (!max.isMissingNode() && !max.isNull()) {
+            if (!max.isNumber()) {
+                throw new AwsException("BadRequestException",
+                        "MaxDeliverySeconds must be a number.", 400);
+            }
+            if (!max.isIntegralNumber()) {
+                throw new AwsException("BadRequestException",
+                        "MaxDeliverySeconds must be an integer.", 400);
+            }
+            d.setMaxDeliverySeconds(max.asLong());
+        }
+        if (d.getTlsPolicy() == null && d.getSendingPoolName() == null && d.getMaxDeliverySeconds() == null) {
+            return null;
+        }
+        return d;
+    }
+
+    private static ArchivingOptions parseArchivingOptions(JsonNode node) {
+        requireOptionObject(node);
+        ArchivingOptions a = new ArchivingOptions();
+        a.setArchiveArn(parseOptionString(node.path("ArchiveArn"), "ArchiveArn"));
+        if (a.getArchiveArn() == null) {
+            return null;
+        }
+        return a;
+    }
+
+    private static VdmOptions parseVdmOptions(JsonNode node) {
+        requireOptionObject(node);
+        VdmOptions v = new VdmOptions();
+        JsonNode dashboard = node.path("DashboardOptions");
+        if (!dashboard.isMissingNode() && !dashboard.isNull()) {
+            requireOptionObject(dashboard);
+            String engagementMetrics = parseOptionString(dashboard.path("EngagementMetrics"), "EngagementMetrics");
+            if (engagementMetrics != null) {
+                DashboardOptions d = new DashboardOptions();
+                d.setEngagementMetrics(engagementMetrics);
+                v.setDashboardOptions(d);
+            }
+        }
+        JsonNode guardian = node.path("GuardianOptions");
+        if (!guardian.isMissingNode() && !guardian.isNull()) {
+            requireOptionObject(guardian);
+            String optimized = parseOptionString(guardian.path("OptimizedSharedDelivery"), "OptimizedSharedDelivery");
+            if (optimized != null) {
+                GuardianOptions g = new GuardianOptions();
+                g.setOptimizedSharedDelivery(optimized);
+                v.setGuardianOptions(g);
+            }
+        }
+        // An all-null block (e.g. an empty PUT body) clears the options rather
+        // than persisting an empty object that GetConfigurationSet would echo.
+        if (v.getDashboardOptions() == null && v.getGuardianOptions() == null) {
+            return null;
+        }
+        return v;
     }
 
     @DELETE
@@ -798,6 +1087,70 @@ public class SesController {
         } catch (AwsException e) {
             throw remapV1Exception(e);
         }
+    }
+
+    // ──────────────────────── Dedicated IP Pools ────────────────────────
+
+    @POST
+    @Path("/dedicated-ip-pools")
+    public Response createDedicatedIpPool(@Context HttpHeaders headers, String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            if (body == null || body.isBlank()) {
+                throw new AwsException("BadRequestException", "Request body is required.", 400);
+            }
+            JsonNode request = objectMapper.readTree(body);
+            requireJsonObject(request);
+            String poolName = readRequiredStringField(request, "PoolName");
+            JsonNode scalingNode = request.path("ScalingMode");
+            String scalingMode;
+            if (scalingNode.isMissingNode() || scalingNode.isNull()) {
+                scalingMode = null;
+            } else if (!scalingNode.isTextual()) {
+                throw new AwsException("BadRequestException",
+                        "The ScalingMode parameter is invalid.", 400);
+            } else {
+                scalingMode = scalingNode.asText();
+            }
+            sesService.createDedicatedIpPool(poolName, scalingMode, region);
+            LOG.infov("SES V2 CreateDedicatedIpPool: {0}", poolName);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
+    }
+
+    @GET
+    @Path("/dedicated-ip-pools")
+    public Response listDedicatedIpPools(@Context HttpHeaders headers) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode pools = result.putArray("DedicatedIpPools");
+        sesService.listDedicatedIpPools(region).forEach(pools::add);
+        return Response.ok(result).build();
+    }
+
+    @GET
+    @Path("/dedicated-ip-pools/{poolName}")
+    public Response getDedicatedIpPool(@Context HttpHeaders headers,
+                                       @PathParam("poolName") String poolName) {
+        String region = regionResolver.resolveRegion(headers);
+        DedicatedIpPool pool = sesService.getDedicatedIpPool(poolName, region);
+        ObjectNode result = objectMapper.createObjectNode();
+        result.set("DedicatedIpPool", objectMapper.valueToTree(pool));
+        return Response.ok(result).build();
+    }
+
+    @DELETE
+    @Path("/dedicated-ip-pools/{poolName}")
+    public Response deleteDedicatedIpPool(@Context HttpHeaders headers,
+                                          @PathParam("poolName") String poolName) {
+        String region = regionResolver.resolveRegion(headers);
+        sesService.deleteDedicatedIpPool(poolName, region);
+        LOG.infov("SES V2 DeleteDedicatedIpPool: {0}", poolName);
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     // ──────────────────────────── Account ────────────────────────────
@@ -1052,12 +1405,12 @@ public class SesController {
         result.set("DkimAttributes", buildDkimAttributes(identity));
 
         ObjectNode mailFromAttributes = result.putObject("MailFromAttributes");
+        mailFromAttributes.put("BehaviorOnMxFailure", v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
         String mailFromDomain = identity.getMailFromDomain();
-        mailFromAttributes.put("MailFromDomain", mailFromDomain == null ? "" : mailFromDomain);
-        mailFromAttributes.put("MailFromDomainStatus",
-                mailFromDomain == null ? "NOT_STARTED" : toV2Status(identity.getMailFromDomainStatus()));
-        mailFromAttributes.put("BehaviorOnMxFailure",
-                v1BehaviorToV2(identity.getBehaviorOnMxFailure()));
+        if (mailFromDomain != null && !mailFromDomain.isEmpty()) {
+            mailFromAttributes.put("MailFromDomain", mailFromDomain);
+            mailFromAttributes.put("MailFromDomainStatus", toV2Status(identity.getMailFromDomainStatus()));
+        }
 
         result.putObject("Policies");
         ArrayNode tags = result.putArray("Tags");
@@ -1239,6 +1592,77 @@ public class SesController {
     }
 
     /**
+     * Parses a {@code SuppressedReasons} JSON array into a list, validating
+     * structure only; reason values are validated by the service layer.
+     * Structural violations reproduce the AWS deserialization-layer errors
+     * (verified against real AWS SES V2 on 2026-06-13): a non-array node and
+     * non-string scalar / container elements fail with
+     * {@code SerializationException}, while {@code null} elements pass
+     * deserialization and are rejected by the service-layer value validation,
+     * exactly as AWS does. Missing / null yields an empty list for the PUT
+     * path, which AWS treats as an explicit empty override.
+     */
+    private static List<String> parseSuppressedReasons(JsonNode reasonsNode) {
+        List<String> reasons = new ArrayList<>();
+        if (!reasonsNode.isMissingNode() && !reasonsNode.isNull()) {
+            if (!reasonsNode.isArray()) {
+                throw new AwsException("SerializationException", "Expected list or null", 400);
+            }
+            for (JsonNode r : reasonsNode) {
+                if (r.isTextual() || r.isNull()) {
+                    reasons.add(r.asText(null));
+                } else if (r.isNumber()) {
+                    throw new AwsException("SerializationException",
+                            "NUMBER_VALUE can not be converted to a String", 400);
+                } else if (r.isBoolean()) {
+                    throw new AwsException("SerializationException",
+                            (r.booleanValue() ? "TRUE_VALUE" : "FALSE_VALUE")
+                                    + " can not be converted to a String", 400);
+                } else {
+                    throw unexpectedStartError(r);
+                }
+            }
+        }
+        return reasons;
+    }
+
+    /**
+     * Reproduces the AWS deserialization behavior for {@code SendingEnabled}
+     * (verified against real AWS SES V2 on 2026-06-13): a missing member
+     * defaults to {@code false}, any string coerces to {@code true}, and
+     * explicit {@code null} or non-boolean scalars fail with
+     * {@code SerializationException}.
+     */
+    private static boolean parseSendingEnabled(JsonNode enabledNode) {
+        if (enabledNode.isMissingNode()) {
+            return false;
+        }
+        if (enabledNode.isBoolean()) {
+            return enabledNode.booleanValue();
+        }
+        if (enabledNode.isTextual()) {
+            return true;
+        }
+        if (enabledNode.isNull()) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+        if (enabledNode.isNumber()) {
+            throw new AwsException("SerializationException",
+                    "NUMBER_VALUE can not be converted to a Boolean", 400);
+        }
+        throw unexpectedStartError(enabledNode);
+    }
+
+    private static AwsException unexpectedStartError(JsonNode node) {
+        if (node.isArray()) {
+            return new AwsException("SerializationException",
+                    "Start of list found where not expected", 400);
+        }
+        return new AwsException("SerializationException",
+                "Start of structure or map found where not expected.", 400);
+    }
+
+    /**
      * Parse a V2 SES {@code Content.Simple.Headers} / {@code Content.Template.Headers} array
      * (additional message headers, elements use {@code Name}/{@code Value}). Returns an empty
      * list when the node is absent so callers can pass it through unconditionally.
@@ -1310,6 +1734,8 @@ public class SesController {
                     new AwsException("NotFoundException", e.getMessage(), 404);
             case "AlreadyExists", "ConfigurationSetAlreadyExists" ->
                     new AwsException("AlreadyExistsException", e.getMessage(), 400);
+            case "ConfigurationSetSendingPausedException" ->
+                    new AwsException("SendingPausedException", e.getMessage(), 400);
             default -> e;
         };
     }

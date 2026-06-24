@@ -8,6 +8,8 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.eks.model.ClusterStatus;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
 import io.github.hectorvent.floci.services.eks.model.Cluster;
+import io.github.hectorvent.floci.services.eks.model.Nodegroup;
+import io.github.hectorvent.floci.services.eks.model.NodegroupStatus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
@@ -27,8 +29,10 @@ class EksServiceTest {
     @BeforeEach
     void setUp() {
         StorageFactory storageFactory = Mockito.mock(StorageFactory.class);
+        // Return a distinct backend per create() call so the cluster and node-group stores
+        // don't share one instance (which would mix types and break node-group scans).
         when(storageFactory.create(Mockito.anyString(), Mockito.anyString(), Mockito.any()))
-                .thenReturn(new InMemoryStorage<>());
+                .thenAnswer(invocation -> new InMemoryStorage<>());
 
         config = Mockito.mock(EmulatorConfig.class);
         var servicesConfig = Mockito.mock(EmulatorConfig.ServicesConfig.class);
@@ -142,5 +146,81 @@ class EksServiceTest {
         tags = eksService.listTagsForResource(arn);
         assertFalse(tags.containsKey("env"));
         assertEquals("platform", tags.get("team"));
+    }
+
+    // ──────────────────────────── Managed node groups (#1137) ────────────────────────────
+
+    private Cluster newCluster(String name) {
+        CreateClusterRequest req = new CreateClusterRequest();
+        req.setName(name);
+        req.setRoleArn("arn:aws:iam::000000000000:role/eks-role");
+        req.setVersion("1.29");
+        return eksService.createCluster(req);
+    }
+
+    private Nodegroup newNodegroupRequest(String name) {
+        Nodegroup ng = new Nodegroup();
+        ng.setNodegroupName(name);
+        ng.setSubnets(List.of("subnet-123"));
+        ng.setNodeRole("arn:aws:iam::000000000000:role/eks-node-role");
+        return ng;
+    }
+
+    @Test
+    void createNodegroupBecomesActiveWithDefaults() {
+        newCluster("ng-cluster");
+        Nodegroup ng = eksService.createNodegroup("ng-cluster", newNodegroupRequest("ng1"));
+
+        assertEquals("ng1", ng.getNodegroupName());
+        assertEquals("ng-cluster", ng.getClusterName());
+        assertEquals(NodegroupStatus.ACTIVE, ng.getStatus());
+        assertTrue(ng.getNodegroupArn().contains("nodegroup/ng-cluster/ng1/"));
+        assertEquals("AL2_x86_64", ng.getAmiType());
+        assertEquals("ON_DEMAND", ng.getCapacityType());
+        assertEquals(20, ng.getDiskSize());
+        assertEquals("1.29", ng.getVersion());
+        assertEquals(List.of("t3.medium"), ng.getInstanceTypes());
+        assertNotNull(ng.getScalingConfig());
+        assertEquals(2, ng.getScalingConfig().getDesiredSize());
+        assertNotNull(ng.getCreatedAt());
+    }
+
+    @Test
+    void createNodegroupOnMissingClusterFails() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> eksService.createNodegroup("no-such-cluster", newNodegroupRequest("ng1")));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
+    }
+
+    @Test
+    void createNodegroupDuplicateFails() {
+        newCluster("ng-cluster");
+        eksService.createNodegroup("ng-cluster", newNodegroupRequest("ng1"));
+        AwsException e = assertThrows(AwsException.class,
+                () -> eksService.createNodegroup("ng-cluster", newNodegroupRequest("ng1")));
+        assertEquals("ResourceInUseException", e.getErrorCode());
+    }
+
+    @Test
+    void describeListAndDeleteNodegroup() {
+        newCluster("ng-cluster");
+        eksService.createNodegroup("ng-cluster", newNodegroupRequest("ng1"));
+        eksService.createNodegroup("ng-cluster", newNodegroupRequest("ng2"));
+
+        assertEquals("ng1", eksService.describeNodegroup("ng-cluster", "ng1").getNodegroupName());
+        assertEquals(List.of("ng1", "ng2"),
+                eksService.listNodegroups("ng-cluster").stream().sorted().toList());
+
+        Nodegroup deleted = eksService.deleteNodegroup("ng-cluster", "ng1");
+        assertEquals(NodegroupStatus.DELETING, deleted.getStatus());
+        assertThrows(AwsException.class, () -> eksService.describeNodegroup("ng-cluster", "ng1"));
+        assertEquals(List.of("ng2"), eksService.listNodegroups("ng-cluster"));
+    }
+
+    @Test
+    void listNodegroupsOnMissingClusterFails() {
+        AwsException e = assertThrows(AwsException.class,
+                () -> eksService.listNodegroups("no-such-cluster"));
+        assertEquals("ResourceNotFoundException", e.getErrorCode());
     }
 }

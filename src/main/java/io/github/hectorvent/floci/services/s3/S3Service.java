@@ -25,7 +25,9 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.ByteArrayOutputStream;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -281,10 +283,19 @@ public class S3Service {
         Bucket bucket = bucketStore.get(bucketName)
                 .orElseThrow(() -> new AwsException("NoSuchBucket",
                         "The specified bucket does not exist.", 404));
+        synchronized (bucket) {
+            return storeObjectInternal(bucket, bucketName, key, data, contentType, metadata, checksum, parts, options);
+        }
+    }
+
+    private S3Object storeObjectInternal(Bucket bucket, String bucketName, String key, byte[] data,
+                                         String contentType, Map<String, String> metadata,
+                                         S3Checksum checksum, List<Part> parts, PutObjectOptions options) {
         PutObjectOptions effectiveOptions = options != null ? options : new PutObjectOptions();
         String normalizedServerSideEncryption = normalizeServerSideEncryption(effectiveOptions.getServerSideEncryption());
         SseCustomerKey sseCustomerKey = validateSseCustomerKey(effectiveOptions.getSseCustomerAlgorithm(), effectiveOptions.getSseCustomerKey(), effectiveOptions.getSseCustomerKeyMd5());
         rejectConflictingServerSideEncryption(normalizedServerSideEncryption, sseCustomerKey);
+        checkWritePreconditions(bucketName, key, effectiveOptions.getIfMatch(), effectiveOptions.getIfNoneMatch());
 
         S3Object object = new S3Object(bucketName, key, data, contentType);
         if (metadata != null) {
@@ -363,6 +374,49 @@ public class S3Service {
         return object;
     }
 
+    private void checkWritePreconditions(String bucketName, String key, String ifMatch, String ifNoneMatch) {
+        if (ifMatch == null && ifNoneMatch == null) {
+            return;
+        }
+
+        S3Object existing;
+        try {
+            existing = headObject(bucketName, key);
+        }
+        catch (AwsException e) {
+            if ("NoSuchKey".equals(e.getErrorCode()) && ifMatch == null) {
+                return;
+            }
+            throw e;
+        }
+
+        if (ifMatch != null && !eTagMatches(ifMatch, existing.getETag())) {
+            throw new S3PreconditionFailedException("If-Match");
+        }
+        if (ifNoneMatch != null && eTagMatches(ifNoneMatch, existing.getETag())) {
+            throw new S3PreconditionFailedException("If-None-Match");
+        }
+    }
+
+    private boolean eTagMatches(String headerValue, String eTag) {
+        String normalizedETag = normalizeEntityTag(eTag);
+        for (String candidate : headerValue.split(",")) {
+            String normalizedCandidate = normalizeEntityTag(candidate);
+            if ("*".equals(normalizedCandidate) || normalizedCandidate.equals(normalizedETag)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private String normalizeEntityTag(String value) {
+        String normalized = value == null ? "" : value.trim();
+        if (normalized.length() >= 2 && normalized.startsWith("\"") && normalized.endsWith("\"")) {
+            normalized = normalized.substring(1, normalized.length() - 1);
+        }
+        return normalized;
+    }
+
     private void applyObjectLock(S3Object object, Bucket bucket,
                                  String objectLockMode, Instant retainUntilDate, String legalHoldStatus) {
         if (objectLockMode != null) {
@@ -415,6 +469,27 @@ public class S3Service {
 
     public S3Object headObject(String bucketName, String key, String versionId) {
         return getObjectMetadata(bucketName, key, versionId);
+    }
+
+    public InputStream openObjectStream(String bucketName, String key, String versionId) {
+        getObjectMetadata(bucketName, key, versionId);
+        if (inMemory) {
+            byte[] data = versionId != null
+                    ? memoryDataStore.get(versionedKey(bucketName, key, versionId))
+                    : memoryDataStore.get(objectKey(bucketName, key));
+            if (data == null) {
+                throw new IllegalStateException("S3 object data is missing for " + bucketName + "/" + key);
+            }
+            return new ByteArrayInputStream(data);
+        }
+        try {
+            Path path = versionId != null
+                    ? resolveVersionedPath(bucketName, key, versionId)
+                    : resolveObjectPath(bucketName, key);
+            return Files.newInputStream(path);
+        } catch (IOException e) {
+            throw new UncheckedIOException("Failed to open S3 object stream", e);
+        }
     }
 
     public S3Object getObjectMetadata(String bucketName, String key, String versionId) {

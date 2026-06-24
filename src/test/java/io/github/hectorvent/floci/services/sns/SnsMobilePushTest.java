@@ -72,6 +72,30 @@ class SnsMobilePushTest {
     }
 
     @Test
+    void createPlatformApplication_rejectsNameWithDisallowedCharacters() {
+        // AWS allows only ASCII letters, digits, underscores, hyphens, and periods.
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformApplication("bad name!", "APNS", Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(e.getMessage().contains("Name"));
+    }
+
+    @Test
+    void createPlatformApplication_rejectsNameLongerThan256Characters() {
+        String tooLong = "a".repeat(257);
+        AwsException e = assertThrows(AwsException.class,
+                () -> snsService.createPlatformApplication(tooLong, "APNS", Map.of(), REGION));
+        assertEquals("InvalidParameter", e.getErrorCode());
+    }
+
+    @Test
+    void createPlatformApplication_acceptsAllAllowedNameCharacters() {
+        PlatformApplication app = snsService.createPlatformApplication(
+                "My-App_1.0", "APNS", Map.of(), REGION);
+        assertEquals("arn:aws:sns:us-east-1:000000000000:app/APNS/My-App_1.0", app.getArn());
+    }
+
+    @Test
     void createPlatformApplication_idempotentByName() {
         PlatformApplication first = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
         PlatformApplication second = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
@@ -140,7 +164,7 @@ class SnsMobilePushTest {
         snsService.setPlatformApplicationAttributes(app.getArn(), Map.of("Enabled", "false"), REGION);
         AwsException e = assertThrows(AwsException.class,
                 () -> snsService.createPlatformEndpoint(app.getArn(), "tok-1", null, Map.of(), REGION));
-        assertEquals("PlatformApplicationDisabledException", e.getErrorCode());
+        assertEquals("PlatformApplicationDisabled", e.getErrorCode());
     }
 
     // --- Publish: happy paths ---
@@ -211,14 +235,25 @@ class SnsMobilePushTest {
     // --- Publish: error codes ---
 
     @Test
-    void publish_jsonStructureRejectsMissingDefaultKey() {
+    void publish_jsonStructureAcceptsPlatformKeyWithoutDefault() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
+
+        snsService.publish(null, endpoint.getArn(), null,
+                "{\"APNS\":\"x\"}", null, "json", null, null, null, REGION);
+        assertEquals("x", snsService.peekPushNotifications(endpoint.getArn()).get(0).payload());
+    }
+
+    @Test
+    void publish_jsonStructureRejectsWhenNeitherPlatformKeyNorDefaultPresent() {
         PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
         PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
 
         AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
-                null, endpoint.getArn(), null, "{\"APNS\":\"x\"}", null, "json",
+                null, endpoint.getArn(), null, "{\"GCM\":\"x\"}", null, "json",
                 null, null, null, REGION));
         assertEquals("InvalidParameter", e.getErrorCode());
+        assertTrue(e.getMessage().contains("APNS"));
         assertTrue(e.getMessage().contains("default"));
     }
 
@@ -234,14 +269,14 @@ class SnsMobilePushTest {
     }
 
     @Test
-    void publish_disabledEndpointThrowsEndpointDisabledException() {
+    void publish_disabledEndpointThrowsEndpointDisabled() {
         PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
         PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "ios-token", null, Map.of(), REGION);
         snsService.setEndpointAttributes(endpoint.getArn(), Map.of("Enabled", "false"), REGION);
 
         AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
                 null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION));
-        assertEquals("EndpointDisabledException", e.getErrorCode());
+        assertEquals("EndpointDisabled", e.getErrorCode());
         assertEquals(400, e.getHttpStatus());
         assertTrue(snsService.peekPushNotifications(endpoint.getArn()).isEmpty());
     }
@@ -255,7 +290,7 @@ class SnsMobilePushTest {
 
         AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
                 null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION));
-        assertEquals("EndpointDisabledException", e.getErrorCode());
+        assertEquals("EndpointDisabled", e.getErrorCode());
     }
 
     @Test
@@ -284,7 +319,7 @@ class SnsMobilePushTest {
 
         AwsException e = assertThrows(AwsException.class, () -> snsService.publish(
                 null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION));
-        assertEquals("PlatformApplicationDisabledException", e.getErrorCode());
+        assertEquals("PlatformApplicationDisabled", e.getErrorCode());
     }
 
     // --- Inspection helpers ---
@@ -323,6 +358,20 @@ class SnsMobilePushTest {
         assertEquals("ios-token", attrs.get("Token"));
         assertEquals("user-42", attrs.get("CustomUserData"));
         assertEquals("true", attrs.get("Enabled"));
+    }
+
+    @Test
+    void setEndpointAttributes_tokenRotationPropagatesToPublishedNotifications() {
+        PlatformApplication app = snsService.createPlatformApplication("ios-app", "APNS", Map.of(), REGION);
+        PlatformEndpoint endpoint = snsService.createPlatformEndpoint(app.getArn(), "old-token", null, Map.of(), REGION);
+
+        snsService.setEndpointAttributes(endpoint.getArn(), Map.of("Token", "new-token"), REGION);
+
+        assertEquals("new-token", snsService.getEndpointAttributes(endpoint.getArn(), REGION).get("Token"));
+
+        snsService.publish(null, endpoint.getArn(), null, "hello", null, null, null, null, null, REGION);
+        assertEquals("new-token",
+                snsService.peekPushNotifications(endpoint.getArn()).get(0).token());
     }
 
     @Test

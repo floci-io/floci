@@ -17,62 +17,60 @@
 | `DescribeStackResource` | Get a specific stack resource |
 | `ListStackResources` | List resource summaries |
 | `GetTemplate` | Retrieve the template body |
-| `ValidateTemplate` | Validate a template without deploying |
+| `ValidateTemplate` | Accepted; returns success without validating (stub) |
 | `CreateChangeSet` | Create a change set |
-| `DescribeChangeSet` | Get change set details |
+| `DescribeChangeSet` | Get change set details (no computed diff/preview) |
 | `ExecuteChangeSet` | Apply a change set |
 | `ListChangeSets` | List change sets for a stack |
 | `DeleteChangeSet` | Delete a change set |
-| `SetStackPolicy` | Set a stack policy |
-| `GetStackPolicy` | Retrieve the current stack policy |
-| `ListStackSets` | List StackSets |
-| `DescribeStackSet` | Get StackSet details |
-| `CreateStackSet` | Create a new StackSet |
+| `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
+| `GetStackPolicy` | Accepted; returns an empty policy (stub) |
+| `ListStackSets` | Accepted; returns an empty result (StackSets not implemented) |
+| `DescribeStackSet` | Accepted; returns an empty result (StackSets not implemented) |
+| `CreateStackSet` | Accepted; returns an empty result (StackSets not implemented) |
 
 ## Supported Resource Types
 
-Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`:
+Resource types provisioned during `CreateStack` / `UpdateStack` / `DeleteStack`. Each delegates to
+the backing service and sets a real physical ID plus the `Ref` / `Fn::GetAtt` attributes used by
+cross-resource references.
 
-| Resource Type | Notes |
+| Service | Resource types |
 |---|---|
-| `AWS::S3::Bucket` | |
-| `AWS::S3::BucketPolicy` | Accepted; policy not enforced |
-| `AWS::SQS::Queue` | |
-| `AWS::SQS::QueuePolicy` | Accepted; policy not enforced |
-| `AWS::SNS::Topic` | |
-| `AWS::DynamoDB::Table` | |
-| `AWS::DynamoDB::GlobalTable` | |
-| `AWS::Lambda::Function` | Zip (S3 or inline `ZipFile`) and Image package types |
-| `AWS::Lambda::EventSourceMapping` | SQS, Kinesis, and DynamoDB Streams sources |
-| `AWS::IAM::Role` | |
-| `AWS::IAM::User` | |
-| `AWS::IAM::AccessKey` | |
-| `AWS::IAM::Policy` | |
-| `AWS::IAM::ManagedPolicy` | |
-| `AWS::IAM::InstanceProfile` | |
-| `AWS::SSM::Parameter` | |
-| `AWS::KMS::Key` | |
-| `AWS::KMS::Alias` | |
-| `AWS::SecretsManager::Secret` | |
-| `AWS::ECR::Repository` | |
-| `AWS::Events::Rule` | |
-| `AWS::ApiGateway::RestApi` | |
-| `AWS::ApiGateway::Resource` | |
-| `AWS::ApiGateway::Method` | |
-| `AWS::ApiGateway::Deployment` | |
-| `AWS::ApiGateway::Stage` | |
-| `AWS::ApiGatewayV2::Api` | |
-| `AWS::ApiGatewayV2::Route` | |
-| `AWS::ApiGatewayV2::Integration` | |
-| `AWS::ApiGatewayV2::Stage` | |
-| `AWS::ApiGatewayV2::Deployment` | |
-| `AWS::Pipes::Pipe` | |
-| `AWS::CloudFormation::Stack` | Nested stacks (stubbed — returns synthetic stack ID) |
-| `AWS::CDK::Metadata` | Accepted; no-op |
-| `AWS::Route53::HostedZone` | Stubbed |
-| `AWS::Route53::RecordSet` | Stubbed |
+| S3 | `Bucket`, `BucketPolicy` (accepted; policy not enforced) |
+| SQS | `Queue`, `QueuePolicy` (accepted; policy not enforced) |
+| SNS | `Topic`, `Subscription` |
+| DynamoDB | `Table`, `GlobalTable` |
+| Lambda | `Function` (Zip via S3/inline `ZipFile`, and Image), `LayerVersion`, `EventSourceMapping` (SQS, Kinesis, DynamoDB Streams) |
+| IAM | `Role`, `User`, `AccessKey`, `Policy`, `ManagedPolicy`, `InstanceProfile` |
+| SSM | `Parameter` |
+| KMS | `Key`, `Alias` |
+| Secrets Manager | `Secret` |
+| ECR | `Repository` |
+| ECS | `Cluster`, `TaskDefinition`, `Service` |
+| EKS | `Cluster`, `Nodegroup` |
+| RDS | `DBInstance`, `DBCluster`, `DBSubnetGroup`, `DBParameterGroup`, `DBClusterParameterGroup` (DBInstance/DBCluster start real containers) |
+| EC2 | `VPC`, `Subnet`, `SecurityGroup`, `InternetGateway`, `RouteTable`, `SubnetRouteTableAssociation`, `Route`, `NatGateway`, `EIP`, `Instance` |
+| Elastic Load Balancing v2 | `LoadBalancer`, `TargetGroup`, `Listener`, `ListenerRule` |
+| Auto Scaling | `LaunchConfiguration`, `AutoScalingGroup` |
+| Route 53 | `HostedZone`, `RecordSet` |
+| API Gateway (v1) | `RestApi`, `Resource`, `Authorizer`, `Method`, `Deployment`, `Stage` |
+| API Gateway v2 | `Api`, `Route`, `Integration`, `Stage`, `Deployment` |
+| Step Functions | `StateMachine` |
+| Batch | `ComputeEnvironment`, `JobQueue`, `JobDefinition` |
+| Cognito | `UserPool`, `UserPoolClient` |
+| EventBridge | `Events::Rule` |
+| Pipes | `Pipe` |
+| Kinesis | `Stream` |
+| Kinesis Data Firehose | `DeliveryStream` |
+| CloudWatch | `Alarm` |
+| CloudWatch Logs | `LogGroup` |
+| CloudFormation | `Stack` (nested stacks), `CustomResource` and `Custom::*` (Lambda-backed) |
+| CDK | `CDK::Metadata` (accepted; no-op) |
 
-All other resource types are accepted without error and assigned a synthetic physical ID, so templates with unsupported types still deploy rather than fail.
+All other resource types are accepted without error and assigned a synthetic physical ID (with an
+`arn:aws:stub:::<logicalId>` ARN attribute), so templates with unsupported types still reach
+`CREATE_COMPLETE` rather than failing.
 
 ## Lambda Stack Updates
 

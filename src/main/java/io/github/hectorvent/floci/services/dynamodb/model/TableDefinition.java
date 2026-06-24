@@ -39,7 +39,14 @@ public class TableDefinition {
     private boolean streamEnabled;
     private String streamArn;
     private String streamViewType;
+    private boolean sseEnabled;
+    private String sseType;
+    private String kmsMasterKeyArn;
     private List<KinesisStreamingDestination> kinesisStreamingDestinations;
+    private String tableId;
+    private String tableClass; // "STANDARD" or "STANDARD_INFREQUENT_ACCESS"
+    private Integer onDemandMaxReadRequestUnits;
+    private Integer onDemandMaxWriteRequestUnits;
 
     public TableDefinition() {
         this.keySchema = new ArrayList<>();
@@ -69,6 +76,7 @@ public class TableDefinition {
         this.itemCount = 0;
         this.tableSizeBytes = 0;
         this.tableArn = AwsArnUtils.Arn.of("dynamodb", region, accountId, "table/" + tableName).toString();
+        this.tableId = java.util.UUID.randomUUID().toString();
         this.provisionedThroughput = new ProvisionedThroughput(5, 5);
         this.tags = new HashMap<>();
         this.globalSecondaryIndexes = new ArrayList<>();
@@ -148,6 +156,15 @@ public class TableDefinition {
     public String getStreamViewType() { return streamViewType; }
     public void setStreamViewType(String streamViewType) { this.streamViewType = streamViewType; }
 
+    public boolean isSseEnabled() { return sseEnabled; }
+    public void setSseEnabled(boolean sseEnabled) { this.sseEnabled = sseEnabled; }
+
+    public String getSseType() { return sseType; }
+    public void setSseType(String sseType) { this.sseType = sseType; }
+
+    public String getKmsMasterKeyArn() { return kmsMasterKeyArn; }
+    public void setKmsMasterKeyArn(String kmsMasterKeyArn) { this.kmsMasterKeyArn = kmsMasterKeyArn; }
+
     public List<KinesisStreamingDestination> getKinesisStreamingDestinations() {
         return kinesisStreamingDestinations != null ? kinesisStreamingDestinations : new ArrayList<>();
     }
@@ -162,6 +179,21 @@ public class TableDefinition {
     }
 
     /** Returns the partition key attribute name. */
+    public String getTableId() {
+        if (tableId == null) tableId = java.util.UUID.randomUUID().toString();
+        return tableId;
+    }
+    public void setTableId(String tableId) { this.tableId = tableId; }
+
+    public String getTableClass() { return tableClass; }
+    public void setTableClass(String tableClass) { this.tableClass = tableClass; }
+
+    public Integer getOnDemandMaxReadRequestUnits() { return onDemandMaxReadRequestUnits; }
+    public void setOnDemandMaxReadRequestUnits(Integer v) { this.onDemandMaxReadRequestUnits = v; }
+
+    public Integer getOnDemandMaxWriteRequestUnits() { return onDemandMaxWriteRequestUnits; }
+    public void setOnDemandMaxWriteRequestUnits(Integer v) { this.onDemandMaxWriteRequestUnits = v; }
+
     public String getPartitionKeyName() {
         return keySchema.stream()
                 .filter(k -> "HASH".equals(k.getKeyType()))

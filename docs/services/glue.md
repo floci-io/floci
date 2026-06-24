@@ -11,9 +11,10 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 
 | Area | Actions |
 |---|---|
-| Databases | `CreateDatabase` · `GetDatabase` · `GetDatabases` |
+| Databases | `CreateDatabase` · `GetDatabase` · `GetDatabases` · `DeleteDatabase` |
 | Tables | `CreateTable` · `GetTable` · `GetTables` · `DeleteTable` |
 | Partitions | `CreatePartition` · `GetPartitions` |
+| User-defined functions | `CreateUserDefinedFunction` · `GetUserDefinedFunction` · `GetUserDefinedFunctions` · `UpdateUserDefinedFunction` · `DeleteUserDefinedFunction` |
 
 ### Schema Registry
 

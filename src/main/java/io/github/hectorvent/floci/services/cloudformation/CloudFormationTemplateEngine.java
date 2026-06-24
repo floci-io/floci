@@ -6,16 +6,20 @@ import com.fasterxml.jackson.databind.node.TextNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import org.jboss.logging.Logger;
 
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.function.Function;
+import java.util.regex.Pattern;
 
 /**
  * Resolves CloudFormation intrinsic functions and pseudo-parameters in template nodes.
  * Supported: Ref, Fn::Sub, Fn::Join, Fn::Select, Fn::If, Fn::Split, Fn::Base64,
- * Fn::GetAtt, Condition.
+ * Fn::GetAtt, Fn::GetAZs, Fn::Cidr, Fn::FindInMap, Fn::ImportValue, Condition.
  */
 public class CloudFormationTemplateEngine {
 
@@ -89,6 +93,12 @@ public class CloudFormationTemplateEngine {
             if (node.has("Fn::Split")) {
                 return resolve(node.get("Fn::Split").get(1));
             }
+            if (node.has("Fn::GetAZs")) {
+                return String.join(",", resolveAvailabilityZones(node.get("Fn::GetAZs")));
+            }
+            if (node.has("Fn::Cidr")) {
+                return String.join(",", resolveCidr(node.get("Fn::Cidr")));
+            }
             if (node.has("Fn::GetAtt")) {
                 return resolveGetAtt(node.get("Fn::GetAtt"));
             }
@@ -112,7 +122,8 @@ public class CloudFormationTemplateEngine {
         if (node.isObject()) {
             if (node.has("Ref") || node.has("Fn::Sub") || node.has("Fn::Join") ||
                     node.has("Fn::Select") || node.has("Fn::If") || node.has("Fn::Base64") ||
-                    node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::Split")) {
+                    node.has("Fn::GetAtt") || node.has("Fn::ImportValue") || node.has("Fn::Split") ||
+                    node.has("Fn::GetAZs") || node.has("Fn::Cidr") || node.has("Fn::FindInMap")) {
                 return TextNode.valueOf(resolve(node));
             }
             // Plain object — resolve each field
@@ -220,12 +231,127 @@ public class CloudFormationTemplateEngine {
         if (!select.isArray() || select.size() < 2) {
             return "";
         }
-        int index = select.get(0).asInt(0);
-        JsonNode list = select.get(1);
-        if (list.isArray() && index < list.size()) {
-            return resolve(list.get(index));
+        int index = parseInt(resolve(select.get(0)), 0);
+        List<String> items = resolveList(select.get(1));
+        if (index >= 0 && index < items.size()) {
+            return items.get(index);
         }
         return "";
+    }
+
+    /**
+     * Resolves a node that represents a list — a literal array, a list-producing intrinsic
+     * ({@code Fn::GetAZs}, {@code Fn::Cidr}, {@code Fn::Split}), or a comma-delimited scalar
+     * (e.g. a {@code Ref} to a {@code List<>} parameter).
+     */
+    private List<String> resolveList(JsonNode node) {
+        List<String> out = new ArrayList<>();
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return out;
+        }
+        if (node.isArray()) {
+            for (JsonNode item : node) {
+                out.add(resolve(item));
+            }
+            return out;
+        }
+        if (node.isObject()) {
+            if (node.has("Fn::GetAZs")) {
+                return resolveAvailabilityZones(node.get("Fn::GetAZs"));
+            }
+            if (node.has("Fn::Cidr")) {
+                return resolveCidr(node.get("Fn::Cidr"));
+            }
+            if (node.has("Fn::Split")) {
+                return resolveSplit(node.get("Fn::Split"));
+            }
+        }
+        String scalar = resolve(node);
+        if (!scalar.isEmpty()) {
+            out.addAll(Arrays.asList(scalar.split(",", -1)));
+        }
+        return out;
+    }
+
+    private List<String> resolveSplit(JsonNode split) {
+        if (!split.isArray() || split.size() < 2) {
+            return List.of();
+        }
+        String delimiter = resolve(split.get(0));
+        String source = resolve(split.get(1));
+        if (delimiter.isEmpty()) {
+            return List.of(source);
+        }
+        return Arrays.asList(source.split(Pattern.quote(delimiter), -1));
+    }
+
+    /**
+     * {@code Fn::GetAZs} — returns the Availability Zones for a region. The argument is the region
+     * (empty string means the stack's region). Floci seeds three default zones per region.
+     */
+    private List<String> resolveAvailabilityZones(JsonNode arg) {
+        String r = (arg == null || arg.isNull()) ? region : resolve(arg);
+        if (r == null || r.isBlank()) {
+            r = region;
+        }
+        return List.of(r + "a", r + "b", r + "c");
+    }
+
+    /**
+     * {@code Fn::Cidr} — splits an IPv4 CIDR block into {@code count} subnets, each with
+     * {@code cidrBits} host bits (i.e. a /{@code (32 - cidrBits)} mask). IPv6 is not supported.
+     */
+    private List<String> resolveCidr(JsonNode args) {
+        if (!args.isArray() || args.size() < 2) {
+            return List.of();
+        }
+        String ipBlock = resolve(args.get(0));
+        int count = parseInt(resolve(args.get(1)), 0);
+        int cidrBits = args.size() > 2 ? parseInt(resolve(args.get(2)), 8) : 8;
+        int slash = ipBlock.indexOf('/');
+        if (slash < 0 || count <= 0 || cidrBits <= 0 || cidrBits > 32) {
+            return List.of();
+        }
+        long base = ipv4ToLong(ipBlock.substring(0, slash));
+        if (base < 0) {
+            return List.of();
+        }
+        int newPrefix = 32 - cidrBits;
+        long step = 1L << cidrBits;
+        List<String> out = new ArrayList<>();
+        for (int i = 0; i < count; i++) {
+            out.add(longToIpv4(base + (long) i * step) + "/" + newPrefix);
+        }
+        return out;
+    }
+
+    private static int parseInt(String value, int fallback) {
+        try {
+            return Integer.parseInt(value.trim());
+        } catch (NumberFormatException e) {
+            return fallback;
+        }
+    }
+
+    private static long ipv4ToLong(String ip) {
+        String[] octets = ip.trim().split("\\.");
+        if (octets.length != 4) {
+            return -1;
+        }
+        long result = 0;
+        for (String octet : octets) {
+            int value = parseInt(octet, -1);
+            if (value < 0 || value > 255) {
+                return -1;
+            }
+            result = (result << 8) | value;
+        }
+        return result;
+    }
+
+    private static String longToIpv4(long value) {
+        return ((value >> 24) & 0xFF) + "." + ((value >> 16) & 0xFF) + "."
+                + ((value >> 8) & 0xFF) + "." + (value & 0xFF);
     }
 
     private String resolveIf(JsonNode ifNode) {

@@ -24,9 +24,9 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 
 | Operation | Notes |
 |---|---|
-| `CreateAutoScalingGroup` | Creates a group with min/max/desired capacity, AZs, tags; starts capacity reconciliation loop |
-| `DescribeAutoScalingGroups` | Filtered by name list; returns all if no filter; includes current instance list with lifecycle state |
-| `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch configuration, AZs |
+| `CreateAutoScalingGroup` | Creates a group with min/max/desired capacity, AZs, tags, launch configuration, launch template, or mixed instances policy; starts capacity reconciliation loop |
+| `DescribeAutoScalingGroups` | Filtered by name list; returns all if no filter; includes current instance list with lifecycle state and mixed instances policy shape when configured |
+| `UpdateAutoScalingGroup` | Updates capacity bounds, cooldown, launch source, AZs |
 | `DeleteAutoScalingGroup` | `ForceDelete=true` terminates all instances before deletion |
 
 ### Instance Management
@@ -64,8 +64,8 @@ Floci implements the EC2 Auto Scaling API — stored-state management for launch
 
 | Operation | Notes |
 |---|---|
-| `PutScalingPolicy` | Creates or updates a policy: `SimpleScaling`, `AdjustmentType`, `ScalingAdjustment`, `Cooldown` |
-| `DescribePolicies` | Lists policies filtered by group or policy name |
+| `PutScalingPolicy` | Creates or updates a policy: `SimpleScaling` fields or `TargetTrackingScaling` with predefined metric, target value, and estimated warmup |
+| `DescribePolicies` | Lists policies filtered by group or policy name, including stored target tracking configuration |
 | `DeletePolicy` | Removes a scaling policy |
 
 ### Activities
@@ -92,6 +92,22 @@ Floci runs a background reconciler (10 s fixed rate) that keeps each group's InS
 - **Scale-out**: calls `RunInstances` with the group's launch configuration; new instances are tracked as `Pending` until the EC2 state transitions to `running`, at which point they move to `InService` and are registered with all attached ELB v2 target groups.
 - **Scale-in**: selects InService instances not protected from scale-in, deregisters them from target groups, then calls `TerminateInstances`.
 - Activity records are written on each scale-out and scale-in event.
+
+## Launch Source Compatibility
+
+Auto Scaling groups preserve either a launch configuration, a top-level launch template, or a `MixedInstancesPolicy`. These launch sources are mutually exclusive in create/update requests. When a mixed instances policy is supplied, Floci stores and returns:
+
+- `LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId`
+- `LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateName`
+- `LaunchTemplate.LaunchTemplateSpecification.Version`
+- `LaunchTemplate.Overrides.member.N.InstanceType`
+- `InstancesDistribution.OnDemandBaseCapacity`
+- `InstancesDistribution.OnDemandPercentageAboveBaseCapacity`
+- `InstancesDistribution.SpotAllocationStrategy`
+
+## Scaling Policy Compatibility
+
+Target tracking policies preserve `TargetTrackingConfiguration` for predefined metrics. `DescribePolicies` returns `PredefinedMetricSpecification.PredefinedMetricType`, `TargetValue`, and `EstimatedInstanceWarmup` when present.
 
 ## Configuration
 

@@ -339,7 +339,8 @@ public class ElbV2QueryHandler {
     private Response handleDeleteTargetGroup(MultivaluedMap<String, String> p, String region) {
         String arn = p.getFirst("TargetGroupArn");
         service.deleteTargetGroup(region, arn);
-        return voidResponse("DeleteTargetGroupResponse");
+        String xml = AwsQueryResponse.envelopeEmptyResult("DeleteTargetGroup", AwsNamespaces.ELB_V2);
+        return Response.ok(xml).type(MediaType.APPLICATION_XML).build();
     }
 
     private Response handleModifyTargetGroup(MultivaluedMap<String, String> p, String region) {
@@ -829,8 +830,11 @@ public class ElbV2QueryHandler {
         xml.start("State").elem("Code", safe(lb.getState())).end("State");
         xml.elem("Type", safe(lb.getType()));
         xml.start("AvailabilityZones");
-        for (String az : lb.getAvailabilityZones()) {
-            xml.start("member").elem("ZoneName", az).end("member");
+        for (AvailabilityZone az : lb.getAvailabilityZones()) {
+            xml.start("member")
+                    .elem("SubnetId", safe(az.getSubnetId()))
+                    .elem("ZoneName", safe(az.getZoneName()))
+                    .end("member");
         }
         xml.end("AvailabilityZones");
         xml.start("SecurityGroups");

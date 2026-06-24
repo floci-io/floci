@@ -11,6 +11,8 @@ quarkus:
     host: 0.0.0.0
     limits:
       max-body-size: ${floci.max-request-size}M
+  datasource:
+    active: false
   security:
      security-providers: BC
   shutdown:
@@ -19,11 +21,19 @@ quarkus:
     delay-enabled: true
   native:
     resources:
-      # The Pricing service reads its bundled snapshot at runtime via
+      # The Pricing service reads its bundled snapshot, EC2 reads its image
+      # catalog (ec2/image-catalog.yaml), AppSync's GraphQL parser reads its
+      # message bundles, and API Gateway's Velocity engine reads its default
+      # properties at runtime via
       # ClassLoader#getResourceAsStream. Quarkus's static resource analysis
-      # cannot detect dynamically-built paths, so the tree is registered
+      # cannot detect these dynamically-built paths, so they are registered
       # explicitly to ensure GraalVM includes every file in the native image.
-      includes: pricing-snapshots/**
+      includes:
+        - pricing-snapshots/**
+        - ui/*.html
+        - ec2/*.yaml
+        - i18n/*.properties
+        - org/apache/velocity/runtime/defaults/*.properties
     additional-build-args:
       - --report-unsupported-elements-at-runtime
       - --allow-incomplete-classpath
@@ -44,11 +54,12 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.route53.Route53Service
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
 
 
 floci:
   port: 4566
-  max-request-size: 512
+  max-request-size: 2048
   base-url: "http://localhost:4566"
   # hostname: ""  # When set, overrides the hostname in response URLs (e.g. SQS QueueUrl).
                    # Needed for multi-container Docker setups. Example: FLOCI_HOSTNAME=floci
@@ -81,8 +92,24 @@ floci:
         flush-interval-ms: 5000
       opensearch:
         flush-interval-ms: 5000
+      batch:
+        flush-interval-ms: 5000
+      codepipeline:
+        flush-interval-ms: 5000
+      s3vectors:
+        flush-interval-ms: 5000
+      ecs:
+        flush-interval-ms: 5000
+      codebuild:
+        flush-interval-ms: 5000
+      config:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
+        # mode: memory
+      ec2:
+        # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
+        # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
 
   dns:
@@ -134,7 +161,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30
-      max-message-size: 262144
+      max-message-size: 1048576
       clear-fifo-deduplication-cache-on-purge: false
     s3:
       enabled: true
@@ -165,6 +192,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: false
@@ -175,6 +203,12 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+    memorydb:
+      enabled: true
+      mock: false
+      proxy-base-port: 6400
+      proxy-max-port: 6419
+      default-image: "valkey/valkey:8"
     rds:
       enabled: true
       proxy-base-port: 7001
@@ -182,12 +216,23 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
+      db-type: "gremlin"
       default-image: "tinkerpop/gremlin-server:3.7.3"
+      default-neo4j-image: "neo4j:5-community"
     eventbridge:
+      enabled: true
+    cloudmap:
+      enabled: true
+    emr:
+      enabled: true
+    wafv2:
       enabled: true
     scheduler:
       enabled: true
@@ -262,6 +307,12 @@ floci:
       tls-enabled: false
       keep-running-on-shutdown: true
       uri-style: hostname
+    ui:
+      enabled: true
+      image: "floci/floci-ui:latest"
+      container-name: floci-ui
+      port: 4500
+      keep-running-on-shutdown: false
     bedrock-runtime:
       enabled: true
     eks:
@@ -281,7 +332,13 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+    batch:
+      enabled: true
+      runner-mode: immediate
+      # docker-network: floci-network
     codedeploy:
+      enabled: true
+    codepipeline:
       enabled: true
     autoscaling:
       enabled: true
@@ -308,7 +365,11 @@ floci:
     bcm-data-exports:
       enabled: true
       emit-mode: synchronous
+    cloudtrail:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:
+      enabled: true
+    s3vectors:
       enabled: true

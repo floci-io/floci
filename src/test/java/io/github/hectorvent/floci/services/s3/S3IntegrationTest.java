@@ -157,26 +157,6 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(10)
-    void pathTraversalInUrlIsNormalizedByFramework() {
-        // Vertx normalizes raw `..` in URL paths before the application layer,
-        // so /test-bucket/../../secret.txt becomes /secret.txt at the framework level
-        // and routes to a bucket-level handler (not S3Service.putObject for test-bucket).
-        //
-        // The actual service-layer traversal guard (resolveObjectPath) is tested
-        // in S3ServiceTest.resolvePathWithTraversalThrows.
-        //
-        // Verify that the normalized path does NOT result in a 500 error.
-        given()
-            .contentType("text/plain")
-            .body("safe-data")
-        .when()
-            .put("/test-bucket/../../secret.txt")
-        .then()
-            .statusCode(not(equalTo(500)));
-    }
-
-    @Test
     @Order(11)
     void listObjectsWithPrefix() {
         given()
@@ -627,6 +607,47 @@ class S3IntegrationTest {
             .delete("/test-bucket/empty.txt")
         .then()
             .statusCode(204);
+    }
+
+    @Test
+    @Order(42)
+    void getObjectRangeStreamsExactBytesFromLargeObject() {
+        String bucket = "stream-range-bucket";
+        String key = "large-range.txt";
+        byte[] body = alphabetBytes(1024 * 1024);
+        int start = 512 * 1024 + 13;
+        int end = start + 31;
+
+        given()
+        .when()
+            .put("/" + bucket)
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/octet-stream")
+            .header("x-amz-meta-kind", "stream-range")
+            .body(body)
+        .when()
+            .put("/" + bucket + "/" + key)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Range", "bytes=" + start + "-" + end)
+        .when()
+            .get("/" + bucket + "/" + key)
+        .then()
+            .statusCode(206)
+            .header("Content-Range", equalTo("bytes " + start + "-" + end + "/" + body.length))
+            .header("Content-Length", equalTo("32"))
+            .header("Accept-Ranges", equalTo("bytes"))
+            .header("x-amz-meta-kind", equalTo("stream-range"))
+            .header("x-amz-checksum-crc64nvme", nullValue())
+            .body(equalTo(asciiSlice(body, start, 32)));
+
+        given().delete("/" + bucket + "/" + key).then().statusCode(204);
+        given().delete("/" + bucket).then().statusCode(204);
     }
 
     @Test
@@ -1873,7 +1894,7 @@ class S3IntegrationTest {
                 .get("/{bucket}/%2e%2e/%2e%2e/secret.txt")
         .then()
                 .statusCode(400)
-                .body(containsString("InvalidKey"));
+                .body(equalTo(""));
 
         // 2. Null byte (survives URL-decoding but fails java.nio.file.Path validation)
         given()
@@ -1896,7 +1917,7 @@ class S3IntegrationTest {
                 .get("/{bucket}/%2E%2E/%2E%2E/secret.txt")
         .then()
                 .statusCode(400)
-                .body(containsString("InvalidKey"));
+                .body(equalTo(""));
     }
 
     @Test
@@ -1938,6 +1959,93 @@ class S3IntegrationTest {
             .body(containsString("BadDigest"));
     }
 
+    @Test
+    @Order(200)
+    void putObjectWithRawTraversalAboveBucketReturnsBadRequest() {
+        given()
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/../../secret.txt")
+        .then()
+            .statusCode(400)
+            .body(equalTo(""));
+    }
+
+    @Test
+    @Order(201)
+    void putObjectWithEncodedTraversalAboveBucketReturnsBadRequest() {
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/%2E%2E/%2E%2E/secret.txt")
+        .then()
+            .statusCode(400)
+            .body(equalTo(""));
+    }
+
+    @Test
+    @Order(202)
+    void putObjectWithEncodedSlashTraversalAboveBucketReturnsBadRequest() {
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/%2E%2E%2Fsecret.txt")
+        .then()
+            .statusCode(400)
+            .body(equalTo(""));
+    }
+
+    @Test
+    @Order(203)
+    void putObjectWithInternalTraversalSucceeds() {
+        given()
+            .urlEncodingEnabled(false)
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/docs/%2E%2E/file.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/test-bucket/docs/%2E%2E/file.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("safe-data"));
+    }
+
+    @Test
+    @Order(204)
+    void listObjectsAllowsTraversalInQueryString() {
+        given()
+            .urlEncodingEnabled(false)
+        .when()
+            .get("/test-bucket?prefix=../x")
+        .then()
+            .statusCode(200)
+            .body(containsString("ListBucketResult"));
+    }
+
+    @Test
+    @Order(205)
+    void putObjectWithTraversalAfterBucketPrefixReturnsBadRequest() {
+        given()
+            .contentType("text/plain")
+            .body("safe-data")
+        .when()
+            .put("/test-bucket/../secret.txt")
+        .then()
+            .statusCode(400)
+            .body(equalTo(""));
+    }
+
     private static String customerKeyMd5(String customerKey) {
         try {
             byte[] md5 = MessageDigest.getInstance("MD5").digest(Base64.getDecoder().decode(customerKey));
@@ -1946,5 +2054,17 @@ class S3IntegrationTest {
         catch (NoSuchAlgorithmException e) {
             throw new IllegalStateException("MD5 is not available", e);
         }
+    }
+
+    private static byte[] alphabetBytes(int size) {
+        byte[] bytes = new byte[size];
+        for (int i = 0; i < size; i++) {
+            bytes[i] = (byte) ('a' + (i % 26));
+        }
+        return bytes;
+    }
+
+    private static String asciiSlice(byte[] bytes, int start, int length) {
+        return new String(bytes, start, length, StandardCharsets.US_ASCII);
     }
 }

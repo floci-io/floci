@@ -29,7 +29,10 @@ public class RedpandaManager {
 
     private static final Logger LOG = Logger.getLogger(RedpandaManager.class);
     private static final int KAFKA_PORT = 9092;
-    private static final int ADMIN_PORT = 9644;
+    static final int ADMIN_PORT = 9644;
+
+    // Redpanda's Admin API exposes readiness at /v1/status/ready. /ready always returns 404
+    private static final String ADMIN_READY_PATH = "/v1/status/ready";
 
     private final ContainerBuilder containerBuilder;
     private final ContainerLifecycleManager lifecycleManager;
@@ -137,13 +140,13 @@ public class RedpandaManager {
             var bindings = inspect.getNetworkSettings().getPorts().getBindings();
             var binding = bindings.get(com.github.dockerjava.api.model.ExposedPort.tcp(ADMIN_PORT));
             if (binding != null && binding.length > 0) {
-                adminUrl = "http://localhost:" + binding[0].getHostPortSpec() + "/ready";
+                adminUrl = "http://localhost:" + binding[0].getHostPortSpec() + ADMIN_READY_PATH;
             } else {
                 return false;
             }
         } else {
             String containerIp = bootstrap.split(":")[0];
-            adminUrl = "http://" + containerIp + ":" + ADMIN_PORT + "/ready";
+            adminUrl = "http://" + containerIp + ":" + ADMIN_PORT + ADMIN_READY_PATH;
         }
 
         try {

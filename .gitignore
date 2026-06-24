@@ -29,3 +29,5 @@ test-results.xml
 
 *.log
 test-results
+
+scripts/node_modules/

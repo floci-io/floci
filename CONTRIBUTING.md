@@ -121,14 +121,14 @@ Do not include `Co-Authored-By` trailers for AI tools in commit messages. Attrib
 
 ## Architecture
 
-See [AGENT.md](AGENT.md) for a detailed description of the three-layer architecture (Controller → Service → Storage), the AWS wire protocol mapping, and conventions for adding new services.
+See [AGENTS.md](AGENTS.md) for a detailed description of the three-layer architecture (Controller → Service → Storage), the AWS wire protocol mapping, and conventions for adding new services.
 
-`AGENT.md` is the canonical agent instructions file for this repository. If your coding agent expects a different filename, create a local symlink to `AGENT.md` instead of copying the file.
+`AGENTS.md` is the canonical agent instructions file for this repository, following the [AGENTS.md standard](https://agents.md/). If your coding agent expects a different filename, create a local symlink to `AGENTS.md` instead of copying the file.
 
 ```bash
-ln -s AGENT.md CLAUDE.md
-ln -s AGENT.md GEMINI.md
-ln -s AGENT.md COPILOT.md
+ln -s AGENTS.md CLAUDE.md
+ln -s AGENTS.md GEMINI.md
+ln -s AGENTS.md COPILOT.md
 ```
 
 ## Adding a New AWS Service
@@ -149,7 +149,7 @@ Always implement the **real AWS wire protocol** — never invent custom endpoint
 
 1. Branch off `main`: `git checkout -b feature/my-feature`
 2. Open a PR targeting `main`.
-3. CI runs tests automatically — all checks must pass before merge.
+3. CI runs tests automatically — all checks must pass before merge.v
 4. Keep PRs focused — one feature or fix per PR.
 5. Reference any related issues in the PR description.
 

@@ -7,6 +7,7 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  custom_dir: overrides
   logo: assets/floci-header.svg
   favicon: assets/floci.svg
   palette:
@@ -90,10 +91,13 @@ nav:
     - IAM: services/iam.md
     - STS: services/sts.md
     - ElastiCache: services/elasticache.md
+    - MemoryDB: services/memorydb.md
     - RDS: services/rds.md
+    - RDS Data API: services/rds-data.md
     - MSK (Kafka): services/msk.md
     - Glue: services/glue.md
     - Neptune: services/neptune.md
+    - DocumentDB: services/docdb.md
     - Athena: services/athena.md
     - Data Firehose: services/firehose.md
     - EventBridge: services/eventbridge.md
@@ -112,12 +116,25 @@ nav:
     - ELB v2: services/elb.md
     - Auto Scaling: services/autoscaling.md
     - CodeBuild: services/codebuild.md
+    - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
+    - CodePipeline: services/codepipeline.md
     - AWS Backup: services/backup.md
     - CloudFront: services/cloudfront.md
     - Route53: services/route53.md
+    - AWS Cloud Map: services/cloudmap.md
     - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
+    - AWS Config: services/config.md
+    - CloudTrail: services/cloudtrail.md
+    - EMR: services/emr.md
+    - WAF v2: services/wafv2.md
+    - Textract: services/textract.md
+    - Transcribe: services/transcribe.md
+    - Pricing: services/pricing.md
+    - Cost Explorer: services/ce.md
+    - Cost and Usage Reports: services/cur.md
+    - BCM Data Exports: services/bcm-data-exports.md
   - Testcontainers:
     - Overview: testcontainers/index.md
     - Java: testcontainers/java.md

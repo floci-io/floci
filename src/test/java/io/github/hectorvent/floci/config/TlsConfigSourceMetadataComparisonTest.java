@@ -17,13 +17,11 @@ import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Unit tests for metadata loading and comparison in TlsConfigSource.
- * 
- * Tests the hostnameConfigChanged() method to verify:
- * - Returns true when metadata file doesn't exist
- * - Returns true when hostnames have changed
- * - Returns false when hostnames are the same (order-independent)
- * - Handles read/parse failures gracefully (returns true)
- * - Proper logging for different scenarios
+ *
+ * Tests the hostnameConfigChanged() method to verify: - Returns true when metadata file doesn't
+ * exist - Returns true when hostnames have changed - Returns false when hostnames are the same
+ * (order-independent) - Handles read/parse failures gracefully (returns true) - Proper logging for
+ * different scenarios
  */
 class TlsConfigSourceMetadataComparisonTest {
 
@@ -67,11 +65,11 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create metadata with old hostnames
         List<String> oldHostnames = List.of("localhost", "127.0.0.1", "oldhost");
         createMetadataFile(tlsDir, oldHostnames);
-        
+
         // Current hostnames are different
         List<String> currentHostnames = List.of("localhost", "127.0.0.1", "newhost");
 
@@ -87,11 +85,11 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create metadata with hostnames
         List<String> hostnames = List.of("localhost", "127.0.0.1", "myhost");
         createMetadataFile(tlsDir, hostnames);
-        
+
         // Current hostnames are the same
         List<String> currentHostnames = List.of("localhost", "127.0.0.1", "myhost");
 
@@ -107,11 +105,11 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create metadata with hostnames in one order
         List<String> hostnames = List.of("localhost", "myhost", "127.0.0.1");
         createMetadataFile(tlsDir, hostnames);
-        
+
         // Current hostnames in different order
         List<String> currentHostnames = List.of("127.0.0.1", "localhost", "myhost");
 
@@ -127,11 +125,11 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create metadata with fewer hostnames
         List<String> oldHostnames = List.of("localhost", "127.0.0.1");
         createMetadataFile(tlsDir, oldHostnames);
-        
+
         // Current hostnames include an additional hostname
         List<String> currentHostnames = List.of("localhost", "127.0.0.1", "newhost");
 
@@ -147,11 +145,11 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create metadata with more hostnames
         List<String> oldHostnames = List.of("localhost", "127.0.0.1", "oldhost");
         createMetadataFile(tlsDir, oldHostnames);
-        
+
         // Current hostnames have one removed
         List<String> currentHostnames = List.of("localhost", "127.0.0.1");
 
@@ -167,11 +165,11 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create malformed metadata file
         Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
         Files.writeString(metadataFile, "{ invalid json }");
-        
+
         List<String> currentHostnames = List.of("localhost", "127.0.0.1");
 
         // Act
@@ -186,12 +184,12 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create metadata with null hostnames field
         Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
         String json = "{\"generatedAt\":\"" + Instant.now().toString() + "\",\"flociVersion\":\"dev\"}";
         Files.writeString(metadataFile, json);
-        
+
         List<String> currentHostnames = List.of("localhost", "127.0.0.1");
 
         // Act
@@ -206,11 +204,11 @@ class TlsConfigSourceMetadataComparisonTest {
         // Arrange
         Path tlsDir = tempDir.resolve("tls");
         Files.createDirectories(tlsDir);
-        
+
         // Create metadata with empty hostnames list
         List<String> emptyHostnames = List.of();
         createMetadataFile(tlsDir, emptyHostnames);
-        
+
         // Current hostnames are also empty
         List<String> currentHostnames = List.of();
 
@@ -227,22 +225,21 @@ class TlsConfigSourceMetadataComparisonTest {
     private void createMetadataFile(Path tlsDir, List<String> hostnames) throws IOException {
         Path metadataFile = tlsDir.resolve("floci-selfsigned.metadata.json");
         CertificateMetadata metadata = CertificateMetadata.create(hostnames, "dev");
-        
+
         ObjectMapper objectMapper = new ObjectMapper();
         String json = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(metadata);
         Files.writeString(metadataFile, json);
     }
 
     /**
-     * Helper method to invoke the private hostnameConfigChanged() method via reflection.
-     * We need to disable TLS temporarily to avoid certificate generation in the constructor.
+     * Helper method to invoke the private hostnameConfigChanged() method via reflection. We need to
+     * disable TLS temporarily to avoid certificate generation in the constructor.
      */
-    @SuppressWarnings("unchecked")
     private boolean invokeHostnameConfigChanged(Path tlsDir, List<String> currentHostnames) throws Exception {
         // Temporarily disable TLS to avoid certificate generation in constructor
         String originalTlsEnabled = System.getProperty("floci.tls.enabled");
         System.setProperty("floci.tls.enabled", "false");
-        
+
         try {
             TlsConfigSource configSource = new TlsConfigSource();
             Method method = TlsConfigSource.class.getDeclaredMethod("hostnameConfigChanged", Path.class, List.class);

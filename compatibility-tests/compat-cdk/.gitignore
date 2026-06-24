@@ -13,3 +13,4 @@ docker-fns/*.js.map
 node_modules/
 coverage/
 cdk.out/
+cdk.context.json

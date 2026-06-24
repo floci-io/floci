@@ -17,6 +17,8 @@ public class PutObjectOptions {
     private String sseCustomerKeyMd5;
     private String acl;
     private String checksumAlgorithm;
+    private String ifMatch;
+    private String ifNoneMatch;
     private Map<String, String> tagging;
 
     public String getStorageClass() { return storageClass; }
@@ -57,6 +59,12 @@ public class PutObjectOptions {
 
     public String getChecksumAlgorithm() { return checksumAlgorithm; }
     public PutObjectOptions withChecksumAlgorithm(String checksumAlgorithm) { this.checksumAlgorithm = checksumAlgorithm; return this; }
+
+    public String getIfMatch() { return ifMatch; }
+    public PutObjectOptions withIfMatch(String ifMatch) { this.ifMatch = ifMatch; return this; }
+
+    public String getIfNoneMatch() { return ifNoneMatch; }
+    public PutObjectOptions withIfNoneMatch(String ifNoneMatch) { this.ifNoneMatch = ifNoneMatch; return this; }
 
     public Map<String, String> getTagging() { return tagging; }
     public PutObjectOptions withTagging(Map<String, String> tagging) { this.tagging = tagging; return this; }

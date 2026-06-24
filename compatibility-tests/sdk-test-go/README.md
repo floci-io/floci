@@ -20,6 +20,7 @@ Compatibility tests for [Floci](https://github.com/hectorvent/floci) using the *
 | `kms`              | Keys, aliases, encrypt/decrypt, data keys, sign/verify  |
 | `kinesis`          | Streams, shards, PutRecord/GetRecords                   |
 | `cloudwatch`       | PutMetricData, ListMetrics, GetMetricStatistics, alarms |
+| `rds-data`         | RDS Data API execute statements, transactions, result fields with SDK v1 and v2 |
 
 ## Requirements
 

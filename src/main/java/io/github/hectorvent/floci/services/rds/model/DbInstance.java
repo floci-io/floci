@@ -3,6 +3,8 @@ package io.github.hectorvent.floci.services.rds.model;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 @RegisterForReflection
 public class DbInstance {
@@ -19,9 +21,14 @@ public class DbInstance {
     private DbEndpoint endpoint;
     private boolean iamDatabaseAuthenticationEnabled;
     private String parameterGroupName;
+    private String dbSubnetGroupName;
     private String dbClusterIdentifier;
     private String dbiResourceId;
     private String dbInstanceArn;
+    private String masterUserSecretArn;
+    private String masterUserSecretStatus;
+    private String masterUserSecretKmsKeyId;
+    private Map<String, String> tags = new LinkedHashMap<>();
     private Instant createdAt;
     private int proxyPort;
 
@@ -96,6 +103,9 @@ public class DbInstance {
     public String getParameterGroupName() { return parameterGroupName; }
     public void setParameterGroupName(String parameterGroupName) { this.parameterGroupName = parameterGroupName; }
 
+    public String getDbSubnetGroupName() { return dbSubnetGroupName; }
+    public void setDbSubnetGroupName(String dbSubnetGroupName) { this.dbSubnetGroupName = dbSubnetGroupName; }
+
     public String getDbClusterIdentifier() { return dbClusterIdentifier; }
     public void setDbClusterIdentifier(String dbClusterIdentifier) { this.dbClusterIdentifier = dbClusterIdentifier; }
 
@@ -104,6 +114,18 @@ public class DbInstance {
 
     public String getDbInstanceArn() { return dbInstanceArn; }
     public void setDbInstanceArn(String dbInstanceArn) { this.dbInstanceArn = dbInstanceArn; }
+
+    public String getMasterUserSecretArn() { return masterUserSecretArn; }
+    public void setMasterUserSecretArn(String masterUserSecretArn) { this.masterUserSecretArn = masterUserSecretArn; }
+
+    public String getMasterUserSecretStatus() { return masterUserSecretStatus; }
+    public void setMasterUserSecretStatus(String masterUserSecretStatus) { this.masterUserSecretStatus = masterUserSecretStatus; }
+
+    public String getMasterUserSecretKmsKeyId() { return masterUserSecretKmsKeyId; }
+    public void setMasterUserSecretKmsKeyId(String masterUserSecretKmsKeyId) { this.masterUserSecretKmsKeyId = masterUserSecretKmsKeyId; }
+
+    public Map<String, String> getTags() { return tags; }
+    public void setTags(Map<String, String> tags) { this.tags = tags != null ? new LinkedHashMap<>(tags) : new LinkedHashMap<>(); }
 
     public Instant getCreatedAt() { return createdAt; }
     public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }

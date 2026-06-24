@@ -5,6 +5,7 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsJson11Controller;
 import io.github.hectorvent.floci.services.eventbridge.model.Archive;
 import io.github.hectorvent.floci.services.eventbridge.model.ArchiveState;
+import io.github.hectorvent.floci.services.eventbridge.model.BatchParameters;
 import io.github.hectorvent.floci.services.eventbridge.model.EventBus;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Replay;
@@ -234,6 +235,10 @@ public class EventBridgeHandler {
                         target.setSqsParameters(sqsParameters);
                     }
                 }
+                JsonNode batchParamsNode = t.path("BatchParameters");
+                if (!batchParamsNode.isMissingNode() && batchParamsNode.isObject()) {
+                    target.setBatchParameters(objectMapper.convertValue(batchParamsNode, BatchParameters.class));
+                }
                 targets.add(target);
             }
         }
@@ -290,6 +295,9 @@ public class EventBridgeHandler {
             }
             if (t.getSqsParameters() != null && t.getSqsParameters().getMessageGroupId() != null) {
                 node.putObject("SqsParameters").put("MessageGroupId", t.getSqsParameters().getMessageGroupId());
+            }
+            if (t.getBatchParameters() != null) {
+                node.set("BatchParameters", objectMapper.valueToTree(t.getBatchParameters()));
             }
             targetsArray.add(node);
         }

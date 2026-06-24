@@ -219,7 +219,7 @@ final class SesEventPayload {
         }
     }
 
-    private static String eventTypeLabel(String eventType) {
+    static String eventTypeLabel(String eventType) {
         return switch (eventType) {
             case "SEND" -> "Send";
             case "REJECT" -> "Reject";
@@ -232,6 +232,58 @@ final class SesEventPayload {
             case "DELIVERY_DELAY" -> "DeliveryDelay";
             case "SUBSCRIPTION" -> "Subscription";
             default -> eventType;
+        };
+    }
+
+    /**
+     * Returns the CloudWatch {@code MetricName} value AWS SES uses for an event.
+     * Mostly matches {@link #eventTypeLabel}, but at least one event type has a
+     * different spelling on CloudWatch than on the SNS payload's {@code eventType}
+     * field, and they must not be unified through {@code eventTypeLabel} or the SNS
+     * payload regresses to a non-AWS value:
+     *   - {@code RENDERING_FAILURE} → CW {@code "RenderingFailure"} (no space)
+     *     vs SNS {@code "Rendering Failure"} (with space) — verified against real
+     *     AWS via a CW event destination + a templated send with a missing
+     *     {@code TemplateData} key.
+     * {@code DELIVERY_DELAY} is not directly observed yet (sandbox cannot easily
+     * trigger SES backoff); kept as {@code "DeliveryDelay"} pending verification.
+     */
+    static String cloudWatchMetricName(String eventType) {
+        return switch (eventType) {
+            case "SEND" -> "Send";
+            case "REJECT" -> "Reject";
+            case "BOUNCE" -> "Bounce";
+            case "COMPLAINT" -> "Complaint";
+            case "DELIVERY" -> "Delivery";
+            case "OPEN" -> "Open";
+            case "CLICK" -> "Click";
+            case "RENDERING_FAILURE" -> "RenderingFailure";
+            case "DELIVERY_DELAY" -> "DeliveryDelay";
+            case "SUBSCRIPTION" -> "Subscription";
+            default -> eventType;
+        };
+    }
+
+    /**
+     * Returns the EventBridge {@code detail-type} value for a SES event. AWS uses a
+     * separate past-tense vocabulary on EventBridge (e.g. {@code Email Sent}) that
+     * differs from the SNS notification {@code eventType} value (e.g. {@code Send})
+     * — a rule pattern keyed on the EventBridge value will not match the SNS value.
+     * Reference: https://docs.aws.amazon.com/eventbridge/latest/ref/events-ref-ses.html
+     */
+    static String eventBridgeDetailType(String eventType) {
+        return switch (eventType) {
+            case "SEND" -> "Email Sent";
+            case "REJECT" -> "Email Rejected";
+            case "BOUNCE" -> "Email Bounced";
+            case "COMPLAINT" -> "Email Complaint Received";
+            case "DELIVERY" -> "Email Delivered";
+            case "OPEN" -> "Email Opened";
+            case "CLICK" -> "Email Clicked";
+            case "RENDERING_FAILURE" -> "Email Rendering Failed";
+            case "DELIVERY_DELAY" -> "Email Delivery Delayed";
+            case "SUBSCRIPTION" -> "Email Subscribed";
+            default -> "Email " + eventType;
         };
     }
 

@@ -4,11 +4,16 @@ import software.amazon.awssdk.auth.credentials.AwsBasicCredentials;
 import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider;
 import software.amazon.awssdk.regions.Region;
 import software.amazon.awssdk.services.cloudformation.CloudFormationClient;
+import software.amazon.awssdk.services.cloudtrail.CloudTrailClient;
 import software.amazon.awssdk.services.cloudwatch.CloudWatchClient;
 import software.amazon.awssdk.services.cloudwatchlogs.CloudWatchLogsClient;
 import software.amazon.awssdk.services.cognitoidentityprovider.CognitoIdentityProviderClient;
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
+import software.amazon.awssdk.core.client.config.SdkAdvancedClientOption;
 import software.amazon.awssdk.services.eventbridge.EventBridgeClient;
+import software.amazon.awssdk.services.servicediscovery.ServiceDiscoveryClient;
+import software.amazon.awssdk.services.emr.EmrClient;
+import software.amazon.awssdk.services.wafv2.Wafv2Client;
 import software.amazon.awssdk.services.iam.IamClient;
 import software.amazon.awssdk.services.kinesis.KinesisAsyncClient;
 import software.amazon.awssdk.services.kinesis.KinesisClient;
@@ -35,6 +40,7 @@ import software.amazon.awssdk.services.kafka.KafkaClient;
 import software.amazon.awssdk.services.athena.AthenaClient;
 import software.amazon.awssdk.services.glue.GlueClient;
 import software.amazon.awssdk.services.firehose.FirehoseClient;
+import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTaggingApiClient;
 import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
@@ -44,14 +50,17 @@ import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.codebuild.CodeBuildClient;
 import software.amazon.awssdk.services.codedeploy.CodeDeployClient;
+import software.amazon.awssdk.services.codepipeline.CodePipelineClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.eks.EksClient;
 import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
+import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.backup.BackupClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
+import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
@@ -372,6 +381,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static ResourceGroupsTaggingApiClient resourceGroupsTaggingApiClient() {
+        return ResourceGroupsTaggingApiClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static FirehoseClient firehoseClient() {
         return FirehoseClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -448,6 +465,42 @@ public final class TestFixtures {
 
     public static EventBridgeClient eventBridgeClient() {
         return EventBridgeClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static ServiceDiscoveryClient serviceDiscoveryClient() {
+        return ServiceDiscoveryClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                // DiscoverInstances carries a "data-" host prefix; injecting it would
+                // rewrite the custom endpoint host (data-<host>) and break resolution.
+                .overrideConfiguration(o -> o.putAdvancedOption(
+                        SdkAdvancedClientOption.DISABLE_HOST_PREFIX_INJECTION, Boolean.TRUE))
+                .build();
+    }
+
+    public static CloudTrailClient cloudTrailClient() {
+        return CloudTrailClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static EmrClient emrClient() {
+        return EmrClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static Wafv2Client wafv2Client() {
+        return Wafv2Client.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -574,6 +627,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static AutoScalingClient autoScalingClient() {
+        return AutoScalingClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AppConfigClient appConfigClient() {
         return AppConfigClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -622,6 +683,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static CodePipelineClient codePipelineClient() {
+        return CodePipelineClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static BackupClient backupClient() {
         return BackupClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -632,6 +701,14 @@ public final class TestFixtures {
 
     public static AppSyncClient appSyncClient() {
         return AppSyncClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static S3VectorsClient s3vectorsClient() {
+        return S3VectorsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

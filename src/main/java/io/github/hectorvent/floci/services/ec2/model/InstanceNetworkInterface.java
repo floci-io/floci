@@ -23,6 +23,7 @@ public class InstanceNetworkInterface {
     private List<GroupIdentifier> groups = new ArrayList<>();
     private String attachmentId;
     private int deviceIndex;
+    private String attachTime;
 
     public InstanceNetworkInterface() {}
 
@@ -64,4 +65,7 @@ public class InstanceNetworkInterface {
 
     public int getDeviceIndex() { return deviceIndex; }
     public void setDeviceIndex(int deviceIndex) { this.deviceIndex = deviceIndex; }
+
+    public String getAttachTime() { return attachTime; }
+    public void setAttachTime(String attachTime) { this.attachTime = attachTime; }
 }

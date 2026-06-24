@@ -33,6 +33,7 @@ class Ec2Phase2IntegrationTest {
 
     private static String instanceWithUserData;
     private static String instanceWithProfile;
+    private static String instanceWithProfileName;
     private static String instanceForTerminate;
     private static String importedKeyName = "phase2-imported-key";
 
@@ -117,6 +118,46 @@ class Ec2Phase2IntegrationTest {
                     equalTo(instanceWithProfile))
             .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name",
                     equalTo("running"));
+    }
+
+    @Test
+    @Order(12)
+    void runInstancesWithIamInstanceProfileName() {
+        String profileName = "my-app-profile";
+
+        instanceWithProfileName = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2204")
+            .formParam("InstanceType", "t3.micro")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("IamInstanceProfile.Name", profileName)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.instanceId", startsWith("i-"))
+            .body("RunInstancesResponse.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/" + profileName))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+    }
+
+    @Test
+    @Order(13)
+    void describeInstanceWithProfileName() {
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", instanceWithProfileName)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                    equalTo(instanceWithProfileName))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/my-app-profile"));
     }
 
     // ─── SSH key import ────────────────────────────────────────────────────────

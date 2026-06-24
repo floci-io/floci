@@ -30,8 +30,10 @@ import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
 import jakarta.ws.rs.core.Response;
+import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
 import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.io.StringReader;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
@@ -85,24 +87,34 @@ public class S3Controller {
     private final S3SelectService s3SelectService;
     private final RegionResolver regionResolver;
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
+    private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
                         RegionResolver regionResolver,
-                        io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest) {
+                        io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
+                        io.github.hectorvent.floci.services.floci.ui.UiPages uiPages) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
         this.currentVertxRequest = currentVertxRequest;
+        this.uiPages = uiPages;
     }
 
     // --- Bucket operations ---
 
     @GET
-    @Produces(MediaType.APPLICATION_XML)
-    public Response listBuckets(@HeaderParam("X-Amz-Target") String target) {
+    @Produces({MediaType.APPLICATION_XML, MediaType.TEXT_HTML})
+    public Response listBuckets(@HeaderParam("X-Amz-Target") String target,
+                                @HeaderParam("Accept") String accept) {
         if (target != null) {
             return null;
+        }
+        // A browser hitting the root endpoint (Accept: text/html) gets the Floci
+        // landing page; SDK/CLI callers (no Accept, */*, or an XML/JSON Accept) fall
+        // through to the normal S3 ListBuckets behavior untouched.
+        if (accept != null && accept.contains(MediaType.TEXT_HTML)) {
+            return Response.ok(uiPages.landingHtml(), MediaType.TEXT_HTML).build();
         }
         try {
             List<Bucket> buckets = s3Service.listBuckets();
@@ -121,7 +133,7 @@ public class S3Controller {
                    .end("Bucket");
             }
             xml.end("Buckets").end("ListAllMyBucketsResult");
-            return Response.ok(xml.build()).build();
+            return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
@@ -151,6 +163,7 @@ public class S3Controller {
                                   @Context HttpHeaders httpHeaders,
                                   byte[] body) {
         try {
+            validateRawUri();
             if (hasQueryParam(uriInfo, "notification")) {
                 return handlePutBucketNotification(bucket, body);
             }
@@ -237,6 +250,7 @@ public class S3Controller {
     public Response deleteBucket(@PathParam("bucket") String bucket,
                                   @Context UriInfo uriInfo) {
         try {
+            validateRawUri();
             if (hasQueryParam(uriInfo, "tagging")) {
                 s3Service.deleteBucketTagging(bucket);
                 return Response.noContent().build();
@@ -290,8 +304,8 @@ public class S3Controller {
                                 @QueryParam("key-marker") String keyMarker,
                                 @QueryParam("marker") String marker,
                                 @Context UriInfo uriInfo) {
-        validateRawUri();
         try {
+            validateRawUri();
             if (hasQueryParam(uriInfo, "uploads")) {
                 return handleListMultipartUploads(bucket);
             }
@@ -486,11 +500,6 @@ public class S3Controller {
                 return handleCopyObject(copySource, bucket, key, contentType, httpHeaders);
             }
 
-            Response preconditionResponse = checkWritePreconditions(bucket, key, ifMatch, ifNoneMatch);
-            if (preconditionResponse != null) {
-                return preconditionResponse;
-            }
-
             Map<String, String> inlineTags = parseInlineTaggingHeader(tagging);
 
             String lockMode = httpHeaders.getHeaderString("x-amz-object-lock-mode");
@@ -525,6 +534,8 @@ public class S3Controller {
                             .withAcl(cannedAcl)
                             .withChecksumAlgorithm(checksumAlgorithm)
                             .withClientChecksum(extractChecksumFromHeaders(httpHeaders))
+                            .withIfMatch(ifMatch)
+                            .withIfNoneMatch(ifNoneMatch)
                             .withTagging(inlineTags));
             var resp = Response.ok().header("ETag", obj.getETag());
             if (obj.getVersionId() != null) {
@@ -594,7 +605,7 @@ public class S3Controller {
                     return preconditionResponse;
                 }
             }
-            S3Object obj = s3Service.getObject(bucket, key, versionId);
+            S3Object obj = s3Service.headObject(bucket, key, versionId);
             S3Service.validateSseCustomerAccess(
                     obj,
                     httpHeaders.getHeaderString("x-amz-server-side-encryption-customer-algorithm"),
@@ -609,17 +620,23 @@ public class S3Controller {
             }
 
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(obj, rangeHeader, overrides);
+                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides);
             }
 
-            return fullObjectResponse(obj, overrides);
+            return fullObjectResponse(bucket, key, versionId, obj, overrides);
         } catch (AwsException e) {
             return xmlErrorResponse(e);
         }
     }
 
-    private Response fullObjectResponse(S3Object obj, ResponseHeaderOverrides overrides) {
-        var resp = Response.ok(obj.getData())
+    private Response fullObjectResponse(String bucket, String key, String versionId,
+                                        S3Object obj, ResponseHeaderOverrides overrides) {
+        StreamingOutput stream = output -> {
+            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
+                input.transferTo(output);
+            }
+        };
+        var resp = Response.ok(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
                 .header("Content-Length", obj.getSize())
                 .header("ETag", obj.getETag())
@@ -632,12 +649,13 @@ public class S3Controller {
         return resp.build();
     }
 
-    private Response handleRangeRequest(S3Object obj, String rangeHeader, ResponseHeaderOverrides overrides) {
-        byte[] data = obj.getData();
-        int totalSize = data.length;
+    private Response handleRangeRequest(String bucket, String key, String versionId,
+                                        S3Object obj, String rangeHeader,
+                                        ResponseHeaderOverrides overrides) {
+        long totalSize = obj.getSize();
         String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
 
-        int start, end;
+        long start, end;
         try {
             int dash = rangeSpec.indexOf('-');
             if (dash < 0) {
@@ -649,15 +667,15 @@ public class S3Controller {
                 return invalidRangeResponse(totalSize);
             }
             if (before.isEmpty()) {
-                int suffix = Integer.parseInt(after);
+                long suffix = Long.parseLong(after);
                 if (suffix <= 0) {
                     return invalidRangeResponse(totalSize);
                 }
                 start = Math.max(0, totalSize - suffix);
                 end = totalSize - 1;
             } else {
-                start = Integer.parseInt(before);
-                end = after.isEmpty() ? totalSize - 1 : Math.min(Integer.parseInt(after), totalSize - 1);
+                start = Long.parseLong(before);
+                end = after.isEmpty() ? totalSize - 1 : Math.min(Long.parseLong(after), totalSize - 1);
             }
         } catch (NumberFormatException e) {
             return invalidRangeResponse(totalSize);
@@ -665,16 +683,22 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(obj, overrides);
+                return fullObjectResponse(bucket, key, versionId, obj, overrides);
             }
             return invalidRangeResponse(totalSize);
         }
 
-        byte[] rangeData = java.util.Arrays.copyOfRange(data, start, end + 1);
+        long length = end - start + 1;
+        StreamingOutput stream = output -> {
+            try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
+                input.skipNBytes(start);
+                transferLimited(input, output, length);
+            }
+        };
         var resp = Response.status(206)
-                .entity(rangeData)
+                .entity(stream)
                 .header("Content-Type", overrides.contentType() != null ? overrides.contentType() : obj.getContentType())
-                .header("Content-Length", rangeData.length)
+                .header("Content-Length", length)
                 .header("Content-Range", "bytes " + start + "-" + end + "/" + totalSize)
                 .header("ETag", obj.getETag())
                 .header("Last-Modified", RFC_822.format(obj.getLastModified()))
@@ -687,7 +711,21 @@ public class S3Controller {
         return resp.build();
     }
 
-    private Response invalidRangeResponse(int totalSize) {
+    private static void transferLimited(InputStream input, java.io.OutputStream output, long bytes)
+            throws java.io.IOException {
+        byte[] buffer = new byte[8192];
+        long remaining = bytes;
+        while (remaining > 0) {
+            int count = input.read(buffer, 0, (int) Math.min(buffer.length, remaining));
+            if (count < 0) {
+                throw new java.io.EOFException("Object stream ended before the requested range was fully written.");
+            }
+            output.write(buffer, 0, count);
+            remaining -= count;
+        }
+    }
+
+    private Response invalidRangeResponse(long totalSize) {
         String xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")
@@ -1942,11 +1980,25 @@ public class S3Controller {
     }
 
     private Response xmlErrorResponse(AwsException e) {
-        String xml = new XmlBuilder()
+        String condition = e instanceof S3PreconditionFailedException preconditionFailedException
+                ? preconditionFailedException.condition()
+                : null;
+        return xmlErrorResponse(e, condition);
+    }
+
+    private Response xmlErrorResponse(AwsException e, String condition) {
+        if (e.getMessage() == null) {
+            return Response.status(e.getHttpStatus()).build();
+        }
+        XmlBuilder xmlBuilder = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("Error")
                 .elem("Code", e.getErrorCode())
-                .elem("Message", e.getMessage())
+                .elem("Message", e.getMessage());
+        if (condition != null) {
+            xmlBuilder.elem("Condition", condition);
+        }
+        String xml = xmlBuilder
                 .elem("RequestId", java.util.UUID.randomUUID().toString())
                 .end("Error")
                 .build();
@@ -1999,10 +2051,10 @@ public class S3Controller {
         }
 
         if (ifMatch != null && !eTagMatches(ifMatch, existing.getETag())) {
-            return preconditionFailedResponse();
+            return preconditionFailedResponse("If-Match");
         }
         if (ifNoneMatch != null && eTagMatches(ifNoneMatch, existing.getETag())) {
-            return preconditionFailedResponse();
+            return preconditionFailedResponse("If-None-Match");
         }
         return null;
     }
@@ -2025,8 +2077,12 @@ public class S3Controller {
     }
 
     private Response preconditionFailedResponse() {
+        return preconditionFailedResponse(null);
+    }
+
+    private Response preconditionFailedResponse(String condition) {
         return xmlErrorResponse(new AwsException("PreconditionFailed",
-                "At least one of the pre-conditions you specified did not hold.", 412));
+                S3PreconditionFailedException.MESSAGE, 412), condition);
     }
 
     private boolean eTagMatches(String headerValue, String eTag) {
@@ -2451,6 +2507,7 @@ public class S3Controller {
      * that JAX-RS path normalization would otherwise strip.
      */
     private String extractObjectKey(UriInfo uriInfo, String bucket) {
+        validateRawUri();
         String rawUri = currentVertxRequest.getCurrent().request().uri();
         int qIdx = rawUri.indexOf('?');
         String rawPath = qIdx >= 0 ? rawUri.substring(0, qIdx) : rawUri;
@@ -2486,9 +2543,37 @@ public class S3Controller {
 
     private void validateRawUri() {
         String rawUri = currentVertxRequest.getCurrent().request().uri();
-        String lower = rawUri.toLowerCase();
-        if (lower.contains("/..") || lower.contains("../") || lower.contains("%2e%2e") || lower.contains("%2e.") || lower.contains(".%2e")) {
-            throw new AwsException("InvalidKey", "The specified key is invalid.", 400);
+        int queryIndex = rawUri.indexOf('?');
+        String rawPath = queryIndex >= 0 ? rawUri.substring(0, queryIndex) : rawUri;
+        String decodedPath;
+        try {
+            decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
+        }
+        catch (IllegalArgumentException e) {
+            throw new AwsException("BadRequest", null, 400);
+        }
+
+        String[] segments = decodedPath.split("/", -1);
+        int firstKeySegment = decodedPath.startsWith("/") ? 2 : 1;
+        if (segments.length <= firstKeySegment) {
+            return;
+        }
+
+        int depth = 0;
+        for (int index = firstKeySegment; index < segments.length; index++) {
+            String segment = segments[index];
+            if (segment.isEmpty() || ".".equals(segment)) {
+                continue;
+            }
+            if ("..".equals(segment)) {
+                if (depth == 0) {
+                    throw new AwsException("BadRequest", null, 400);
+                }
+                depth--;
+            }
+            else {
+                depth++;
+            }
         }
     }
 

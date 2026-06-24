@@ -8,6 +8,8 @@
 | Action | Description |
 |---|---|
 | `CreateKey` | Create a new KMS key |
+| `GenerateRandom` | Generate random bytes |
+| `GetPublicKey` | Get public key material for asymmetric keys |
 | `DescribeKey` | Get key metadata |
 | `ListKeys` | List all keys |
 | `Encrypt` | Encrypt plaintext with a key |
@@ -17,16 +19,21 @@
 | `GenerateDataKeyWithoutPlaintext` | Generate only the encrypted data key |
 | `Sign` | Sign a message with an asymmetric key |
 | `Verify` | Verify a signature |
+| `GenerateMac` | Generate a MAC with an HMAC key |
+| `VerifyMac` | Verify a MAC with an HMAC key |
 | `CreateAlias` | Create a friendly name for a key |
 | `DeleteAlias` | Remove an alias |
 | `ListAliases` | List all aliases |
 | `ScheduleKeyDeletion` | Mark a key for deletion |
 | `CancelKeyDeletion` | Cancel pending deletion |
+| `EnableKey` | Enable a key |
+| `DisableKey` | Disable a key |
 | `TagResource` | Tag a key |
 | `UntagResource` | Remove tags |
 | `ListResourceTags` | List tags |
 | `GetKeyPolicy` | Get a key's resource policy |
 | `PutKeyPolicy` | Update a key's resource policy |
+| `UpdateKeyDescription` | Update a key's description |
 | `GetKeyRotationStatus` | Check if automatic key rotation is enabled |
 | `EnableKeyRotation` | Enable automatic key rotation (symmetric keys only) |
 | `DisableKeyRotation` | Disable automatic key rotation |

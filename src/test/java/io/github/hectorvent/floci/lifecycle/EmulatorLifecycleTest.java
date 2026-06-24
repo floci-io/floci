@@ -9,6 +9,9 @@ import io.github.hectorvent.floci.lifecycle.inithook.InitializationHooksRunner;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheContainerManager;
 import io.github.hectorvent.floci.services.elasticache.container.ElastiCacheMemcachedContainerManager;
 import io.github.hectorvent.floci.services.elasticache.proxy.ElastiCacheProxyManager;
+import io.github.hectorvent.floci.services.docdb.container.DocDbContainerManager;
+import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
+import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import io.github.hectorvent.floci.services.lambda.DynamoDbStreamsEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.KinesisEventSourcePoller;
 import io.github.hectorvent.floci.services.lambda.SqsEventSourcePoller;
@@ -32,7 +35,12 @@ import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.io.IOException;
+import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -52,6 +60,11 @@ class EmulatorLifecycleTest {
     @Mock private ElastiCacheProxyManager elastiCacheProxyManager;
     @Mock private RdsContainerManager rdsContainerManager;
     @Mock private RdsProxyManager rdsProxyManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.container.MemoryDbContainerManager memoryDbContainerManager;
+    @Mock private io.github.hectorvent.floci.services.memorydb.proxy.MemoryDbProxyManager memoryDbProxyManager;
+    @Mock private DocDbContainerManager docDbContainerManager;
+    @Mock private NeptuneContainerManager neptuneContainerManager;
+    @Mock private NeptuneProxyManager neptuneProxyManager;
     @Mock private RdsService rdsService;
     @Mock private InitializationHooksRunner initializationHooksRunner;
     @Mock private SqsEventSourcePoller sqsPoller;
@@ -60,6 +73,7 @@ class EmulatorLifecycleTest {
     @Mock private PipesService pipesService;
     @Mock private Ec2MetadataServer ec2MetadataServer;
     @Mock private EcrRegistryManager ecrRegistryManager;
+    @Mock private io.github.hectorvent.floci.services.floci.ui.FlociUiManager flociUiManager;
     @Mock private InitLifecycleState initLifecycleState;
     @Mock private EmulatorConfig.TlsConfig tlsConfig;
 
@@ -76,9 +90,11 @@ class EmulatorLifecycleTest {
         emulatorLifecycle = new EmulatorLifecycle(
                 storageFactory, serviceRegistry, config,
                 elastiCacheContainerManager, elastiCacheMemcachedContainerManager,
-                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager, rdsService,
+                elastiCacheProxyManager, rdsContainerManager, rdsProxyManager,
+                memoryDbContainerManager, memoryDbProxyManager,
+                docDbContainerManager, neptuneContainerManager, neptuneProxyManager, rdsService,
                 initializationHooksRunner, sqsPoller, kinesisPoller, dynamodbStreamsPoller,
-                pipesService, ec2MetadataServer, ecrRegistryManager, initLifecycleState);
+                pipesService, ec2MetadataServer, ecrRegistryManager, flociUiManager, initLifecycleState);
     }
 
     private void stubStorageConfig() {
@@ -191,6 +207,7 @@ class EmulatorLifecycleTest {
         verify(storageFactory, never()).shutdownAll();
         verify(elastiCacheProxyManager, never()).stopAll();
         verify(rdsProxyManager, never()).stopAll();
+        verify(neptuneProxyManager, never()).stopAll();
     }
 
     @Test
@@ -238,8 +255,11 @@ class EmulatorLifecycleTest {
 
         verify(elastiCacheProxyManager).stopAll();
         verify(rdsProxyManager).stopAll();
+        verify(neptuneProxyManager).stopAll();
         verify(elastiCacheContainerManager).stopAll();
         verify(rdsContainerManager).stopAll();
+        verify(docDbContainerManager).stopAll();
+        verify(neptuneContainerManager).stopAll();
         verify(storageFactory).shutdownAll();
         // Hooks are handled by onPreShutdown, never from ShutdownEvent.
         verify(initializationHooksRunner, never()).run(InitializationHook.STOP);
@@ -256,8 +276,90 @@ class EmulatorLifecycleTest {
         verify(initializationHooksRunner).run(InitializationHook.STOP);
         verify(elastiCacheProxyManager).stopAll();
         verify(rdsProxyManager).stopAll();
+        verify(neptuneProxyManager).stopAll();
         verify(elastiCacheContainerManager).stopAll();
         verify(rdsContainerManager).stopAll();
+        verify(docDbContainerManager).stopAll();
+        verify(neptuneContainerManager).stopAll();
         verify(storageFactory).shutdownAll();
+    }
+
+    // --- LocalStack-parity "Ready." log line ---
+
+    /** Collects the messages EmulatorLifecycle logs while {@code action} runs. */
+    private List<String> lifecycleLogMessages(Runnable action) {
+        java.util.logging.Logger logger =
+                java.util.logging.Logger.getLogger(EmulatorLifecycle.class.getName());
+        List<String> messages = new CopyOnWriteArrayList<>();
+        java.util.logging.Handler handler = new java.util.logging.Handler() {
+            @Override
+            public void publish(java.util.logging.LogRecord logRecord) {
+                messages.add(logRecord.getMessage());
+            }
+
+            @Override
+            public void flush() {
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        logger.addHandler(handler);
+        try {
+            action.run();
+        } finally {
+            logger.removeHandler(handler);
+        }
+        return messages;
+    }
+
+    @Test
+    @DisplayName("Should emit the LocalStack-parity \"Ready.\" line after the banner by default")
+    void shouldEmitParityReadyLineByDefault() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        List<String> messages =
+                lifecycleLogMessages(() -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+
+        assertEquals(1, messages.stream().filter("Ready."::equals).count(),
+                "Exactly one parity \"Ready.\" line must be emitted");
+        int banner = messages.indexOf("=== AWS Local Emulator Ready ===");
+        assertTrue(banner >= 0, "The Floci ready banner must still be emitted");
+        assertTrue(messages.indexOf("Ready.") > banner,
+                "The parity line must follow the banner");
+    }
+
+    @Test
+    @DisplayName("Should not emit the parity \"Ready.\" line when LOCALSTACK_PARITY=false")
+    void shouldNotEmitParityReadyLineWhenParityDisabled() {
+        stubStorageConfig();
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+        emulatorLifecycle.localstackParity = "false";
+
+        List<String> messages =
+                lifecycleLogMessages(() -> emulatorLifecycle.onStart(Mockito.mock(StartupEvent.class)));
+
+        assertFalse(messages.contains("Ready."),
+                "No parity line may be emitted when parity is disabled");
+        assertTrue(messages.contains("=== AWS Local Emulator Ready ==="),
+                "The Floci ready banner must still be emitted");
+    }
+
+    @Test
+    @DisplayName("Should emit the parity \"Ready.\" line on the deferred onHttpStart ready path too")
+    void shouldEmitParityReadyLineOnHttpStartPath() throws IOException, InterruptedException {
+        when(tlsConfig.enabled()).thenReturn(false);
+        when(initializationHooksRunner.hasHooks(InitializationHook.START)).thenReturn(true);
+        when(initializationHooksRunner.hasHooks(InitializationHook.READY)).thenReturn(false);
+
+        List<String> messages = lifecycleLogMessages(() ->
+                emulatorLifecycle.onHttpStart(new HttpServerStart(new HttpServerOptions().setPort(4566))));
+
+        assertEquals(1, messages.stream().filter("Ready."::equals).count(),
+                "Exactly one parity \"Ready.\" line must be emitted on the hook path");
     }
 }

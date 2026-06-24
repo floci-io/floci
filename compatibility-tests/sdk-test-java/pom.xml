@@ -123,6 +123,10 @@
             <artifactId>glue</artifactId>
         </dependency>
         <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>resourcegroupstaggingapi</artifactId>
+        </dependency>
+        <dependency>
             <groupId>software.amazon.glue</groupId>
             <artifactId>schema-registry-serde</artifactId>
             <version>1.1.27</version>
@@ -161,6 +165,26 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>eventbridge</artifactId>
+        </dependency>
+        <!-- Cloud Map (servicediscovery) client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>servicediscovery</artifactId>
+        </dependency>
+        <!-- CloudTrail client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>cloudtrail</artifactId>
+        </dependency>
+        <!-- EMR client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>emr</artifactId>
+        </dependency>
+        <!-- WAF v2 client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>wafv2</artifactId>
         </dependency>
         <!-- Kinesis client -->
         <dependency>
@@ -232,6 +256,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>scheduler</artifactId>
         </dependency>
+        <!-- Auto Scaling client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>autoscaling</artifactId>
+        </dependency>
         <!-- CloudFormation client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -247,6 +276,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>codedeploy</artifactId>
         </dependency>
+        <!-- CodePipeline client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>codepipeline</artifactId>
+        </dependency>
         <!-- AWS Backup client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
@@ -256,6 +290,11 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appsync</artifactId>
+        </dependency>
+        <!-- S3 Vectors client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>s3vectors</artifactId>
         </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>

@@ -116,6 +116,8 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
         if (request.protocol() == ServiceProtocol.JSON || request.protocol() == ServiceProtocol.REST_JSON) {
             return Response.status(400)
                     .type(MediaType.APPLICATION_JSON)
+                    .header("X-Amzn-Errortype", "ServiceNotAvailableException")
+                    .header("x-amzn-query-error", "ServiceNotAvailableException;Sender")
                     .entity(new AwsErrorResponse("ServiceNotAvailableException", message))
                     .build();
         }

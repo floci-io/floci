@@ -35,6 +35,9 @@ public class SqsEventSourcePoller {
 
     private static final Logger LOG = Logger.getLogger(SqsEventSourcePoller.class);
 
+    /** AWS SQS default visibility timeout, used as the retry backoff when a queue has none configured. */
+    private static final int DEFAULT_RETRY_VISIBILITY_SECONDS = 30;
+
     private final Vertx vertx;
     private final SqsService sqsService;
     private final LambdaExecutorService executorService;
@@ -114,7 +117,8 @@ public class SqsEventSourcePoller {
         }
     }
 
-    private void pollAndInvoke(EventSourceMapping esm) {
+    /** Package-private (not private) only so unit tests can drive a single poll directly. */
+    void pollAndInvoke(EventSourceMapping esm) {
         // Skip this tick if a previous poll for this ESM is still in progress.
         // This prevents concurrent deliveries of the same message when the Lambda
         // cold-start / execution time exceeds the SQS visibility timeout.
@@ -176,9 +180,18 @@ public class SqsEventSourcePoller {
                                     msg.getMessageId(), e.getMessage());
                         }
                     }
+                    // Reported partial-batch failures are not deleted; return them to the
+                    // queue immediately so they can be retried/redriven rather than sitting
+                    // in-flight for the full execution-cover visibility window.
+                    if (!failedIds.isEmpty()) {
+                        List<Message> toReturn = messages.stream()
+                                .filter(m -> failedIds.contains(m.getMessageId())).toList();
+                        returnMessagesToQueue(esm, toReturn);
+                    }
                 } else {
-                    LOG.warnv("ESM {0}: Lambda returned error [{1}], messages will return to queue",
-                            esm.getUuid(), result.getFunctionError());
+                    LOG.warnv("ESM {0}: Lambda returned error [{1}], returning {2} message(s) to queue for retry/redrive",
+                            esm.getUuid(), result.getFunctionError(), messages.size());
+                    returnMessagesToQueue(esm, messages);
                 }
             } catch (Exception e) {
                 LOG.warnv("ESM {0}: poll/invoke error: {1} ({2})",
@@ -187,6 +200,51 @@ public class SqsEventSourcePoller {
                 activePolls.remove(esm.getUuid());
             }
         });
+    }
+
+    /**
+     * Returns failed messages to the source queue by resetting their visibility timeout
+     * to the queue's own {@code VisibilityTimeout}. The poller hides messages for
+     * {@code fn.timeout + 30s} to cover execution time, but on failure that long window
+     * would keep the message in-flight (and therefore not redelivered nor redriven) far
+     * longer than the queue's own visibility/redrive policy intends. Shrinking the window
+     * back to the queue's visibility timeout lets the next poll re-receive them — matching
+     * AWS's redelivery cadence rather than spinning a tight retry loop (which resetting to
+     * 0 would cause for a persistently failing function) — so ApproximateReceiveCount
+     * climbs and the queue's RedrivePolicy moves them to the DLQ once
+     * {@code maxReceiveCount} is exceeded.
+     */
+    private void returnMessagesToQueue(EventSourceMapping esm, List<Message> messages) {
+        int retryVisibility = retryVisibilityTimeout(esm);
+        for (Message msg : messages) {
+            try {
+                sqsService.changeMessageVisibility(
+                        esm.getQueueUrl(), msg.getReceiptHandle(), retryVisibility, esm.getRegion());
+            } catch (Exception e) {
+                LOG.warnv("ESM {0}: failed to return message {1} to queue: {2}",
+                        esm.getUuid(), msg.getMessageId(), e.getMessage());
+            }
+        }
+    }
+
+    /**
+     * The visibility timeout to apply when returning a failed message to the queue: the
+     * queue's configured {@code VisibilityTimeout}, or the AWS default of 30s when unset
+     * or unreadable. This governs how soon the message is retried/redriven.
+     */
+    private int retryVisibilityTimeout(EventSourceMapping esm) {
+        try {
+            String vt = sqsService.getQueueAttributes(
+                    esm.getQueueUrl(), List.of("VisibilityTimeout"), esm.getRegion())
+                    .get("VisibilityTimeout");
+            if (vt != null) {
+                return Math.max(0, Integer.parseInt(vt));
+            }
+        } catch (Exception e) {
+            LOG.debugv("ESM {0}: could not read VisibilityTimeout, using default {1}s backoff: {2}",
+                    esm.getUuid(), DEFAULT_RETRY_VISIBILITY_SECONDS, e.getMessage());
+        }
+        return DEFAULT_RETRY_VISIBILITY_SECONDS;
     }
 
     private Set<String> extractBatchItemFailures(EventSourceMapping esm, InvokeResult result) {

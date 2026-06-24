@@ -12,6 +12,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.List;
@@ -36,6 +37,7 @@ class CognitoServiceTest {
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 groupStore,
+                new InMemoryStorage<>(), // revokedTokenStore
                 "http://localhost:4566",
                 regionResolver,
                 null
@@ -118,6 +120,470 @@ class CognitoServiceTest {
         );
 
         assertEquals("ResourceConflictException", exception.getErrorCode());
+    }
+
+    // =========================================================================
+    // Issue #1306 — CreateUserPoolClient extended configuration
+    // =========================================================================
+
+    @Test
+    void createUserPoolClientPersistsExtendedConfiguration() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        Map<String, Object> analyticsConfiguration = Map.of(
+                "ApplicationId", "d70b2ba36a8c4dc5a04a0451a31a1e12",
+                "ExternalId", "my-external-id",
+                "RoleArn", "arn:aws:iam::123456789012:role/test-cognitouserpool-role",
+                "UserDataShared", true
+        );
+        Map<String, String> tokenValidityUnits = Map.of(
+                "AccessToken", "hours",
+                "IdToken", "minutes",
+                "RefreshToken", "days"
+        );
+        Map<String, Object> refreshTokenRotation = Map.of(
+                "Feature", "ENABLED",
+                "RetryGracePeriodSeconds", 30
+        );
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "my-test-app-client",
+                true,
+                true,
+                List.of(" code ", "code"),
+                List.of("aws.cognito.signin.user.admin", "openid"),
+                analyticsConfiguration,
+                List.of("https://example.com", "http://localhost", "myapp://example"),
+                "https://example.com",
+                List.of("ALLOW_USER_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_USER_PASSWORD_AUTH",
+                        "ALLOW_REFRESH_TOKEN_AUTH"),
+                6,
+                6,
+                List.of("https://example.com/logout"),
+                "ENABLED",
+                List.of("email", "address", "preferred_username"),
+                6,
+                List.of("SignInWithApple", "MySSO"),
+                tokenValidityUnits,
+                List.of("family_name", "email"),
+                refreshTokenRotation,
+                true
+        );
+
+        assertNotNull(client.getClientId());
+        assertEquals(pool.getId(), client.getUserPoolId());
+        assertEquals("my-test-app-client", client.getClientName());
+        assertTrue(client.isGenerateSecret());
+        assertNotNull(client.getClientSecret());
+        assertEquals(1, client.getUserPoolClientSecrets().size());
+        assertTrue(client.isAllowedOAuthFlowsUserPoolClient());
+        assertEquals(List.of("code"), client.getAllowedOAuthFlows());
+        assertEquals(List.of("aws.cognito.signin.user.admin", "openid"), client.getAllowedOAuthScopes());
+        assertEquals(analyticsConfiguration, client.getAnalyticsConfiguration());
+        assertEquals(List.of("https://example.com", "http://localhost", "myapp://example"), client.getCallbackURLs());
+        assertEquals("https://example.com", client.getDefaultRedirectURI());
+        assertEquals(List.of("ALLOW_USER_AUTH", "ALLOW_ADMIN_USER_PASSWORD_AUTH", "ALLOW_USER_PASSWORD_AUTH",
+                "ALLOW_REFRESH_TOKEN_AUTH"), client.getExplicitAuthFlows());
+        assertEquals(6, client.getAccessTokenValidity());
+        assertEquals(6, client.getIdTokenValidity());
+        assertEquals(List.of("https://example.com/logout"), client.getLogoutURLs());
+        assertEquals("ENABLED", client.getPreventUserExistenceErrors());
+        assertEquals(List.of("email", "address", "preferred_username"), client.getReadAttributes());
+        assertEquals(6, client.getRefreshTokenValidity());
+        assertEquals(List.of("SignInWithApple", "MySSO"), client.getSupportedIdentityProviders());
+        assertEquals(tokenValidityUnits, client.getTokenValidityUnits());
+        assertEquals(List.of("family_name", "email"), client.getWriteAttributes());
+        assertEquals(refreshTokenRotation, client.getRefreshTokenRotation());
+        assertEquals(Boolean.TRUE, client.getEnableTokenRevocation());
+    }
+
+    @Test
+    void createUserPoolClientGeneratesIdSecretTimestampsAndNormalizesLists() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "basic-client",
+                true,
+                true,
+                List.of(" code ", "code", "implicit", "", "implicit"),
+                new ArrayList<>(java.util.Arrays.asList(" openid ", "openid", "email", null, "email")),
+                null,
+                List.of("https://example.com/callback"),
+                "https://example.com/callback",
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null
+        );
+
+        assertNotNull(client.getClientId());
+        assertEquals(26, client.getClientId().length());
+        assertTrue(client.getClientId().chars().allMatch(Character::isLetterOrDigit));
+
+        assertTrue(client.isGenerateSecret());
+        assertNotNull(client.getClientSecret());
+        assertFalse(client.getClientSecret().isBlank());
+        assertEquals(1, client.getUserPoolClientSecrets().size());
+        assertEquals(client.getClientSecret(), client.getUserPoolClientSecrets().get(0).getClientSecretValue());
+
+        assertTrue(client.getCreationDate() > 0);
+        assertTrue(client.getLastModifiedDate() > 0);
+        assertEquals(client.getCreationDate(), client.getLastModifiedDate());
+
+        assertEquals(List.of("code", "implicit"), client.getAllowedOAuthFlows());
+        assertEquals(List.of("openid", "email"), client.getAllowedOAuthScopes());
+    }
+
+    @Test
+    void createUserPoolClientAppliesAwsLikeDefaultsForSupportedIdentityProvidersAndTokenRevocation() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "defaulted-client",
+                false,
+                false,
+                List.of(),
+                List.of()
+        );
+
+        assertEquals(List.of("COGNITO"), client.getSupportedIdentityProviders());
+        assertEquals(Boolean.TRUE, client.getEnableTokenRevocation());
+    }
+
+    @Test
+    void createUserPoolClientRejectsInvalidTokenValidityConfiguration() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-token-validity-client",
+                        false,
+                        false,
+                        List.of(),
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        -1,
+                        0,
+                        List.of(),
+                        null,
+                        List.of(),
+                        -7,
+                        List.of(),
+                        Map.of(
+                                "AccessToken", "weeks",
+                                "IdToken", "minutes",
+                                "RefreshToken", "days"
+                        ),
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void createUserPoolClientAcceptsRefreshTokenValidityZeroAndCoercesToDefault() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "refresh-default-client",
+                false,
+                false,
+                List.of(),
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                0,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null
+        );
+
+        assertEquals(30, client.getRefreshTokenValidity());
+    }
+
+    @Test
+    void createUserPoolClientRejectsLogoutUrlsWhenOAuthFlowsUserPoolClientIsFalse() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-logout-client",
+                        false,
+                        false,
+                        List.of(),
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        null,
+                        List.of("https://example.com/logout"),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void createUserPoolClientRejectsMixedCaseTokenValidityUnits() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-token-unit-client",
+                        false,
+                        false,
+                        List.of(),
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        1,
+                        1,
+                        List.of(),
+                        null,
+                        List.of(),
+                        7,
+                        List.of(),
+                        Map.of(
+                                "AccessToken", "Hours",
+                                "IdToken", "minutes",
+                                "RefreshToken", "days"
+                        ),
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void createUserPoolClientRejectsInconsistentOAuthFlowConfiguration() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-oauth-client",
+                        false,
+                        false,
+                        List.of("code"),
+                        List.of("openid"),
+                        null,
+                        List.of("https://example.com/callback"),
+                        "https://example.com/callback",
+                        List.of(),
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void createUserPoolClientRejectsDefaultRedirectUriNotInCallbackUrls() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> service.createUserPoolClient(
+                        pool.getId(),
+                        "invalid-redirect-client",
+                        false,
+                        true,
+                        List.of("code"),
+                        List.of("openid"),
+                        null,
+                        List.of("https://example.com/callback"),
+                        "https://different.example.com/callback",
+                        List.of(),
+                        null,
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        List.of(),
+                        null,
+                        null
+                )
+        );
+
+        assertEquals("InvalidParameterException", exception.getErrorCode());
+    }
+
+    @Test
+    void updateUserPoolClientAllowsClearingListFieldsWithEmptyArrays() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "client",
+                false,
+                true,
+                List.of("code"),
+                List.of("openid"),
+                null,
+                List.of("https://example.com"),
+                "https://example.com",
+                List.of("ALLOW_USER_AUTH"),
+                null,
+                null,
+                List.of("https://example.com/logout"),
+                null,
+                List.of("email"),
+                null,
+                List.of("COGNITO", "Google"),
+                null,
+                List.of("family_name"),
+                null,
+                null
+        );
+
+        service.updateUserPoolClient(
+                pool.getId(),
+                client.getClientId(),
+                null,
+                false,
+                List.of(),
+                List.of(),
+                null,
+                List.of(),
+                "",
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null
+        );
+
+        UserPoolClient updated = service.describeUserPoolClient(pool.getId(), client.getClientId());
+        assertEquals(List.of(), updated.getCallbackURLs());
+        assertEquals(List.of(), updated.getExplicitAuthFlows());
+        assertEquals(List.of(), updated.getLogoutURLs());
+        assertEquals(List.of(), updated.getReadAttributes());
+        assertEquals(List.of(), updated.getSupportedIdentityProviders());
+        assertEquals(List.of(), updated.getWriteAttributes());
+    }
+
+    @Test
+    void updateUserPoolClientAcceptsRefreshTokenValidityZeroAndCoercesToDefault() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "client",
+                false,
+                false,
+                List.of(),
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                7,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null
+        );
+
+        UserPoolClient updated = service.updateUserPoolClient(
+                pool.getId(),
+                client.getClientId(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                0,
+                null,
+                null,
+                null,
+                null,
+                null
+        );
+
+        assertEquals(30, updated.getRefreshTokenValidity());
     }
 
     @Test
@@ -680,7 +1146,6 @@ class CognitoServiceTest {
     // =========================================================================
 
     @Test
-    @SuppressWarnings("unchecked")
     void adminSetUserPasswordPermanentFalseChangesPassword() {
         UserPool pool = createPoolAndUser(); // alice has permanent "Perm1234!"
         UserPoolClient client = service.createUserPoolClient(pool.getId(), "c", false, false, List.of(), List.of());
@@ -721,6 +1186,9 @@ class CognitoServiceTest {
         assertNotNull(params.get("SRP_B"));
         assertNotNull(params.get("SECRET_BLOCK"));
         assertEquals("bob", params.get("USER_ID_FOR_SRP"));
+        // Real AWS Cognito returns USERNAME alongside USER_ID_FOR_SRP; the .NET
+        // Amazon.Extensions.CognitoAuthentication SRP client requires it (issue #1305).
+        assertEquals("bob", params.get("USERNAME"));
     }
 
     @Test
@@ -886,11 +1354,12 @@ class CognitoServiceTest {
         assertNotNull(refreshToken);
         // Should be parseable as base64 structured token
         String decoded = new String(Base64.getDecoder().decode(refreshToken), StandardCharsets.UTF_8);
-        String[] parts = decoded.split("\\|", 4);
-        assertEquals(4, parts.length, "Refresh token should encode 4 pipe-separated fields");
+        String[] parts = decoded.split("\\|", 5);
+        assertEquals(5, parts.length, "Refresh token should encode 5 pipe-separated fields");
         assertEquals(pool.getId(), parts[0]);
         assertEquals("alice", parts[1]);
         assertEquals(client.getClientId(), parts[2]);
+        assertFalse(parts[3].isBlank(), "Refresh token should encode its issued-at timestamp");
     }
 
     @Test
@@ -919,6 +1388,46 @@ class CognitoServiceTest {
 
         assertThrows(AwsException.class, () ->
                 service.getTokensFromRefreshToken(client.getClientId(), "not-a-valid-refresh-token"));
+    }
+
+    // =========================================================================
+    // Issue #1306 — Refresh token expiry respects client token validity
+    // =========================================================================
+
+    @Test
+    void getTokensFromRefreshTokenExpiredTokenThrows() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "c",
+                false,
+                false,
+                List.of(),
+                List.of(),
+                null,
+                List.of(),
+                null,
+                List.of(),
+                null,
+                null,
+                List.of(),
+                null,
+                List.of(),
+                1,
+                List.of(),
+                Map.of("RefreshToken", "seconds"),
+                List.of(),
+                null,
+                null
+        );
+
+        long issuedAt = (System.currentTimeMillis() / 1000L) - 5;
+        String raw = pool.getId() + "|alice|" + client.getClientId() + "|" + issuedAt + "|" + java.util.UUID.randomUUID();
+        String expiredRefreshToken = Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+
+        AwsException exception = assertThrows(AwsException.class, () ->
+                service.getTokensFromRefreshToken(client.getClientId(), expiredRefreshToken));
+        assertEquals("NotAuthorizedException", exception.getErrorCode());
     }
 
     @Test
@@ -1097,7 +1606,6 @@ class CognitoServiceTest {
         String session2 = (String) retryResult.get("Session");
 
         // Eventually correct answer issues tokens
-        @SuppressWarnings("unchecked")
         Map<String, Object> tokenResult = service.respondToAuthChallenge(
                 client.getClientId(), "CUSTOM_CHALLENGE", session2,
                 Map.of("USERNAME", "alice", "ANSWER", "secret-otp"));

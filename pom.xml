@@ -6,7 +6,7 @@
 
     <groupId>io.github.hectorvent</groupId>
     <artifactId>floci</artifactId>
-    <version>1.5.22</version>
+    <version>1.5.27</version>
     <packaging>jar</packaging>
 
     <name>Floci</name>
@@ -15,7 +15,7 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.34.6</quarkus.platform.version>
+        <quarkus.platform.version>3.36.0</quarkus.platform.version>
         <apicurio.version>2.6.9.Final</apicurio.version>
     </properties>
 
@@ -159,7 +159,7 @@
         <dependency>
             <groupId>com.dashjoin</groupId>
             <artifactId>jsonata</artifactId>
-            <version>0.9.9</version>
+            <version>0.9.10</version>
         </dependency>
 
         <!-- Apache Velocity Template Engine (API Gateway VTL mapping templates) -->
@@ -167,6 +167,13 @@
             <groupId>org.apache.velocity</groupId>
             <artifactId>velocity-engine-core</artifactId>
             <version>2.4.1</version>
+        </dependency>
+
+        <!-- GraphQL schema parsing and type system (AppSync execution engine) -->
+        <dependency>
+            <groupId>com.graphql-java</groupId>
+            <artifactId>graphql-java</artifactId>
+            <version>22.0</version>
         </dependency>
 
         <!-- JSON Schema validation (API Gateway request validation) -->
@@ -180,7 +187,7 @@
         <dependency>
             <groupId>io.swagger.parser.v3</groupId>
             <artifactId>swagger-parser</artifactId>
-            <version>2.1.41</version>
+            <version>2.1.43</version>
         </dependency>
 
         <!-- Glue Schema Registry: Apicurio format utilities (parsing, canonicalization, compatibility) -->
@@ -229,6 +236,23 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
         </dependency>
+        <dependency>
+            <groupId>io.quarkus</groupId>
+            <artifactId>quarkus-jdbc-mysql</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.h2database</groupId>
+            <artifactId>h2</artifactId>
+            <version>2.3.232</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- openCypher/Bolt client for the Neptune neo4j db-type integration test -->
+        <dependency>
+            <groupId>org.neo4j.driver</groupId>
+            <artifactId>neo4j-java-driver</artifactId>
+            <version>5.28.5</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>
@@ -259,7 +283,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.5</version>
+                <version>3.5.6</version>
                 <configuration>
                     <systemPropertyVariables>
                         <java.util.logging.manager>org.jboss.logmanager.LogManager</java.util.logging.manager>
@@ -269,7 +293,7 @@
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
-                <version>3.6.2</version>
+                <version>3.6.3</version>
                 <executions>
                     <execution>
                         <id>enforce-java</id>

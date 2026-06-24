@@ -501,6 +501,36 @@ class S3Test {
         assertInlineTaggingHeaderRejected(huge, 400, "InvalidArgument");
     }
 
+    @Test
+    @Order(33)
+    void getObjectRangeRoundTripsThroughSdk() {
+        String bucket = TestFixtures.uniqueName("range-sdk-bucket");
+        String key = "range.txt";
+        s3.createBucket(CreateBucketRequest.builder().bucket(bucket).build());
+        try {
+            s3.putObject(PutObjectRequest.builder()
+                            .bucket(bucket).key(key).build(),
+                    RequestBody.fromString(CONTENT));
+
+            var response = s3.getObjectAsBytes(GetObjectRequest.builder()
+                    .bucket(bucket)
+                    .key(key)
+                    .range("bytes=6-13")
+                    .build());
+
+            assertThat(response.asUtf8String()).isEqualTo("from AWS");
+            assertThat(response.response().contentLength()).isEqualTo(8);
+            assertThat(response.response().contentRange()).isEqualTo("bytes 6-13/" + CONTENT.length());
+        } finally {
+            try {
+                s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(key).build());
+            } catch (Exception ignored) {}
+            try {
+                s3.deleteBucket(DeleteBucketRequest.builder().bucket(bucket).build());
+            } catch (Exception ignored) {}
+        }
+    }
+
     private void assertInlineTaggingHeaderRejected(String rawTaggingHeader, int expectedStatus, String expectedErrorCode) {
         String bucket = TestFixtures.uniqueName("inline-tag-reject");
         String key = "rejected.txt";

@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.configservice;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRule;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleEvaluationStatus;
 import io.github.hectorvent.floci.services.configservice.model.ConfigRuleSource;
@@ -11,6 +14,7 @@ import io.github.hectorvent.floci.services.configservice.model.ConfigurationReco
 import io.github.hectorvent.floci.services.configservice.model.ConformancePack;
 import io.github.hectorvent.floci.services.configservice.model.ConformancePackStatusDetail;
 import io.github.hectorvent.floci.services.configservice.model.DeliveryChannel;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -26,33 +30,84 @@ import java.util.stream.Collectors;
 public class AwsConfigService {
 
     private final RegionResolver regionResolver;
+    private final StorageFactory storageFactory;
 
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, ConfigRule>> configRules = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, ConformancePack>> conformancePacks = new ConcurrentHashMap<>();
+    // region -> ruleName -> rule (nested)
+    private Map<String, Map<String, ConfigRule>> configRules = new ConcurrentHashMap<>();
+    // region -> packName -> pack (nested)
+    private Map<String, Map<String, ConformancePack>> conformancePacks = new ConcurrentHashMap<>();
 
-    private final ConcurrentHashMap<String, ConfigurationRecorder> configurationRecorders = new ConcurrentHashMap<>();
+    // region -> recorder / channel (flat)
+    private Map<String, ConfigurationRecorder> configurationRecorders = new ConcurrentHashMap<>();
+    private Map<String, DeliveryChannel> deliveryChannels = new ConcurrentHashMap<>();
+
+    // recorder run-state is transient runtime state (not persisted)
     private final ConcurrentHashMap<String, Boolean> recorderRunning = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> recorderLastStartTime = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Long> recorderLastStopTime = new ConcurrentHashMap<>();
 
-    private final ConcurrentHashMap<String, DeliveryChannel> deliveryChannels = new ConcurrentHashMap<>();
-
-    private final ConcurrentHashMap<String, Map<String, String>> tags = new ConcurrentHashMap<>();
+    // resourceArn -> {tagKey -> tagValue} (flat outer, mutable inner)
+    private Map<String, Map<String, String>> tags = new ConcurrentHashMap<>();
 
     @Inject
-    public AwsConfigService(RegionResolver regionResolver) {
+    public AwsConfigService(RegionResolver regionResolver, StorageFactory storageFactory) {
         this.regionResolver = regionResolver;
+        this.storageFactory = storageFactory;
+    }
+
+    @PostConstruct
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.configRules = storageBacked("config-rules.json",
+                new TypeReference<Map<String, Map<String, ConfigRule>>>() {});
+        this.conformancePacks = storageBacked("config-conformance-packs.json",
+                new TypeReference<Map<String, Map<String, ConformancePack>>>() {});
+        this.configurationRecorders = storageBacked("config-recorders.json",
+                new TypeReference<Map<String, ConfigurationRecorder>>() {});
+        this.deliveryChannels = storageBacked("config-delivery-channels.json",
+                new TypeReference<Map<String, DeliveryChannel>>() {});
+        this.tags = storageBacked("config-tags.json",
+                new TypeReference<Map<String, Map<String, String>>>() {});
+        normalizeRegionMaps(configRules);
+        normalizeRegionMaps(conformancePacks);
+        normalizeRegionMaps(tags);
+    }
+
+    private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference) {
+        return new StorageBackedMap<>(storageFactory.create("config", fileName, typeReference));
+    }
+
+    /** After load, re-wrap persisted inner maps as {@link ConcurrentHashMap} (Jackson deserializes
+     *  them as plain maps) so per-key mutation stays thread-safe. */
+    private <V> void normalizeRegionMaps(Map<String, Map<String, V>> resources) {
+        for (Map.Entry<String, Map<String, V>> entry : new ArrayList<>(resources.entrySet())) {
+            if (!(entry.getValue() instanceof ConcurrentHashMap)) {
+                resources.put(entry.getKey(), new ConcurrentHashMap<>(entry.getValue()));
+            }
+        }
+    }
+
+    /** {@link StorageBackedMap} only flushes on a top-level put, so an in-place mutation of an
+     *  inner map must be written back by re-putting the outer entry. */
+    private <V> void persistRegion(Map<String, Map<String, V>> resources, String region) {
+        Map<String, V> regionResources = resources.get(region);
+        if (regionResources != null) {
+            resources.put(region, regionResources);
+        }
     }
 
     // --- Config Rules ---
 
     public ConfigRule putConfigRule(String region, String ruleName, ConfigRuleSource source) {
-        ConcurrentHashMap<String, ConfigRule> store = rulesFor(region);
+        Map<String, ConfigRule> store = rulesFor(region);
         ConfigRule existing = store.get(ruleName);
         if (existing != null) {
             ConfigRule updated = new ConfigRule(existing.configRuleName(), existing.configRuleArn(),
                     existing.configRuleId(), existing.configRuleState(), source);
             store.put(ruleName, updated);
+            persistRegion(configRules, region);
             return updated;
         }
         String ruleId = "config-rule-" + shortId();
@@ -60,20 +115,22 @@ public class AwsConfigService {
                 "config-rule/" + ruleId).toString();
         ConfigRule rule = new ConfigRule(ruleName, ruleArn, ruleId, "ACTIVE", source);
         store.put(ruleName, rule);
+        persistRegion(configRules, region);
         return rule;
     }
 
     public void deleteConfigRule(String region, String ruleName) {
-        ConcurrentHashMap<String, ConfigRule> store = rulesFor(region);
+        Map<String, ConfigRule> store = rulesFor(region);
         if (store.remove(ruleName) == null) {
             throw new AwsException("NoSuchConfigRuleException",
                     "The ConfigRule provided in the request is invalid. " +
                             "Please check the configRule name.", 400);
         }
+        persistRegion(configRules, region);
     }
 
     public List<ConfigRule> describeConfigRules(String region, List<String> ruleNames) {
-        ConcurrentHashMap<String, ConfigRule> store = rulesFor(region);
+        Map<String, ConfigRule> store = rulesFor(region);
         if (ruleNames == null || ruleNames.isEmpty()) {
             return new ArrayList<>(store.values());
         }
@@ -101,7 +158,7 @@ public class AwsConfigService {
     }
 
     public void startConfigRulesEvaluation(String region, List<String> ruleNames) {
-        ConcurrentHashMap<String, ConfigRule> store = rulesFor(region);
+        Map<String, ConfigRule> store = rulesFor(region);
         for (String name : ruleNames) {
             if (!store.containsKey(name)) {
                 throw new AwsException("NoSuchConfigRuleException",
@@ -222,12 +279,13 @@ public class AwsConfigService {
 
     public ConformancePack putConformancePack(String region, String packName,
                                               String templateS3Uri, String templateBody) {
-        ConcurrentHashMap<String, ConformancePack> store = packsFor(region);
+        Map<String, ConformancePack> store = packsFor(region);
         ConformancePack existing = store.get(packName);
         if (existing != null) {
             ConformancePack updated = new ConformancePack(existing.conformancePackName(), existing.conformancePackArn(),
                     existing.conformancePackId(), templateS3Uri, templateBody);
             store.put(packName, updated);
+            persistRegion(conformancePacks, region);
             return updated;
         }
         String packId = "conformance-pack-" + shortId();
@@ -235,19 +293,21 @@ public class AwsConfigService {
                 "conformance-pack/" + packName + "/" + packId).toString();
         ConformancePack pack = new ConformancePack(packName, packArn, packId, templateS3Uri, templateBody);
         store.put(packName, pack);
+        persistRegion(conformancePacks, region);
         return pack;
     }
 
     public void deleteConformancePack(String region, String packName) {
-        ConcurrentHashMap<String, ConformancePack> store = packsFor(region);
+        Map<String, ConformancePack> store = packsFor(region);
         if (store.remove(packName) == null) {
             throw new AwsException("NoSuchConformancePackException",
                     "Conformance pack '" + packName + "' does not exist.", 400);
         }
+        persistRegion(conformancePacks, region);
     }
 
     public List<ConformancePack> describeConformancePacks(String region, List<String> names) {
-        ConcurrentHashMap<String, ConformancePack> store = packsFor(region);
+        Map<String, ConformancePack> store = packsFor(region);
         if (names == null || names.isEmpty()) {
             return new ArrayList<>(store.values());
         }
@@ -284,12 +344,14 @@ public class AwsConfigService {
         for (Map<String, String> t : tagList) {
             tagMap.put(t.get("Key"), t.get("Value"));
         }
+        tags.put(arn, tagMap); // write back the in-place inner-map mutation
     }
 
     public void untagResource(String arn, List<String> tagKeys) {
         Map<String, String> tagMap = tags.get(arn);
         if (tagMap != null) {
             tagKeys.forEach(tagMap::remove);
+            tags.put(arn, tagMap); // write back the in-place inner-map mutation
         }
     }
 
@@ -302,11 +364,11 @@ public class AwsConfigService {
 
     // --- Helpers ---
 
-    private ConcurrentHashMap<String, ConfigRule> rulesFor(String region) {
+    private Map<String, ConfigRule> rulesFor(String region) {
         return configRules.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
-    private ConcurrentHashMap<String, ConformancePack> packsFor(String region) {
+    private Map<String, ConformancePack> packsFor(String region) {
         return conformancePacks.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 

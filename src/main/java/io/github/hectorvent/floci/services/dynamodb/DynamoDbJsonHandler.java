@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.dynamodb;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -22,6 +23,9 @@ import java.util.*;
  */
 @ApplicationScoped
 public class DynamoDbJsonHandler {
+
+    private static final String DEFAULT_ACCOUNT_ID = "000000000000";
+    private static final String SSE_TYPE_KMS = "KMS";
 
     private final DynamoDbService dynamoDbService;
     private final DynamoDbStreamService dynamoDbStreamService;
@@ -171,6 +175,20 @@ public class DynamoDbJsonHandler {
             table.setBillingMode("PROVISIONED");
         }
 
+        if (request.has("TableClass")) {
+            table.setTableClass(request.get("TableClass").asText());
+        }
+
+        JsonNode onDemand = request.path("OnDemandThroughput");
+        if (onDemand.isObject()) {
+            if (onDemand.has("MaxReadRequestUnits")) {
+                table.setOnDemandMaxReadRequestUnits(onDemand.get("MaxReadRequestUnits").asInt());
+            }
+            if (onDemand.has("MaxWriteRequestUnits")) {
+                table.setOnDemandMaxWriteRequestUnits(onDemand.get("MaxWriteRequestUnits").asInt());
+            }
+        }
+
         // Store tags from CreateTable request
         JsonNode tagsNode = request.path("Tags");
         if (tagsNode.isArray()) {
@@ -189,6 +207,13 @@ public class DynamoDbJsonHandler {
             table.setStreamViewType(viewType);
         }
 
+        JsonNode sseSpec = request.path("SSESpecification");
+        if (!sseSpec.isMissingNode() && sseSpec.path("Enabled").asBoolean(false)) {
+            table.setSseEnabled(true);
+            table.setSseType(SSE_TYPE_KMS);
+            table.setKmsMasterKeyArn(defaultKmsMasterKeyArn(region));
+        }
+
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
         return Response.ok(response).build();
@@ -198,8 +223,9 @@ public class DynamoDbJsonHandler {
         String tableName = request.path("TableName").asText();
         TableDefinition table = dynamoDbService.describeTable(tableName, region);
         if (table.isDeletionProtectionEnabled()) {
-            throw new AwsException("ResourceInUseException",
-                    "Table " + tableName + " can't be deleted while DeletionProtectionEnabled is set to true", 400);
+            throw new AwsException("ValidationException",
+                    "Table " + tableName + " is protected against deletion. To delete the table, "
+                    + "DeletionProtectionEnabled must be set to false.", 400);
         }
         ObjectNode response = objectMapper.createObjectNode();
         response.set("TableDescription", tableToNode(table));
@@ -301,6 +327,8 @@ public class DynamoDbJsonHandler {
             throw new AwsException("ValidationException",
                     "ExpressionAttributeValues can only be specified when using expressions: ConditionExpression is null", 400);
         }
+
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
         validateItemSets(item);
 
@@ -406,6 +434,8 @@ public class DynamoDbJsonHandler {
                     + String.join("; ", delValidationErrors), 400);
         }
 
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
+
         JsonNode expectedDel = request.has("Expected") ? request.get("Expected") : null;
         String condOpDel = request.has("ConditionalOperator")
                 ? request.get("ConditionalOperator").asText() : "AND";
@@ -470,6 +500,8 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {AttributeUpdates} Expression parameters: {UpdateExpression}", 400);
         }
+
+        ExpressionEvaluator.validateExpression(conditionExpression, "ConditionExpression", exprAttrNames, exprAttrValues);
 
         if (conditionExpression != null && expectedUpd != null) {
             throw new AwsException("ValidationException",
@@ -628,6 +660,31 @@ public class DynamoDbJsonHandler {
         return changedAttributes;
     }
 
+    // DynamoDB rejects an ExclusiveStartKey whose attribute set does not exactly match the
+    // key schema being paged: the table's primary key, plus the index's key attributes when
+    // an IndexName is supplied. Query and Scan report different messages for the same fault.
+    private void validateExclusiveStartKey(JsonNode exclusiveStartKey, TableDefinition table,
+                                           String indexName, boolean isScan) {
+        if (exclusiveStartKey == null || exclusiveStartKey.isNull()) return;
+        Set<String> expected = new HashSet<>();
+        expected.add(table.getPartitionKeyName());
+        String sortKey = table.getSortKeyName();
+        if (sortKey != null) expected.add(sortKey);
+        if (indexName != null) {
+            table.findGsi(indexName).ifPresent(g ->
+                    g.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
+            table.findLsi(indexName).ifPresent(l ->
+                    l.getKeySchema().forEach(k -> expected.add(k.getAttributeName())));
+        }
+        Set<String> actual = new HashSet<>();
+        exclusiveStartKey.fieldNames().forEachRemaining(actual::add);
+        if (!actual.equals(expected)) {
+            throw new AwsException("ValidationException", isScan
+                    ? "The provided starting key is invalid: The provided key element does not match the schema"
+                    : "The provided starting key is invalid", 400);
+        }
+    }
+
     private static final Set<String> VALID_SELECT = Set.of(
             "ALL_ATTRIBUTES", "ALL_PROJECTED_ATTRIBUTES", "SPECIFIC_ATTRIBUTES", "COUNT");
 
@@ -680,6 +737,11 @@ public class DynamoDbJsonHandler {
                     "Can not use both expression and non-expression parameters in the same request: "
                     + "Non-expression parameters: {QueryFilter} Expression parameters: {FilterExpression}", 400);
         }
+        if (attributesToGet != null && projectionExpression != null) {
+            throw new AwsException("ValidationException",
+                    "Can not use both expression and non-expression parameters in the same request: "
+                    + "Non-expression parameters: {AttributesToGet} Expression parameters: {ProjectionExpression}", 400);
+        }
 
         if (keyConditionExpr == null && keyConditions == null) {
             throw new AwsException("ValidationException",
@@ -692,13 +754,17 @@ public class DynamoDbJsonHandler {
                     "Invalid KeyConditionExpression: The expression can not be empty;", 400);
         }
 
+        ExpressionEvaluator.validateExpression(keyConditionExpr, "KeyConditionExpression", exprAttrNames, exprAttrValues);
+        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+
         if (select != null && !VALID_SELECT.contains(select)) {
             throw new AwsException("ValidationException",
                     "1 validation error detected: Value '" + select + "' at 'select' failed to satisfy constraint: "
                     + "Member must satisfy enum value set: [SPECIFIC_ATTRIBUTES, COUNT, ALL_ATTRIBUTES, ALL_PROJECTED_ATTRIBUTES]", 400);
         }
 
-        if ("SPECIFIC_ATTRIBUTES".equals(select) && projectionExpression == null) {
+        boolean hasAttributesToGet = attributesToGet != null && attributesToGet.size() > 0;
+        if ("SPECIFIC_ATTRIBUTES".equals(select) && projectionExpression == null && !hasAttributesToGet) {
             throw new AwsException("ValidationException",
                     "Select type SPECIFIC_ATTRIBUTES requires the ProjectionExpression to be provided.", 400);
         }
@@ -727,6 +793,11 @@ public class DynamoDbJsonHandler {
             // Check unused EAN across all expressions (KCE + FE + PE)
             Set<String> hashTokens = extractHashTokens(keyConditionExpr, filterExpr, projectionExpression);
             checkUnusedEan(exprAttrNames, hashTokens);
+        }
+
+        if (exclusiveStartKey != null) {
+            validateExclusiveStartKey(exclusiveStartKey,
+                    dynamoDbService.describeTable(tableName, region), indexName, false);
         }
 
         DynamoDbService.QueryResult result = dynamoDbService.query(tableName, keyConditions,
@@ -820,11 +891,19 @@ public class DynamoDbJsonHandler {
                     + "Segment: " + segment + " is not less than TotalSegments: " + totalSegments, 400);
         }
 
+        ExpressionEvaluator.validateExpression(filterExpr, "FilterExpression", exprAttrNames, exprAttrValues);
+
         String projectionExpressionScan = request.has("ProjectionExpression")
                 ? request.get("ProjectionExpression").asText() : null;
 
+        if (exclusiveStartKey != null) {
+            validateExclusiveStartKey(exclusiveStartKey,
+                    dynamoDbService.describeTable(tableName, region), indexNameScan, true);
+        }
+
         DynamoDbService.ScanResult result = dynamoDbService.scan(
-                tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit, exclusiveStartKey, region);
+                tableName, filterExpr, exprAttrNames, exprAttrValues, scanFilter, limit,
+                exclusiveStartKey, indexNameScan, region);
 
         List<JsonNode> scanItems = result.items();
         // Apply parallel scan segment partitioning
@@ -1082,6 +1161,20 @@ public class DynamoDbJsonHandler {
             if ("PAY_PER_REQUEST".equals(billingMode)) {
                 table.getProvisionedThroughput().setReadCapacityUnits(0L);
                 table.getProvisionedThroughput().setWriteCapacityUnits(0L);
+            }
+        }
+
+        if (request.has("TableClass")) {
+            table.setTableClass(request.get("TableClass").asText());
+        }
+
+        JsonNode onDemand = request.path("OnDemandThroughput");
+        if (onDemand.isObject()) {
+            if (onDemand.has("MaxReadRequestUnits")) {
+                table.setOnDemandMaxReadRequestUnits(onDemand.get("MaxReadRequestUnits").asInt());
+            }
+            if (onDemand.has("MaxWriteRequestUnits")) {
+                table.setOnDemandMaxWriteRequestUnits(onDemand.get("MaxWriteRequestUnits").asInt());
             }
         }
 
@@ -1726,6 +1819,7 @@ public class DynamoDbJsonHandler {
     private ObjectNode tableToNode(TableDefinition table) {
         ObjectNode node = objectMapper.createObjectNode();
         node.put("TableName", table.getTableName());
+        node.put("TableId", table.getTableId());
         node.put("TableStatus", table.getTableStatus());
         node.put("TableArn", table.getTableArn());
         node.put("CreationDateTime", table.getCreationDateTime().getEpochSecond());
@@ -1739,6 +1833,24 @@ public class DynamoDbJsonHandler {
             billing.put("LastUpdateToPayPerRequestDateTime",
                     table.getCreationDateTime().getEpochSecond());
             node.set("BillingModeSummary", billing);
+        }
+
+        // TableClassSummary always present; defaults to STANDARD.
+        ObjectNode tableClassSummary = objectMapper.createObjectNode();
+        tableClassSummary.put("TableClass",
+                table.getTableClass() != null ? table.getTableClass() : "STANDARD");
+        node.set("TableClassSummary", tableClassSummary);
+
+        if (table.getOnDemandMaxReadRequestUnits() != null
+                || table.getOnDemandMaxWriteRequestUnits() != null) {
+            ObjectNode odt = objectMapper.createObjectNode();
+            if (table.getOnDemandMaxReadRequestUnits() != null) {
+                odt.put("MaxReadRequestUnits", table.getOnDemandMaxReadRequestUnits());
+            }
+            if (table.getOnDemandMaxWriteRequestUnits() != null) {
+                odt.put("MaxWriteRequestUnits", table.getOnDemandMaxWriteRequestUnits());
+            }
+            node.set("OnDemandThroughput", odt);
         }
 
         ObjectNode warmThroughput = objectMapper.createObjectNode();
@@ -1770,6 +1882,16 @@ public class DynamoDbJsonHandler {
         ptNode.put("WriteCapacityUnits", table.getProvisionedThroughput().getWriteCapacityUnits());
         ptNode.put("NumberOfDecreasesToday", table.getProvisionedThroughput().getNumberOfDecreasesToday());
         node.set("ProvisionedThroughput", ptNode);
+
+        if (table.isSseEnabled()) {
+            ObjectNode sseDescription = objectMapper.createObjectNode();
+            sseDescription.put("Status", "ENABLED");
+            sseDescription.put("SSEType", table.getSseType() != null ? table.getSseType() : SSE_TYPE_KMS);
+            sseDescription.put("KMSMasterKeyArn", table.getKmsMasterKeyArn() != null
+                    ? table.getKmsMasterKeyArn()
+                    : defaultKmsMasterKeyArn(AwsArnUtils.regionOrDefault(table.getTableArn(), "us-east-1")));
+            node.set("SSEDescription", sseDescription);
+        }
 
         List<GlobalSecondaryIndex> gsis = table.getGlobalSecondaryIndexes();
         if (gsis != null && !gsis.isEmpty()) {
@@ -1857,6 +1979,11 @@ public class DynamoDbJsonHandler {
         }
 
         return node;
+    }
+
+    private String defaultKmsMasterKeyArn(String region) {
+        return AwsArnUtils.Arn.of("kms", region, DEFAULT_ACCOUNT_ID,
+                "key/aws-managed-dynamodb").toString();
     }
 
     private ObjectNode continuousBackupsDescriptionNode(TableDefinition table) {

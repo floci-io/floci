@@ -4,6 +4,8 @@ quarkus:
     test-port: 0
     limits:
       max-body-size: ${floci.max-request-size}M
+  datasource:
+    active: false
 
 floci:
   base-url: "http://localhost:4566"
@@ -34,6 +36,18 @@ floci:
         flush-interval-ms: 60000
       opensearch:
         flush-interval-ms: 60000
+      batch:
+        flush-interval-ms: 60000
+      codepipeline:
+        flush-interval-ms: 60000
+      s3vectors:
+        flush-interval-ms: 60000
+      ecs:
+        flush-interval-ms: 60000
+      codebuild:
+        flush-interval-ms: 60000
+      config:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
@@ -63,7 +77,7 @@ floci:
     sqs:
       enabled: true
       default-visibility-timeout: 30
-      max-message-size: 262144
+      max-message-size: 1048576
     s3:
       enabled: true
       default-presign-expiry-seconds: 3600
@@ -83,6 +97,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: true
@@ -93,6 +108,12 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+    memorydb:
+      enabled: true
+      mock: false
+      proxy-base-port: 6400
+      proxy-max-port: 6419
+      default-image: "valkey/valkey:8"
     rds:
       enabled: true
       proxy-base-port: 7001
@@ -100,12 +121,21 @@ floci:
       default-postgres-image: "postgres:16-alpine"
       default-mysql-image: "mysql:8.0"
       default-mariadb-image: "mariadb:11"
+    rds-data:
+      enabled: true
+      transaction-ttl-seconds: 180
     neptune:
       enabled: true
       proxy-base-port: 8182
       proxy-max-port: 8282
       default-image: "tinkerpop/gremlin-server:3.7.3"
     eventbridge:
+      enabled: true
+    cloudmap:
+      enabled: true
+    emr:
+      enabled: true
+    wafv2:
       enabled: true
     scheduler:
       enabled: true
@@ -159,6 +189,8 @@ floci:
       enabled: true
     ecr:
       enabled: true
+    ui:
+      enabled: true
     bedrock-runtime:
       enabled: true
     eks:
@@ -172,7 +204,12 @@ floci:
     codebuild:
       enabled: true
       # docker-network: floci-network
+    batch:
+      enabled: true
+      runner-mode: immediate
     codedeploy:
+      enabled: true
+    codepipeline:
       enabled: true
     autoscaling:
       enabled: true
@@ -195,7 +232,11 @@ floci:
     bcm-data-exports:
       enabled: true
       emit-mode: off
+    cloudtrail:
+      enabled: true
     cloudfront:
       enabled: true
     appsync:
+      enabled: true
+    s3vectors:
       enabled: true

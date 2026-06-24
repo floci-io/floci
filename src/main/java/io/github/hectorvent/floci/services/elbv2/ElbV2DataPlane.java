@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.elbv2;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.Action;
 import io.github.hectorvent.floci.services.elbv2.model.Listener;
 import io.github.hectorvent.floci.services.elbv2.model.Rule;
@@ -62,6 +63,9 @@ public class ElbV2DataPlane {
     LambdaService lambdaService;
 
     @Inject
+    Ec2Service ec2Service;
+
+    @Inject
     ObjectMapper objectMapper;
 
     private final Map<String, HttpServer> servers = new ConcurrentHashMap<>();
@@ -105,10 +109,27 @@ public class ElbV2DataPlane {
 
         server.requestHandler(req -> handleRequest(req, listenerArn, region));
         server.listen()
-                .onSuccess(s -> LOG.infov("ELBv2 listener started on port {0} for {1}", String.valueOf(listener.getPort()), listenerArn))
-                .onFailure(err -> LOG.warnv("ELBv2 listener failed to start on port {0}: {1}", String.valueOf(listener.getPort()), err.getMessage()));
+                .onSuccess(s -> {
+                    servers.put(listenerArn, s);
+                    LOG.infov("ELBv2 listener started on port {0} for {1}", String.valueOf(listener.getPort()), listenerArn);
+                })
+                .onFailure(err -> {
+                    ruleChains.remove(listenerArn);
+                    listenerRegions.remove(listenerArn);
+                    LOG.warnv("ELBv2 listener failed to start on port {0}: {1}", String.valueOf(listener.getPort()), err.getMessage());
+                });
+    }
 
-        servers.put(listenerArn, server);
+    public void restartListener(Listener listener, String region, List<Rule> rules) {
+        if (config.services().elbv2().mock()) {
+            return;
+        }
+        HttpServer server = servers.remove(listener.getListenerArn());
+        if (server == null) {
+            startListener(listener, region, rules);
+            return;
+        }
+        server.close().onComplete(ignored -> startListener(listener, region, rules));
     }
 
     public void stopListener(String listenerArn) {
@@ -192,7 +213,7 @@ public class ElbV2DataPlane {
         int idx = Math.abs(counter.getAndIncrement() % candidates.size());
         TargetDescription target = candidates.get(idx);
         int targetPort = ElbV2HealthChecker.effectivePort(target, tg);
-        proxyRequest(req, target.getId(), targetPort);
+        proxyRequest(req, ElbV2TargetResolver.resolveHost(ec2Service, tg, target), targetPort);
     }
 
     private void invokeLambdaTarget(io.vertx.core.http.HttpServerRequest req, String functionArn, String region) {

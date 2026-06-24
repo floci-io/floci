@@ -224,7 +224,10 @@ class SqsIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<Attribute>"))
-            .body(containsString("QueueArn"));
+            .body(containsString("QueueArn"))
+            .body(containsString("ApproximateNumberOfMessages"))
+            .body(containsString("ApproximateNumberOfMessagesNotVisible"))
+            .body(containsString("ApproximateNumberOfMessagesDelayed"));
     }
 
     @Test
@@ -394,7 +397,7 @@ class SqsIntegrationTest {
             .extract().xmlPath().getString("CreateQueueResponse.CreateQueueResult.QueueUrl");
 
         try {
-            String bigBody = "x".repeat(100_000);
+            String bigBody = "x".repeat(400_000);
             given()
                 .contentType("application/x-www-form-urlencoded")
                 .formParam("Action", "SendMessageBatch")

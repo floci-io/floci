@@ -10,6 +10,7 @@ import java.time.Instant;
 public class SessionCredential {
 
     private String accessKeyId;
+    private String secretAccessKey;
     private String roleArn;
     private Instant expiration;
     /** Inline session policy passed to AssumeRole/GetFederationToken — further restricts role policies. */
@@ -30,8 +31,20 @@ public class SessionCredential {
         this.sessionPolicyDocument = sessionPolicyDocument;
     }
 
+    public SessionCredential(String accessKeyId, String secretAccessKey, String roleArn, Instant expiration,
+                              String sessionPolicyDocument) {
+        this.accessKeyId = accessKeyId;
+        this.secretAccessKey = secretAccessKey;
+        this.roleArn = roleArn;
+        this.expiration = expiration;
+        this.sessionPolicyDocument = sessionPolicyDocument;
+    }
+
     public String getAccessKeyId() { return accessKeyId; }
     public void setAccessKeyId(String accessKeyId) { this.accessKeyId = accessKeyId; }
+
+    public String getSecretAccessKey() { return secretAccessKey; }
+    public void setSecretAccessKey(String secretAccessKey) { this.secretAccessKey = secretAccessKey; }
 
     public String getRoleArn() { return roleArn; }
     public void setRoleArn(String roleArn) { this.roleArn = roleArn; }

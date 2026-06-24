@@ -308,4 +308,51 @@ class SesEventPayloadTest {
         assertEquals("Reject", node.get("eventType").asText());
         assertNotNull(node.get("reject").get("reason"));
     }
+
+    /**
+     * AWS CloudWatch metric names for SES events are mostly the same as the SNS
+     * {@code eventType} value, except {@code RENDERING_FAILURE} is emitted as
+     * {@code RenderingFailure} (no space) on CW but {@code Rendering Failure}
+     * (with space) on SNS — verified directly against real AWS by sending a
+     * templated email with a missing {@code TemplateData} key through a CS with a
+     * CloudWatch event destination, then capturing the new metric name from
+     * {@code aws cloudwatch list-metrics --namespace AWS/SES}. Pin both spellings
+     * so a future cleanup of either accessor cannot silently regress the other.
+     */
+    @Test
+    void cloudWatchMetricName_matchesAwsCwSpelling() {
+        assertEquals("Send",              SesEventPayload.cloudWatchMetricName("SEND"));
+        assertEquals("Reject",            SesEventPayload.cloudWatchMetricName("REJECT"));
+        assertEquals("Bounce",            SesEventPayload.cloudWatchMetricName("BOUNCE"));
+        assertEquals("Complaint",         SesEventPayload.cloudWatchMetricName("COMPLAINT"));
+        assertEquals("Delivery",          SesEventPayload.cloudWatchMetricName("DELIVERY"));
+        assertEquals("Open",              SesEventPayload.cloudWatchMetricName("OPEN"));
+        assertEquals("Click",             SesEventPayload.cloudWatchMetricName("CLICK"));
+        // Verified against real AWS — no space, unlike the SNS spelling.
+        assertEquals("RenderingFailure",  SesEventPayload.cloudWatchMetricName("RENDERING_FAILURE"));
+        assertEquals("DeliveryDelay",     SesEventPayload.cloudWatchMetricName("DELIVERY_DELAY"));
+        assertEquals("Subscription",      SesEventPayload.cloudWatchMetricName("SUBSCRIPTION"));
+    }
+
+    /**
+     * EventBridge uses a separate past-tense vocabulary for {@code detail-type}, distinct
+     * from the SNS notification {@code eventType} value. Pin every mapping against
+     * https://docs.aws.amazon.com/eventbridge/latest/ref/events-ref-ses.html so a
+     * future cleanup of {@link SesEventPayload#eventTypeLabel} cannot accidentally
+     * regress the EventBridge value (which would silently break customer rules
+     * keyed on the AWS detail-type names).
+     */
+    @Test
+    void eventBridgeDetailType_matchesAwsPastTenseVocabulary() {
+        assertEquals("Email Sent",                SesEventPayload.eventBridgeDetailType("SEND"));
+        assertEquals("Email Rejected",            SesEventPayload.eventBridgeDetailType("REJECT"));
+        assertEquals("Email Bounced",             SesEventPayload.eventBridgeDetailType("BOUNCE"));
+        assertEquals("Email Complaint Received",  SesEventPayload.eventBridgeDetailType("COMPLAINT"));
+        assertEquals("Email Delivered",           SesEventPayload.eventBridgeDetailType("DELIVERY"));
+        assertEquals("Email Opened",              SesEventPayload.eventBridgeDetailType("OPEN"));
+        assertEquals("Email Clicked",             SesEventPayload.eventBridgeDetailType("CLICK"));
+        assertEquals("Email Rendering Failed",    SesEventPayload.eventBridgeDetailType("RENDERING_FAILURE"));
+        assertEquals("Email Delivery Delayed",    SesEventPayload.eventBridgeDetailType("DELIVERY_DELAY"));
+        assertEquals("Email Subscribed",          SesEventPayload.eventBridgeDetailType("SUBSCRIPTION"));
+    }
 }

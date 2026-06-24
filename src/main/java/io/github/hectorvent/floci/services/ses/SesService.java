@@ -6,15 +6,20 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
+import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
+import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
+import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
@@ -42,6 +47,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Matcher;
@@ -66,6 +72,7 @@ public class SesService {
     private final StorageBackend<String, ConfigurationSet> configSetStore;
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
+    private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -88,6 +95,8 @@ public class SesService {
                 new TypeReference<Map<String, SuppressedDestination>>() {});
         this.accountSuppressionStore = storageFactory.create("ses", "ses-account-suppression.json",
                 new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
+        this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
+                new TypeReference<Map<String, DedicatedIpPool>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
@@ -101,6 +110,7 @@ public class SesService {
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper) {
         this.identityStore = identityStore;
@@ -110,6 +120,7 @@ public class SesService {
         this.configSetStore = configSetStore;
         this.suppressionStore = suppressionStore;
         this.accountSuppressionStore = accountSuppressionStore;
+        this.dedicatedIpPoolStore = dedicatedIpPoolStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
@@ -285,20 +296,30 @@ public class SesService {
     }
 
     /**
-     * Validate that a non-blank {@code ConfigurationSetName} refers to a configuration set
-     * that exists in the given region. Always raises {@code ConfigurationSetDoesNotExist}
-     * with {@code httpStatus = 400}; the V2 REST controller's {@code remapV1Exception}
-     * then translates that into a {@code NotFoundException 404}, while V1 Query keeps the
-     * original code/status. Mirrors AWS SES behaviour: invalid set name fails fast instead
-     * of silently storing/relaying the message and skipping event publishing later.
+     * Validate that a non-blank {@code ConfigurationSetName} is usable for a send. Performs
+     * two gates:
+     *   1. Existence — raises {@code ConfigurationSetDoesNotExist} (400) when the set is
+     *      missing in the given region. The V2 REST controller's {@code remapV1Exception}
+     *      translates that into {@code NotFoundException 404}; V1 Query keeps the original.
+     *   2. Sending-enabled — raises {@code ConfigurationSetSendingPausedException} (400)
+     *      when the set's {@code SendingEnabled} flag has been turned off via
+     *      {@code UpdateConfigurationSetSendingEnabled} (v1) /
+     *      {@code PutConfigurationSetSendingOptions} (v2). The V2 controller narrows that
+     *      code to {@code SendingPausedException}; V1 keeps the longer form, matching the
+     *      exact wire shape AWS returns on each surface.
+     * Mirrors AWS SES behaviour: invalid or paused set fails fast instead of silently
+     * storing/relaying the message and skipping event publishing later.
      */
     private void validateConfigurationSet(String configurationSetName, String region) {
         if (configurationSetName == null || configurationSetName.isBlank()) {
             return;
         }
-        if (configSetStore.get(configSetKey(region, configurationSetName)).isEmpty()) {
-            throw new AwsException("ConfigurationSetDoesNotExist",
-                    "Configuration set <" + configurationSetName + "> does not exist.", 400);
+        ConfigurationSet cs = configSetStore.get(configSetKey(region, configurationSetName))
+                .orElseThrow(() -> new AwsException("ConfigurationSetDoesNotExist",
+                        "Configuration set <" + configurationSetName + "> does not exist.", 400));
+        if (cs.getSendingEnabled() != null && !cs.getSendingEnabled()) {
+            throw new AwsException("ConfigurationSetSendingPausedException",
+                    "Sending is paused for configuration set " + configurationSetName, 400);
         }
     }
 
@@ -464,7 +485,9 @@ public class SesService {
                         "Identity <" + identityValue + "> does not exist.", 400));
         identity.setMailFromDomain(clearing ? null : mailFromDomain);
         identity.setMailFromDomainStatus(clearing ? "Pending" : "Success");
-        if (normalizedBehavior != null) {
+        if (clearing) {
+            identity.setBehaviorOnMxFailure("UseDefaultValue");
+        } else if (normalizedBehavior != null) {
             identity.setBehaviorOnMxFailure(normalizedBehavior);
         }
         identityStore.put(key, identity);
@@ -532,6 +555,14 @@ public class SesService {
     public void setAccountSendingEnabled(String region, boolean enabled) {
         accountSettingsStore.put("sending::" + region, enabled);
         LOG.infov("Updated account sending enabled for region {0}: {1}", region, enabled);
+    }
+
+    public void setConfigurationSetSendingEnabled(String configSetName, boolean enabled, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        cs.setSendingEnabled(enabled);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated SendingEnabled on configuration set {0} in region {1}: {2}",
+                configSetName, region, enabled);
     }
 
     // ──────────────────────────── Templates ────────────────────────────
@@ -608,6 +639,26 @@ public class SesService {
                 validateTag(tag);
             }
         }
+        if (configSet.getSuppressionOptions() != null
+                && configSet.getSuppressionOptions().getSuppressedReasons() != null) {
+            for (String reason : configSet.getSuppressionOptions().getSuppressedReasons()) {
+                if (reason == null) {
+                    throw new AwsException("BadRequestException",
+                            invalidSuppressionReasonMessage(null), 400);
+                }
+                if (!isValidConfigSetSuppressionReason(reason)) {
+                    throw new AwsException("BadRequestException",
+                            "1 validation error detected: Value at "
+                                    + "'suppressionOptions.suppressedReasons' failed to satisfy "
+                                    + "constraint: Member must satisfy constraint: "
+                                    + "[Member must satisfy enum value set: [BOUNCE, COMPLAINT]]",
+                            400);
+                }
+            }
+        }
+        validateTrackingOptions(configSet.getTrackingOptions(), region);
+        validateDeliveryOptions(configSet.getDeliveryOptions(), region);
+        validateVdmOptions(configSet.getVdmOptions());
         if (configSetStore.get(key).isPresent()) {
             throw new AwsException("ConfigurationSetAlreadyExists",
                     "Configuration set " + configSet.getName() + " already exists.", 400);
@@ -618,6 +669,198 @@ public class SesService {
         configSetStore.put(key, configSet);
         LOG.infov("Created SES configuration set: {0} in region {1}", configSet.getName(), region);
         return configSet;
+    }
+
+    public void setConfigurationSetTrackingOptions(String configSetName, TrackingOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        validateTrackingOptions(options, region);
+        cs.setTrackingOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void setConfigurationSetDeliveryOptions(String configSetName, DeliveryOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        validateDeliveryOptions(options, region);
+        cs.setDeliveryOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated DeliveryOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        cs.setReputationMetricsEnabled(metricsEnabled);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated ReputationMetricsEnabled on configuration set {0} in region {1}: {2}",
+                configSetName, region, metricsEnabled);
+    }
+
+    private boolean isVerifiedDomainIdentity(String domain, String region) {
+        Identity identity = getIdentityVerificationAttributes(domain, region);
+        return identity != null && "Success".equals(identity.getVerificationStatus())
+                && "Domain".equals(identity.getIdentityType());
+    }
+
+    private void requireVerifiedRedirectDomain(String domain, String region) {
+        if (domain == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'trackingOptions' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (domain.isBlank()) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "At least one field of TrackingOptions must contain a value.", 400);
+        }
+        if (!isVerifiedDomainIdentity(domain, region)) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
+        }
+    }
+
+    public void createConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
+                                                      String region) {
+        requireVerifiedRedirectDomain(customRedirectDomain, region);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() != null && cs.getTrackingOptions().getCustomRedirectDomain() != null) {
+            throw new AwsException("TrackingOptionsAlreadyExistsException",
+                    "Configuration set <" + configSetName + "> already has tracking options.", 400);
+        }
+        TrackingOptions options = new TrackingOptions();
+        options.setCustomRedirectDomain(customRedirectDomain);
+        cs.setTrackingOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Created TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void updateConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
+                                                      String region) {
+        requireVerifiedRedirectDomain(customRedirectDomain, region);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
+            throw new AwsException("TrackingOptionsDoesNotExistException",
+                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
+        }
+        cs.getTrackingOptions().setCustomRedirectDomain(customRedirectDomain);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void deleteConfigurationSetTrackingOptions(String configSetName, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
+            throw new AwsException("TrackingOptionsDoesNotExistException",
+                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
+        }
+        cs.setTrackingOptions(null);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Deleted TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void setConfigurationSetArchivingOptions(String configSetName, ArchivingOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        cs.setArchivingOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated ArchivingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    private static final java.util.Set<String> VDM_FEATURE_STATES = java.util.Set.of("ENABLED", "DISABLED");
+
+    public void setConfigurationSetVdmOptions(String configSetName, VdmOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        validateVdmOptions(options);
+        cs.setVdmOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated VdmOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    private void validateVdmOptions(VdmOptions options) {
+        if (options == null) {
+            return;
+        }
+        // Enum values verified against real AWS 2026-06-19; messages use the
+        // nested member path and the [ENABLED, DISABLED] value set.
+        if (options.getDashboardOptions() != null
+                && options.getDashboardOptions().getEngagementMetrics() != null
+                && !VDM_FEATURE_STATES.contains(options.getDashboardOptions().getEngagementMetrics())) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'vdmOptions.dashboardOptions.engagementMetrics' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
+        }
+        if (options.getGuardianOptions() != null
+                && options.getGuardianOptions().getOptimizedSharedDelivery() != null
+                && !VDM_FEATURE_STATES.contains(options.getGuardianOptions().getOptimizedSharedDelivery())) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'vdmOptions.guardianOptions.optimizedSharedDelivery' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
+        }
+    }
+
+    private static final java.util.Set<String> HTTPS_POLICIES =
+            java.util.Set.of("REQUIRE", "REQUIRE_OPEN_ONLY", "OPTIONAL");
+    private static final java.util.Set<String> TLS_POLICIES = java.util.Set.of("REQUIRE", "OPTIONAL");
+
+    private void validateTrackingOptions(TrackingOptions options, String region) {
+        if (options == null) {
+            return;
+        }
+        String domain = options.getCustomRedirectDomain();
+        String httpsPolicy = options.getHttpsPolicy();
+        // AWS validation order (verified against real AWS 2026-06-17): a present
+        // CustomRedirectDomain must be non-blank, and it is required whenever
+        // HttpsPolicy is set; then the domain must be a verified domain identity
+        // (checked even without HttpsPolicy); then HttpsPolicy must be a valid enum.
+        if ((domain != null && domain.isBlank()) || (httpsPolicy != null && domain == null)) {
+            throw new AwsException("BadRequestException",
+                    "CustomRedirectDomain must be specified.", 400);
+        }
+        if (domain != null && !isVerifiedDomainIdentity(domain, region)) {
+            throw new AwsException("BadRequestException",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
+        }
+        if (httpsPolicy != null && !HTTPS_POLICIES.contains(httpsPolicy)) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'httpsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]", 400);
+        }
+    }
+
+    private void validateDeliveryOptions(DeliveryOptions options, String region) {
+        if (options == null) {
+            return;
+        }
+        if (options.getTlsPolicy() != null && !TLS_POLICIES.contains(options.getTlsPolicy())) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'tlsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]", 400);
+        }
+        // AWS rejects a blank SendingPoolName outright, and a non-existent
+        // dedicated IP pool (both verified against real AWS 2026-06-17). The
+        // pool must have been created via CreateDedicatedIpPool.
+        if (options.getSendingPoolName() != null) {
+            if (options.getSendingPoolName().isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "sendingPoolName can't be blank.", 400);
+            }
+            if (!dedicatedIpPoolExists(options.getSendingPoolName(), region)) {
+                throw new AwsException("BadRequestException",
+                        "SendingPool <" + options.getSendingPoolName() + "> doesn't exist", 400);
+            }
+        }
+        // AWS constrains MaxDeliverySeconds to [300, 50400] (max verified against
+        // real AWS 2026-06-17; min follows the same smithy range-constraint shape).
+        if (options.getMaxDeliverySeconds() != null) {
+            long maxDeliverySeconds = options.getMaxDeliverySeconds();
+            if (maxDeliverySeconds < 300) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value greater than or equal to 300", 400);
+            }
+            if (maxDeliverySeconds > 50400) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value less than or equal to 50400", 400);
+            }
+        }
     }
 
     public ConfigurationSet getConfigurationSet(String name, String region) {
@@ -651,6 +894,61 @@ public class SesService {
     private static String configSetKey(String region, String name) {
         validateConfigurationSetName(name);
         return "configSet::" + region + "::" + name;
+    }
+
+    // ──────────────────────── Dedicated IP Pools ────────────────────────
+
+    private static final java.util.Set<String> SCALING_MODES = java.util.Set.of("STANDARD", "MANAGED");
+
+    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, String region) {
+        if (poolName == null || poolName.isBlank()) {
+            throw new AwsException("BadRequestException", "PoolName is required.", 400);
+        }
+        String effectiveScaling = (scalingMode == null || scalingMode.isBlank()) ? "STANDARD" : scalingMode;
+        if (!SCALING_MODES.contains(effectiveScaling)) {
+            throw new AwsException("BadRequestException", "The ScalingMode parameter is invalid.", 400);
+        }
+        String key = dedicatedIpPoolKey(region, poolName);
+        if (dedicatedIpPoolStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "The pool <" + poolName + "> already exists.", 400);
+        }
+        DedicatedIpPool pool = new DedicatedIpPool(poolName, effectiveScaling);
+        dedicatedIpPoolStore.put(key, pool);
+        LOG.infov("Created SES dedicated IP pool: {0} in region {1}", poolName, region);
+        return pool;
+    }
+
+    public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
+        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "The requested pool <" + poolName + "> does not exist.", 404));
+    }
+
+    public boolean dedicatedIpPoolExists(String poolName, String region) {
+        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName)).isPresent();
+    }
+
+    public List<String> listDedicatedIpPools(String region) {
+        String prefix = "dedicatedIpPool::" + region + "::";
+        return dedicatedIpPoolStore.scan(k -> k.startsWith(prefix)).stream()
+                .map(DedicatedIpPool::getPoolName)
+                .sorted()
+                .toList();
+    }
+
+    public void deleteDedicatedIpPool(String poolName, String region) {
+        String key = dedicatedIpPoolKey(region, poolName);
+        if (dedicatedIpPoolStore.get(key).isEmpty()) {
+            throw new AwsException("NotFoundException",
+                    "The requested pool <" + poolName + "> does not exist.", 404);
+        }
+        dedicatedIpPoolStore.delete(key);
+        LOG.infov("Deleted SES dedicated IP pool: {0} in region {1}", poolName, region);
+    }
+
+    private static String dedicatedIpPoolKey(String region, String name) {
+        return "dedicatedIpPool::" + region + "::" + name;
     }
 
     static void validateConfigurationSetName(String name) {
@@ -1132,17 +1430,26 @@ public class SesService {
         String normalized = normalizeSuppressionEmail(emailAddress);
         validateSuppressionReason(reason, "reason", false);
         String key = suppressionKey(region, normalized);
-        SuppressedDestination existing = suppressionStore.get(key).orElse(null);
-        SuppressedDestination entry = existing != null ? existing : new SuppressedDestination(normalized, reason);
+        SuppressionMatch match = existingSuppressionMatch(region, emailAddress, normalized).orElse(null);
+        SuppressedDestination entry = match != null ? match.entry() : new SuppressedDestination(normalized, reason);
+        entry.setEmailAddress(normalized);
         entry.setReason(reason);
         entry.setLastUpdateTime(Instant.now());
+        // Write the canonical key first, then drop a legacy key it migrated from,
+        // so a failed write can't lose the entry. The legacy form was persisted by
+        // a pre-canonicalization Floci (trim-only key); migrating it avoids leaving
+        // a stuck duplicate after a re-PUT.
         suppressionStore.put(key, entry);
+        if (match != null && !match.key().equals(key)) {
+            suppressionStore.delete(match.key());
+        }
         LOG.infov("Suppressed destination {0} in region {1} (reason={2})", normalized, region, reason);
     }
 
     public SuppressedDestination getSuppressedDestination(String region, String emailAddress) {
         String normalized = normalizeSuppressionEmail(emailAddress);
-        return suppressionStore.get(suppressionKey(region, normalized))
+        return existingSuppressionMatch(region, emailAddress, normalized)
+                .map(SuppressionMatch::entry)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Email address " + normalized + " does not exist on your suppression list.",
                         404));
@@ -1150,14 +1457,38 @@ public class SesService {
 
     public void deleteSuppressedDestination(String region, String emailAddress) {
         String normalized = normalizeSuppressionEmail(emailAddress);
-        String key = suppressionKey(region, normalized);
-        if (suppressionStore.get(key).isEmpty()) {
-            throw new AwsException("NotFoundException",
-                    "Email address " + normalized + " does not exist on your suppression list.",
-                    404);
-        }
-        suppressionStore.delete(key);
+        SuppressionMatch match = existingSuppressionMatch(region, emailAddress, normalized)
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "Email address " + normalized + " does not exist on your suppression list.",
+                        404));
+        suppressionStore.delete(match.key());
         LOG.infov("Removed suppression entry for {0} in region {1}", normalized, region);
+    }
+
+    /** A suppression entry together with the storage key it currently lives under. */
+    private record SuppressionMatch(String key, SuppressedDestination entry) {
+    }
+
+    /**
+     * Resolve a suppression entry by its canonical (domain-lower-cased) key, falling
+     * back to the legacy raw-trimmed key used by a pre-canonicalization Floci. Returns
+     * the entry and the key it was found under in a single read per candidate, so
+     * callers don't re-fetch the store.
+     */
+    private Optional<SuppressionMatch> existingSuppressionMatch(String region, String rawEmail, String normalized) {
+        String canonical = suppressionKey(region, normalized);
+        Optional<SuppressedDestination> hit = suppressionStore.get(canonical);
+        if (hit.isPresent()) {
+            return Optional.of(new SuppressionMatch(canonical, hit.get()));
+        }
+        String legacy = suppressionKey(region, rawEmail.trim());
+        if (!legacy.equals(canonical)) {
+            Optional<SuppressedDestination> legacyHit = suppressionStore.get(legacy);
+            if (legacyHit.isPresent()) {
+                return Optional.of(new SuppressionMatch(legacy, legacyHit.get()));
+            }
+        }
+        return Optional.empty();
     }
 
     public List<SuppressedDestination> listSuppressedDestinations(String region, List<String> reasonFilters) {
@@ -1214,7 +1545,8 @@ public class SesService {
                 continue;
             }
             String normalized = normalizeSuppressionEmail(address);
-            SuppressedDestination entry = suppressionStore.get(suppressionKey(region, normalized))
+            SuppressedDestination entry = existingSuppressionMatch(region, address, normalized)
+                    .map(SuppressionMatch::entry)
                     .orElse(null);
             if (entry != null && entry.getReason() != null
                     && reasonFilter.contains(entry.getReason())) {
@@ -1269,9 +1601,11 @@ public class SesService {
             return null;
         }
         // Share the same normalization used when entries are stored
-        // (`normalizeSuppressionEmail`) so lookups can't drift apart from inserts.
+        // (`normalizeSuppressionEmail`) so lookups can't drift apart from inserts,
+        // with the same legacy-key fallback as GET/DELETE.
         String normalized = normalizeSuppressionEmail(emailAddress);
-        SuppressedDestination entry = suppressionStore.get(suppressionKey(region, normalized))
+        SuppressedDestination entry = existingSuppressionMatch(region, emailAddress, normalized)
+                .map(SuppressionMatch::entry)
                 .orElse(null);
         if (entry == null || entry.getReason() == null) {
             return null;
@@ -1287,8 +1621,19 @@ public class SesService {
         if (emailAddress == null || emailAddress.isBlank()) {
             throw new AwsException("BadRequestException", "EmailAddress is required.", 400);
         }
-        // AWS trims leading/trailing whitespace from EmailAddress before storing.
-        return emailAddress.trim();
+        // AWS trims the EmailAddress and canonicalizes only the domain to lower
+        // case; the local-part keeps its case. Verified against real AWS SES V2
+        // (2026-06-15): `Foo@Example.COM` and `Foo@example.com` collapse to one
+        // suppression entry (`Foo@example.com`), but `Foo@x` and `foo@x` are two
+        // distinct entries. Lower-casing the whole address would wrongly merge
+        // local-part variants and alter the stored value on read-back.
+        // Locale.ROOT avoids the JVM-locale Turkish-i pitfall.
+        String trimmed = emailAddress.trim();
+        int at = trimmed.lastIndexOf('@');
+        if (at < 0) {
+            return trimmed;
+        }
+        return trimmed.substring(0, at) + "@" + trimmed.substring(at + 1).toLowerCase(Locale.ROOT);
     }
 
     /**
@@ -1318,13 +1663,24 @@ public class SesService {
      * V2 SES uses a different, simpler natural-language sentence on this
      * endpoint than on the three older suppression APIs above:
      *   "Reason <X> is invalid, must be one of [BOUNCE, COMPLAINT]."
-     * (Verified against real AWS V2 SES on 2026-06-03.)
+     * (Verified against real AWS V2 SES on 2026-06-03.) CreateConfigurationSet
+     * reports the constraint-style validation message for invalid non-null
+     * values but falls back to this sentence for null elements, matching AWS
+     * (verified 2026-06-13); see {@link #createConfigurationSet}.
      */
     private static void validateConfigSetSuppressionReason(String reason) {
-        if (reason == null || (!"BOUNCE".equals(reason) && !"COMPLAINT".equals(reason))) {
+        if (!isValidConfigSetSuppressionReason(reason)) {
             throw new AwsException("BadRequestException",
-                    "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].", 400);
+                    invalidSuppressionReasonMessage(reason), 400);
         }
+    }
+
+    private static boolean isValidConfigSetSuppressionReason(String reason) {
+        return "BOUNCE".equals(reason) || "COMPLAINT".equals(reason);
+    }
+
+    private static String invalidSuppressionReasonMessage(String reason) {
+        return "Reason " + reason + " is invalid, must be one of [BOUNCE, COMPLAINT].";
     }
 
     static void validateTag(Tag tag) {

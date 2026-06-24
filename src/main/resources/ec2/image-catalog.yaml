@@ -1,0 +1,82 @@
+defaultDockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+
+images:
+  - imageId: ami-0abcdef1234567890
+    aliases:
+      - ami-amazonlinux2
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2
+    name: amzn2-ami-hvm-2.0.20230404.0-x86_64-gp2
+    description: Amazon Linux 2 AMI
+    architecture: x86_64
+    creationDate: "2023-04-04T00:00:00.000Z"
+
+  - imageId: ami-0abcdef1234567891
+    aliases:
+      - ami-amazonlinux2023
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: al2023-ami-2023.0.20230315.0-kernel-6.1-x86_64
+    description: Amazon Linux 2023 AMI
+    architecture: x86_64
+    creationDate: "2023-03-15T00:00:00.000Z"
+
+  - imageId: ami-0abcdef1234567892
+    aliases:
+      - ami-ubuntu2004
+    dockerImage: public.ecr.aws/docker/library/ubuntu:20.04
+    name: ubuntu/images/hvm-ssd/ubuntu-focal-20.04-amd64-server-20230324
+    description: Canonical, Ubuntu, 20.04 LTS
+    ownerId: "099720109477"
+    imageOwnerAlias: canonical
+    architecture: x86_64
+    creationDate: "2023-03-24T00:00:00.000Z"
+
+  - imageId: ami-ubuntu2204
+    dockerImage: public.ecr.aws/docker/library/ubuntu:22.04
+    name: ubuntu/images/hvm-ssd/ubuntu-jammy-22.04-amd64-server-20230420
+    description: Canonical, Ubuntu, 22.04 LTS
+    ownerId: "099720109477"
+    imageOwnerAlias: canonical
+    architecture: x86_64
+    creationDate: "2023-04-20T00:00:00.000Z"
+
+  - imageId: ami-ubuntu2404-arm64
+    aliases:
+      - ami-ubuntu2404
+    dockerImage: public.ecr.aws/docker/library/ubuntu:24.04
+    name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20260515
+    description: Canonical, Ubuntu, 24.04 LTS
+    ownerId: "099720109477"
+    imageOwnerAlias: canonical
+    architecture: arm64
+    creationDate: "2026-05-15T00:00:00.000Z"
+
+  - imageId: ami-ubuntu2404-amd64
+    dockerImage: public.ecr.aws/docker/library/ubuntu:24.04
+    name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-20260515
+    description: Canonical, Ubuntu, 24.04 LTS
+    ownerId: "099720109477"
+    imageOwnerAlias: canonical
+    architecture: x86_64
+    creationDate: "2026-05-15T00:00:00.000Z"
+
+  - imageId: ami-debian12
+    dockerImage: public.ecr.aws/docker/library/debian:12
+    name: debian-12-amd64-20230411
+    description: Debian 12 AMI
+    architecture: x86_64
+    creationDate: "2023-04-11T00:00:00.000Z"
+
+  - imageId: ami-alpine
+    dockerImage: public.ecr.aws/docker/library/alpine:latest
+    name: alpine-linux-latest-x86_64
+    description: Alpine Linux AMI
+    architecture: x86_64
+    creationDate: "2023-04-01T00:00:00.000Z"
+
+  - imageId: ami-0abcdef1234567893
+    dockerImage: public.ecr.aws/amazonlinux/amazonlinux:2023
+    name: Windows_Server-2022-English-Full-Base-2023.04.12
+    description: Microsoft Windows Server 2022 Full Locale English AMI
+    architecture: x86_64
+    platform: windows
+    creationDate: "2023-04-12T00:00:00.000Z"

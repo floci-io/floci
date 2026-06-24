@@ -3,9 +3,6 @@ package io.github.hectorvent.floci.services.sns;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.Test;
 
-import java.nio.charset.StandardCharsets;
-import java.util.Base64;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
 
@@ -16,7 +13,7 @@ class SnsLambdaIntegrationTest {
     void publish_toLambdaSubscriber() {
         // 1. Create a Lambda function using the REST API (skipping code to bypass validation)
         String functionName = "sns-subscriber-fn";
-        
+
         String lambdaRequest = String.format(
             "{\"FunctionName\":\"%s\",\"Runtime\":\"nodejs18.x\",\"Handler\":\"index.handler\",\"Role\":\"arn:aws:iam::000000000000:role/lambda-role\"}",
             functionName
@@ -68,7 +65,7 @@ class SnsLambdaIntegrationTest {
         .then()
             .statusCode(200)
             .body(containsString("<MessageId>"));
-        
+
         // Note: Actual invocation check would require mocking the Docker/Executor,
         // but here we just want to see if it reaches the delivery logic without crashing.
     }

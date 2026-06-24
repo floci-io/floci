@@ -487,6 +487,394 @@ class AppSyncTest {
         assertThat(resp).isNotNull();
     }
 
+    // ── Phase 2: Model Compatibility ───────────────────────────────────
+
+    @Test
+    @Order(90)
+    void createDataSource_hasDataSourceArn() {
+        CreateDataSourceResponse resp = client.createDataSource(CreateDataSourceRequest.builder()
+                .apiId(apiId)
+                .name("arn-check-ds")
+                .type("NONE")
+                .build());
+
+        assertThat(resp.dataSource().dataSourceArn()).isNotNull();
+        assertThat(resp.dataSource().dataSourceArn()).contains("arn:aws:appsync:");
+        assertThat(resp.dataSource().dataSourceArn()).contains("/datasources/arn-check-ds");
+
+        client.deleteDataSource(r -> r.apiId(apiId).name("arn-check-ds"));
+    }
+
+    @Test
+    @Order(91)
+    void createResolver_hasResolverArn() {
+        CreateResolverResponse resp = client.createResolver(CreateResolverRequest.builder()
+                .apiId(apiId)
+                .typeName("Query")
+                .fieldName("resolverArnCheck")
+                .dataSourceName("none-ds")
+                .build());
+
+        assertThat(resp.resolver().resolverArn()).isNotNull();
+        assertThat(resp.resolver().resolverArn()).contains("arn:aws:appsync:");
+        assertThat(resp.resolver().resolverArn()).contains("/types/Query/resolvers/resolverArnCheck");
+
+        client.deleteResolver(r -> r.apiId(apiId).typeName("Query").fieldName("resolverArnCheck"));
+    }
+
+    @Test
+    @Order(92)
+    void createFunction_hasFunctionArn() {
+        CreateFunctionResponse resp = client.createFunction(CreateFunctionRequest.builder()
+                .apiId(apiId)
+                .name("arn-check-fn")
+                .dataSourceName("none-ds")
+                .build());
+
+        assertThat(resp.functionConfiguration().functionArn()).isNotNull();
+        assertThat(resp.functionConfiguration().functionArn()).contains("arn:aws:appsync:");
+
+        client.deleteFunction(r -> r.apiId(apiId).functionId(resp.functionConfiguration().functionId()));
+    }
+
+    @Test
+    @Order(93)
+    void startSchemaCreation_invalidSchema() {
+        assertThatThrownBy(() -> client.startSchemaCreation(StartSchemaCreationRequest.builder()
+                        .apiId(apiId)
+                        .definition(SdkBytes.fromUtf8String("type Query { invalid !!! }"))
+                        .build()))
+                .isInstanceOf(AppSyncException.class)
+                .hasMessageContaining("Invalid schema");
+    }
+
+    @Test
+    @Order(94)
+    void startSchemaCreation_withAWSScalars() {
+        StartSchemaCreationResponse resp = client.startSchemaCreation(
+                StartSchemaCreationRequest.builder()
+                        .apiId(apiId)
+                        .definition(SdkBytes.fromUtf8String(
+                                "type Query { now: AWSDateTime, data: AWSJSON, ip: AWSIPAddress, active: AWSBoolean }"))
+                        .build());
+
+        assertThat(resp.status()).isNotNull();
+    }
+
+    // ── Channel Namespaces ─────────────────────────────────────────────
+
+    private static String channelNsName;
+
+    @Test
+    @Order(95)
+    void createChannelNamespace() {
+        CreateChannelNamespaceResponse resp = client.createChannelNamespace(
+                CreateChannelNamespaceRequest.builder()
+                        .apiId(apiId)
+                        .name("sdk-channel-ns")
+                        .build());
+
+        assertThat(resp.channelNamespace()).isNotNull();
+        channelNsName = resp.channelNamespace().name();
+        assertThat(channelNsName).isEqualTo("sdk-channel-ns");
+        assertThat(resp.channelNamespace().apiId()).isEqualTo(apiId);
+    }
+
+    @Test
+    @Order(96)
+    void getChannelNamespace() {
+        GetChannelNamespaceResponse resp = client.getChannelNamespace(
+                GetChannelNamespaceRequest.builder()
+                        .apiId(apiId)
+                        .name(channelNsName)
+                        .build());
+
+        assertThat(resp.channelNamespace()).isNotNull();
+        assertThat(resp.channelNamespace().name()).isEqualTo(channelNsName);
+    }
+
+    @Test
+    @Order(97)
+    void updateChannelNamespace() {
+        UpdateChannelNamespaceResponse resp = client.updateChannelNamespace(
+                UpdateChannelNamespaceRequest.builder()
+                        .apiId(apiId)
+                        .name(channelNsName)
+                        .build());
+
+        assertThat(resp.channelNamespace()).isNotNull();
+    }
+
+    @Test
+    @Order(98)
+    void listChannelNamespaces() {
+        ListChannelNamespacesResponse resp = client.listChannelNamespaces(
+                ListChannelNamespacesRequest.builder()
+                        .apiId(apiId)
+                        .build());
+
+        assertThat(resp.channelNamespaces()).isNotEmpty();
+    }
+
+    @Test
+    @Order(99)
+    void deleteChannelNamespace() {
+        DeleteChannelNamespaceResponse resp = client.deleteChannelNamespace(
+                DeleteChannelNamespaceRequest.builder()
+                        .apiId(apiId)
+                        .name(channelNsName)
+                        .build());
+
+        assertThat(resp).isNotNull();
+    }
+
+    // ── Domain Association ─────────────────────────────────────────────
+
+    private static String tempDomainName;
+
+    @Test
+    @Order(100)
+    void createDomainName() {
+        // Use unique domain name to avoid conflicts
+        String domainSuffix = java.util.UUID.randomUUID().toString().substring(0, 8);
+        CreateDomainNameResponse resp = client.createDomainName(
+                CreateDomainNameRequest.builder()
+                        .domainName("sdk-" + domainSuffix + ".example.com")
+                        .certificateArn("arn:aws:acm:us-east-1:000000000000:certificate/sdk")
+                        .build());
+
+        assertThat(resp.domainNameConfig()).isNotNull();
+        tempDomainName = resp.domainNameConfig().domainName();
+        assertThat(tempDomainName).startsWith("sdk-");
+        assertThat(resp.domainNameConfig().appsyncDomainName()).isNotNull();
+    }
+
+    @Test
+    @Order(101)
+    void getDomainName() {
+        GetDomainNameResponse resp = client.getDomainName(
+                GetDomainNameRequest.builder()
+                        .domainName(tempDomainName)
+                        .build());
+
+        assertThat(resp.domainNameConfig()).isNotNull();
+        assertThat(resp.domainNameConfig().domainName()).isEqualTo(tempDomainName);
+    }
+
+    @Test
+    @Order(102)
+    void updateDomainName() {
+        UpdateDomainNameResponse resp = client.updateDomainName(
+                UpdateDomainNameRequest.builder()
+                        .domainName(tempDomainName)
+                        .description("updated-domain")
+                        .build());
+
+        assertThat(resp.domainNameConfig()).isNotNull();
+        assertThat(resp.domainNameConfig().domainName()).isEqualTo(tempDomainName);
+    }
+
+    @Test
+    @Order(103)
+    void associateApi() {
+        AssociateApiResponse resp = client.associateApi(
+                AssociateApiRequest.builder()
+                        .domainName(tempDomainName)
+                        .apiId(apiId)
+                        .build());
+
+        assertThat(resp.apiAssociation()).isNotNull();
+        assertThat(resp.apiAssociation().domainName()).isEqualTo(tempDomainName);
+        assertThat(resp.apiAssociation().apiId()).isEqualTo(apiId);
+    }
+
+    @Test
+    @Order(104)
+    void getApiAssociation() {
+        GetApiAssociationResponse resp = client.getApiAssociation(
+                GetApiAssociationRequest.builder()
+                        .domainName(tempDomainName)
+                        .build());
+
+        assertThat(resp.apiAssociation()).isNotNull();
+        assertThat(resp.apiAssociation().apiId()).isEqualTo(apiId);
+    }
+
+    @Test
+    @Order(105)
+    void disassociateApi() {
+        DisassociateApiResponse resp = client.disassociateApi(
+                DisassociateApiRequest.builder()
+                        .domainName(tempDomainName)
+                        .build());
+
+        assertThat(resp).isNotNull();
+    }
+
+    @Test
+    @Order(106)
+    void deleteDomainName() {
+        DeleteDomainNameResponse resp = client.deleteDomainName(
+                DeleteDomainNameRequest.builder()
+                        .domainName(tempDomainName)
+                        .build());
+
+        assertThat(resp).isNotNull();
+    }
+
+    // ── Source API Association ─────────────────────────────────────────
+
+    private static String sourceApiId;
+    private static String assocId;
+
+    @Test
+    @Order(107)
+    void associateSourceGraphqlApi() {
+        // Create source API
+        CreateGraphqlApiResponse sourceResp = client.createGraphqlApi(
+                CreateGraphqlApiRequest.builder()
+                        .name("sdk-source-api")
+                        .authenticationType("API_KEY")
+                        .build());
+        sourceApiId = sourceResp.graphqlApi().apiId();
+
+        AssociateSourceGraphqlApiResponse resp = client.associateSourceGraphqlApi(
+                AssociateSourceGraphqlApiRequest.builder()
+                        .mergedApiIdentifier(apiId)
+                        .sourceApiIdentifier(sourceApiId)
+                        .build());
+
+        assertThat(resp.sourceApiAssociation()).isNotNull();
+        assocId = resp.sourceApiAssociation().associationId();
+        assertThat(assocId).isNotNull();
+        assertThat(resp.sourceApiAssociation().sourceApiId()).isEqualTo(sourceApiId);
+    }
+
+    @Test
+    @Order(108)
+    void getSourceApiAssociation() {
+        GetSourceApiAssociationResponse resp = client.getSourceApiAssociation(
+                GetSourceApiAssociationRequest.builder()
+                        .mergedApiIdentifier(apiId)
+                        .associationId(assocId)
+                        .build());
+
+        assertThat(resp.sourceApiAssociation()).isNotNull();
+        assertThat(resp.sourceApiAssociation().associationId()).isEqualTo(assocId);
+        assertThat(resp.sourceApiAssociation().sourceApiId()).isEqualTo(sourceApiId);
+    }
+
+    @Test
+    @Order(109)
+    void listSourceApiAssociations() {
+        ListSourceApiAssociationsResponse resp = client.listSourceApiAssociations(
+                ListSourceApiAssociationsRequest.builder()
+                        .apiId(apiId)
+                        .build());
+
+        assertThat(resp.sourceApiAssociationSummaries()).isNotEmpty();
+    }
+
+    @Test
+    @Order(110)
+    void disassociateSourceGraphqlApi() {
+        DisassociateSourceGraphqlApiResponse resp = client.disassociateSourceGraphqlApi(
+                DisassociateSourceGraphqlApiRequest.builder()
+                        .mergedApiIdentifier(apiId)
+                        .associationId(assocId)
+                        .build());
+
+        assertThat(resp).isNotNull();
+    }
+
+    @Test
+    @Order(111)
+    void cleanupSourceApi() {
+        client.deleteGraphqlApi(DeleteGraphqlApiRequest.builder()
+                .apiId(sourceApiId)
+                .build());
+    }
+
+    // ── Merged API Associations ────────────────────────────────────────
+
+    private static String mergedAssocSourceApiId;
+    private static String mergedAssocId;
+
+    @Test
+    @Order(112)
+    void associateMergedGraphqlApi() {
+        CreateGraphqlApiResponse sourceResp = client.createGraphqlApi(
+                CreateGraphqlApiRequest.builder()
+                        .name("sdk-merged-source")
+                        .authenticationType("API_KEY")
+                        .build());
+        mergedAssocSourceApiId = sourceResp.graphqlApi().apiId();
+
+        AssociateMergedGraphqlApiResponse resp = client.associateMergedGraphqlApi(
+                AssociateMergedGraphqlApiRequest.builder()
+                        .sourceApiIdentifier(mergedAssocSourceApiId)
+                        .mergedApiIdentifier(apiId)
+                        .build());
+
+        assertThat(resp.sourceApiAssociation()).isNotNull();
+        mergedAssocId = resp.sourceApiAssociation().associationId();
+        assertThat(mergedAssocId).isNotNull();
+        assertThat(resp.sourceApiAssociation().sourceApiId()).isEqualTo(mergedAssocSourceApiId);
+        assertThat(resp.sourceApiAssociation().mergedApiId()).isEqualTo(apiId);
+    }
+
+    @Test
+    @Order(113)
+    void updateSourceApiAssociation() {
+        CreateGraphqlApiResponse updateSourceResp = client.createGraphqlApi(
+                CreateGraphqlApiRequest.builder()
+                        .name("sdk-update-source")
+                        .authenticationType("API_KEY")
+                        .build());
+        String updateSourceApiId = updateSourceResp.graphqlApi().apiId();
+
+        AssociateSourceGraphqlApiResponse assocResp = client.associateSourceGraphqlApi(
+                AssociateSourceGraphqlApiRequest.builder()
+                        .mergedApiIdentifier(apiId)
+                        .sourceApiIdentifier(updateSourceApiId)
+                        .build());
+        String updateAssocId = assocResp.sourceApiAssociation().associationId();
+
+        UpdateSourceApiAssociationResponse resp = client.updateSourceApiAssociation(
+                UpdateSourceApiAssociationRequest.builder()
+                        .mergedApiIdentifier(apiId)
+                        .associationId(updateAssocId)
+                        .description("updated-association")
+                        .build());
+
+        assertThat(resp.sourceApiAssociation()).isNotNull();
+        assertThat(resp.sourceApiAssociation().associationId()).isEqualTo(updateAssocId);
+        assertThat(resp.sourceApiAssociation().description()).isEqualTo("updated-association");
+
+        client.deleteGraphqlApi(DeleteGraphqlApiRequest.builder().apiId(updateSourceApiId).build());
+    }
+
+    @Test
+    @Order(114)
+    void disassociateMergedGraphqlApi() {
+        DisassociateMergedGraphqlApiResponse resp = client.disassociateMergedGraphqlApi(
+                DisassociateMergedGraphqlApiRequest.builder()
+                        .sourceApiIdentifier(mergedAssocSourceApiId)
+                        .associationId(mergedAssocId)
+                        .build());
+
+        assertThat(resp).isNotNull();
+        assertThat(resp.sourceApiAssociationStatus()).isNotNull();
+    }
+
+    @Test
+    @Order(115)
+    void cleanupMergedSourceApi() {
+        client.deleteGraphqlApi(DeleteGraphqlApiRequest.builder()
+                .apiId(mergedAssocSourceApiId)
+                .build());
+    }
+
     // ── Error Handling ─────────────────────────────────────────────────
 
     @Test
