@@ -617,7 +617,7 @@ public class Ec2Service {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                String dockerImage = amiImageResolver.resolve(imageId);
+                ResolvedAmiImage dockerImage = amiImageResolver.resolveImage(imageId);
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);

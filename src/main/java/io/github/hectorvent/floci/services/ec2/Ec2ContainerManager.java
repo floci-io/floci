@@ -15,6 +15,8 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -99,6 +101,10 @@ public class Ec2ContainerManager {
      * @param region      AWS region (for CloudWatch log group naming)
      */
     public void launch(Instance instance, String dockerImage, String publicKey, String region) {
+        launch(instance, ResolvedAmiImage.minimal(dockerImage), publicKey, region);
+    }
+
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region) {
         instance.setState(InstanceState.pending());
 
         executor.submit(() -> {
@@ -118,9 +124,9 @@ public class Ec2ContainerManager {
                 String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
                 String serviceEndpoint = "http://" + flociHost + ":4566";
 
-                // Build container spec — use tail -f /dev/null to keep container alive
-                // regardless of the base image's default CMD.
-                ContainerSpec spec = containerBuilder.newContainer(dockerImage)
+                // Build container spec — minimal images keep the historic tail
+                // command, while cloud-image AMI guests can boot their init.
+                ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image.dockerImage())
                         .withName(containerName)
                         .withEmbeddedDns()
                         .withDockerNetwork(Optional.empty())
@@ -133,8 +139,15 @@ public class Ec2ContainerManager {
                         // needs network administration privileges in the local
                         // container to attach that link-local address.
                         .withPrivileged(true)
-                        .withCmd(List.of("tail", "-f", "/dev/null"))
-                        .build();
+                        .withCmd(image.systemd() ? List.of("/sbin/init") : List.of("tail", "-f", "/dev/null"));
+                if (image.systemd()) {
+                    specBuilder
+                            .withCgroupnsMode("host")
+                            .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
+                            .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
+                            .withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+                }
+                ContainerSpec spec = specBuilder.build();
 
                 // Create container without starting it
                 String containerId = lifecycleManager.create(spec);
