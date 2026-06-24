@@ -242,6 +242,8 @@ class Ec2IntegrationTest {
             .statusCode(200)
             .contentType("application/xml")
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceType", equalTo("m6gd.2xlarge"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageSupported", equalTo("true"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB", equalTo("474"))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     equalTo("arm64"));
     }
@@ -267,6 +269,10 @@ class Ec2IntegrationTest {
                     everyItem(equalTo("2")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.memoryInfo.sizeInMiB",
                     everyItem(equalTo("8192")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageSupported",
+                    everyItem(equalTo("true")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB",
+                    everyItem(equalTo("118")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.supportedArchitectures.item.item",
                     everyItem(equalTo("arm64")));
     }
