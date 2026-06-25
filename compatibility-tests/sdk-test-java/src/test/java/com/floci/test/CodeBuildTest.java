@@ -45,6 +45,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CodeBuildTest {
 
+    private static final String CODEBUILD_TEST_IMAGE =
+            "public.ecr.aws/docker/library/busybox@sha256:fd8d9aa63ba2f0982b5304e1ee8d3b90a210bc1ffb5314d980eb6962f1a9715d";
+
     static CodeBuildClient codebuild;
     static String reportGroupArn;
     static String sourceCredentialsArn;
@@ -210,7 +213,7 @@ class CodeBuildTest {
                         .build())
                 .environment(ProjectEnvironment.builder()
                         .type(EnvironmentType.LINUX_CONTAINER)
-                        .image("public.ecr.aws/docker/library/alpine:latest")
+                        .image(CODEBUILD_TEST_IMAGE)
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
                 .serviceRole("arn:aws:iam::000000000000:role/codebuild-role"));
@@ -343,7 +346,7 @@ class CodeBuildTest {
                         .build())
                 .environment(ProjectEnvironment.builder()
                         .type(EnvironmentType.LINUX_CONTAINER)
-                        .image("public.ecr.aws/docker/library/alpine:latest")
+                        .image(CODEBUILD_TEST_IMAGE)
                         .computeType(ComputeType.BUILD_GENERAL1_SMALL)
                         .build())
                 .serviceRole("arn:aws:iam::000000000000:role/codebuild-role"));
@@ -358,7 +361,7 @@ class CodeBuildTest {
                 "  build:",
                 "    commands:",
                 "      - echo '=== OS Family ===' > command-output.txt",
-                "      - cat /etc/os-release >> command-output.txt",
+                "      - uname -a >> command-output.txt",
                 "      - echo '' >> command-output.txt",
                 "      - echo '=== Directory Tree (depth 3) ===' >> command-output.txt",
                 "      - find / -maxdepth 3 -type d 2>/dev/null >> command-output.txt",
@@ -409,7 +412,7 @@ class CodeBuildTest {
         System.out.println("=== command-output.txt from os-bucket ===");
         System.out.println(content);
 
-        assertThat(content).contains("NAME=");
+        assertThat(content).contains("Linux");
         assertThat(content).contains("/usr");
 
         s3.close();
