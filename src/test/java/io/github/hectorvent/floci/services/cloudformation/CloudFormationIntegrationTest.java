@@ -1138,6 +1138,95 @@ class CloudFormationIntegrationTest {
             .body(containsString("does not exist"));
     }
 
+    // Regression: issue #1539. Deleting a stack that owns a NON-EMPTY S3 bucket must leave the
+    // stack in DELETE_FAILED (S3 refuses to delete a non-empty bucket) and keep the bucket — it
+    // must not silently report DELETE_COMPLETE while the bucket and its objects still exist.
+    @Test
+    void deleteStack_withNonEmptyS3Bucket_failsAndKeepsBucket() throws Exception {
+        String bucket = "cfn-nonempty-delete-test-bucket";
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s"
+                  }
+                }
+              }
+            }
+            """.formatted(bucket);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-nonempty-delete-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // The managed bucket exists.
+        given()
+            .header("Host", bucket + ".localhost")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200);
+
+        // Put an object so the bucket is non-empty.
+        given()
+            .contentType("text/plain")
+            .body("hello floci 1539")
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-nonempty-delete-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The stack must settle into DELETE_FAILED — never DELETE_COMPLETE.
+        String statusXml = null;
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            statusXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", "cfn-nonempty-delete-stack")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (statusXml.contains("<StackStatus>DELETE_FAILED</StackStatus>")
+                    || statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertThat(statusXml, containsString("<StackStatus>DELETE_FAILED</StackStatus>"));
+        assertThat(statusXml, not(containsString("<StackStatus>DELETE_COMPLETE</StackStatus>")));
+
+        // The managed bucket must still exist after the failed delete.
+        given()
+            .header("Host", bucket + ".localhost")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200);
+    }
+
     @Test
     void describeDeletedStack_byArn_expiresAfterRetentionWindow() throws Exception {
         String template = """
