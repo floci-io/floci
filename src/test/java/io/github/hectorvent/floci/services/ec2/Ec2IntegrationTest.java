@@ -223,9 +223,10 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
-            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-ubuntu2404-arm64"))
-            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(2))
+            .body("DescribeImagesResponse.imagesSet.item.imageId",
+                    containsInAnyOrder("ami-ubuntu2404-arm64", "ami-ubuntu2404-cloud-arm64"))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", everyItem(equalTo("arm64")));
     }
 
     @Test
@@ -573,6 +574,67 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(34)
+    void describeSecurityGroupRulesReturnsDefaultEgress() {
+        // Issue #1093: default egress rule must be visible via DescribeSecurityGroupRules
+        // immediately after CreateSecurityGroup. Terraform relies on this.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            // Must contain at least the default egress-all rule plus the authorized
+            // ingress (ssh/22) and egress (tcp/443) rules
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
+                    greaterThanOrEqualTo(3))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.groupId",
+                    everyItem(equalTo(securityGroupId)));
+    }
+
+    @Test
+    @Order(35)
+    void describeSecurityGroupRulesIncludesIngressRule() {
+        // Verify authorized ingress rule (tcp/22) is present in the rules list
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<fromPort>22</fromPort>"))
+            .body(containsString("<ipProtocol>tcp</ipProtocol>"))
+            .body(containsString("<cidrIpv4>0.0.0.0/0</cidrIpv4>"));
+    }
+
+    @Test
+    @Order(36)
+    void describeSecurityGroupRulesDefaultVpcEgressVisible() {
+        // Issue #1093: default VPC security group must also have its egress rule visible
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", "sg-default")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
+                    greaterThanOrEqualTo(1))
+            .body(containsString("<isEgress>true</isEgress>"))
+            .body(containsString("<ipProtocol>-1</ipProtocol>"));
     }
 
     // =========================================================================

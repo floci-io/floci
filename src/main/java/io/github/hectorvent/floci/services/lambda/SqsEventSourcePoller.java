@@ -288,8 +288,26 @@ public class SqsEventSourcePoller {
                         String.valueOf(msg.getFirstReceiveTimestamp() != null
                                 ? msg.getFirstReceiveTimestamp().toEpochMilli()
                                 : System.currentTimeMillis()));
-                record.putObject("messageAttributes");
+                // Populate messageAttributes from the message model
+                ObjectNode msgAttrs = record.putObject("messageAttributes");
+                if (msg.getMessageAttributes() != null) {
+                    msg.getMessageAttributes().forEach((name, val) -> {
+                        ObjectNode attrNode = msgAttrs.putObject(name);
+                        attrNode.put("dataType", val.getDataType() != null ? val.getDataType() : "String");
+                        if (val.getBinaryValue() != null) {
+                            attrNode.put("binaryValue",
+                                    java.util.Base64.getEncoder().encodeToString(val.getBinaryValue()));
+                        } else if (val.getStringValue() != null) {
+                            attrNode.put("stringValue", val.getStringValue());
+                        }
+                        attrNode.putArray("stringListValues");
+                        attrNode.putArray("binaryListValues");
+                    });
+                }
                 record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
+                if (msg.getMd5OfMessageAttributes() != null) {
+                    record.put("md5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+                }
                 record.put("eventSource", "aws:sqs");
                 record.put("eventSourceARN", esm.getEventSourceArn());
                 record.put("awsRegion", esm.getRegion());

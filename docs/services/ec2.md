@@ -4,7 +4,7 @@
 
 ## Instance Execution Model
 
-`RunInstances` launches a **real Docker container** for each instance. The container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. The lifecycle maps directly to Docker:
+`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest.
 
 | EC2 state | Docker operation |
 |---|---|
@@ -31,11 +31,44 @@ metadata.
 | `ami-ubuntu2204` | | `public.ecr.aws/docker/library/ubuntu:22.04` |
 | `ami-ubuntu2404-arm64` | `ami-ubuntu2404` | `public.ecr.aws/docker/library/ubuntu:24.04` |
 | `ami-ubuntu2404-amd64` | | `public.ecr.aws/docker/library/ubuntu:24.04` |
+| `ami-ubuntu2404-cloud-arm64` | `ami-ubuntu2404-cloud` | `floci/ami-ubuntu:24.04-arm64` |
 | `ami-debian12` | | `public.ecr.aws/docker/library/debian:12` |
 | `ami-alpine` | | `public.ecr.aws/docker/library/alpine:latest` |
 | `ami-0abcdef1234567893` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
 
 Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to the catalog `defaultDockerImage` (`public.ecr.aws/amazonlinux/amazonlinux:2023` by default).
+
+### Cloud-image-derived AMI guests
+
+The `ami-ubuntu2404-cloud` entry is an experimental Ubuntu 24.04 guest image built from Canonical cloud-image artifacts, not from the Docker-library `ubuntu:24.04` image. It is intended for EC2 workflows that need packages such as `systemd` and `cloud-init` to match a real Ubuntu cloud image more closely.
+
+This mode is opt-in by AMI selection, not by a global configuration switch.
+Existing catalog entries, including `ami-ubuntu2404`, keep their current
+Docker-library image mapping and default `tail -f /dev/null` container
+lifecycle. The cloud-image-derived entry is a separate AMI ID and alias, so
+`DescribeImages` can advertise it while existing callers continue to get the
+old behavior unless they choose `ami-ubuntu2404-cloud-arm64` or the
+`ami-ubuntu2404-cloud` alias.
+
+The Java metadata-driven builder lives at `io.github.hectorvent.floci.tools.ami.AmiImageTool`. Its recipe is checked in at `docker/ec2/ami-images/image-build-metadata.yaml`, and generated context/provenance defaults to `target/ami-images/<image-id>/`.
+
+```bash
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="plan --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="generate --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="build --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="smoke --image-id ubuntu-24.04-arm64"
+```
 
 ## SSH Key Injection
 

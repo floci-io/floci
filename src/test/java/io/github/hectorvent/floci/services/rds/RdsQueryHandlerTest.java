@@ -340,7 +340,7 @@ class RdsQueryHandlerTest {
                 eq(null), eq(null), eq(null), eq("db.t3.micro"),
                 eq(20), eq(false), eq(null), eq(null), eq(null), eq(false), eq(null), eq(java.util.Map.of())))
                 .thenThrow(new AwsException("InvalidParameterValue",
-                        "Unsupported engine: oracle. Supported: postgres, mysql, mariadb.", 400));
+                        "A value that you provided for a parameter isn't valid. Check the parameter constraints and try again.", 400));
 
         MultivaluedMap<String, String> p = params();
         p.add("DBInstanceIdentifier", "mydb");
@@ -349,6 +349,7 @@ class RdsQueryHandlerTest {
 
         assertEquals(400, response.getStatus());
         assertTrue(((String) response.getEntity()).contains("InvalidParameterValue"));
+        assertTrue(((String) response.getEntity()).contains("Check the parameter constraints and try again."));
     }
 
     @Test

@@ -362,6 +362,10 @@ public class ContainerLifecycleManager {
             hostConfig.withPrivileged(true);
         }
 
+        if (spec.cgroupnsMode() != null && !spec.cgroupnsMode().isBlank()) {
+            hostConfig.withCgroupnsMode(spec.cgroupnsMode());
+        }
+
         // Memory limit
         if (spec.hasMemoryLimit()) {
             hostConfig.withMemory(spec.memoryBytes());

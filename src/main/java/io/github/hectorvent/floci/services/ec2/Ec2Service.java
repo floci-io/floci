@@ -299,6 +299,9 @@ public class Ec2Service {
         egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
         defaultSg.getIpPermissionsEgress().add(egressAll);
         securityGroups.put(key(region, securityGroupId), defaultSg);
+        // Persist the default egress rule as a SecurityGroupRule so that
+        // DescribeSecurityGroupRules can find it immediately (#1093).
+        createRules(region, securityGroupId, egressAll, true);
     }
 
     private String createMainRouteTable(String region, Vpc vpc, String routeTableId, String associationId) {
@@ -617,7 +620,7 @@ public class Ec2Service {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                String dockerImage = amiImageResolver.resolve(imageId);
+                ResolvedAmiImage dockerImage = amiImageResolver.resolveImage(imageId);
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -1110,6 +1113,9 @@ public class Ec2Service {
         egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
         sg.getIpPermissionsEgress().add(egressAll);
         securityGroups.put(key(region, sgId), sg);
+        // Persist the default egress rule as a SecurityGroupRule so that
+        // DescribeSecurityGroupRules can find it immediately (#1093).
+        createRules(region, sgId, egressAll, true);
         return sg;
     }
 
@@ -1228,8 +1234,9 @@ public class Ec2Service {
 
     public List<SecurityGroupRule> describeSecurityGroupRules(String region, String groupId, List<String> ruleIds) {
         ensureDefaultResources(region);
-        return securityGroupRules.scan(k -> true).stream()
-                .filter(r -> r.getGroupId().equals(groupId))
+        String regionPrefix = region + "::";
+        return securityGroupRules.scan(k -> k.startsWith(regionPrefix)).stream()
+                .filter(r -> groupId.isEmpty() || groupId.equals(r.getGroupId()))
                 .filter(r -> ruleIds.isEmpty() || ruleIds.contains(r.getSecurityGroupRuleId()))
                 .collect(Collectors.toList());
     }

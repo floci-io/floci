@@ -166,6 +166,29 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstanceRejectsUnknownParameterGroup() {
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, "does-not-exist", null, null));
+
+        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBParameterGroupName doesn't refer to an existing DB parameter group.", exception.getMessage());
+    }
+
+    @Test
+    void createDbInstanceRejectsIncompatibleParameterGroupFamily() {
+        rdsService.createDbParameterGroup("pg1", "mysql8.0", "test group");
+
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, "pg1", null, null));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals("Parameters that must not be used together were used together. Remove one of the conflicting parameters and try again.",
+                exception.getMessage());
+    }
+
+    @Test
     void listDbInstancesIsCaseInsensitive() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -297,6 +320,27 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbClusterRejectsUnknownClusterParameterGroup() {
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, "does-not-exist"));
+
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", exception.getMessage());
+    }
+
+    @Test
+    void createDbClusterRejectsIncompatibleClusterParameterGroupFamily() {
+        rdsService.createDbClusterParameterGroup("cpg1", "aurora-mysql8.0", "test group");
+
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, "cpg1"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals("Parameters that must not be used together were used together. Remove one of the conflicting parameters and try again.",
+                exception.getMessage());
+    }
+
+    @Test
     void createDbClusterParameterGroupRoundTrip() {
         DbClusterParameterGroup created = rdsService.createDbClusterParameterGroup(
                 "cpg1", "aurora-postgresql16", "test cluster group");
@@ -337,7 +381,8 @@ class RdsServiceTest {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.deleteDbClusterParameterGroup("nonexistent"));
 
-        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", exception.getMessage());
     }
 
     @Test
@@ -345,7 +390,8 @@ class RdsServiceTest {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.getDbClusterParameterGroup("nonexistent"));
 
-        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", exception.getMessage());
     }
 
     @Test

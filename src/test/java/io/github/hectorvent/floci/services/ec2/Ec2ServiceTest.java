@@ -77,6 +77,22 @@ class Ec2ServiceTest {
         assertEquals("source", version.getInstanceTags().getFirst().getValue());
     }
 
+    @Test
+    void describeImagesAdvertisesCloudGuestWithoutChangingUbuntuDefault() {
+        Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
+        AmiImageResolver amiImageResolver = new AmiImageResolver(imageCatalog);
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                amiImageResolver, imageCatalog, new InMemoryStorageFactory());
+
+        assertTrue(service.describeImages("us-east-1", List.of(), List.of()).stream()
+                .anyMatch(image -> "ami-ubuntu2404-cloud-arm64".equals(image.getImageId())));
+        assertEquals("public.ecr.aws/docker/library/ubuntu:24.04", amiImageResolver.resolve("ami-ubuntu2404"));
+
+        ResolvedAmiImage resolved = amiImageResolver.resolveImage("ami-ubuntu2404-cloud");
+        assertEquals("floci/ami-ubuntu:24.04-arm64", resolved.dockerImage());
+        assertTrue(resolved.systemd());
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

@@ -74,24 +74,25 @@ public class CognitoService {
     public CognitoService(StorageFactory storageFactory, EmulatorConfig emulatorConfig,
             RegionResolver regionResolver, LambdaService lambdaService, SesService sesService,
             SnsService snsService, Clock clock) {
-        this.poolStore = storageFactory.create("cognito", "cognito-pools.json",
-                new TypeReference<Map<String, UserPool>>() {});
-        this.clientStore = storageFactory.create("cognito", "cognito-clients.json",
-                new TypeReference<Map<String, UserPoolClient>>() {});
-        this.resourceServerStore = storageFactory.create("cognito", "cognito-resource-servers.json",
-                new TypeReference<Map<String, ResourceServer>>() {});
-        this.userStore = storageFactory.create("cognito", "cognito-users.json",
-                new TypeReference<Map<String, CognitoUser>>() {});
-        this.groupStore = storageFactory.create("cognito", "cognito-groups.json",
-                new TypeReference<Map<String, CognitoGroup>>() {});
-        this.revokedTokenStore = storageFactory.create("cognito", "cognito-revoked-tokens.json",
-                new TypeReference<Map<String, RevokedTokenInfo>>() {});
-        this.baseUrl = trimTrailingSlash(emulatorConfig.baseUrl());
-        this.regionResolver = regionResolver;
-        this.lambdaService = lambdaService;
-        this.verificationCodeService = new VerificationCodeService(storageFactory, clock);
-        this.messageDispatcher = new CognitoMessageDispatcher(sesService, snsService);
-        this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
+        this(
+                storageFactory.create("cognito", "cognito-pools.json",
+                        new TypeReference<Map<String, UserPool>>() {}),
+                storageFactory.create("cognito", "cognito-clients.json",
+                        new TypeReference<Map<String, UserPoolClient>>() {}),
+                storageFactory.create("cognito", "cognito-resource-servers.json",
+                        new TypeReference<Map<String, ResourceServer>>() {}),
+                storageFactory.create("cognito", "cognito-users.json",
+                        new TypeReference<Map<String, CognitoUser>>() {}),
+                storageFactory.create("cognito", "cognito-groups.json",
+                        new TypeReference<Map<String, CognitoGroup>>() {}),
+                storageFactory.create("cognito", "cognito-revoked-tokens.json",
+                        new TypeReference<Map<String, RevokedTokenInfo>>() {}),
+                trimTrailingSlash(emulatorConfig.baseUrl()),
+                regionResolver,
+                lambdaService,
+                new VerificationCodeService(storageFactory, clock),
+                new CognitoMessageDispatcher(sesService, snsService)
+        );
     }
 
     CognitoService(StorageBackend<String, UserPool> poolStore,
@@ -103,6 +104,20 @@ public class CognitoService {
                    String baseUrl,
                    RegionResolver regionResolver,
                    LambdaService lambdaService) {
+        this(poolStore, clientStore, resourceServerStore, userStore, groupStore, revokedTokenStore, baseUrl,
+                regionResolver, lambdaService, null, null);
+    }
+
+    CognitoService(StorageBackend<String, UserPool> poolStore,
+            StorageBackend<String, UserPoolClient> clientStore,
+            StorageBackend<String, ResourceServer> resourceServerStore,
+            StorageBackend<String, CognitoUser> userStore,
+            StorageBackend<String, CognitoGroup> groupStore,
+            StorageBackend<String, RevokedTokenInfo> revokedTokenStore,
+            String baseUrl,
+            RegionResolver regionResolver, LambdaService lambdaService,
+            VerificationCodeService verificationCodeService,
+            CognitoMessageDispatcher messageDispatcher) {
         this.poolStore = poolStore;
         this.clientStore = clientStore;
         this.resourceServerStore = resourceServerStore;
@@ -112,8 +127,8 @@ public class CognitoService {
         this.baseUrl = baseUrl;
         this.regionResolver = regionResolver;
         this.lambdaService = lambdaService;
-        this.verificationCodeService = null;
-        this.messageDispatcher = null;
+        this.verificationCodeService = verificationCodeService;
+        this.messageDispatcher = messageDispatcher;
         this.authFlowHandler = new CognitoAuthFlowHandler(this, lambdaService, regionResolver);
     }
 
@@ -1034,7 +1049,8 @@ public class CognitoService {
 
     public CognitoUser signUp(String clientId, String username, String password, Map<String, String> attributes) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
+                        400));
         String userPoolId = client.getUserPoolId();
         UserPool pool = describeUserPool(userPoolId);
 
@@ -1071,9 +1087,37 @@ public class CognitoService {
             user.getAttributes().put("phone_number_verified", "true");
         }
 
+        DeliveryTarget deliveryTarget = null;
+        boolean requiresConfirmationCode =
+                !preSignUp.autoConfirmUser() && verificationCodeService != null
+                        && messageDispatcher != null && isSignUpConfirmationEnabled(pool);
+        if (requiresConfirmationCode) {
+            deliveryTarget = resolveSignUpDeliveryTarget(pool, user);
+            if (deliveryTarget == null) {
+                throw new AwsException("InvalidParameterException",
+                        "Cannot confirm user because email or phone_number is missing", 400);
+            }
+        }
+
         userStore.put(key, user);
         LOG.infov("Signed up user {0} in pool {1} (status={2})",
                 username, userPoolId, user.getUserStatus());
+
+        if (requiresConfirmationCode) {
+            try {
+                String code = verificationCodeService.issue(pool.getId(), user.getUsername(),
+                        VerificationCode.Purpose.SIGNUP_CONFIRMATION, Duration.ofHours(24));
+                messageDispatcher.dispatch(pool, user, VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+                        code, List.of(deliveryTarget.deliveryMedium()));
+            } catch (VerificationCodeException e) {
+                rollbackSignUpConfirmationArtifacts(pool.getId(), user.getUsername(), key);
+                throw mapVerificationCodeException(e);
+            } catch (RuntimeException e) {
+                rollbackSignUpConfirmationArtifacts(pool.getId(), user.getUsername(), key);
+                throw new AwsException("CodeDeliveryFailureException",
+                        "Failed to deliver the message.", 400);
+            }
+        }
 
         // When PreSignUp auto-confirms, AWS Cognito also fires PostConfirmation.
         // See: docs.aws.amazon.com/cognito/latest/developerguide/user-pool-lambda-pre-sign-up.html
@@ -1084,16 +1128,43 @@ public class CognitoService {
     }
 
     public void confirmSignUp(String clientId, String username) {
+        confirmSignUp(clientId, username, null);
+    }
+
+    public void confirmSignUp(String clientId, String username, String confirmationCode) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found",
+                        400));
+        UserPool pool = poolStore.get(client.getUserPoolId())
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException",
+                        "User pool not found", 400));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
+        if (verificationCodeService != null && isSignUpConfirmationEnabled(pool)) {
+            try {
+                verificationCodeService.consume(client.getUserPoolId(), user.getUsername(),
+                        VerificationCode.Purpose.SIGNUP_CONFIRMATION,
+                        confirmationCode == null ? "" : confirmationCode);
+            } catch (VerificationCodeException e) {
+                throw mapVerificationCodeException(e);
+            }
+        }
         user.setUserStatus("CONFIRMED");
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(client.getUserPoolId(), user.getUsername()), user);
-
-        UserPool pool = poolStore.get(client.getUserPoolId())
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
         authFlowHandler.firePostConfirmation(pool, client, user, Map.of(), "PostConfirmation_ConfirmSignUp");
+    }
+
+    Map<String, String> signUpCodeDeliveryDetails(CognitoUser user) {
+        UserPool pool = describeUserPool(user.getUserPoolId());
+        if (!isSignUpConfirmationEnabled(pool)) {
+            return Map.of();
+        }
+        DeliveryTarget deliveryTarget = resolveSignUpDeliveryTarget(pool, user);
+        if (deliveryTarget == null) {
+            return Map.of();
+        }
+        return Map.of("AttributeName", deliveryTarget.attributeName(), "DeliveryMedium",
+                deliveryTarget.deliveryMedium(), "Destination", deliveryTarget.destination());
     }
 
     public void adminConfirmSignUp(String userPoolId, String username) {
@@ -2270,6 +2341,43 @@ public class CognitoService {
                 400);
     }
 
+    private boolean isSignUpConfirmationEnabled(UserPool pool) {
+        return pool.getAutoVerifiedAttributes() != null
+                && !pool.getAutoVerifiedAttributes().isEmpty();
+    }
+
+    private DeliveryTarget resolveSignUpDeliveryTarget(UserPool pool, CognitoUser user) {
+        Map<String, String> attributes = user.getAttributes();
+        List<String> autoVerifiedAttributes =
+                pool.getAutoVerifiedAttributes() != null ? pool.getAutoVerifiedAttributes()
+                        : List.of();
+        for (String attribute : autoVerifiedAttributes) {
+            if ("email".equals(attribute)) {
+                String email = blankToNull(attributes.get("email"));
+                if (email != null) {
+                    return new DeliveryTarget("email", "EMAIL", maskEmail(email));
+                }
+            }
+            if ("phone_number".equals(attribute)) {
+                String phoneNumber = blankToNull(attributes.get("phone_number"));
+                if (phoneNumber != null) {
+                    return new DeliveryTarget("phone_number", "SMS", maskPhoneNumber(phoneNumber));
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private void rollbackSignUpConfirmationArtifacts(String userPoolId, String username,
+            String userKey) {
+        userStore.delete(userKey);
+        if (verificationCodeService != null) {
+            verificationCodeService.invalidatePrevious(userPoolId, username,
+                    VerificationCode.Purpose.SIGNUP_CONFIRMATION);
+        }
+    }
+
     private AwsException mapVerificationCodeException(VerificationCodeException e) {
         return switch (e.getKind()) {
             case MISMATCH, NOT_FOUND -> new AwsException("CodeMismatchException",
@@ -2348,7 +2456,7 @@ public class CognitoService {
         return value;
     }
 
-    private String trimTrailingSlash(String value) {
+    private static String trimTrailingSlash(String value) {
         if (value.endsWith("/")) {
             return value.substring(0, value.length() - 1);
         }
