@@ -7,6 +7,9 @@ import jakarta.ws.rs.core.UriInfo;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Map;
+import java.util.Optional;
+
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -19,6 +22,7 @@ class AccountContextFilterTest {
     private AccountResolver accountResolver;
     private RegionResolver regionResolver;
     private RequestContext requestContext;
+    private Map<String, String> sessionAccounts;
     private AccountContextFilter filter;
 
     @BeforeEach
@@ -26,7 +30,9 @@ class AccountContextFilterTest {
         accountResolver = new AccountResolver(DEFAULT_ACCOUNT);
         regionResolver = new RegionResolver(DEFAULT_REGION, DEFAULT_ACCOUNT);
         requestContext = new RequestContext();
-        filter = new AccountContextFilter(accountResolver, regionResolver, requestContext);
+        sessionAccounts = new java.util.HashMap<>();
+        SessionAccountLookup sessionLookup = akid -> Optional.ofNullable(sessionAccounts.get(akid));
+        filter = new AccountContextFilter(accountResolver, regionResolver, requestContext, sessionLookup);
     }
 
     @Test
@@ -83,6 +89,52 @@ class AccountContextFilterTest {
         filter.filter(ctx);
         assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
         assertEquals(DEFAULT_REGION, requestContext.getRegion());
+    }
+
+    @Test
+    void resolvesAssumedRoleSessionKeyToSessionAccount() {
+        sessionAccounts.put("ASIAEXAMPLESESSIONKEY", "222233334444");
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=ASIAEXAMPLESESSIONKEY/20260617/us-west-2/dynamodb/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+        filter.filter(ctx);
+        assertEquals("222233334444", requestContext.getAccountId());
+        assertEquals("us-west-2", requestContext.getRegion());
+    }
+
+    @Test
+    void twelveDigitAkidWinsOverSessionLookup() {
+        sessionAccounts.put("000000000001", "999999999999");
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=000000000001/20260617/us-west-2/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+        filter.filter(ctx);
+        assertEquals("000000000001", requestContext.getAccountId());
+    }
+
+    @Test
+    void unknownSessionKeyFallsBackToDefault() {
+        ContainerRequestContext ctx = mockContext(
+            "AWS4-HMAC-SHA256 Credential=ASIAUNKNOWNKEY/20260617/us-west-2/s3/aws4_request, "
+                + "SignedHeaders=host, Signature=abc",
+            null
+        );
+        filter.filter(ctx);
+        assertEquals(DEFAULT_ACCOUNT, requestContext.getAccountId());
+    }
+
+    @Test
+    void resolvesSessionKeyFromPresignedCredential() {
+        sessionAccounts.put("ASIAPRESIGNEDKEY", "555566667777");
+        ContainerRequestContext ctx = mockContext(null,
+            "ASIAPRESIGNEDKEY/20260617/eu-west-1/s3/aws4_request");
+        filter.filter(ctx);
+        assertEquals("555566667777", requestContext.getAccountId());
+        assertEquals("eu-west-1", requestContext.getRegion());
     }
 
     private ContainerRequestContext mockContext(String authHeader, String xAmzCredential) {
