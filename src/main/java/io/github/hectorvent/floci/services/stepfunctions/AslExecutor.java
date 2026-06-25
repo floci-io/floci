@@ -260,6 +260,10 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, taskResult, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
         } else {
+            // ResultSelector transforms the raw result before ResultPath merges it into the state input.
+            if (stateDef.has("ResultSelector")) {
+                taskResult = resolveParameters(stateDef.get("ResultSelector"), taskResult, context);
+            }
             JsonNode output = mergeResult(stateDef, input, taskResult);
             output = applyOutputPath(stateDef, input, output);
             return new StateResult(output, stateDef.path("Next").asText(null));
@@ -1073,7 +1077,7 @@ public class AslExecutor {
         return resolvePath(path, output);
     }
 
-    private JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {
+    JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {
         if (parameters.isObject()) {
             ObjectNode resolved = objectMapper.createObjectNode();
             Iterator<Map.Entry<String, JsonNode>> fields = parameters.fields();
@@ -1113,11 +1117,32 @@ public class AslExecutor {
         if (!path.startsWith("$.")) {
             return NullNode.getInstance();
         }
-        String[] parts = path.substring(2).split("\\.");
-        JsonNode current = root;
-        for (String part : parts) {
-            if (current == null || current.isMissingNode()) {
+        return walkPath(path.substring(2).split("\\."), 0, root);
+    }
+
+    /**
+     * Walks the remaining path segments from {@code idx}. A {@code *} segment projects the rest of
+     * the path over each element of the current array and collects the results into an array
+     * (e.g. {@code $.Regions.*.RegionName}).
+     */
+    private JsonNode walkPath(String[] parts, int idx, JsonNode current) {
+        for (int i = idx; i < parts.length; i++) {
+            if (current == null || current.isMissingNode() || current.isNull()) {
                 return NullNode.getInstance();
+            }
+            String part = parts[i];
+            if ("*".equals(part)) {
+                if (!current.isArray()) {
+                    return NullNode.getInstance();
+                }
+                ArrayNode projected = objectMapper.createArrayNode();
+                for (JsonNode element : current) {
+                    JsonNode value = walkPath(parts, i + 1, element);
+                    if (value != null && !value.isMissingNode() && !value.isNull()) {
+                        projected.add(value);
+                    }
+                }
+                return projected;
             }
             // Handle array index notation like field[0]
             if (part.contains("[")) {
@@ -1136,7 +1161,7 @@ public class AslExecutor {
     /**
      * Evaluate a JSONPath-mode intrinsic function (States.*).
      * Supports: States.StringToJson, States.JsonToString, States.Format,
-     *           States.Array, States.ArrayLength, States.MathAdd, States.UUID.
+     *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID.
      * Throws FailStateException("States.Runtime") for unrecognized functions.
      */
     private JsonNode evaluateIntrinsic(String expr, JsonNode root) {
@@ -1211,6 +1236,25 @@ public class AslExecutor {
                 JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
                 JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
                 yield objectMapper.getNodeFactory().numberNode(a.asLong() + b.asLong());
+            }
+            case "States.ArrayContains" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2) {
+                    throw new FailStateException("States.Runtime",
+                            "States.ArrayContains requires exactly 2 arguments");
+                }
+                JsonNode array = resolveIntrinsicArg(parts.get(0).trim(), root);
+                JsonNode value = resolveIntrinsicArg(parts.get(1).trim(), root);
+                boolean contains = false;
+                if (array.isArray()) {
+                    for (JsonNode element : array) {
+                        if (element.equals(value)) {
+                            contains = true;
+                            break;
+                        }
+                    }
+                }
+                yield objectMapper.getNodeFactory().booleanNode(contains);
             }
             case "States.UUID" -> {
                 yield objectMapper.getNodeFactory().textNode(java.util.UUID.randomUUID().toString());
