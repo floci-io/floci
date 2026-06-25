@@ -158,13 +158,14 @@ public class CognitoService {
     public UserPool updateUserPool(Map<String, Object> request, String region) {
         String id = (String) request.get("UserPoolId");
         UserPool pool = describeUserPool(id);
+        UserPool updatedPool = MAPPER.convertValue(pool, UserPool.class);
 
-        populateUserPool(pool, request);
+        populateUserPool(updatedPool, request);
 
-        pool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-        poolStore.put(id, pool);
+        updatedPool.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+        poolStore.put(id, updatedPool);
         LOG.infov("Updated User Pool: {0}", id);
-        return pool;
+        return updatedPool;
     }
 
     public void addCustomAttributes(String userPoolId, List<Map<String, Object>> customAttributes) {
@@ -818,17 +819,21 @@ public class CognitoService {
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
-        Optional<CognitoUser> byKey = userStore.get(userKey(userPoolId, username));
-        if (byKey.isPresent()) {
-            return byKey.get();
-        }
-        // Fallback: resolve by sub UUID or email alias
+        UserPool pool = poolStore.get(userPoolId).orElseThrow(
+                () -> new AwsException("ResourceNotFoundException", "User pool not found", 400));
+        LinkedHashSet<CognitoUser> matches = new LinkedHashSet<>();
+        userStore.get(userKey(userPoolId, username)).ifPresent(matches::add);
         String prefix = userPoolId + "::";
-        return userStore.scan(k -> k.startsWith(prefix)).stream()
-                .filter(u -> username.equals(u.getAttributes().get("sub"))
-                          || username.equals(u.getAttributes().get("email")))
-                .findFirst()
-                .orElseThrow(() -> new AwsException("UserNotFoundException", "User not found", 404));
+        matches.addAll(userStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(u -> matchesAliasOrUsernameAttribute(pool, u, username)).toList());
+        if (matches.isEmpty()) {
+            throw new AwsException("UserNotFoundException", "User not found", 400);
+        }
+        if (matches.size() > 1) {
+            throw new AwsException("InvalidParameterException",
+                    "Multiple users found for the supplied username", 400);
+        }
+        return matches.getFirst();
     }
 
     public void adminDeleteUser(String userPoolId, String username) {
@@ -2386,6 +2391,38 @@ public class CognitoService {
                     "Invalid code provided, please request a code again.", 400);
             case RATE_LIMIT -> new AwsException("LimitExceededException",
                     "Attempt limit exceeded, please try again later", 400);
+        };
+    }
+
+    private boolean matchesAliasOrUsernameAttribute(UserPool pool, CognitoUser user,
+            String username) {
+        if (username.equals(user.getAttributes().get("sub"))) {
+            return true;
+        }
+
+        for (String attribute : pool.getAliasAttributes()) {
+            if (username.equals(user.getAttributes().get(attribute))
+                    && isActiveAliasAttribute(user, attribute)) {
+                return true;
+            }
+        }
+
+        for (String attribute : pool.getUsernameAttributes()) {
+            if (username.equals(user.getAttributes().get(attribute))) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private boolean isActiveAliasAttribute(CognitoUser user, String attribute) {
+        return switch (attribute) {
+            case "email" -> Boolean
+                    .parseBoolean(user.getAttributes().getOrDefault("email_verified", "false"));
+            case "phone_number" -> Boolean.parseBoolean(
+                    user.getAttributes().getOrDefault("phone_number_verified", "false"));
+            default -> true;
         };
     }
 
