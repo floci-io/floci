@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineVersion;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -97,6 +98,35 @@ public class StepFunctionsService {
     public List<StateMachine> listStateMachines(String region) {
         String prefix = "arn:aws:states:" + region + ":";
         return stateMachineStore.scan(k -> k.startsWith(prefix));
+    }
+
+    // ── State machine versions ──────────────────────────────────────────────
+
+    public StateMachineVersion publishStateMachineVersion(String stateMachineArn) {
+        StateMachine sm = describeStateMachine(stateMachineArn);
+        int next = sm.getVersionCounter() + 1;
+        sm.setVersionCounter(next);
+        StateMachineVersion version = new StateMachineVersion(
+                stateMachineArn + ":" + next, next, System.currentTimeMillis() / 1000.0);
+        sm.getVersions().add(version);
+        stateMachineStore.put(stateMachineArn, sm);
+        return version;
+    }
+
+    public List<StateMachineVersion> listStateMachineVersions(String stateMachineArn) {
+        return describeStateMachine(stateMachineArn).getVersions();
+    }
+
+    public void deleteStateMachineVersion(String stateMachineVersionArn) {
+        int lastColon = stateMachineVersionArn.lastIndexOf(':');
+        if (lastColon < 0) {
+            return;
+        }
+        String baseArn = stateMachineVersionArn.substring(0, lastColon);
+        stateMachineStore.get(baseArn).ifPresent(sm -> {
+            sm.getVersions().removeIf(v -> stateMachineVersionArn.equals(v.getStateMachineVersionArn()));
+            stateMachineStore.put(baseArn, sm);
+        });
     }
 
     public void deleteStateMachine(String arn) {
