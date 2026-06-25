@@ -196,7 +196,7 @@ public class SqsQueryHandler {
     private Response handleSendMessage(MultivaluedMap<String, String> params, String region) {
         String queueUrl = getParam(params, "QueueUrl");
         String body = getParam(params, "MessageBody");
-        int delaySeconds = getIntParam(params, "DelaySeconds", 0);
+        Integer delaySeconds = getIntegerParam(params, "DelaySeconds");
         String messageGroupId = getParam(params, "MessageGroupId");
         String messageDeduplicationId = getParam(params, "MessageDeduplicationId");
 
@@ -331,7 +331,7 @@ public class SqsQueryHandler {
         String queueUrl = getParam(params, "QueueUrl");
         var xml = new XmlBuilder();
 
-        record ParsedEntry(String id, String body, int delay, String groupId, String dedupId,
+        record ParsedEntry(String id, String body, Integer delay, String groupId, String dedupId,
                            Map<String, MessageAttributeValue> attributes, String awsTraceHeader) {}
 
         List<ParsedEntry> parsedEntries = new ArrayList<>();
@@ -340,7 +340,7 @@ public class SqsQueryHandler {
             String id = getParam(params, "SendMessageBatchRequestEntry." + i + ".Id");
             if (id == null) break;
             String body = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageBody");
-            int delaySeconds = getIntParam(params, "SendMessageBatchRequestEntry." + i + ".DelaySeconds", 0);
+            Integer delaySeconds = getIntegerParam(params, "SendMessageBatchRequestEntry." + i + ".DelaySeconds");
             String messageGroupId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageGroupId");
             String messageDeduplicationId = getParam(params, "SendMessageBatchRequestEntry." + i + ".MessageDeduplicationId");
 
@@ -557,6 +557,17 @@ public class SqsQueryHandler {
             return Integer.parseInt(value);
         } catch (NumberFormatException e) {
             return defaultValue;
+        }
+    }
+
+    private Integer getIntegerParam(MultivaluedMap<String, String> params, String name) {
+        String value = params.getFirst(name);
+        if (value == null) return null;
+        try {
+            return Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new AwsException("InvalidParameterValue",
+                    "Value for parameter " + name + " is invalid. Reason: Must be an integer.", 400);
         }
     }
 
