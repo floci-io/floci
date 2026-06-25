@@ -148,6 +148,10 @@
             <artifactId>elasticache</artifactId>
         </dependency>
         <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>elasticbeanstalk</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.lettuce</groupId>
             <artifactId>lettuce-core</artifactId>
             <version>6.3.2.RELEASE</version>
