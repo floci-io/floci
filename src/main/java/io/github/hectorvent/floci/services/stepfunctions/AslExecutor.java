@@ -205,11 +205,14 @@ public class AslExecutor {
 
         JsonNode effectiveInput = applyInputPath(stateDef, input);
 
-        JsonNode result;
+        // Pass states transform their input through Parameters (with intrinsics), then a static
+        // Result overrides if present.
+        JsonNode result = effectiveInput;
+        if (stateDef.has("Parameters")) {
+            result = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
+        }
         if (stateDef.has("Result")) {
             result = stateDef.get("Result");
-        } else {
-            result = effectiveInput;
         }
 
         JsonNode output = mergeResult(stateDef, input, result);
