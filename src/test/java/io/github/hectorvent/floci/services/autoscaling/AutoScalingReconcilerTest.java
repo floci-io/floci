@@ -12,11 +12,13 @@ import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.elbv2.ElbV2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetHealth;
+import io.github.hectorvent.floci.services.ssm.SsmCommandService;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.Mockito.eq;
@@ -290,6 +292,36 @@ class AutoScalingReconcilerTest {
                 eq("Removing stale EC2 instance reference(s): [i-dead]"),
                 eq("Persisted Auto Scaling state referenced instance containers that are no longer running."),
                 eq("Successful"));
+    }
+
+    @Test
+    void reconcileFailsActiveSsmInvocationsBeforePruningStaleInstance() {
+        AutoScalingService asgService = mock(AutoScalingService.class);
+        Ec2Service ec2Service = mock(Ec2Service.class);
+        ElbV2Service elbV2Service = mock(ElbV2Service.class);
+        SsmCommandService ssmCommandService = mock(SsmCommandService.class);
+        AutoScalingReconciler reconciler = new AutoScalingReconciler(
+                asgService, ec2Service, elbV2Service, ssmCommandService);
+        AutoScalingGroup asg = new AutoScalingGroup();
+        asg.setRegion("us-east-1");
+        asg.setAutoScalingGroupName("app-asg");
+        asg.setDesiredCapacity(0);
+        asg.getInstances().add(instance("i-dead", "Pending"));
+
+        Instance ec2Instance = new Instance();
+        ec2Instance.setInstanceId("i-dead");
+        ec2Instance.setState(InstanceState.terminated());
+        Reservation reservation = new Reservation();
+        reservation.setInstances(List.of(ec2Instance));
+        when(ec2Service.describeInstances("us-east-1", List.of("i-dead"), null))
+                .thenReturn(List.of(reservation));
+        when(ssmCommandService.failActiveInvocationsForInstances("us-east-1", Set.of("i-dead"), "Undeliverable"))
+                .thenReturn(1);
+
+        reconciler.reconcile(asg);
+
+        assertEquals(0, asg.getInstances().size());
+        verify(ssmCommandService).failActiveInvocationsForInstances("us-east-1", Set.of("i-dead"), "Undeliverable");
     }
 
     @Test

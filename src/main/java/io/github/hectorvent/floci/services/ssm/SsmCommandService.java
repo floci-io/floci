@@ -20,9 +20,11 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -267,6 +269,52 @@ public class SsmCommandService {
         command.setStatusDetails("Cancelled");
         commandStore.put(commandKey(region, commandId), command);
         LOG.infov("CancelCommand: commandId={0}", commandId);
+    }
+
+    public int failActiveInvocationsForInstance(String region, String instanceId, String statusDetails) {
+        return failActiveInvocationsForInstances(region, Set.of(instanceId), statusDetails);
+    }
+
+    public int failActiveInvocationsForInstances(String region, Set<String> instanceIds, String statusDetails) {
+        if (instanceIds == null || instanceIds.isEmpty()) {
+            return 0;
+        }
+        String prefix = region + "::";
+        Instant now = Instant.now();
+        Set<String> commandIds = new LinkedHashSet<>();
+        int failed = 0;
+
+        for (CommandInvocation invocation : invocationStore.scan(key -> key.startsWith(prefix))) {
+            if (!instanceIds.contains(invocation.getInstanceId())) {
+                continue;
+            }
+            if (!isActiveInvocation(invocation.getStatus())) {
+                continue;
+            }
+            invocation.setStatus("Failed");
+            invocation.setStatusDetails(statusDetails);
+            invocation.setResponseCode(-1);
+            invocation.setExecutionEndDateTime(now);
+            invocationStore.put(invocationKey(region, invocation.getCommandId(), invocation.getInstanceId()), invocation);
+            commandIds.add(invocation.getCommandId());
+            failed++;
+        }
+
+        for (String instanceId : instanceIds) {
+            Queue<PendingMessage> queue = messageQueues.remove(instanceId);
+            if (queue != null) {
+                queue.clear();
+            }
+        }
+        messageIndex.entrySet().removeIf(entry -> {
+            String[] meta = entry.getValue();
+            return meta.length == 3
+                    && instanceIds.contains(meta[1])
+                    && region.equals(meta[2])
+                    && commandIds.contains(meta[0]);
+        });
+        commandIds.forEach(commandId -> updateCommandStatus(commandId, region));
+        return failed;
     }
 
     // ── ec2messages agent protocol ──────────────────────────────────────────
@@ -657,6 +705,10 @@ public class SsmCommandService {
             case "Cancelled", "Canceled" -> "Cancelled";
             default -> "Failed";
         };
+    }
+
+    private static boolean isActiveInvocation(String status) {
+        return "Pending".equals(status) || "InProgress".equals(status);
     }
 
     private static String statusDetails(String status) {
