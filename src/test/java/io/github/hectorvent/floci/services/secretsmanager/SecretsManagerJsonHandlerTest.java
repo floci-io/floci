@@ -247,4 +247,79 @@ class SecretsManagerJsonHandlerTest {
         Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
         assertThat(response.getStatus(), is(400));
     }
+
+    @Test
+    void rotateSecretParsesRotationRules() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "rotate-test-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rotate-test-secret");
+        rotateReq.put("RotationLambdaARN", "arn:aws:lambda:us-east-1:000000000000:function:rotate");
+        ObjectNode rules = MAPPER.createObjectNode();
+        rules.put("ScheduleExpression", "cron(0 16 ? * 2 *)");
+        rotateReq.set("RotationRules", rules);
+
+        Response response = handler.handle("RotateSecret", rotateReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rotate-test-secret");
+        Response describeResponse = handler.handle("DescribeSecret", describeReq, REGION);
+        ObjectNode body = (ObjectNode) describeResponse.getEntity();
+        assertThat(body.has("RotationRules"), is(true));
+        assertThat(body.get("RotationRules").get("ScheduleExpression").asText(), is("cron(0 16 ? * 2 *)"));
+        assertThat(body.get("RotationRules").has("AutomaticallyAfterDays"), is(false));
+    }
+
+    @Test
+    void rotateSecretFailsWithMutuallyExclusiveRotationRules() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "rotate-test-secret-2");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rotate-test-secret-2");
+        rotateReq.put("RotationLambdaARN", "arn:aws:lambda:us-east-1:000000000000:function:rotate");
+        ObjectNode rules = MAPPER.createObjectNode();
+        rules.put("AutomaticallyAfterDays", 30);
+        rules.put("ScheduleExpression", "cron(0 16 ? * 2 *)");
+        rotateReq.set("RotationRules", rules);
+
+        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                io.github.hectorvent.floci.core.common.AwsException.class, 
+                () -> handler.handle("RotateSecret", rotateReq, REGION)
+        );
+        assertThat(ex.getErrorCode(), is("InvalidParameterException"));
+    }
+
+    @Test
+    void rotateSecretParsesAllPascalCaseRules() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "rotate-test-secret-all-pascal");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rotate-test-secret-all-pascal");
+        rotateReq.put("RotationLambdaARN", "arn:aws:lambda:us-east-1:000000000000:function:rotate");
+        rotateReq.put("RotateImmediately", false);
+        
+        ObjectNode rules = MAPPER.createObjectNode();
+        rules.put("AutomaticallyAfterDays", 45);
+        rules.put("Duration", "2h");
+        rotateReq.set("RotationRules", rules);
+
+        Response response = handler.handle("RotateSecret", rotateReq, REGION);
+        assertThat(response.getStatus(), is(200));
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rotate-test-secret-all-pascal");
+        Response describeResponse = handler.handle("DescribeSecret", describeReq, REGION);
+        ObjectNode body = (ObjectNode) describeResponse.getEntity();
+        
+        assertThat(body.has("RotationRules"), is(true));
+        assertThat(body.get("RotationRules").get("AutomaticallyAfterDays").asInt(), is(45));
+        assertThat(body.get("RotationRules").get("Duration").asText(), is("2h"));
+    }
 }

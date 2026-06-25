@@ -62,6 +62,7 @@ public class Ec2QueryHandler {
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
+                case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
                 case "DisassociateVpcCidrBlock" -> handleDisassociateVpcCidrBlock(params, region);
@@ -109,6 +110,14 @@ public class Ec2QueryHandler {
                 case "DisassociateRouteTable" -> handleDisassociateRouteTable(params, region);
                 case "CreateRoute" -> handleCreateRoute(params, region);
                 case "DeleteRoute" -> handleDeleteRoute(params, region);
+                // Network ACLs
+                case "CreateNetworkAcl" -> handleCreateNetworkAcl(params, region);
+                case "DescribeNetworkAcls" -> handleDescribeNetworkAcls(params, region);
+                case "DeleteNetworkAcl" -> handleDeleteNetworkAcl(params, region);
+                case "CreateNetworkAclEntry" -> handleNetworkAclEntry(params, region, "CreateNetworkAclEntry");
+                case "ReplaceNetworkAclEntry" -> handleNetworkAclEntry(params, region, "ReplaceNetworkAclEntry");
+                case "DeleteNetworkAclEntry" -> handleDeleteNetworkAclEntry(params, region);
+                case "ReplaceNetworkAclAssociation" -> handleReplaceNetworkAclAssociation(params, region);
                 // NAT Gateways
                 case "CreateNatGateway" -> handleCreateNatGateway(params, region);
                 case "DescribeNatGateways" -> handleDescribeNatGateways(params, region);
@@ -675,6 +684,7 @@ public class Ec2QueryHandler {
                 getList(p, "RouteTableId"),
                 getList(p, "SubnetId"),
                 getList(p, "SecurityGroupId"),
+                p.getFirst("PrivateDnsEnabled") != null ? Boolean.valueOf(p.getFirst("PrivateDnsEnabled")) : null,
                 parseTagsForResource(p, "vpc-endpoint"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateVpcEndpointResponse", AwsNamespaces.EC2)
@@ -696,6 +706,28 @@ public class Ec2QueryHandler {
             xml.start("item").raw(vpcEndpointXml(endpoint)).end("item");
         }
         xml.end("vpcEndpointSet").end("DescribeVpcEndpointsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribePrefixLists(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "PrefixListId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<PrefixList> lists = service.describePrefixLists(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribePrefixListsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("prefixListSet");
+        for (PrefixList pl : lists) {
+            xml.start("item")
+                    .elem("prefixListId", pl.getPrefixListId())
+                    .elem("prefixListName", pl.getPrefixListName())
+                    .start("cidrSet");
+            for (String cidr : pl.getCidrs()) {
+                xml.elem("item", cidr);
+            }
+            xml.end("cidrSet").end("item");
+        }
+        xml.end("prefixListSet").end("DescribePrefixListsResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1171,6 +1203,73 @@ public class Ec2QueryHandler {
         String dest = p.getFirst("DestinationCidrBlock");
         service.deleteRoute(region, rtId, dest);
         return booleanResponse("DeleteRoute");
+    }
+
+    // ─── Network ACL handlers ─────────────────────────────────────────────────
+
+    private Response handleCreateNetworkAcl(MultivaluedMap<String, String> p, String region) {
+        NetworkAcl acl = service.createNetworkAcl(region, p.getFirst("VpcId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateNetworkAclResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("networkAcl").raw(networkAclXml(acl)).end("networkAcl")
+                .end("CreateNetworkAclResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeNetworkAcls(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "NetworkAclId");
+        Map<String, List<String>> filters = getFilters(p);
+        List<NetworkAcl> acls = service.describeNetworkAcls(region, ids, filters);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeNetworkAclsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("networkAclSet");
+        for (NetworkAcl acl : acls) {
+            xml.start("item").raw(networkAclXml(acl)).end("item");
+        }
+        xml.end("networkAclSet").end("DescribeNetworkAclsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteNetworkAcl(MultivaluedMap<String, String> p, String region) {
+        service.deleteNetworkAcl(region, p.getFirst("NetworkAclId"));
+        return booleanResponse("DeleteNetworkAcl");
+    }
+
+    private Response handleNetworkAclEntry(MultivaluedMap<String, String> p, String region, String action) {
+        String fromStr = p.getFirst("PortRange.From");
+        String toStr = p.getFirst("PortRange.To");
+        service.createNetworkAclEntry(region,
+                p.getFirst("NetworkAclId"),
+                Integer.parseInt(p.getFirst("RuleNumber")),
+                p.getFirst("Protocol"),
+                p.getFirst("RuleAction"),
+                Boolean.parseBoolean(p.getFirst("Egress")),
+                p.getFirst("CidrBlock"),
+                fromStr != null ? Integer.valueOf(fromStr) : null,
+                toStr != null ? Integer.valueOf(toStr) : null,
+                "ReplaceNetworkAclEntry".equals(action));
+        return booleanResponse(action);
+    }
+
+    private Response handleDeleteNetworkAclEntry(MultivaluedMap<String, String> p, String region) {
+        service.deleteNetworkAclEntry(region,
+                p.getFirst("NetworkAclId"),
+                Integer.parseInt(p.getFirst("RuleNumber")),
+                Boolean.parseBoolean(p.getFirst("Egress")));
+        return booleanResponse("DeleteNetworkAclEntry");
+    }
+
+    private Response handleReplaceNetworkAclAssociation(MultivaluedMap<String, String> p, String region) {
+        NetworkAclAssociation assoc = service.replaceNetworkAclAssociation(region,
+                p.getFirst("AssociationId"), p.getFirst("NetworkAclId"));
+        XmlBuilder xml = new XmlBuilder()
+                .start("ReplaceNetworkAclAssociationResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .elem("newAssociationId", assoc.getNetworkAclAssociationId())
+                .end("ReplaceNetworkAclAssociationResponse");
+        return xmlResponse(xml.build());
     }
 
     // ─── NAT Gateway handlers ─────────────────────────────────────────────────
@@ -1846,6 +1945,41 @@ public class Ec2QueryHandler {
         return xml.build();
     }
 
+    private String networkAclXml(NetworkAcl acl) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("networkAclId", acl.getNetworkAclId())
+                .elem("vpcId", acl.getVpcId())
+                .elem("default", String.valueOf(acl.isDefault()))
+                .elem("ownerId", acl.getOwnerId())
+                .start("entrySet");
+        for (NetworkAclEntry e : acl.getEntries()) {
+            xml.start("item")
+                    .elem("ruleNumber", String.valueOf(e.getRuleNumber()))
+                    .elem("protocol", e.getProtocol())
+                    .elem("ruleAction", e.getRuleAction())
+                    .elem("egress", String.valueOf(e.isEgress()))
+                    .elem("cidrBlock", e.getCidrBlock());
+            if (e.getPortRangeFrom() != null || e.getPortRangeTo() != null) {
+                xml.start("portRange")
+                        .elem("from", String.valueOf(e.getPortRangeFrom()))
+                        .elem("to", String.valueOf(e.getPortRangeTo()))
+                        .end("portRange");
+            }
+            xml.end("item");
+        }
+        xml.end("entrySet").start("associationSet");
+        for (NetworkAclAssociation a : acl.getAssociations()) {
+            xml.start("item")
+                    .elem("networkAclAssociationId", a.getNetworkAclAssociationId())
+                    .elem("networkAclId", a.getNetworkAclId())
+                    .elem("subnetId", a.getSubnetId())
+                    .end("item");
+        }
+        xml.end("associationSet")
+                .raw(tagSetXml(acl.getTags()));
+        return xml.build();
+    }
+
     private String natGatewayXml(NatGateway natGateway) {
         XmlBuilder xml = new XmlBuilder()
                 .elem("natGatewayId", natGateway.getNatGatewayId())
@@ -1968,18 +2102,19 @@ public class Ec2QueryHandler {
                 .elem("vpcEndpointType", endpoint.getVpcEndpointType())
                 .elem("vpcId", endpoint.getVpcId())
                 .elem("serviceName", endpoint.getServiceName())
-                .elem("state", endpoint.getState());
+                .elem("state", endpoint.getState())
+                .elem("privateDnsEnabled", String.valueOf(endpoint.isPrivateDnsEnabled()));
         if (endpoint.getCreationTimestamp() != null) {
             xml.elem("creationTimestamp", ISO_FMT.format(endpoint.getCreationTimestamp()));
         }
         xml.start("routeTableIdSet");
         for (String routeTableId : endpoint.getRouteTableIds()) {
-            xml.start("item").elem("routeTableId", routeTableId).end("item");
+            xml.elem("item", routeTableId);
         }
         xml.end("routeTableIdSet")
                 .start("subnetIdSet");
         for (String subnetId : endpoint.getSubnetIds()) {
-            xml.start("item").elem("subnetId", subnetId).end("item");
+            xml.elem("item", subnetId);
         }
         xml.end("subnetIdSet")
                 .start("groupSet");

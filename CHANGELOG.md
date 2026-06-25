@@ -7,6 +7,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.27] - 2026-06-23
+
+### Added
+
+- **memorydb:** add the MemoryDB service with mock mode ([#1420](https://github.com/floci-io/floci/pull/1420))
+- **s3vectors:** add the S3 Vectors service ([#1435](https://github.com/floci-io/floci/pull/1435))
+- **codepipeline:** add AWS CodePipeline emulation ([#1469](https://github.com/floci-io/floci/pull/1469))
+- **ec2:** add Network ACL support ([#1473](https://github.com/floci-io/floci/pull/1473))
+- **secretsmanager:** implement the automatic secret rotation lifecycle ([#1467](https://github.com/floci-io/floci/pull/1467))
+- **ses:** support v2 dedicated IP pools and configuration-set option groups ([#1412](https://github.com/floci-io/floci/pull/1412)); support v1 configuration-set tracking and reputation-metrics options ([#1479](https://github.com/floci-io/floci/pull/1479))
+- **dynamodb:** add `TableId`, `TableClass`, and `OnDemandThroughput` ([#1457](https://github.com/floci-io/floci/pull/1457))
+- **cloudformation:** generate an implicit API Gateway from SAM `Api` events ([#1438](https://github.com/floci-io/floci/pull/1438))
+- **neptune:** support a neo4j backend for openCypher via `NEPTUNE_DB_TYPE` ([#1449](https://github.com/floci-io/floci/pull/1449))
+
+### Fixed
+
+- **ecs:** persist durable resources via `StorageBackedMap` so they survive a restart ([#1514](https://github.com/floci-io/floci/pull/1514))
+- **codebuild:** persist projects, report groups, and source credentials ([#1515](https://github.com/floci-io/floci/pull/1515))
+- **config:** persist config rules, conformance packs, recorders, delivery channels, and tags ([#1516](https://github.com/floci-io/floci/pull/1516))
+- **dynamodb:** validate `ExclusiveStartKey` against the key schema ([#1443](https://github.com/floci-io/floci/pull/1443)); reject redundant parentheses, duplicate `contains()` operands, and non-string `begins_with` ([#1442](https://github.com/floci-io/floci/pull/1442)); cap scanned items with `Limit` and carry the full cursor on index scans ([#1456](https://github.com/floci-io/floci/pull/1456))
+- **cloudformation:** support OAuth and callback configurations in `UserPoolClient` ([#1458](https://github.com/floci-io/floci/pull/1458)); delete EC2 security groups on stack deletion ([#1472](https://github.com/floci-io/floci/pull/1472)); merge SAM `Globals` into resource properties ([#1427](https://github.com/floci-io/floci/pull/1427))
+- **ec2:** omit the empty `stateReason` element in `DescribeInstances` ([#1410](https://github.com/floci-io/floci/pull/1410)); log instance user data ([#1474](https://github.com/floci-io/floci/pull/1474))
+- **rds:** fix the PostgreSQL proxy ignoring the requested database name ([#1480](https://github.com/floci-io/floci/pull/1480))
+- **cognito:** implement token revocation for `AdminUserGlobalSignOut` ([#1407](https://github.com/floci-io/floci/pull/1407))
+- **apigatewayv2:** cascade-delete child resources and return 404 for dangling references ([#1300](https://github.com/floci-io/floci/pull/1300))
+- **athena:** add partition keys to the table metadata response ([#1454](https://github.com/floci-io/floci/pull/1454))
+- **acm:** restore certificates after a restart by ignoring computed getters ([#1440](https://github.com/floci-io/floci/pull/1440))
+- **autoscaling:** reject launch templates without image ids ([#1451](https://github.com/floci-io/floci/pull/1451))
+- **ssm:** reject send-command timeouts below the AWS minimum ([#1511](https://github.com/floci-io/floci/pull/1511))
+- **docdb/neptune:** stop containers and proxies on emulator shutdown ([#1452](https://github.com/floci-io/floci/pull/1452))
+- **ui:** register `StatusResponse` for native-image reflection ([#1441](https://github.com/floci-io/floci/pull/1441)); resolve the readiness probe URL from the container endpoint ([#1471](https://github.com/floci-io/floci/pull/1471))
+
+### Changed
+
+- **kms:** use enums for type-safety and add algorithms to key metadata ([#1430](https://github.com/floci-io/floci/pull/1430))
+
 ## [1.5.26] - 2026-06-19
 
 ### Added
@@ -1009,7 +1045,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.26...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.27...HEAD
+[1.5.27]: https://github.com/floci-io/floci/compare/1.5.26...1.5.27
 [1.5.26]: https://github.com/floci-io/floci/compare/1.5.25...1.5.26
 [1.5.25]: https://github.com/floci-io/floci/compare/1.5.24...1.5.25
 [1.5.24]: https://github.com/floci-io/floci/compare/1.5.23...1.5.24
