@@ -922,7 +922,9 @@ public class IamService implements SessionAccountLookup {
      */
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
-        if (accessKeyId == null || accessKeyId.isBlank()) {
+        // STS issues only ASIA-prefixed temporary keys, so anything else cannot be a session.
+        // Short-circuit here to keep the per-request hot path off the session-store scan below.
+        if (accessKeyId == null || !accessKeyId.startsWith("ASIA")) {
             return Optional.empty();
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
