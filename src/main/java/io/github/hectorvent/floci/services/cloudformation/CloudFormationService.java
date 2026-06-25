@@ -30,6 +30,7 @@ import java.time.Instant;
 import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -271,18 +272,22 @@ public class CloudFormationService {
      * Deletes a stack, removing its resources from {@code accountId}'s namespace. The account must
      * match the one the resources were provisioned into (the caller's account for a single-stack
      * deployment, or the target account for a StackSet instance).
+     *
+     * @return a future that completes when the resources have been removed; already-gone stacks
+     *         complete immediately. Callers that need synchronous deletion (e.g. StackSet instance
+     *         removal) can await it.
      */
-    public void deleteStack(String stackName, String region, String accountId) {
+    public Future<?> deleteStack(String stackName, String region, String accountId) {
         purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region);
         if (stack == null) {
-            return; // Already gone — no-op
+            return CompletableFuture.completedFuture(null); // Already gone — no-op
         }
         stack.setStatus("DELETE_IN_PROGRESS");
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
-        executor.submit(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
+        return executor.submit(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
     }
 
     // ── GetTemplate ───────────────────────────────────────────────────────────

@@ -166,7 +166,7 @@ public class StackSetService {
             for (String region : regions) {
                 String key = instanceKey(name, account, region);
                 instances.get(key).ifPresent(inst -> {
-                    cfnService.deleteStack(inst.getStackName(), region, account);
+                    await(cfnService.deleteStack(inst.getStackName(), region, account));
                     instances.delete(key);
                 });
             }

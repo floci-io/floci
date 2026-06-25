@@ -177,6 +177,64 @@ class CloudFormationStackSetsIntegrationTest {
     }
 
     @Test
+    void updateStackSetReappliesToExistingInstances() {
+        String setName = "upd-" + UUID.randomUUID().toString().substring(0, 8);
+        String q1 = "u1-" + UUID.randomUUID().toString().substring(0, 8);
+        String q2 = "u2-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(q1))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        assertQueueVisible(ACCOUNT_B, q1);
+        assertQueueAbsent(ACCOUNT_B, q2);
+
+        // Update the template to add a second queue; existing instances are re-applied.
+        String twoQueues = """
+            {"Resources":{
+              "Q1":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s"}},
+              "Q2":{"Type":"AWS::SQS::Queue","Properties":{"QueueName":"%s"}}}}
+            """.formatted(q1, q2);
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", twoQueues)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<OperationId>"));
+
+        // The newly added resource now exists in the target account.
+        assertQueueVisible(ACCOUNT_B, q2);
+
+        // The operation history records the update.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListStackSetOperations")
+            .formParam("StackSetName", setName)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Action>UPDATE</Action>"));
+    }
+
+    @Test
     void stackSetErrorPaths() {
         String setName = "errset-" + UUID.randomUUID().toString().substring(0, 8);
         String queue = "errq-" + UUID.randomUUID().toString().substring(0, 8);
