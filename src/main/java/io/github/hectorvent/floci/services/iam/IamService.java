@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.iam.model.AccessKey;
@@ -329,6 +330,19 @@ public class IamService {
         return roles.get(roleName)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "The role with name " + roleName + " cannot be found.", 404));
+    }
+
+    /**
+     * Looks up a role by name in a specific account's namespace, without throwing when absent.
+     *
+     * <p>Roles are account-namespaced, so a cross-account caller (e.g. STS AssumeRole) must resolve
+     * the role in its owning account — taken from the role ARN — rather than the request's account.
+     */
+    public Optional<IamRole> findRole(String accountId, String roleName) {
+        if (roles instanceof AccountAwareStorageBackend<IamRole> aware) {
+            return aware.getForAccount(accountId, roleName);
+        }
+        return roles.get(roleName);
     }
 
     public void deleteRole(String roleName) {

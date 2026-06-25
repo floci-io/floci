@@ -14,11 +14,14 @@
 | `GetFederationToken` | Get temporary credentials for a federated user |
 | `DecodeAuthorizationMessage` | Decode an encoded authorization failure message |
 
-## Configuration
+## Trust Policy Enforcement
 
-| Variable | Default | Description |
-|---|---|---|
-| `FLOCI_SERVICES_STS_ENABLED` | `true` | Enable or disable the service |
+By default `AssumeRole` succeeds for any caller. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`,
+`AssumeRole` evaluates the target role's trust policy (`AssumeRolePolicyDocument`) against the caller
+and returns `AccessDenied` if it is not permitted. AWS principal forms are matched — `"*"`, an
+account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principal ARNs — and an
+explicit `Deny` always wins. Roles that Floci has no record of stay permissive, so this only affects
+roles created through IAM with a real trust policy.
 
 ## Examples
 
