@@ -4,7 +4,10 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ManagedContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -186,6 +189,18 @@ public class CloudFormationService {
     // ── ExecuteChangeSet ──────────────────────────────────────────────────────
 
     public Future<?> executeChangeSet(String stackName, String changeSetName, String region) {
+        return executeChangeSet(stackName, changeSetName, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Executes a change set, provisioning its resources into {@code accountId}'s namespace.
+     *
+     * <p>Provisioning runs on a background executor thread that has no inherited request scope, so
+     * the downstream service calls would otherwise fall back to the default account. The resources
+     * are materialized under a synthetic request scope bound to {@code accountId} so a single-stack
+     * deployment lands in the caller's account, and a StackSet instance lands in its target account.
+     */
+    public Future<?> executeChangeSet(String stackName, String changeSetName, String region, String accountId) {
         Stack stack = getStackOrThrow(stackName, region);
         ChangeSet cs = stack.getChangeSets().get(resolveChangeSetName(changeSetName));
         if (cs == null) {
@@ -205,8 +220,31 @@ public class CloudFormationService {
         String templateBody = cs.getTemplateBody();
         Map<String, String> params = cs.getParameters() != null ? cs.getParameters() : Map.of();
 
-        String accountId = regionResolver.getAccountId();
-        return executor.submit(() -> executeTemplate(stack, templateBody, params, isCreate, region, accountId));
+        return executor.submit(() -> runUnderAccount(accountId,
+                () -> executeTemplate(stack, templateBody, params, isCreate, region, accountId)));
+    }
+
+    /**
+     * Runs {@code body} under a synthetic CDI request scope whose account is {@code accountId}, so
+     * that account-aware storage in the downstream services namespaces provisioned resources under
+     * the intended account. Mirrors the pattern used by other background workers.
+     */
+    private void runUnderAccount(String accountId, Runnable body) {
+        ManagedContext requestContext = Arc.container().requestContext();
+        boolean alreadyActive = requestContext.isActive();
+        if (!alreadyActive) {
+            requestContext.activate();
+        }
+        try {
+            if (accountId != null) {
+                Arc.container().instance(RequestContext.class).get().setAccountId(accountId);
+            }
+            body.run();
+        } finally {
+            if (!alreadyActive) {
+                requestContext.terminate();
+            }
+        }
     }
 
     // ── DeleteChangeSet ───────────────────────────────────────────────────────
@@ -226,6 +264,15 @@ public class CloudFormationService {
     // ── DeleteStack ───────────────────────────────────────────────────────────
 
     public void deleteStack(String stackName, String region) {
+        deleteStack(stackName, region, regionResolver.getAccountId());
+    }
+
+    /**
+     * Deletes a stack, removing its resources from {@code accountId}'s namespace. The account must
+     * match the one the resources were provisioned into (the caller's account for a single-stack
+     * deployment, or the target account for a StackSet instance).
+     */
+    public void deleteStack(String stackName, String region, String accountId) {
         purgeExpiredDeletedStacks();
         Stack stack = resolveStack(stackName, region);
         if (stack == null) {
@@ -235,7 +282,7 @@ public class CloudFormationService {
         addEvent(stack, stack.getStackName(), stack.getStackId(),
                 "AWS::CloudFormation::Stack", "DELETE_IN_PROGRESS", null);
 
-        executor.submit(() -> deleteStackResources(stack, region));
+        executor.submit(() -> runUnderAccount(accountId, () -> deleteStackResources(stack, region)));
     }
 
     // ── GetTemplate ───────────────────────────────────────────────────────────
