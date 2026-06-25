@@ -759,7 +759,10 @@ public class AslExecutor {
         }
         if (rule.has("IsPresent")) {
             boolean expectPresent = rule.get("IsPresent").asBoolean();
-            return !value.isMissingNode() == expectPresent;
+            // resolvePath collapses an absent path to a null node, so treat null and missing alike:
+            // an absent field is not present (matches AWS IsPresent semantics for missing fields).
+            boolean present = !value.isMissingNode() && !value.isNull();
+            return present == expectPresent;
         }
         if (rule.has("IsString")) {
             return value.isTextual() == rule.get("IsString").asBoolean();
