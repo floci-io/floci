@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -50,6 +51,13 @@ public class IamService {
     private final StorageBackend<String, SessionCredential> sessions;
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
+
+    /**
+     * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
+     * not owned by any account — so they live here rather than in the account-partitioned
+     * {@link #policies} store, and {@link #getPolicy} resolves them for any caller.
+     */
+    private final Map<String, IamPolicy> awsManagedPolicies = buildAwsManagedPolicies();
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -105,17 +113,25 @@ public class IamService {
         }
     }
 
-    void seedAwsManagedPolicies() {
-        int seeded = 0;
+    private static Map<String, IamPolicy> buildAwsManagedPolicies() {
+        Map<String, IamPolicy> catalog = new LinkedHashMap<>();
         for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
             String arn = def.arn();
-            if (policies.get(arn).isPresent()) {
+            catalog.put(arn, new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
+                    def.description(), AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+        }
+        return catalog;
+    }
+
+    void seedAwsManagedPolicies() {
+        // Managed policies are served globally from the catalog (see getPolicy); this also
+        // mirrors them into the default-account store so ListPolicies(Scope=AWS) lists them.
+        int seeded = 0;
+        for (Map.Entry<String, IamPolicy> entry : awsManagedPolicies.entrySet()) {
+            if (policies.get(entry.getKey()).isPresent()) {
                 continue;
             }
-            String policyId = "ANPA" + randomId(16);
-            IamPolicy policy = new IamPolicy(policyId, def.name(), def.path(), arn,
-                    def.description(), AwsManagedPolicies.PERMISSIVE_DOCUMENT);
-            policies.put(arn, policy);
+            policies.put(entry.getKey(), entry.getValue());
             seeded++;
         }
         if (seeded > 0) {
@@ -398,6 +414,16 @@ public class IamService {
     }
 
     public IamPolicy getPolicy(String policyArn) {
+        // AWS-managed policies (arn:aws:iam::aws:policy/...) are global — not owned by any
+        // account — so they are served from the catalog rather than the account-partitioned
+        // store, which would otherwise make them visible only to the default account.
+        if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            IamPolicy managed = awsManagedPolicies.get(policyArn);
+            if (managed != null) {
+                return managed;
+            }
+            throw new AwsException("NoSuchEntity", "Policy " + policyArn + " does not exist.", 404);
+        }
         return policies.get(policyArn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "Policy " + policyArn + " does not exist.", 404));
