@@ -102,7 +102,7 @@ class SqsEventSourcePollerTest {
         assertNotNull(color, "color attribute must be present");
         assertEquals("String", color.get("dataType").asText());
         assertEquals("red",    color.get("stringValue").asText());
-        assertTrue(color.get("binaryValue").isNull());
+        assertNull(color.get("binaryValue"));
         assertTrue(color.get("stringListValues").isArray());
         assertTrue(color.get("binaryListValues").isArray());
 
@@ -153,7 +153,7 @@ class SqsEventSourcePollerTest {
                 .get("Records").get(0).get("messageAttributes").get("data");
 
         assertEquals("Binary", data.get("dataType").asText());
-        assertTrue(data.get("stringValue").isNull());
+        assertNull(data.get("stringValue"));
         assertEquals(
                 java.util.Base64.getEncoder().encodeToString(raw),
                 data.get("binaryValue").asText());

@@ -233,16 +233,11 @@ public class SqsEventSourcePoller {
                     msg.getMessageAttributes().forEach((name, val) -> {
                         ObjectNode attrNode = msgAttrs.putObject(name);
                         attrNode.put("dataType", val.getDataType() != null ? val.getDataType() : "String");
-                        if (val.getStringValue() != null) {
-                            attrNode.put("stringValue", val.getStringValue());
-                        } else {
-                            attrNode.putNull("stringValue");
-                        }
                         if (val.getBinaryValue() != null) {
                             attrNode.put("binaryValue",
                                     java.util.Base64.getEncoder().encodeToString(val.getBinaryValue()));
-                        } else {
-                            attrNode.putNull("binaryValue");
+                        } else if (val.getStringValue() != null) {
+                            attrNode.put("stringValue", val.getStringValue());
                         }
                         attrNode.putArray("stringListValues");
                         attrNode.putArray("binaryListValues");
