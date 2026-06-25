@@ -507,6 +507,7 @@ class ElbV2Test {
         boolean hasDefault = resp.sslPolicies().stream()
                 .anyMatch(p -> p.name().startsWith("ELBSecurityPolicy-"));
         assertThat(hasDefault).isTrue();
+        assertThat(resp.nextMarker()).isNull();
     }
 
     @Test

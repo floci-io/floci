@@ -760,7 +760,6 @@ public class ElbV2QueryHandler {
                .end("member");
         }
         xml.end("SslPolicies")
-           .elem("NextMarker", "")
            .end("DescribeSSLPoliciesResult")
            .raw(AwsQueryResponse.responseMetadata())
            .end("DescribeSSLPoliciesResponse");

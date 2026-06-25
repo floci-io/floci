@@ -25,6 +25,8 @@ import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.kinesis.KinesisService;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.DeliveryStreamDescription;
 import io.github.hectorvent.floci.services.rds.RdsService;
 import io.github.hectorvent.floci.services.eks.EksService;
 import io.github.hectorvent.floci.services.eks.model.CreateClusterRequest;
@@ -148,6 +150,7 @@ public class CloudFormationResourceProvisioner {
     private final KinesisService kinesisService;
     private final CloudWatchMetricsService cloudWatchMetricsService;
     private final AutoScalingService autoScalingService;
+    private final FirehoseService firehoseService;
 
     @Inject
     public CloudFormationResourceProvisioner(S3Service s3Service, SqsService sqsService,
@@ -175,7 +178,8 @@ public class CloudFormationResourceProvisioner {
                                              CloudWatchLogsService logsService,
                                              KinesisService kinesisService,
                                              CloudWatchMetricsService cloudWatchMetricsService,
-                                             AutoScalingService autoScalingService) {
+                                             AutoScalingService autoScalingService,
+                                             FirehoseService firehoseService) {
         this.s3Service = s3Service;
         this.sqsService = sqsService;
         this.snsService = snsService;
@@ -206,6 +210,7 @@ public class CloudFormationResourceProvisioner {
         this.kinesisService = kinesisService;
         this.cloudWatchMetricsService = cloudWatchMetricsService;
         this.autoScalingService = autoScalingService;
+        this.firehoseService = firehoseService;
     }
 
     /**
@@ -315,6 +320,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::EC2::Route" -> provisionRoute(resource, properties, engine, region);
                 case "AWS::EC2::NatGateway" -> provisionNatGateway(resource, properties, engine, region);
                 case "AWS::EC2::EIP" -> provisionEip(resource, region);
+                case "AWS::KinesisFirehose::DeliveryStream" ->
+                        provisionFirehoseDeliveryStream(resource, properties, engine, stackName);
                 case "AWS::EC2::Instance" -> provisionEc2Instance(resource, properties, engine, region);
                 // RDS. DBInstance/DBCluster start real RDS containers (same as the direct API).
                 case "AWS::RDS::DBSubnetGroup" -> provisionDbSubnetGroup(resource, properties, engine, stackName);
@@ -418,6 +425,8 @@ public class CloudFormationResourceProvisioner {
                 case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
                 case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
+                case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
+                case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
                 case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
                 case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
                 case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
@@ -737,6 +746,7 @@ public class CloudFormationResourceProvisioner {
         }
         String associatePublicIp = resolveOptional(props, "AssociatePublicIpAddress", engine);
         var lc = autoScalingService.createLaunchConfiguration(region, name,
+                resolveOptional(props, "InstanceId", engine),
                 resolveOptional(props, "ImageId", engine),
                 resolveOptional(props, "InstanceType", engine),
                 resolveOptional(props, "KeyName", engine),
@@ -768,12 +778,14 @@ public class CloudFormationResourceProvisioner {
         }
 
         var asg = autoScalingService.createAutoScalingGroup(region, name,
-                blankToNull(launchConfigName), blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
+                blankToNull(launchConfigName), null, blankToNull(launchTemplateName), blankToNull(launchTemplateVersion),
+                null,
                 parseIntProp(props, "MinSize", engine, 0),
                 parseIntProp(props, "MaxSize", engine, 0),
                 parseIntProp(props, "DesiredCapacity", engine, 0),
                 parseIntProp(props, "Cooldown", engine, 0),
                 resolveStringList(props, "AvailabilityZones", engine),
+                resolveStringList(props, "VPCZoneIdentifier", engine),
                 resolveStringList(props, "TargetGroupARNs", engine),
                 resolveStringList(props, "LoadBalancerNames", engine),
                 resolveOptional(props, "HealthCheckType", engine),
@@ -1038,6 +1050,48 @@ public class CloudFormationResourceProvisioner {
         if (nodegroup.getNodegroupArn() != null) {
             r.getAttributes().put("Arn", nodegroup.getNodegroupArn());
         }
+    }
+
+    // ── Kinesis Data Firehose ───────────────────────────────────────────────────
+
+    private void provisionFirehoseDeliveryStream(StackResource r, JsonNode props,
+                                                 CloudFormationTemplateEngine engine, String stackName) {
+        String name = resolveOptional(props, "DeliveryStreamName", engine);
+        if (name == null || name.isBlank()) {
+            name = generatePhysicalName(stackName, r.getLogicalId(), 64, false);
+        }
+
+        DeliveryStreamDescription.S3Destination s3 = null;
+        JsonNode s3Node = props != null && props.has("ExtendedS3DestinationConfiguration")
+                ? props.get("ExtendedS3DestinationConfiguration")
+                : (props != null ? props.get("S3DestinationConfiguration") : null);
+        if (s3Node != null && !s3Node.isNull()) {
+            s3 = new DeliveryStreamDescription.S3Destination();
+            s3.setBucketArn(blankToNull(engine.resolve(s3Node.path("BucketARN"))));
+            s3.setPrefix(blankToNull(engine.resolve(s3Node.path("Prefix"))));
+            if (s3Node.has("BufferingHints")) {
+                JsonNode hints = s3Node.get("BufferingHints");
+                var bufferingHints = new DeliveryStreamDescription.BufferingHints();
+                bufferingHints.setSizeInMBs(parseIntProp(hints, "SizeInMBs", engine, 5));
+                bufferingHints.setIntervalInSeconds(parseIntProp(hints, "IntervalInSeconds", engine, 300));
+                s3.setBufferingHints(bufferingHints);
+            }
+        }
+
+        List<DeliveryStreamDescription.Tag> tags = new ArrayList<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    tags.add(new DeliveryStreamDescription.Tag(key, engine.resolve(tag.path("Value"))));
+                }
+            }
+        }
+
+        String arn = firehoseService.createDeliveryStream(name, s3, tags);
+        // Ref returns the delivery stream name; Fn::GetAtt Arn returns the stream ARN.
+        r.setPhysicalId(name);
+        r.getAttributes().put("Arn", arn);
     }
 
     // ── SNS ───────────────────────────────────────────────────────────────────
@@ -2551,6 +2605,20 @@ public class CloudFormationResourceProvisioner {
 
         var deployment = apiGatewayService.createDeployment(region, apiId, req);
         r.setPhysicalId(deployment.id());
+
+        // AWS::ApiGateway::Deployment accepts an inline StageName: when present, AWS creates that
+        // stage pointing at this deployment, with no separate AWS::ApiGateway::Stage resource.
+        String stageName = resolveOptional(props, "StageName", engine);
+        if (stageName != null && !stageName.isBlank()) {
+            Map<String, Object> stageReq = new HashMap<>();
+            stageReq.put("stageName", stageName);
+            stageReq.put("deploymentId", deployment.id());
+            JsonNode stageDescription = props != null ? props.get("StageDescription") : null;
+            if (stageDescription != null && stageDescription.has("Description")) {
+                stageReq.put("description", resolveOptional(stageDescription, "Description", engine));
+            }
+            apiGatewayService.createStage(region, apiId, stageReq);
+        }
     }
 
     private void provisionApiGatewayStage(StackResource r, JsonNode props, CloudFormationTemplateEngine engine,
@@ -2761,13 +2829,39 @@ public class CloudFormationResourceProvisioner {
         List<String> allowedOAuthFlows = resolveStringListOrEmpty(props, "AllowedOAuthFlows", engine);
         List<String> allowedOAuthScopes = resolveStringListOrEmpty(props, "AllowedOAuthScopes", engine);
 
+        Map<String, Object> analyticsConfiguration = resolveMapOrDefault(props, "AnalyticsConfiguration", engine, null);
+        List<String> callbackURLs = resolveStringListOrEmpty(props, "CallbackURLs", engine);
+        String defaultRedirectURI = resolveOptional(props, "DefaultRedirectURI", engine);
+        List<String> explicitAuthFlows = resolveStringListOrEmpty(props, "ExplicitAuthFlows", engine);
+        Integer accessTokenValidity = parseIntegerPropOrNull(props, "AccessTokenValidity", engine);
+        Integer idTokenValidity = parseIntegerPropOrNull(props, "IdTokenValidity", engine);
+        List<String> logoutURLs = resolveStringListOrEmpty(props, "LogoutURLs", engine);
+        String preventUserExistenceErrors = resolveOptional(props, "PreventUserExistenceErrors", engine);
+        List<String> readAttributes = resolveStringListOrEmpty(props, "ReadAttributes", engine);
+        Integer refreshTokenValidity = parseIntegerPropOrNull(props, "RefreshTokenValidity", engine);
+        List<String> supportedIdentityProviders = resolveStringListOrEmpty(props, "SupportedIdentityProviders", engine);
+        Map<String, String> tokenValidityUnits = resolveStringMapOrNull(props, "TokenValidityUnits", engine);
+        List<String> writeAttributes = resolveStringListOrEmpty(props, "WriteAttributes", engine);
+        Map<String, Object> refreshTokenRotation = resolveMapOrDefault(props, "RefreshTokenRotation", engine, null);
+        Boolean enableTokenRevocation = parseBooleanOrNull(resolveOptional(props, "EnableTokenRevocation", engine));
+
         UserPoolClient client;
         if (r.getPhysicalId() == null) {
-            client = cognitoService.createUserPoolClient(userPoolId, clientName, generateSecret,
-                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+            client = cognitoService.createUserPoolClient(
+                    userPoolId, clientName, generateSecret, allowedOAuthFlowsUserPoolClient,
+                    allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
+                    defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
+                    logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                    supportedIdentityProviders, tokenValidityUnits, writeAttributes,
+                    refreshTokenRotation, enableTokenRevocation);
         } else {
-            client = cognitoService.updateUserPoolClient(userPoolId, r.getPhysicalId(), clientName,
-                    allowedOAuthFlowsUserPoolClient, allowedOAuthFlows, allowedOAuthScopes);
+            client = cognitoService.updateUserPoolClient(
+                    userPoolId, r.getPhysicalId(), clientName, allowedOAuthFlowsUserPoolClient,
+                    allowedOAuthFlows, allowedOAuthScopes, analyticsConfiguration, callbackURLs,
+                    defaultRedirectURI, explicitAuthFlows, accessTokenValidity, idTokenValidity,
+                    logoutURLs, preventUserExistenceErrors, readAttributes, refreshTokenValidity,
+                    supportedIdentityProviders, tokenValidityUnits, writeAttributes,
+                    refreshTokenRotation, enableTokenRevocation);
         }
 
         r.setPhysicalId(client.getClientId());
@@ -2776,6 +2870,31 @@ public class CloudFormationResourceProvisioner {
         if (client.getClientSecret() != null) {
             r.getAttributes().put("ClientSecret", client.getClientSecret());
         }
+    }
+
+    private Integer parseIntegerPropOrNull(JsonNode props, String name, CloudFormationTemplateEngine engine) {
+        String value = resolveOptional(props, name, engine);
+        if (value == null || value.isBlank()) {
+            return null;
+        }
+        try {
+            return Integer.valueOf(value.trim());
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
+    private Map<String, String> resolveStringMapOrNull(JsonNode props, String source, CloudFormationTemplateEngine engine) {
+        if (props == null || !props.has(source) || props.get(source).isNull()) {
+            return null;
+        }
+        JsonNode resolved = engine.resolveNode(props.get(source));
+        if (resolved == null || !resolved.isObject()) {
+            return null;
+        }
+        Map<String, String> out = new LinkedHashMap<>();
+        resolved.fields().forEachRemaining(e -> out.put(e.getKey(), e.getValue().asText()));
+        return out;
     }
 
     // ── Lambda LayerVersion ──────────────────────────────────────────────────

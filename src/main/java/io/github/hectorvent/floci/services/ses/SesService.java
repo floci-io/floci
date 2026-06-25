@@ -6,15 +6,20 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
+import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
+import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
 import io.github.hectorvent.floci.services.ses.model.MessageHeader;
 import io.github.hectorvent.floci.services.ses.model.MessageTag;
+import io.github.hectorvent.floci.services.ses.model.TrackingOptions;
+import io.github.hectorvent.floci.services.ses.model.VdmOptions;
 import io.github.hectorvent.floci.services.ses.model.SentEmail;
 import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import io.github.hectorvent.floci.services.ses.model.SuppressionOptions;
@@ -67,6 +72,7 @@ public class SesService {
     private final StorageBackend<String, ConfigurationSet> configSetStore;
     private final StorageBackend<String, SuppressedDestination> suppressionStore;
     private final StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore;
+    private final StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore;
     private final SmtpRelay smtpRelay;
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
@@ -89,6 +95,8 @@ public class SesService {
                 new TypeReference<Map<String, SuppressedDestination>>() {});
         this.accountSuppressionStore = storageFactory.create("ses", "ses-account-suppression.json",
                 new TypeReference<Map<String, AccountSuppressionAttributes>>() {});
+        this.dedicatedIpPoolStore = storageFactory.create("ses", "ses-dedicated-ip-pools.json",
+                new TypeReference<Map<String, DedicatedIpPool>>() {});
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
@@ -102,6 +110,7 @@ public class SesService {
                StorageBackend<String, ConfigurationSet> configSetStore,
                StorageBackend<String, SuppressedDestination> suppressionStore,
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SmtpRelay smtpRelay,
                ObjectMapper objectMapper) {
         this.identityStore = identityStore;
@@ -111,6 +120,7 @@ public class SesService {
         this.configSetStore = configSetStore;
         this.suppressionStore = suppressionStore;
         this.accountSuppressionStore = accountSuppressionStore;
+        this.dedicatedIpPoolStore = dedicatedIpPoolStore;
         this.smtpRelay = smtpRelay;
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
@@ -235,10 +245,15 @@ public class SesService {
         }
         validateConfigurationSet(configurationSetName, region);
         boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
-        boolean willPublishEvents = configurationSetName != null && !configurationSetName.isBlank();
-        SmtpRelay.RawMessageHeaders headers = (hasExplicitDestinations && !willPublishEvents)
+        boolean sourceOmitted = source == null || source.isBlank();
+        boolean willPublishEvents = (configurationSetName != null && !configurationSetName.isBlank())
+                || !resolveIdentityNotificationTargets(source, region).isEmpty();
+        SmtpRelay.RawMessageHeaders headers = (hasExplicitDestinations && !willPublishEvents && !sourceOmitted)
                 ? null
                 : SmtpRelay.parseRawHeaders(rawMessage);
+        String effectiveSource = sourceOmitted && headers != null && !headers.from().isBlank()
+                ? headers.from()
+                : source;
         List<String> effectiveDestinations = hasExplicitDestinations
                 ? destinations
                 : allRecipients(headers.to(), headers.cc(), headers.bcc());
@@ -247,21 +262,21 @@ public class SesService {
                     "At least one destination address is required.", 400);
         }
         String messageId = UUID.randomUUID().toString();
-        SentEmail email = new SentEmail(messageId, region, source, effectiveDestinations, rawMessage);
+        SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         emailStore.put("email::" + region + "::" + messageId, email);
 
         Map<String, String> suppressedReasons = collectSuppressedReasons(effectiveDestinations, configurationSetName, region);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!relayedDestinations.isEmpty()) {
-            smtpRelay.relayRaw(source, relayedDestinations, rawMessage);
+            smtpRelay.relayRaw(effectiveSource, relayedDestinations, rawMessage);
         } else {
             LOG.infov("SES raw email accepted but not relayed (all recipients suppressed): messageId={0}",
                     messageId);
         }
 
-        LOG.infov("SES raw email sent: from={0}, messageId={1}", source, messageId);
-        publishSendEvents(configurationSetName, messageId, source,
+        LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        publishSendEvents(configurationSetName, messageId, effectiveSource,
                 headers != null ? headers.subject() : "",
                 headers != null ? headers.to() : List.of(),
                 headers != null ? headers.cc() : List.of(),
@@ -320,19 +335,22 @@ public class SesService {
                                    Map<String, String> suppressedReasons,
                                    List<MessageTag> emailTags,
                                    List<MessageHeader> additionalHeaders, String region) {
-        if (eventPublisher == null) {
+        if (eventPublisher == null || messageId == null) {
             return;
         }
-        if (configurationSetName == null || configurationSetName.isBlank() || messageId == null) {
-            return;
+        ConfigurationSet cs = null;
+        if (configurationSetName != null && !configurationSetName.isBlank()) {
+            cs = configSetStore.get(configSetKey(region, configurationSetName)).orElse(null);
+            if (cs == null) {
+                LOG.warnv("SES send references unknown ConfigurationSet <{0}>; configuration-set "
+                        + "events not published (identity notifications, if any, still apply).",
+                        configurationSetName);
+            }
         }
-        ConfigurationSet cs = configSetStore.get(configSetKey(region, configurationSetName)).orElse(null);
-        if (cs == null) {
-            LOG.warnv("SES send references unknown ConfigurationSet <{0}>; events not published.",
-                    configurationSetName);
-            return;
-        }
-        if (cs.getEventDestinations().isEmpty()) {
+        boolean configSetActive = cs != null && !cs.getEventDestinations().isEmpty();
+        Map<String, IdentityNotificationTarget> identityTargets =
+                resolveIdentityNotificationTargets(source, region);
+        if (!configSetActive && identityTargets.isEmpty()) {
             return;
         }
 
@@ -342,7 +360,8 @@ public class SesService {
         String sendingAccountId = defaultAccountId;
         String sourceArn = (source == null || source.isBlank())
                 ? null
-                : AwsArnUtils.Arn.of("ses", region, sendingAccountId, "identity/" + source).toString();
+                : AwsArnUtils.Arn.of("ses", region, sendingAccountId,
+                        "identity/" + extractEmailAddress(source)).toString();
 
         List<String> suppressionBounceRecipients = new ArrayList<>();
         List<String> suppressionComplaintRecipients = new ArrayList<>();
@@ -356,11 +375,81 @@ public class SesService {
 
         for (String eventType : determineSendEventTypes(envelope,
                 suppressionBounceRecipients, suppressionComplaintRecipients)) {
-            eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
-                    subject, toAddresses, ccAddresses, bccAddresses, envelope,
-                    suppressionBounceRecipients, suppressionComplaintRecipients,
-                    emailTags, additionalHeaders, timestamp, region);
+            if (configSetActive) {
+                eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
+                        subject, toAddresses, ccAddresses, bccAddresses, envelope,
+                        suppressionBounceRecipients, suppressionComplaintRecipients,
+                        emailTags, additionalHeaders, timestamp, region);
+            }
+            IdentityNotificationTarget target = identityTargets.get(eventType);
+            if (target != null) {
+                eventPublisher.publishIdentityNotification(target.topicArn(), target.includeHeaders(),
+                        eventType, messageId, source, sourceArn, sendingAccountId, subject,
+                        toAddresses, ccAddresses, bccAddresses, envelope, suppressionBounceRecipients,
+                        suppressionComplaintRecipients, additionalHeaders, timestamp, region);
+            }
         }
+    }
+
+    /**
+     * Resolves the SNS feedback notification target configured via {@code SetIdentityNotificationTopic}
+     * for the sending identity. The email-address identity's topic takes precedence over its parent
+     * domain identity's topic, per notification type; the headers-in-notifications flag is read from
+     * whichever identity supplied the topic. Returns a map keyed by the {@code SEND}-style event name
+     * ({@code BOUNCE}/{@code COMPLAINT}/{@code DELIVERY}) so it can be looked up directly against
+     * {@link #determineSendEventTypes}.
+     */
+    private Map<String, IdentityNotificationTarget> resolveIdentityNotificationTargets(String source,
+                                                                                       String region) {
+        Map<String, IdentityNotificationTarget> targets = new LinkedHashMap<>();
+        if (source == null || source.isBlank()) {
+            return targets;
+        }
+        String email = extractEmailAddress(source);
+        if (email.isBlank()) {
+            return targets;
+        }
+        Identity emailIdentity = identityStore.get(identityKey(region, email)).orElse(null);
+        Identity domainIdentity = null;
+        int at = email.indexOf('@');
+        if (at >= 0 && at < email.length() - 1) {
+            domainIdentity = identityStore.get(identityKey(region, email.substring(at + 1))).orElse(null);
+        }
+        for (String type : NOTIFICATION_TYPES) {
+            String topic = notificationTopicFor(emailIdentity, type);
+            Identity owner = emailIdentity;
+            if (topic == null) {
+                topic = notificationTopicFor(domainIdentity, type);
+                owner = domainIdentity;
+            }
+            if (topic == null) {
+                continue;
+            }
+            boolean includeHeaders = Boolean.TRUE.equals(
+                    owner.getHeadersInNotificationsEnabled().get(type));
+            targets.put(type.toUpperCase(Locale.ROOT),
+                    new IdentityNotificationTarget(topic, includeHeaders));
+        }
+        return targets;
+    }
+
+    private static String notificationTopicFor(Identity identity, String type) {
+        if (identity == null) {
+            return null;
+        }
+        String topic = identity.getNotificationAttributes().get(type + "Topic");
+        return topic != null && !topic.isBlank() ? topic : null;
+    }
+
+    private record IdentityNotificationTarget(String topicArn, boolean includeHeaders) {}
+
+    private static String extractEmailAddress(String source) {
+        int open = source.indexOf('<');
+        int close = source.indexOf('>', open + 1);
+        if (open >= 0 && close > open) {
+            return source.substring(open + 1, close).trim();
+        }
+        return source.trim();
     }
 
     private static List<String> determineSendEventTypes(List<String> destinations,
@@ -646,6 +735,9 @@ public class SesService {
                 }
             }
         }
+        validateTrackingOptions(configSet.getTrackingOptions(), region);
+        validateDeliveryOptions(configSet.getDeliveryOptions(), region);
+        validateVdmOptions(configSet.getVdmOptions());
         if (configSetStore.get(key).isPresent()) {
             throw new AwsException("ConfigurationSetAlreadyExists",
                     "Configuration set " + configSet.getName() + " already exists.", 400);
@@ -656,6 +748,198 @@ public class SesService {
         configSetStore.put(key, configSet);
         LOG.infov("Created SES configuration set: {0} in region {1}", configSet.getName(), region);
         return configSet;
+    }
+
+    public void setConfigurationSetTrackingOptions(String configSetName, TrackingOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        validateTrackingOptions(options, region);
+        cs.setTrackingOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void setConfigurationSetDeliveryOptions(String configSetName, DeliveryOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        validateDeliveryOptions(options, region);
+        cs.setDeliveryOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated DeliveryOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void setConfigurationSetReputationOptions(String configSetName, boolean metricsEnabled, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        cs.setReputationMetricsEnabled(metricsEnabled);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated ReputationMetricsEnabled on configuration set {0} in region {1}: {2}",
+                configSetName, region, metricsEnabled);
+    }
+
+    private boolean isVerifiedDomainIdentity(String domain, String region) {
+        Identity identity = getIdentityVerificationAttributes(domain, region);
+        return identity != null && "Success".equals(identity.getVerificationStatus())
+                && "Domain".equals(identity.getIdentityType());
+    }
+
+    private void requireVerifiedRedirectDomain(String domain, String region) {
+        if (domain == null) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'trackingOptions' failed to satisfy constraint: "
+                            + "Member must not be null", 400);
+        }
+        if (domain.isBlank()) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "At least one field of TrackingOptions must contain a value.", 400);
+        }
+        if (!isVerifiedDomainIdentity(domain, region)) {
+            throw new AwsException("InvalidTrackingOptions",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
+        }
+    }
+
+    public void createConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
+                                                      String region) {
+        requireVerifiedRedirectDomain(customRedirectDomain, region);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() != null && cs.getTrackingOptions().getCustomRedirectDomain() != null) {
+            throw new AwsException("TrackingOptionsAlreadyExistsException",
+                    "Configuration set <" + configSetName + "> already has tracking options.", 400);
+        }
+        TrackingOptions options = new TrackingOptions();
+        options.setCustomRedirectDomain(customRedirectDomain);
+        cs.setTrackingOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Created TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void updateConfigurationSetTrackingOptions(String configSetName, String customRedirectDomain,
+                                                      String region) {
+        requireVerifiedRedirectDomain(customRedirectDomain, region);
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
+            throw new AwsException("TrackingOptionsDoesNotExistException",
+                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
+        }
+        cs.getTrackingOptions().setCustomRedirectDomain(customRedirectDomain);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void deleteConfigurationSetTrackingOptions(String configSetName, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        if (cs.getTrackingOptions() == null || cs.getTrackingOptions().getCustomRedirectDomain() == null) {
+            throw new AwsException("TrackingOptionsDoesNotExistException",
+                    "There are no tracking options for configuration set <" + configSetName + ">", 400);
+        }
+        cs.setTrackingOptions(null);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Deleted TrackingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    public void setConfigurationSetArchivingOptions(String configSetName, ArchivingOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        cs.setArchivingOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated ArchivingOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    private static final java.util.Set<String> VDM_FEATURE_STATES = java.util.Set.of("ENABLED", "DISABLED");
+
+    public void setConfigurationSetVdmOptions(String configSetName, VdmOptions options, String region) {
+        ConfigurationSet cs = getConfigurationSet(configSetName, region);
+        validateVdmOptions(options);
+        cs.setVdmOptions(options);
+        configSetStore.put(configSetKey(region, configSetName), cs);
+        LOG.infov("Updated VdmOptions on configuration set {0} in region {1}", configSetName, region);
+    }
+
+    private void validateVdmOptions(VdmOptions options) {
+        if (options == null) {
+            return;
+        }
+        // Enum values verified against real AWS 2026-06-19; messages use the
+        // nested member path and the [ENABLED, DISABLED] value set.
+        if (options.getDashboardOptions() != null
+                && options.getDashboardOptions().getEngagementMetrics() != null
+                && !VDM_FEATURE_STATES.contains(options.getDashboardOptions().getEngagementMetrics())) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'vdmOptions.dashboardOptions.engagementMetrics' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
+        }
+        if (options.getGuardianOptions() != null
+                && options.getGuardianOptions().getOptimizedSharedDelivery() != null
+                && !VDM_FEATURE_STATES.contains(options.getGuardianOptions().getOptimizedSharedDelivery())) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'vdmOptions.guardianOptions.optimizedSharedDelivery' "
+                            + "failed to satisfy constraint: Member must satisfy enum value set: [ENABLED, DISABLED]", 400);
+        }
+    }
+
+    private static final java.util.Set<String> HTTPS_POLICIES =
+            java.util.Set.of("REQUIRE", "REQUIRE_OPEN_ONLY", "OPTIONAL");
+    private static final java.util.Set<String> TLS_POLICIES = java.util.Set.of("REQUIRE", "OPTIONAL");
+
+    private void validateTrackingOptions(TrackingOptions options, String region) {
+        if (options == null) {
+            return;
+        }
+        String domain = options.getCustomRedirectDomain();
+        String httpsPolicy = options.getHttpsPolicy();
+        // AWS validation order (verified against real AWS 2026-06-17): a present
+        // CustomRedirectDomain must be non-blank, and it is required whenever
+        // HttpsPolicy is set; then the domain must be a verified domain identity
+        // (checked even without HttpsPolicy); then HttpsPolicy must be a valid enum.
+        if ((domain != null && domain.isBlank()) || (httpsPolicy != null && domain == null)) {
+            throw new AwsException("BadRequestException",
+                    "CustomRedirectDomain must be specified.", 400);
+        }
+        if (domain != null && !isVerifiedDomainIdentity(domain, region)) {
+            throw new AwsException("BadRequestException",
+                    "Domain <" + domain + "> is not verified under this account.", 400);
+        }
+        if (httpsPolicy != null && !HTTPS_POLICIES.contains(httpsPolicy)) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'httpsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE, REQUIRE_OPEN_ONLY]", 400);
+        }
+    }
+
+    private void validateDeliveryOptions(DeliveryOptions options, String region) {
+        if (options == null) {
+            return;
+        }
+        if (options.getTlsPolicy() != null && !TLS_POLICIES.contains(options.getTlsPolicy())) {
+            throw new AwsException("BadRequestException",
+                    "1 validation error detected: Value at 'tlsPolicy' failed to satisfy constraint: "
+                            + "Member must satisfy enum value set: [OPTIONAL, REQUIRE]", 400);
+        }
+        // AWS rejects a blank SendingPoolName outright, and a non-existent
+        // dedicated IP pool (both verified against real AWS 2026-06-17). The
+        // pool must have been created via CreateDedicatedIpPool.
+        if (options.getSendingPoolName() != null) {
+            if (options.getSendingPoolName().isBlank()) {
+                throw new AwsException("BadRequestException",
+                        "sendingPoolName can't be blank.", 400);
+            }
+            if (!dedicatedIpPoolExists(options.getSendingPoolName(), region)) {
+                throw new AwsException("BadRequestException",
+                        "SendingPool <" + options.getSendingPoolName() + "> doesn't exist", 400);
+            }
+        }
+        // AWS constrains MaxDeliverySeconds to [300, 50400] (max verified against
+        // real AWS 2026-06-17; min follows the same smithy range-constraint shape).
+        if (options.getMaxDeliverySeconds() != null) {
+            long maxDeliverySeconds = options.getMaxDeliverySeconds();
+            if (maxDeliverySeconds < 300) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value greater than or equal to 300", 400);
+            }
+            if (maxDeliverySeconds > 50400) {
+                throw new AwsException("BadRequestException",
+                        "1 validation error detected: Value at 'maxDeliverySeconds' failed to satisfy constraint: "
+                                + "Member must have value less than or equal to 50400", 400);
+            }
+        }
     }
 
     public ConfigurationSet getConfigurationSet(String name, String region) {
@@ -689,6 +973,61 @@ public class SesService {
     private static String configSetKey(String region, String name) {
         validateConfigurationSetName(name);
         return "configSet::" + region + "::" + name;
+    }
+
+    // ──────────────────────── Dedicated IP Pools ────────────────────────
+
+    private static final java.util.Set<String> SCALING_MODES = java.util.Set.of("STANDARD", "MANAGED");
+
+    public DedicatedIpPool createDedicatedIpPool(String poolName, String scalingMode, String region) {
+        if (poolName == null || poolName.isBlank()) {
+            throw new AwsException("BadRequestException", "PoolName is required.", 400);
+        }
+        String effectiveScaling = (scalingMode == null || scalingMode.isBlank()) ? "STANDARD" : scalingMode;
+        if (!SCALING_MODES.contains(effectiveScaling)) {
+            throw new AwsException("BadRequestException", "The ScalingMode parameter is invalid.", 400);
+        }
+        String key = dedicatedIpPoolKey(region, poolName);
+        if (dedicatedIpPoolStore.get(key).isPresent()) {
+            throw new AwsException("AlreadyExistsException",
+                    "The pool <" + poolName + "> already exists.", 400);
+        }
+        DedicatedIpPool pool = new DedicatedIpPool(poolName, effectiveScaling);
+        dedicatedIpPoolStore.put(key, pool);
+        LOG.infov("Created SES dedicated IP pool: {0} in region {1}", poolName, region);
+        return pool;
+    }
+
+    public DedicatedIpPool getDedicatedIpPool(String poolName, String region) {
+        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName))
+                .orElseThrow(() -> new AwsException("NotFoundException",
+                        "The requested pool <" + poolName + "> does not exist.", 404));
+    }
+
+    public boolean dedicatedIpPoolExists(String poolName, String region) {
+        return dedicatedIpPoolStore.get(dedicatedIpPoolKey(region, poolName)).isPresent();
+    }
+
+    public List<String> listDedicatedIpPools(String region) {
+        String prefix = "dedicatedIpPool::" + region + "::";
+        return dedicatedIpPoolStore.scan(k -> k.startsWith(prefix)).stream()
+                .map(DedicatedIpPool::getPoolName)
+                .sorted()
+                .toList();
+    }
+
+    public void deleteDedicatedIpPool(String poolName, String region) {
+        String key = dedicatedIpPoolKey(region, poolName);
+        if (dedicatedIpPoolStore.get(key).isEmpty()) {
+            throw new AwsException("NotFoundException",
+                    "The requested pool <" + poolName + "> does not exist.", 404);
+        }
+        dedicatedIpPoolStore.delete(key);
+        LOG.infov("Deleted SES dedicated IP pool: {0} in region {1}", poolName, region);
+    }
+
+    private static String dedicatedIpPoolKey(String region, String name) {
+        return "dedicatedIpPool::" + region + "::" + name;
     }
 
     static void validateConfigurationSetName(String name) {

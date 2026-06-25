@@ -9,6 +9,7 @@ import software.amazon.awssdk.services.ec2.model.DescribeSubnetsResponse;
 import software.amazon.awssdk.services.rds.RdsClient;
 import software.amazon.awssdk.services.rds.model.CreateDbSubnetGroupResponse;
 import software.amazon.awssdk.services.rds.model.DescribeDbSubnetGroupsResponse;
+import software.amazon.awssdk.services.rds.model.DescribeOrderableDbInstanceOptionsResponse;
 
 import java.util.List;
 
@@ -65,5 +66,18 @@ class RdsControlPlaneTest {
         assertThat(describeResponse.dbSubnetGroups().get(0).subnets())
                 .extracting("subnetIdentifier")
                 .containsExactlyElementsOf(subnetIds);
+    }
+
+    @Test
+    void sdkDiscoversCurrentSmallGravitonPostgresOption() {
+        DescribeOrderableDbInstanceOptionsResponse response = rds.describeOrderableDBInstanceOptions(b -> b
+                .engine("postgres")
+                .engineVersion("16.14")
+                .dbInstanceClass("db.t4g.small"));
+
+        assertThat(response.orderableDBInstanceOptions()).hasSize(1);
+        assertThat(response.orderableDBInstanceOptions().get(0).engine()).isEqualTo("postgres");
+        assertThat(response.orderableDBInstanceOptions().get(0).engineVersion()).isEqualTo("16.14");
+        assertThat(response.orderableDBInstanceOptions().get(0).dbInstanceClass()).isEqualTo("db.t4g.small");
     }
 }

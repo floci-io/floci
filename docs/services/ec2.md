@@ -4,7 +4,7 @@
 
 ## Instance Execution Model
 
-`RunInstances` launches a **real Docker container** for each instance. The container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. The lifecycle maps directly to Docker:
+`RunInstances` launches a **real Docker container** for each instance. By default, the container is kept alive with `tail -f /dev/null` so any base image works regardless of its default CMD. Catalog entries that opt into the `systemd` guest runtime start `/sbin/init` instead, with the Docker mounts needed for a systemd-based cloud-image guest.
 
 | EC2 state | Docker operation |
 |---|---|
@@ -31,11 +31,44 @@ metadata.
 | `ami-ubuntu2204` | | `public.ecr.aws/docker/library/ubuntu:22.04` |
 | `ami-ubuntu2404-arm64` | `ami-ubuntu2404` | `public.ecr.aws/docker/library/ubuntu:24.04` |
 | `ami-ubuntu2404-amd64` | | `public.ecr.aws/docker/library/ubuntu:24.04` |
+| `ami-ubuntu2404-cloud-arm64` | `ami-ubuntu2404-cloud` | `floci/ami-ubuntu:24.04-arm64` |
 | `ami-debian12` | | `public.ecr.aws/docker/library/debian:12` |
 | `ami-alpine` | | `public.ecr.aws/docker/library/alpine:latest` |
 | `ami-0abcdef1234567893` | | `public.ecr.aws/amazonlinux/amazonlinux:2023` |
 
 Any unrecognized AMI ID (including real AWS AMI IDs like `ami-0abc12345678`) falls back to the catalog `defaultDockerImage` (`public.ecr.aws/amazonlinux/amazonlinux:2023` by default).
+
+### Cloud-image-derived AMI guests
+
+The `ami-ubuntu2404-cloud` entry is an experimental Ubuntu 24.04 guest image built from Canonical cloud-image artifacts, not from the Docker-library `ubuntu:24.04` image. It is intended for EC2 workflows that need packages such as `systemd` and `cloud-init` to match a real Ubuntu cloud image more closely.
+
+This mode is opt-in by AMI selection, not by a global configuration switch.
+Existing catalog entries, including `ami-ubuntu2404`, keep their current
+Docker-library image mapping and default `tail -f /dev/null` container
+lifecycle. The cloud-image-derived entry is a separate AMI ID and alias, so
+`DescribeImages` can advertise it while existing callers continue to get the
+old behavior unless they choose `ami-ubuntu2404-cloud-arm64` or the
+`ami-ubuntu2404-cloud` alias.
+
+The Java metadata-driven builder lives at `io.github.hectorvent.floci.tools.ami.AmiImageTool`. Its recipe is checked in at `docker/ec2/ami-images/image-build-metadata.yaml`, and generated context/provenance defaults to `target/ami-images/<image-id>/`.
+
+```bash
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="plan --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="generate --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="build --image-id ubuntu-24.04-arm64"
+
+./mvnw -q -DskipTests compile exec:java \
+  -Dexec.mainClass=io.github.hectorvent.floci.tools.ami.AmiImageTool \
+  -Dexec.args="smoke --image-id ubuntu-24.04-arm64"
+```
 
 ## SSH Key Injection
 
@@ -45,7 +78,9 @@ Key pairs created with `CreateKeyPair` contain dummy private key material. Impor
 
 ## UserData
 
-`UserData` must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into `/tmp/user-data.sh` inside the container, and executes it with `sh` after SSH key injection. Output is captured and logged.
+`UserData` must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into `/tmp/user-data.sh` inside the container, and executes the script directly after SSH key injection so the script shebang selects the interpreter. Output is captured and logged.
+
+EC2 containers receive `AWS_EC2_METADATA_SERVICE_ENDPOINT` for IMDS and `AWS_ENDPOINT_URL` for AWS service API calls back to Floci.
 
 ## Instance Metadata Service (IMDS)
 
@@ -100,6 +135,7 @@ Floci seeds the following resources on first use in each region so Terraform, th
 | Default Security Group | `sg-default` | `groupName=default`, all-traffic egress |
 | Default Internet Gateway | `igw-default` | Attached to default VPC |
 | Main Route Table | `rtb-default` | Associated with default VPC |
+| Default Network ACL | `acl-default` | Allow-all, associated with the default subnets |
 
 ## Supported Actions
 
@@ -130,6 +166,12 @@ Floci seeds the following resources on first use in each region so Terraform, th
 ### Route Tables
 `CreateRouteTable` · `DescribeRouteTables` · `DeleteRouteTable` · `AssociateRouteTable` · `DisassociateRouteTable` · `CreateRoute` · `DeleteRoute`
 
+### Network ACLs
+`CreateNetworkAcl` · `DescribeNetworkAcls` · `DeleteNetworkAcl` · `CreateNetworkAclEntry` · `ReplaceNetworkAclEntry` · `DeleteNetworkAclEntry` · `ReplaceNetworkAclAssociation`
+
+### Prefix Lists
+`DescribePrefixLists`
+
 ### NAT Gateways
 `CreateNatGateway` · `DescribeNatGateways` · `DeleteNatGateway`
 
@@ -143,7 +185,9 @@ Floci seeds the following resources on first use in each region so Terraform, th
 `DescribeInstanceTypes` · `DescribeInstanceTypeOfferings`
 
 ### Launch Templates
-`CreateLaunchTemplate` · `DescribeLaunchTemplates` · `DeleteLaunchTemplate`
+`CreateLaunchTemplate` · `CreateLaunchTemplateVersion` · `DescribeLaunchTemplates` · `DescribeLaunchTemplateVersions` · `ModifyLaunchTemplate` · `DeleteLaunchTemplate`
+
+Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
 
 ### IAM Instance Profiles
 `DescribeIamInstanceProfileAssociations`

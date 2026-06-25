@@ -415,9 +415,10 @@ public class PipesPoller {
             for (Map.Entry<String, MessageAttributeValue> entry : msg.getMessageAttributes().entrySet()) {
                 ObjectNode attrNode = msgAttrs.putObject(entry.getKey());
                 MessageAttributeValue val = entry.getValue();
-                attrNode.put("stringValue", val.getStringValue());
                 if (val.getBinaryValue() != null) {
                     attrNode.put("binaryValue", Base64.getEncoder().encodeToString(val.getBinaryValue()));
+                } else if (val.getStringValue() != null) {
+                    attrNode.put("stringValue", val.getStringValue());
                 }
                 attrNode.putArray("stringListValues");
                 attrNode.putArray("binaryListValues");

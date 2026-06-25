@@ -188,6 +188,29 @@ class RdsServiceTest {
     }
 
     @Test
+    void createDbInstanceRejectsUnknownParameterGroup() {
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, "does-not-exist", null, null));
+
+        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBParameterGroupName doesn't refer to an existing DB parameter group.", exception.getMessage());
+    }
+
+    @Test
+    void createDbInstanceRejectsIncompatibleParameterGroupFamily() {
+        rdsService.createDbParameterGroup("pg1", "mysql8.0", "test group");
+
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, "pg1", null, null));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals("Parameters that must not be used together were used together. Remove one of the conflicting parameters and try again.",
+                exception.getMessage());
+    }
+
+    @Test
     void listDbInstancesIsCaseInsensitive() {
         rdsService.createDbInstance("mydb", "postgres", "13",
                 "admin", "password", "dbname", "db.t3.micro",
@@ -281,6 +304,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void describeOrderableDbInstanceOptionsIncludesModernGravitonPostgresClasses() {
+        var flociPinned = rdsService.describeOrderableDbInstanceOptions(
+                "postgres", "18.1", "db.m8g.large");
+        var awsEquivalent = rdsService.describeOrderableDbInstanceOptions(
+                "postgres", "18.4", "db.m8g.large");
+
+        assertEquals(1, flociPinned.size());
+        assertEquals("db.m8g.large", flociPinned.getFirst().get("dbInstanceClass"));
+        assertEquals("18.1", flociPinned.getFirst().get("engineVersion"));
+        assertEquals(1, awsEquivalent.size());
+        assertEquals("db.m8g.large", awsEquivalent.getFirst().get("dbInstanceClass"));
+        assertEquals("18.4", awsEquivalent.getFirst().get("engineVersion"));
+    }
+
+    @Test
+    void describeOrderableDbInstanceOptionsIncludesCurrentSmallGravitonPostgresClass() {
+        var result = rdsService.describeOrderableDbInstanceOptions(
+                "postgres", "16.14", "db.t4g.small");
+
+        assertEquals(1, result.size());
+        assertEquals("db.t4g.small", result.getFirst().get("dbInstanceClass"));
+        assertEquals("16.14", result.getFirst().get("engineVersion"));
+    }
+
+    @Test
     void deleteDbClusterFailsWhenMembersRemain() {
         DbCluster cluster = rdsService.createDbCluster("cluster1", "postgres", "13",
                 "admin", "password", "dbname", false, null, null, null, false);
@@ -291,6 +339,27 @@ class RdsServiceTest {
 
         assertEquals("InvalidDBClusterStateFault", exception.getErrorCode());
         assertTrue(exception.getMessage().contains("still has DB instances"));
+    }
+
+    @Test
+    void createDbClusterRejectsUnknownClusterParameterGroup() {
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, "does-not-exist"));
+
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", exception.getMessage());
+    }
+
+    @Test
+    void createDbClusterRejectsIncompatibleClusterParameterGroupFamily() {
+        rdsService.createDbClusterParameterGroup("cpg1", "aurora-mysql8.0", "test group");
+
+        AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, "cpg1"));
+
+        assertEquals("InvalidParameterCombination", exception.getErrorCode());
+        assertEquals("Parameters that must not be used together were used together. Remove one of the conflicting parameters and try again.",
+                exception.getMessage());
     }
 
     @Test
@@ -411,7 +480,8 @@ class RdsServiceTest {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.deleteDbClusterParameterGroup("nonexistent"));
 
-        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", exception.getMessage());
     }
 
     @Test
@@ -419,7 +489,8 @@ class RdsServiceTest {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.getDbClusterParameterGroup("nonexistent"));
 
-        assertEquals("DBParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupNotFound", exception.getErrorCode());
+        assertEquals("DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", exception.getMessage());
     }
 
     @Test

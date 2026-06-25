@@ -132,7 +132,7 @@ podman network create floci-net
 podman run -d --name floci \
   --network floci-net \
   -p 4566:4566 \
-  -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock:Z \
+  -v /run/user/$(id -u)/podman/podman.sock:/var/run/docker.sock:z \
   -e FLOCI_SERVICES_LAMBDA_DOCKER_NETWORK=floci-net \
   -e FLOCI_HOSTNAME=floci \
   floci/floci
@@ -147,9 +147,14 @@ What each setting does and why it is needed:
   Lambda containers it spawns to that same named network.
 - **`FLOCI_HOSTNAME=floci`** — gives Floci a stable name that Lambda containers
   resolve when calling back to the Runtime API.
-- **`:Z` on the socket mount** — relabels the Podman socket for SELinux. Without
-  it, Floci fails to talk to the Podman socket and Lambda container creation
-  errors with `java.io.IOException: Broken pipe`.
+- **`:z` on the socket mount** — relabels the Podman socket for SELinux. Without
+  it, Floci fails to talk to the Podman socket: Lambda/ECR container creation
+  errors with `java.io.IOException: Broken pipe`, and the **Floci UI** sidecar
+  fails to launch with `java.net.BindException: Permission denied`. Use the
+  lowercase `:z` (shared relabel) rather than `:Z` — the Podman API socket is
+  shared with the Podman service, and `:Z` applies a container-private SELinux
+  label that can break access. If `:z` is still not enough on your host, fall
+  back to `--security-opt label=disable`.
 
 !!! tip "When the Runtime API address is still unreachable"
     On some Podman network topologies the auto-detected Runtime API address

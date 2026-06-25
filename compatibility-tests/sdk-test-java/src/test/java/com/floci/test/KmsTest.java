@@ -3,25 +3,7 @@ package com.floci.test;
 import org.junit.jupiter.api.*;
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.kms.KmsClient;
-import software.amazon.awssdk.services.kms.model.CreateKeyResponse;
-import software.amazon.awssdk.services.kms.model.CustomerMasterKeySpec;
-import software.amazon.awssdk.services.kms.model.DataKeySpec;
-import software.amazon.awssdk.services.kms.model.DecryptResponse;
-import software.amazon.awssdk.services.kms.model.DescribeKeyResponse;
-import software.amazon.awssdk.services.kms.model.EncryptResponse;
-import software.amazon.awssdk.services.kms.model.GenerateDataKeyResponse;
-import software.amazon.awssdk.services.kms.model.GenerateDataKeyWithoutPlaintextResponse;
-import software.amazon.awssdk.services.kms.model.GetPublicKeyResponse;
-import software.amazon.awssdk.services.kms.model.KeySpec;
-import software.amazon.awssdk.services.kms.model.KeyState;
-import software.amazon.awssdk.services.kms.model.KeyUsageType;
-import software.amazon.awssdk.services.kms.model.ListAliasesResponse;
-import software.amazon.awssdk.services.kms.model.ListResourceTagsResponse;
-import software.amazon.awssdk.services.kms.model.MessageType;
-import software.amazon.awssdk.services.kms.model.ReEncryptResponse;
-import software.amazon.awssdk.services.kms.model.SignResponse;
-import software.amazon.awssdk.services.kms.model.SigningAlgorithmSpec;
-import software.amazon.awssdk.services.kms.model.VerifyResponse;
+import software.amazon.awssdk.services.kms.model.*;
 
 import java.nio.charset.StandardCharsets;
 
@@ -203,6 +185,10 @@ class KmsTest {
                 .customerMasterKeySpec(CustomerMasterKeySpec.RSA_2048));
         String asymmetricKeyId = createResponse.keyMetadata().keyId();
 
+        assertThat(createResponse.keyMetadata().keySpec()).isEqualTo(KeySpec.RSA_2048);
+        assertThat(createResponse.keyMetadata().signingAlgorithms()).contains(SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256);
+        assertThat(createResponse.keyMetadata().customerMasterKeySpec().name()).isEqualTo(KeySpec.RSA_2048.name());
+        assertThat(createResponse.keyMetadata().keySpec().name()).isEqualTo(KeySpec.RSA_2048.name());
         SdkBytes msg = SdkBytes.fromString("message to sign", StandardCharsets.UTF_8);
 
         SignResponse signResponse = kms.sign(b -> b
@@ -262,6 +248,10 @@ class KmsTest {
         assertThat(pubResponse.publicKey()).isNotNull();
         assertThat(pubResponse.keyUsage()).isEqualTo(KeyUsageType.SIGN_VERIFY);
         assertThat(pubResponse.customerMasterKeySpec()).isEqualTo(CustomerMasterKeySpec.ECC_NIST_P256);
+        assertThat(pubResponse.keySpec()).isEqualTo(KeySpec.ECC_NIST_P256);
+        assertThat(pubResponse.signingAlgorithms()).isNotEmpty();
+        assertThat(pubResponse.signingAlgorithms()).contains(SigningAlgorithmSpec.ECDSA_SHA_256);
+
     }
 
     @Test
@@ -277,7 +267,8 @@ class KmsTest {
     @Test
     @Order(17)
     void deleteAlias() {
-        kms.deleteAlias(b -> b.aliasName(aliasName));
+        DeleteAliasResponse deleteAliasResponse = kms.deleteAlias(b -> b.aliasName(aliasName));
+        assertThat(deleteAliasResponse).isNotNull();
         // No exception means success
     }
 
@@ -316,5 +307,105 @@ class KmsTest {
 
         assertThat(response.plaintext()).isNotNull();
         assertThat(response.plaintext().asByteArray()).hasSize(32);
+    }
+
+    @Test
+    @Order(19)
+    void describeSignVerifyRsaKey() {
+        CreateKeyResponse response = kms.createKey(b -> b.description("test-sign-key")
+                .keySpec(KeySpec.RSA_2048)
+                .keyUsage("SIGN_VERIFY"));
+        String signKeyId = response.keyMetadata().keyId();
+        assertThat(response.keyMetadata().encryptionAlgorithms()).isEmpty();
+        assertThat(response.keyMetadata().signingAlgorithms()).isNotEmpty();
+        assertThat(response.keyMetadata().keySpec()).isNotNull();
+        assertThat(response.keyMetadata().signingAlgorithms()).contains(SigningAlgorithmSpec.RSASSA_PKCS1_V1_5_SHA_256);
+        assertThat(signKeyId).isNotNull();
+        DescribeKeyResponse describeKeyResponse = kms.describeKey(b -> b.keyId(signKeyId));
+        assertThat(describeKeyResponse.keyMetadata().signingAlgorithms()).isNotEmpty();
+        assertThat(describeKeyResponse.keyMetadata().keySpec()).isNotNull();
+        assertThat(describeKeyResponse.keyMetadata().keyId()).isEqualTo(signKeyId);
+    }
+
+    @Test
+    @Order(20)
+    void describeSignVerifyEcKey() {
+        CreateKeyResponse response = kms.createKey(b -> b.description("test-sign-key")
+                .keySpec(KeySpec.ECC_SECG_P256_K1)
+                .keyUsage("SIGN_VERIFY"));
+        String signKeyId = response.keyMetadata().keyId();
+        assertThat(response.keyMetadata().signingAlgorithms()).isNotEmpty();
+        assertThat(response.keyMetadata().keySpec()).isNotNull();
+        assertThat(response.keyMetadata().signingAlgorithms()).contains(SigningAlgorithmSpec.ECDSA_SHA_256);
+        assertThat(signKeyId).isNotNull();
+        DescribeKeyResponse describeKeyResponse = kms.describeKey(b -> b.keyId(signKeyId));
+        assertThat(describeKeyResponse.keyMetadata().signingAlgorithms()).isNotEmpty();
+        assertThat(describeKeyResponse.keyMetadata().signingAlgorithms()).contains(SigningAlgorithmSpec.ECDSA_SHA_256);
+        assertThat(describeKeyResponse.keyMetadata().keySpec()).isNotNull();
+        assertThat(describeKeyResponse.keyMetadata().keyId()).isEqualTo(signKeyId);
+    }
+
+    @Test
+    @Order(21)
+    void describeSignVerifyOtherKey() {
+        CreateKeyResponse response = kms.createKey(b -> b.description("test-sign-key")
+                .keySpec(KeySpec.RSA_2048)
+                .keyUsage("ENCRYPT_DECRYPT"));
+        String signKeyId = response.keyMetadata().keyId();
+        assertThat(response.keyMetadata().signingAlgorithms()).isEmpty();
+        assertThat(response.keyMetadata().keySpec()).isNotNull();
+        assertThat(response.keyMetadata().encryptionAlgorithms()).contains(EncryptionAlgorithmSpec.RSAES_OAEP_SHA_1);
+        assertThat(signKeyId).isNotNull();
+        DescribeKeyResponse describeKeyResponse = kms.describeKey(b -> b.keyId(signKeyId));
+        assertThat(describeKeyResponse.keyMetadata().encryptionAlgorithms()).isNotEmpty();
+        assertThat(describeKeyResponse.keyMetadata().encryptionAlgorithms()).contains(EncryptionAlgorithmSpec.RSAES_OAEP_SHA_256);
+        assertThat(describeKeyResponse.keyMetadata().keySpec()).isNotNull();
+        assertThat(describeKeyResponse.keyMetadata().keyId()).isEqualTo(signKeyId);
+    }
+
+    @Test
+    @Order(22)
+    void describeHmacKey() {
+        CreateKeyResponse response = kms.createKey(b -> b.description("test-sign-key")
+                .keySpec(KeySpec.HMAC_224)
+                .keyUsage("GENERATE_VERIFY_MAC"));
+        String signKeyId = response.keyMetadata().keyId();
+        assertThat(response.keyMetadata().signingAlgorithms()).isEmpty();
+        assertThat(response.keyMetadata().encryptionAlgorithms()).isEmpty();
+        assertThat(response.keyMetadata().keySpec()).isNotNull();
+        assertThat(response.keyMetadata().macAlgorithms()).contains(MacAlgorithmSpec.HMAC_SHA_224);
+        assertThat(signKeyId).isNotNull();
+        DescribeKeyResponse describeKeyResponse = kms.describeKey(b -> b.keyId(signKeyId));
+        assertThat(describeKeyResponse.keyMetadata().macAlgorithms()).isNotEmpty();
+        assertThat(describeKeyResponse.keyMetadata().macAlgorithms()).contains(MacAlgorithmSpec.HMAC_SHA_224);
+        assertThat(describeKeyResponse.keyMetadata().keySpec()).isNotNull();
+        assertThat(describeKeyResponse.keyMetadata().keyId()).isEqualTo(signKeyId);
+    }
+
+    @Test
+    @Order(23)
+    void generateAndVerifyMac() {
+        CreateKeyResponse createResponse = kms.createKey(b -> b
+                .description("hmac-test-key")
+                .keySpec(KeySpec.HMAC_256)
+                .keyUsage(KeyUsageType.GENERATE_VERIFY_MAC));
+        String hmacKeyId = createResponse.keyMetadata().keyId();
+
+        SdkBytes msg = SdkBytes.fromString("message for mac", StandardCharsets.UTF_8);
+
+        GenerateMacResponse generateMacResponse = kms.generateMac(b -> b
+                .keyId(hmacKeyId)
+                .message(msg)
+                .macAlgorithm(MacAlgorithmSpec.HMAC_SHA_256));
+
+        assertThat(generateMacResponse.mac()).isNotNull();
+
+        VerifyMacResponse verifyMacResponse = kms.verifyMac(b -> b
+                .keyId(hmacKeyId)
+                .message(msg)
+                .mac(generateMacResponse.mac())
+                .macAlgorithm(MacAlgorithmSpec.HMAC_SHA_256));
+
+        assertThat(verifyMacResponse.macValid()).isTrue();
     }
 }

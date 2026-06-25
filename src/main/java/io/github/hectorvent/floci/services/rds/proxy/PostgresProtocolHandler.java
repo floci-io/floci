@@ -127,7 +127,7 @@ public class PostgresProtocolHandler {
         InputStream backendIn = backend.getInputStream();
         OutputStream backendOut = backend.getOutputStream();
 
-        String effectiveDbName = (dbName != null && !dbName.isBlank()) ? dbName : "postgres";
+        String effectiveDbName = resolveEffectiveDbName(startup.database(), dbName);
         String backendUser = (isIam || isMaster) ? masterUsername : clientUsername;
         String backendPass = (isIam || isMaster) ? masterPassword : clientPassword;
         sendStartupToBackend(backendOut, backendUser, effectiveDbName);
@@ -146,6 +146,16 @@ public class PostgresProtocolHandler {
         List<byte[]> bufferedMessages = readUntilReadyForQuery(backendIn);
 
         // Phase 6: Send AuthenticationOK to client, forward buffered messages, then bridge
+        if (endsWithErrorResponse(bufferedMessages)) {
+            for (byte[] msg : bufferedMessages) {
+                clientOut.write(msg);
+            }
+            clientOut.flush();
+            closeQuietly(client);
+            closeQuietly(backend);
+            return;
+        }
+
         sendMessage(clientOut, 'R', intBytes(0)); // AuthenticationOK
         for (byte[] msg : bufferedMessages) {
             clientOut.write(msg);
@@ -183,7 +193,9 @@ public class PostgresProtocolHandler {
             byte[] payload = new byte[length - 8];
             readFully(in, payload);
             Map<String, String> params = parseStartupParams(payload);
-            return new StartupMessage(currentSocket, params.getOrDefault("user", "postgres"));
+            return new StartupMessage(currentSocket,
+                    params.getOrDefault("user", "postgres"),
+                    params.get("database"));
         }
     }
 
@@ -257,7 +269,21 @@ public class PostgresProtocolHandler {
         return context;
     }
 
-    private record StartupMessage(Socket socket, String username) {}
+    private record StartupMessage(Socket socket, String username, String database) {}
+
+    static String resolveEffectiveDbName(String clientDatabase, String instanceDbName) {
+        if (clientDatabase != null && !clientDatabase.isBlank()) {
+            return clientDatabase;
+        }
+        if (instanceDbName != null && !instanceDbName.isBlank()) {
+            return instanceDbName;
+        }
+        return "postgres";
+    }
+
+    private static boolean endsWithErrorResponse(List<byte[]> messages) {
+        return !messages.isEmpty() && messages.get(messages.size() - 1)[0] == 'E';
+    }
 
     private static Map<String, String> parseStartupParams(byte[] data) {
         Map<String, String> params = new HashMap<>();

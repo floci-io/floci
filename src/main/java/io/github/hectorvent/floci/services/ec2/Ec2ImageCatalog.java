@@ -148,6 +148,9 @@ public class Ec2ImageCatalog {
         public String imageOwnerAlias;
         public String creationDate;
         public Boolean advertised;
+        public String guestRuntime;
+        public Boolean cloudInit;
+        public String provenance;
 
         public boolean advertised() {
             return advertised == null || advertised;

@@ -38,6 +38,16 @@ floci:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
+      codepipeline:
+        flush-interval-ms: 60000
+      s3vectors:
+        flush-interval-ms: 60000
+      ecs:
+        flush-interval-ms: 60000
+      codebuild:
+        flush-interval-ms: 60000
+      config:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
@@ -87,6 +97,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: true
@@ -97,6 +108,12 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+    memorydb:
+      enabled: true
+      mock: false
+      proxy-base-port: 6400
+      proxy-max-port: 6419
+      default-image: "valkey/valkey:8"
     rds:
       enabled: true
       proxy-base-port: 7001
@@ -192,6 +209,8 @@ floci:
       runner-mode: immediate
     codedeploy:
       enabled: true
+    codepipeline:
+      enabled: true
     autoscaling:
       enabled: true
     transfer:
@@ -218,4 +237,6 @@ floci:
     cloudfront:
       enabled: true
     appsync:
+      enabled: true
+    s3vectors:
       enabled: true

@@ -11,10 +11,13 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -33,6 +36,7 @@ public class Ec2MetadataServer {
     private static final Logger LOG = Logger.getLogger(Ec2MetadataServer.class);
     private static final DateTimeFormatter ISO = DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
             .withZone(ZoneOffset.UTC);
+    private static final String INSTANCE_TAGS_PREFIX = "/latest/meta-data/tags/instance/";
 
     private final Vertx vertx;
     private final EmulatorConfig config;
@@ -59,10 +63,14 @@ public class Ec2MetadataServer {
     }
 
     /** Called by Ec2ContainerManager when a container is terminated. */
-    public void unregisterContainer(String containerIp) {
-        if (containerIp != null) {
-            containerIpToInstance.remove(containerIp);
+    public void unregisterContainer(String containerIp, Instance instance) {
+        if (containerIp != null && instance != null) {
+            containerIpToInstance.remove(containerIp, instance);
         }
+    }
+
+    Optional<Instance> registeredContainer(String containerIp) {
+        return Optional.ofNullable(containerIpToInstance.get(containerIp));
     }
 
     public CompletableFuture<Void> start() {
@@ -92,6 +100,9 @@ public class Ec2MetadataServer {
         router.get("/latest/meta-data/iam/info").handler(ctx -> handleIamInfo(ctx));
         router.get("/latest/meta-data/iam/security-credentials/").handler(ctx -> handleCredentialsList(ctx));
         router.get("/latest/meta-data/iam/security-credentials/:role").handler(ctx -> handleCredentials(ctx));
+        router.get("/latest/meta-data/tags/instance").handler(ctx -> handleInstanceTagKeys(ctx));
+        router.get("/latest/meta-data/tags/instance/").handler(ctx -> handleInstanceTagKeys(ctx));
+        router.getWithRegex("/latest/meta-data/tags/instance/.+").handler(ctx -> handleInstanceTagValue(ctx));
         router.get("/latest/user-data").handler(ctx -> handleUserData(ctx));
         router.get("/latest/dynamic/instance-identity/document").handler(ctx -> handleIdentityDocument(ctx));
 
@@ -245,6 +256,36 @@ public class Ec2MetadataServer {
                 .end(body);
     }
 
+    private void handleInstanceTagKeys(RoutingContext ctx) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+        ctx.response().setStatusCode(200)
+                .putHeader("content-type", "text/plain")
+                .end(instanceTagKeys(inst));
+    }
+
+    private void handleInstanceTagValue(RoutingContext ctx) {
+        Instance inst = resolveInstance(ctx);
+        if (inst == null) {
+            return;
+        }
+
+        String path = ctx.request().path();
+        String tagKey = path.length() <= INSTANCE_TAGS_PREFIX.length()
+                ? ""
+                : URLDecoder.decode(path.substring(INSTANCE_TAGS_PREFIX.length()), StandardCharsets.UTF_8);
+        Optional<String> value = instanceTagValue(inst, tagKey);
+        if (value.isEmpty()) {
+            ctx.response().setStatusCode(404).end("not-found");
+            return;
+        }
+        ctx.response().setStatusCode(200)
+                .putHeader("content-type", "text/plain")
+                .end(value.get());
+    }
+
     private void handleUserData(RoutingContext ctx) {
         Instance inst = resolveInstance(ctx);
         if (inst == null) {
@@ -324,5 +365,34 @@ public class Ec2MetadataServer {
 
     private static String nvl(String s) {
         return s != null ? s : "";
+    }
+
+    static String instanceTagKeys(Instance instance) {
+        StringBuilder tags = new StringBuilder();
+        if (instance == null || instance.getTags() == null) {
+            return "";
+        }
+        for (var tag : instance.getTags()) {
+            if (tag.getKey() == null || tag.getKey().isBlank()) {
+                continue;
+            }
+            if (!tags.isEmpty()) {
+                tags.append("\n");
+            }
+            tags.append(tag.getKey());
+        }
+        return tags.toString();
+    }
+
+    static Optional<String> instanceTagValue(Instance instance, String key) {
+        if (instance == null || instance.getTags() == null || key == null) {
+            return Optional.empty();
+        }
+        for (var tag : instance.getTags()) {
+            if (key.equals(tag.getKey())) {
+                return Optional.of(nvl(tag.getValue()));
+            }
+        }
+        return Optional.empty();
     }
 }

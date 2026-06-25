@@ -611,7 +611,7 @@ public class SqsService {
                 // to the new queue's consumers.
                 return Collections.emptyList();
             }
-            List<Message> result = doReceiveMessage(storageKey, maxMessages, visibilityTimeout, region);
+            List<Message> result = doReceiveMessage(storageKey, queueUrl, maxMessages, visibilityTimeout, region);
             if (!result.isEmpty() || maxWait <= 0) {
                 if (!result.isEmpty() && LOG.isTraceEnabled()) {
                     for (Message m : result) {
@@ -657,8 +657,8 @@ public class SqsService {
         });
     }
 
-    private List<Message> doReceiveMessage(String storageKey, int maxMessages, int visibilityTimeout, String region) {
-        Queue queue = queueStore.get(storageKey).orElse(null);
+    private List<Message> doReceiveMessage(String storageKey, String queueUrl, int maxMessages, int visibilityTimeout, String region) {
+        Queue queue = getQueueByUrl(storageKey, queueUrl).orElse(null);
         if (queue == null) {
             return Collections.emptyList();
         }
