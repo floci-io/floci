@@ -71,8 +71,10 @@ public class CloudFormationQueryHandler {
             case "DeleteStackSet" -> deleteStackSet(params);
             case "CreateStackInstances" -> createStackInstances(params, region);
             case "ListStackInstances" -> listStackInstances(params);
+            case "DescribeStackInstance" -> describeStackInstance(params);
             case "DeleteStackInstances" -> deleteStackInstances(params);
             case "ListStackSetOperations" -> listStackSetOperations(params);
+            case "DescribeStackSetOperation" -> describeStackSetOperation(params);
             default -> xmlError("UnknownAction", "Action " + action + " is not supported.", 400);
         };
     }
@@ -710,6 +712,33 @@ public class CloudFormationQueryHandler {
         }
     }
 
+    private Response describeStackInstance(MultivaluedMap<String, String> params) {
+        try {
+            StackInstance inst = stackSetService.describeStackInstance(
+                    params.getFirst("StackSetName"),
+                    params.getFirst("StackInstanceAccount"),
+                    params.getFirst("StackInstanceRegion"));
+            String xml = new XmlBuilder()
+                    .start("DescribeStackInstanceResponse", CF_NS)
+                    .start("DescribeStackInstanceResult")
+                    .start("StackInstance")
+                      .elem("StackSetId", inst.getStackSetId())
+                      .elem("Account", inst.getAccount())
+                      .elem("Region", inst.getRegion())
+                      .elem("StackId", inst.getStackId())
+                      .elem("Status", inst.getStatus())
+                      .elem("StatusReason", inst.getStatusReason())
+                    .end("StackInstance")
+                    .end("DescribeStackInstanceResult")
+                    .raw(AwsQueryResponse.responseMetadata())
+                    .end("DescribeStackInstanceResponse")
+                    .build();
+            return Response.ok(xml).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
     private Response deleteStackInstances(MultivaluedMap<String, String> params) {
         try {
             StackSetOperation op = stackSetService.deleteStackInstances(
@@ -743,6 +772,30 @@ public class CloudFormationQueryHandler {
             xml.end("Summaries").end("ListStackSetOperationsResult")
                .raw(AwsQueryResponse.responseMetadata())
                .end("ListStackSetOperationsResponse");
+            return Response.ok(xml.build()).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response describeStackSetOperation(MultivaluedMap<String, String> params) {
+        try {
+            StackSetOperation op = stackSetService.describeStackSetOperation(
+                    params.getFirst("StackSetName"), params.getFirst("OperationId"));
+            XmlBuilder xml = new XmlBuilder()
+                    .start("DescribeStackSetOperationResponse", CF_NS)
+                    .start("DescribeStackSetOperationResult")
+                    .start("StackSetOperation")
+                      .elem("OperationId", op.getOperationId())
+                      .elem("Action", op.getAction())
+                      .elem("Status", op.getStatus())
+                      .elem("CreationTimestamp", ISO.format(op.getCreationTimestamp()));
+            if (op.getEndTimestamp() != null) {
+                xml.elem("EndTimestamp", ISO.format(op.getEndTimestamp()));
+            }
+            xml.end("StackSetOperation").end("DescribeStackSetOperationResult")
+               .raw(AwsQueryResponse.responseMetadata())
+               .end("DescribeStackSetOperationResponse");
             return Response.ok(xml.build()).type("text/xml").build();
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());

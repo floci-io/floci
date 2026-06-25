@@ -131,15 +131,41 @@ class CloudFormationStackSetsIntegrationTest {
             .body(containsString("<Account>" + ACCOUNT_B + "</Account>"))
             .body(containsString("<Account>" + ACCOUNT_C + "</Account>"));
 
-        // 6. ListStackSetOperations records the CREATE operation.
+        // 5b. DescribeStackInstance (singular) returns one target's instance.
         given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackInstance")
+            .formParam("StackSetName", setName)
+            .formParam("StackInstanceAccount", ACCOUNT_B)
+            .formParam("StackInstanceRegion", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Account>" + ACCOUNT_B + "</Account>"))
+            .body(containsString("<Region>" + REGION + "</Region>"));
+
+        // 6. ListStackSetOperations records the CREATE operation.
+        String operationId = given()
             .contentType("application/x-www-form-urlencoded")
             .formParam("Action", "ListStackSetOperations")
             .formParam("StackSetName", setName)
             .header("Authorization", auth(ADMIN, "cloudformation"))
         .when().post("/")
         .then().statusCode(200)
-            .body(containsString("<Action>CREATE</Action>"));
+            .body(containsString("<Action>CREATE</Action>"))
+            .extract().path("ListStackSetOperationsResponse.ListStackSetOperationsResult.Summaries.member.OperationId");
+
+        // 6b. DescribeStackSetOperation returns that operation.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackSetOperation")
+            .formParam("StackSetName", setName)
+            .formParam("OperationId", operationId)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<OperationId>" + operationId + "</OperationId>"))
+            .body(containsString("<Status>SUCCEEDED</Status>"));
 
         // 7. Delete the instances; resources and instance records go away.
         given()

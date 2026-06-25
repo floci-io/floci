@@ -116,6 +116,13 @@ class CloudFormationStackSetsTest {
         assertThat(summaries).extracting(StackInstanceSummary::account)
                 .containsExactlyInAnyOrder(ACCOUNT_B, ACCOUNT_C);
         assertThat(summaries).allSatisfy(s -> assertThat(s.region()).isEqualTo(REGION));
+
+        // DescribeStackInstance (singular) — the operation DPS's state machine actually calls.
+        StackInstance inst = cfn.describeStackInstance(r -> r.stackSetName(stackSetName)
+                .stackInstanceAccount(ACCOUNT_B).stackInstanceRegion(REGION)).stackInstance();
+        assertThat(inst.account()).isEqualTo(ACCOUNT_B);
+        assertThat(inst.region()).isEqualTo(REGION);
+        assertThat(inst.stackId()).isNotBlank();
     }
 
     @Test
@@ -126,6 +133,14 @@ class CloudFormationStackSetsTest {
         assertThat(ops).isNotEmpty();
         assertThat(ops).extracting(StackSetOperationSummary::action)
                 .contains(StackSetOperationAction.CREATE);
+
+        String opId = ops.stream().filter(o -> o.action() == StackSetOperationAction.CREATE)
+                .findFirst().orElseThrow().operationId();
+        StackSetOperation op = cfn.describeStackSetOperation(r -> r.stackSetName(stackSetName)
+                .operationId(opId)).stackSetOperation();
+        assertThat(op.operationId()).isEqualTo(opId);
+        assertThat(op.action()).isEqualTo(StackSetOperationAction.CREATE);
+        assertThat(op.status()).isEqualTo(StackSetOperationStatus.SUCCEEDED);
     }
 
     @Test

@@ -156,6 +156,17 @@ public class StackSetService {
                 .toList();
     }
 
+    public StackInstance describeStackInstance(String name, String account, String region) {
+        getStackSetOrThrow(name);
+        if (account == null || region == null) {
+            throw new AwsException("ValidationError",
+                    "StackInstanceAccount and StackInstanceRegion are required", 400);
+        }
+        return instances.get(instanceKey(name, account, region))
+                .orElseThrow(() -> new AwsException("StackInstanceNotFoundException",
+                        "Stack instance for [" + account + "/" + region + "] not found in stack set " + name, 404));
+    }
+
     public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions) {
         getStackSetOrThrow(name);
         if (accounts == null || accounts.isEmpty() || regions == null || regions.isEmpty()) {
@@ -180,6 +191,16 @@ public class StackSetService {
         return operations.scan(k -> k.startsWith(prefix)).stream()
                 .sorted((a, b) -> b.getCreationTimestamp().compareTo(a.getCreationTimestamp()))
                 .toList();
+    }
+
+    public StackSetOperation describeStackSetOperation(String name, String operationId) {
+        getStackSetOrThrow(name);
+        if (operationId == null || operationId.isBlank()) {
+            throw new AwsException("ValidationError", "OperationId is required", 400);
+        }
+        return operations.get(name + ":" + operationId)
+                .orElseThrow(() -> new AwsException("OperationNotFoundException",
+                        "Operation " + operationId + " not found for stack set " + name, 404));
     }
 
     // ── Internal helpers ────────────────────────────────────────────────────────

@@ -347,7 +347,8 @@ public class AwsQueryController {
             "DescribeStackEvents", "DescribeStackResources", "ListStackResources", "DescribeStackResource",
             "SetStackPolicy", "GetStackPolicy",
             "ListStackSets", "DescribeStackSet", "CreateStackSet", "UpdateStackSet", "DeleteStackSet",
-            "CreateStackInstances", "ListStackInstances", "DeleteStackInstances", "ListStackSetOperations"
+            "CreateStackInstances", "ListStackInstances", "DescribeStackInstance", "DeleteStackInstances",
+            "ListStackSetOperations", "DescribeStackSetOperation"
     );
 
     private static final Set<String> SES_ACTIONS = Set.of(
