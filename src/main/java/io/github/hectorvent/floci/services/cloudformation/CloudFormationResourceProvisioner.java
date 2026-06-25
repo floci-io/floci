@@ -847,7 +847,8 @@ public class CloudFormationResourceProvisioner {
                 resolveOptional(props, "HealthCheckType", engine),
                 parseIntProp(props, "HealthCheckGracePeriod", engine, 0),
                 resolveStringList(props, "TerminationPolicies", engine),
-                resolveAsgTags(props, engine));
+                resolveAsgTags(props, engine),
+                resolveAsgTagPropagation(props, engine));
         // Ref returns the Auto Scaling group name; Fn::GetAtt Arn returns the ASG ARN.
         r.setPhysicalId(name);
         r.getAttributes().put("Arn", asg.getAutoScalingGroupArn());
@@ -864,6 +865,19 @@ public class CloudFormationResourceProvisioner {
             }
         }
         return tags;
+    }
+
+    private Map<String, Boolean> resolveAsgTagPropagation(JsonNode props, CloudFormationTemplateEngine engine) {
+        Map<String, Boolean> propagation = new LinkedHashMap<>();
+        if (props != null && props.has("Tags") && props.get("Tags").isArray()) {
+            for (JsonNode tag : props.get("Tags")) {
+                String key = engine.resolve(tag.path("Key"));
+                if (!key.isEmpty()) {
+                    propagation.put(key, Boolean.parseBoolean(engine.resolve(tag.path("PropagateAtLaunch"))));
+                }
+            }
+        }
+        return propagation;
     }
 
     private List<String> resolveStringList(JsonNode props, String field, CloudFormationTemplateEngine engine) {

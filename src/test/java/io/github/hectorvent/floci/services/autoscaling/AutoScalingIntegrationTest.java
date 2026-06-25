@@ -465,6 +465,11 @@ class AutoScalingIntegrationTest {
                 .formParam("Tags.member.1.Key", "owner")
                 .formParam("Tags.member.1.Value", "sample-app")
                 .formParam("Tags.member.1.PropagateAtLaunch", "true")
+                .formParam("Tags.member.2.ResourceId", "my-lt-asg")
+                .formParam("Tags.member.2.ResourceType", "auto-scaling-group")
+                .formParam("Tags.member.2.Key", "control-plane-only")
+                .formParam("Tags.member.2.Value", "true")
+                .formParam("Tags.member.2.PropagateAtLaunch", "false")
                 .header("Authorization", AUTH)
             .when()
                 .post("/")
@@ -489,7 +494,10 @@ class AutoScalingIntegrationTest {
                 .body(containsString("<Version>$Latest</Version>"))
                 .body(containsString("<VPCZoneIdentifier>subnet-12345678,subnet-87654321</VPCZoneIdentifier>"))
                 .body(containsString("owner"))
-                .body(containsString("sample-app"));
+                .body(containsString("sample-app"))
+                .body(containsString("<PropagateAtLaunch>true</PropagateAtLaunch>"))
+                .body(containsString("control-plane-only"))
+                .body(containsString("<PropagateAtLaunch>false</PropagateAtLaunch>"));
 
         given()
                 .formParam("Action", "DeleteTags")

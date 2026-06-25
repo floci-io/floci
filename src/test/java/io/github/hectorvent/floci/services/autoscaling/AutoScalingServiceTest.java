@@ -48,7 +48,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of());
     }
 
     @Test
@@ -120,7 +120,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of()));
+                java.util.Map.of(), java.util.Map.of()));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.MISSING_LAUNCH_TEMPLATE_IMAGE_ID_MESSAGE, error.getMessage());
@@ -229,7 +229,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of()));
+                java.util.Map.of(), java.util.Map.of()));
 
         assertEquals("ValidationError", error.getErrorCode());
         assertEquals(AutoScalingService.INVALID_LAUNCH_TEMPLATE_MESSAGE, error.getMessage());
@@ -633,7 +633,7 @@ class AutoScalingServiceTest {
                 "EC2",
                 0,
                 List.of("Default"),
-                java.util.Map.of());
+                java.util.Map.of(), java.util.Map.of());
     }
 
     private static final class AutoScalingGroupFixture {
