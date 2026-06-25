@@ -225,9 +225,9 @@ public class IamQueryHandler {
     }
 
     private Response handleListMFADevices(MultivaluedMap<String, String> params) {
-        // MFA device state is not modeled; return a wire-accurate empty list so that
-        // SDK/Steampipe per-user hydration (aws_iam_user) succeeds instead of failing
-        // on an UnsupportedOperation error.
+        // MFA device state is not modeled; return the wire-accurate empty result
+        // (MFADevices list + IsTruncated=false). Real AWS returns NoSuchEntity
+        // (HTTP 404) for an unknown user — Floci returns an empty list regardless.
         String result = new XmlBuilder()
                 .start("MFADevices").end("MFADevices")
                 .elem("IsTruncated", false)

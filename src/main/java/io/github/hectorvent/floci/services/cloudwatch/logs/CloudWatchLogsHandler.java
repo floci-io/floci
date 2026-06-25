@@ -313,10 +313,10 @@ public class CloudWatchLogsHandler {
     }
 
     private Response handleGetDataProtectionPolicy(JsonNode request, String region) {
-        // Data-protection policies are not modeled. Real AWS returns
-        // ResourceNotFoundException when a log group has no policy, but the Steampipe
-        // aws_cloudwatch_log_group hydrate does not tolerate errors, so return an
-        // empty policy (HTTP 200) to let per-group collection succeed.
+        // Data-protection policies are not modeled. Return HTTP 200 with the resolved
+        // logGroupIdentifier and no policyDocument ("no policy set"). Real AWS returns
+        // ResourceNotFoundException (HTTP 400) when the resource does not exist — the
+        // 200-empty response is a deliberate Floci simplification for read-only callers.
         String identifier = resolveLogGroupName(request);
         ObjectNode response = objectMapper.createObjectNode();
         if (identifier != null) {

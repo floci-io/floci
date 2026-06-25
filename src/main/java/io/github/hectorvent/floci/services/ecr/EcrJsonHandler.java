@@ -102,10 +102,12 @@ public class EcrJsonHandler {
     }
 
     private Response handleBatchGetRepositoryScanningConfiguration(JsonNode request, String region) {
-        // Scanning configuration is not modeled. Reuse describeRepositories (which
-        // resolves names and throws RepositoryNotFoundException for misses) and return
-        // a wire-accurate scanning config so Steampipe per-repo hydration
-        // (aws_ecr_repository) succeeds instead of failing on UnsupportedOperation.
+        // Scanning configuration is not modeled. Resolve names via describeRepositories
+        // and synthesize a wire-accurate RepositoryScanningConfiguration per repo:
+        // scanFrequency derived from scanOnPush (AWS enum: SCAN_ON_PUSH|CONTINUOUS_SCAN|
+        // MANUAL), with empty appliedScanFilters. Note: real AWS reports unknown repos
+        // in the `failures` array; here describeRepositories throws
+        // RepositoryNotFoundException, failing the whole batch instead.
         List<String> names = parseStringList(request.path("repositoryNames"));
         String registryId = request.path("registryId").asText(null);
 
