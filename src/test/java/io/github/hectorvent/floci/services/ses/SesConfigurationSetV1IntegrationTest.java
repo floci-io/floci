@@ -189,4 +189,63 @@ class SesConfigurationSetV1IntegrationTest {
             .statusCode(400)
             .body(containsString("<Code>InvalidParameterValue</Code>"));
     }
+
+    @Test
+    @Order(11)
+    void putConfigurationSetDeliveryOptions() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "CreateConfigurationSet")
+            .formParam("ConfigurationSet.Name", "v1-cs-delivery")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "PutConfigurationSetDeliveryOptions")
+            .formParam("ConfigurationSetName", "v1-cs-delivery")
+            .formParam("DeliveryOptions.TlsPolicy", "Require")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("PutConfigurationSetDeliveryOptionsResponse"));
+    }
+
+    @Test
+    @Order(12)
+    void putConfigurationSetDeliveryOptions_unknownSetReturns400() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "PutConfigurationSetDeliveryOptions")
+            .formParam("ConfigurationSetName", "v1-cs-ghost")
+            .formParam("DeliveryOptions.TlsPolicy", "Require")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>ConfigurationSetDoesNotExist</Code>"));
+    }
+
+    @Test
+    @Order(13)
+    void putConfigurationSetDeliveryOptions_invalidTlsPolicyReturns400() {
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", AUTH)
+            .formParam("Action", "PutConfigurationSetDeliveryOptions")
+            .formParam("ConfigurationSetName", "v1-cs-delivery")
+            .formParam("DeliveryOptions.TlsPolicy", "Bogus")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>BadRequestException</Code>"))
+            .body(containsString("tlsPolicy"));
+    }
 }
