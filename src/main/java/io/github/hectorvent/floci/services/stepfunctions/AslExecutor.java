@@ -5,6 +5,11 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
+import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
+import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -44,6 +49,10 @@ public class AslExecutor {
     private static final Logger LOG = Logger.getLogger(AslExecutor.class);
     private static final int MAX_WAIT_SECONDS = 30;
 
+    // ecs:runTask.sync polling — wait up to ~60s for the task to reach STOPPED.
+    private static final int ECS_SYNC_POLL_ATTEMPTS = 600;
+    private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
+
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
 
     private final LambdaExecutorService lambdaExecutor;
@@ -51,6 +60,8 @@ public class AslExecutor {
     private final DynamoDbService dynamoDbService;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
     private final SqsJsonHandler sqsJsonHandler;
+    private final EcsService ecsService;
+    private final EcsJsonHandler ecsJsonHandler;
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
@@ -63,7 +74,7 @@ public class AslExecutor {
     @Inject
     public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
                        DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
-                       SqsJsonHandler sqsJsonHandler,
+                       SqsJsonHandler sqsJsonHandler, EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService) {
         this.lambdaExecutor = lambdaExecutor;
@@ -71,6 +82,8 @@ public class AslExecutor {
         this.dynamoDbService = dynamoDbService;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
         this.sqsJsonHandler = sqsJsonHandler;
+        this.ecsService = ecsService;
+        this.ecsJsonHandler = ecsJsonHandler;
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
@@ -359,6 +372,16 @@ public class AslExecutor {
             return invokeAwsSdkSqsSendMessage(input, region);
         }
 
+        // ECS optimized integration: arn:aws:states:::ecs:runTask  (request-response and .sync).
+        // The .waitForTaskToken suffix is already stripped by executeTaskState, so a
+        // waitForTaskToken variant arrives here as the bare runTask resource and simply
+        // launches the task while the token future blocks for SendTaskSuccess.
+        if (resource.startsWith("arn:aws:states:::ecs:runTask")) {
+            String mode = resource.substring("arn:aws:states:::ecs:runTask".length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeEcsRunTask(mode, input, region);
+        }
+
         // Nested state machine integration
         if (resource.startsWith("arn:aws:states:::states:startExecution")) {
             String mode = resource.substring("arn:aws:states:::states:startExecution".length());
@@ -441,6 +464,140 @@ public class AslExecutor {
         }
         throw new FailStateException("States.TaskFailed",
                 "Nested execution timed out: " + execArn);
+    }
+
+    /**
+     * Optimized ECS RunTask integration. Step Functions passes PascalCase parameters
+     * ({@code Cluster}, {@code TaskDefinition}, {@code Overrides.ContainerOverrides}, …)
+     * and expects PascalCase results, whereas Floci's ECS handlers use the lowerCamelCase
+     * of the ECS data-plane API — {@link #recaseKeys} bridges the two ends.
+     *
+     * @param mode "" for request-response (returns the RunTask {@code {Tasks,Failures}}
+     *             response), ".sync" to block until the task reaches STOPPED.
+     */
+    private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region) throws Exception {
+        String taskDefinition = input.path("TaskDefinition").asText(null);
+        if (taskDefinition == null || taskDefinition.isBlank()) {
+            throw new FailStateException("States.TaskFailed",
+                    "TaskDefinition is required for the ecs:runTask integration");
+        }
+        String cluster = input.hasNonNull("Cluster") ? input.path("Cluster").asText() : null;
+        int count = input.path("Count").asInt(1);
+
+        LaunchType launchType = null;
+        String launchTypeRaw = input.path("LaunchType").asText(null);
+        if (launchTypeRaw != null && !launchTypeRaw.isBlank()) {
+            try {
+                launchType = LaunchType.valueOf(launchTypeRaw);
+            } catch (IllegalArgumentException e) {
+                throw new FailStateException("States.TaskFailed", "Unsupported LaunchType: " + launchTypeRaw);
+            }
+        }
+        String group = input.path("Group").asText(null);
+        String startedBy = input.path("StartedBy").asText(null);
+
+        // Parameters are PascalCase; the ECS handler's override parser expects the
+        // camelCase of the data-plane API, so recase the sub-tree before reusing it.
+        JsonNode overridesNode = recaseKeys(objectMapper,
+                input.path("Overrides").path("ContainerOverrides"), false);
+        List<ContainerOverride> overrides = ecsJsonHandler.parseContainerOverrides(overridesNode);
+
+        List<EcsTask> launched;
+        try {
+            launched = ecsService.runTask(cluster, taskDefinition, count, launchType, group, startedBy,
+                    overrides, region);
+        } catch (AwsException e) {
+            throw new FailStateException("ECS." + e.getErrorCode(), e.getMessage());
+        }
+        if (launched.isEmpty()) {
+            throw new FailStateException("States.TaskFailed", "ecs:runTask launched no tasks");
+        }
+
+        if (mode.isEmpty()) {
+            // Request-response: return the RunTask response shape { Tasks: [...], Failures: [] }.
+            ObjectNode resp = objectMapper.createObjectNode();
+            ArrayNode tasks = resp.putArray("Tasks");
+            for (EcsTask t : launched) {
+                tasks.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(t), true));
+            }
+            resp.putArray("Failures");
+            return resp;
+        }
+
+        // .sync — wait until the task reaches STOPPED, then surface success or failure.
+        String taskArn = launched.get(0).getTaskArn();
+        for (int i = 0; i < ECS_SYNC_POLL_ATTEMPTS; i++) {
+            Thread.sleep(ECS_SYNC_POLL_INTERVAL_MS);
+            List<EcsTask> described = ecsService.describeTasks(cluster, List.of(taskArn), region);
+            if (described.isEmpty()) {
+                continue;
+            }
+            EcsTask task = described.get(0);
+            if (!"STOPPED".equals(task.getLastStatus())) {
+                continue;
+            }
+            // Terminal. Like real Step Functions, fail the state when an essential container
+            // exits non-zero or the task never ran a container (e.g. it failed to start).
+            Integer nonZeroExit = null;
+            boolean ranAContainer = task.getContainers() != null && !task.getContainers().isEmpty();
+            if (ranAContainer) {
+                for (var c : task.getContainers()) {
+                    if (c.getExitCode() != null && c.getExitCode() != 0) {
+                        nonZeroExit = c.getExitCode();
+                    }
+                }
+            }
+            if (nonZeroExit != null || !ranAContainer) {
+                String cause = task.getStoppedReason() != null ? task.getStoppedReason()
+                        : (nonZeroExit != null ? "Essential container exited with code " + nonZeroExit
+                                               : "Task stopped without running a container");
+                throw new FailStateException("States.TaskFailed", cause);
+            }
+            return recaseKeys(objectMapper, ecsJsonHandler.taskNode(task), true);
+        }
+        throw new FailStateException("States.Timeout",
+                "ecs:runTask.sync timed out waiting for task to stop: " + taskArn);
+    }
+
+    /**
+     * Returns a deep copy of {@code node} with the first character of every object key
+     * recased. Step Functions optimized service integrations use PascalCase member names
+     * while Floci's ECS wire handlers use the lowerCamelCase of the data-plane API.
+     *
+     * @param upperFirst true to map lowerCamelCase → PascalCase (results handed back to the
+     *                   state machine); false to map PascalCase → lowerCamelCase (parameters
+     *                   handed to the ECS handlers).
+     */
+    static JsonNode recaseKeys(ObjectMapper mapper, JsonNode node, boolean upperFirst) {
+        if (node == null) {
+            return null;
+        }
+        if (node.isObject()) {
+            ObjectNode out = mapper.createObjectNode();
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> e = fields.next();
+                out.set(recaseKey(e.getKey(), upperFirst), recaseKeys(mapper, e.getValue(), upperFirst));
+            }
+            return out;
+        }
+        if (node.isArray()) {
+            ArrayNode out = mapper.createArrayNode();
+            for (JsonNode item : node) {
+                out.add(recaseKeys(mapper, item, upperFirst));
+            }
+            return out;
+        }
+        return node.deepCopy();
+    }
+
+    private static String recaseKey(String key, boolean upperFirst) {
+        if (key == null || key.isEmpty()) {
+            return key;
+        }
+        char first = key.charAt(0);
+        char recased = upperFirst ? Character.toUpperCase(first) : Character.toLowerCase(first);
+        return recased == first ? key : recased + key.substring(1);
     }
 
     private boolean isActivityArn(String resource) {

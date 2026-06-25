@@ -1007,7 +1007,9 @@ public class EcsJsonHandler {
         return n;
     }
 
-    private ObjectNode taskNode(EcsTask t) {
+    /** Renders an ECS task to its data-plane JSON shape. Reused by the Step Functions
+     *  ecs:runTask integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
+    public ObjectNode taskNode(EcsTask t) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("taskArn", t.getTaskArn());
         n.put("clusterArn", t.getClusterArn());
@@ -1311,7 +1313,9 @@ public class EcsJsonHandler {
         return result;
     }
 
-    private List<ContainerOverride> parseContainerOverrides(JsonNode node) {
+    /** Parses ECS container overrides from data-plane JSON. Reused by the Step Functions
+     *  ecs:runTask integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
+    public List<ContainerOverride> parseContainerOverrides(JsonNode node) {
         List<ContainerOverride> result = new ArrayList<>();
         if (!node.isArray()) {
             return result;
