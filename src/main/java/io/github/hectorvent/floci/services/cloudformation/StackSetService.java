@@ -227,7 +227,10 @@ public class StackSetService {
         if (!stacks.isEmpty() && stacks.get(0).getStatus() != null
                 && stacks.get(0).getStatus().endsWith("FAILED")) {
             inst.setStatus("INOPERABLE");
+            inst.setDetailedStatus("FAILED");
             inst.setStatusReason(stacks.get(0).getStatusReason());
+        } else {
+            inst.setDetailedStatus("SUCCEEDED");
         }
         return inst;
     }

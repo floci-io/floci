@@ -585,7 +585,7 @@ public class CloudFormationQueryHandler {
         try {
             StackSet ss = stackSetService.createStackSet(
                     params.getFirst("StackSetName"),
-                    params.getFirst("TemplateBody"),
+                    cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),
                     extractParameters(params),
                     extractList(params, "Capabilities.member."),
                     extractTags(params),
@@ -651,7 +651,7 @@ public class CloudFormationQueryHandler {
         try {
             StackSetOperation op = stackSetService.updateStackSet(
                     params.getFirst("StackSetName"),
-                    params.getFirst("TemplateBody"),
+                    cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),
                     extractParameters(params),
                     extractList(params, "Capabilities.member."),
                     extractTags(params),
@@ -700,6 +700,9 @@ public class CloudFormationQueryHandler {
                    .elem("Region", inst.getRegion())
                    .elem("StackId", inst.getStackId())
                    .elem("Status", inst.getStatus())
+                   .start("StackInstanceStatus")
+                     .elem("DetailedStatus", inst.getDetailedStatus())
+                   .end("StackInstanceStatus")
                    .elem("StatusReason", inst.getStatusReason())
                    .end("member");
             }
@@ -727,6 +730,9 @@ public class CloudFormationQueryHandler {
                       .elem("Region", inst.getRegion())
                       .elem("StackId", inst.getStackId())
                       .elem("Status", inst.getStatus())
+                      .start("StackInstanceStatus")
+                        .elem("DetailedStatus", inst.getDetailedStatus())
+                      .end("StackInstanceStatus")
                       .elem("StatusReason", inst.getStatusReason())
                     .end("StackInstance")
                     .end("DescribeStackInstanceResult")

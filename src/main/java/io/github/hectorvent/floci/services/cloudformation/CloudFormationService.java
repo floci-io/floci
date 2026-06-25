@@ -726,6 +726,18 @@ public class CloudFormationService {
         return "{}";
     }
 
+    /**
+     * Resolves a template body from an inline body or a TemplateURL (fetched from S3), for callers
+     * outside this service such as the StackSets handler. Returns {@code null} when neither is given.
+     */
+    public String resolveTemplateBody(String templateBody, String templateUrl) {
+        if ((templateBody == null || templateBody.isBlank())
+                && (templateUrl == null || templateUrl.isBlank())) {
+            return null;
+        }
+        return resolveTemplate(templateBody, templateUrl);
+    }
+
     private String fetchTemplateFromS3(String url) {
         // Parse S3 URL — three forms:
         //   Virtual-hosted AWS:   https://bucket.s3[.region].amazonaws.com/key

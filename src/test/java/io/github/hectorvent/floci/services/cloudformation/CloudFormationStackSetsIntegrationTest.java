@@ -57,6 +57,55 @@ class CloudFormationStackSetsIntegrationTest {
     }
 
     @Test
+    void stackSetFromTemplateUrlProvisionsAndReportsDetailedStatus() {
+        String setName = "url-set-" + UUID.randomUUID().toString().substring(0, 8);
+        String queue = "url-q-" + UUID.randomUUID().toString().substring(0, 8);
+        String bucket = "tpl-bucket-" + UUID.randomUUID().toString().substring(0, 8);
+        String tkey = "template.json";
+
+        // Stage the template in S3, the way DPS does, then reference it by TemplateURL.
+        given().header("Authorization", auth(ADMIN, "s3")).when().put("/" + bucket)
+            .then().statusCode(200);
+        given().header("Authorization", auth(ADMIN, "s3")).body(queueTemplate(queue))
+            .when().put("/" + bucket + "/" + tkey).then().statusCode(200);
+        String templateUrl = "http://localhost:4566/" + bucket + "/" + tkey;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateURL", templateUrl)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackSetId>"));
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        // The template fetched from S3 was provisioned into account B.
+        assertQueueVisible(ACCOUNT_B, queue);
+
+        // DescribeStackInstance reports the nested StackInstanceStatus.DetailedStatus DPS polls.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackInstance")
+            .formParam("StackSetName", setName)
+            .formParam("StackInstanceAccount", ACCOUNT_B)
+            .formParam("StackInstanceRegion", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<DetailedStatus>SUCCEEDED</DetailedStatus>"));
+    }
+
+    @Test
     void singleStackProvisioningLandsInCallerAccount() {
         String queue = "single-" + UUID.randomUUID().toString().substring(0, 8);
 

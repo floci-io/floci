@@ -13,7 +13,10 @@ public class StackInstance {
     /** Name of the backing single stack that materializes this instance's resources. */
     private String stackName;
     private String stackId;
+    /** Drift status (CURRENT, OUTDATED, INOPERABLE). */
     private String status = "CURRENT";
+    /** Last operation status (SUCCEEDED, FAILED, ...) reported under StackInstanceStatus.DetailedStatus. */
+    private String detailedStatus = "SUCCEEDED";
     private String statusReason;
 
     public String getStackSetId() { return stackSetId; }
@@ -30,6 +33,8 @@ public class StackInstance {
     public void setStackId(String stackId) { this.stackId = stackId; }
     public String getStatus() { return status; }
     public void setStatus(String status) { this.status = status; }
+    public String getDetailedStatus() { return detailedStatus; }
+    public void setDetailedStatus(String detailedStatus) { this.detailedStatus = detailedStatus; }
     public String getStatusReason() { return statusReason; }
     public void setStatusReason(String statusReason) { this.statusReason = statusReason; }
 }
