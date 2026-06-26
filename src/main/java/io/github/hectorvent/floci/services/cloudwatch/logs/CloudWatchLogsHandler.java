@@ -52,6 +52,7 @@ public class CloudWatchLogsHandler {
             case "PutSubscriptionFilter" -> handlePutSubscriptionFilter(request, region);
             case "DescribeSubscriptionFilters" -> handleDescribeSubscriptionFilters(request, region);
             case "DeleteSubscriptionFilter" -> handleDeleteSubscriptionFilter(request, region);
+            case "GetDataProtectionPolicy" -> handleGetDataProtectionPolicy(request, region);
             default -> Response.status(400)
                     .entity(new AwsErrorResponse("UnsupportedOperation", "Operation " + action + " is not supported."))
                     .build();
@@ -309,6 +310,20 @@ public class CloudWatchLogsHandler {
         String filterName = request.path("filterName").asText();
         logsService.deleteSubscriptionFilter(logGroupName, filterName, region);
         return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGetDataProtectionPolicy(JsonNode request, String region) {
+        // Data-protection policies are not modeled. Return HTTP 200 with the resolved
+        // logGroupIdentifier and no policyDocument ("no policy set"). Real AWS returns
+        // ResourceNotFoundException (HTTP 400) when the resource does not exist — the
+        // 200-empty response is a deliberate Floci simplification for read-only callers.
+        String identifier = resolveLogGroupName(request);
+        ObjectNode response = objectMapper.createObjectNode();
+        if (identifier != null) {
+            response.put("logGroupIdentifier", identifier);
+        }
+        // policyDocument intentionally omitted -> no data-protection policy
+        return Response.ok(response).build();
     }
 
     private String resolveLogGroupName(JsonNode request) {

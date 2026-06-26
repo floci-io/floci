@@ -38,6 +38,31 @@ export function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+const SIX_DIGIT_CODE = /\b(\d{6})\b/;
+
+export async function fetchLatestSesVerificationCode(recipient: string): Promise<string> {
+  const response = await fetch(
+    `${ENDPOINT}/_aws/ses?email=${encodeURIComponent(recipient)}`
+  );
+  if (!response.ok) {
+    throw new Error(`failed to fetch SES messages: ${response.status}`);
+  }
+
+  const payload = (await response.json()) as {
+    messages?: Array<{ Body?: { text_part?: string } }>;
+  };
+  const firstMessage = payload.messages?.[0];
+  const body =
+    firstMessage?.Body?.text_part ??
+    (firstMessage?.Body as { html_part?: string } | undefined)?.html_part ??
+    '';
+  const match = body.match(SIX_DIGIT_CODE);
+  if (!match) {
+    throw new Error('verification code email should contain a 6-digit code');
+  }
+  return match[1];
+}
+
 // Build a minimal ZIP file for Lambda functions
 export function buildMinimalZip(filename: string, content: Buffer): Buffer {
   const filenameBytes = Buffer.from(filename);

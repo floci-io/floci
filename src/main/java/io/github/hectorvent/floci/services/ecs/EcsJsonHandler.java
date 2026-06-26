@@ -25,6 +25,7 @@ import io.github.hectorvent.floci.services.ecs.model.ServiceDeployment;
 import io.github.hectorvent.floci.services.ecs.model.ServiceRevision;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.TaskSet;
+import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -951,6 +952,31 @@ public class EcsJsonHandler {
                     host.put("sourcePath", v.hostSourcePath());
                     vNode.set("host", host);
                 }
+                if (v.efs() != null) {
+                    EfsVolumeConfiguration e = v.efs();
+                    ObjectNode efs = objectMapper.createObjectNode();
+                    efs.put("fileSystemId", e.fileSystemId());
+                    if (e.rootDirectory() != null) {
+                        efs.put("rootDirectory", e.rootDirectory());
+                    }
+                    if (e.transitEncryption() != null) {
+                        efs.put("transitEncryption", e.transitEncryption());
+                    }
+                    if (e.transitEncryptionPort() != null) {
+                        efs.put("transitEncryptionPort", e.transitEncryptionPort());
+                    }
+                    if (e.accessPointId() != null || e.iam() != null) {
+                        ObjectNode auth = objectMapper.createObjectNode();
+                        if (e.accessPointId() != null) {
+                            auth.put("accessPointId", e.accessPointId());
+                        }
+                        if (e.iam() != null) {
+                            auth.put("iam", e.iam());
+                        }
+                        efs.set("authorizationConfig", auth);
+                    }
+                    vNode.set("efsVolumeConfiguration", efs);
+                }
                 vols.add(vNode);
             }
             n.set("volumes", vols);
@@ -1292,9 +1318,30 @@ public class EcsJsonHandler {
         }
         for (JsonNode item : node) {
             String hostSourcePath = item.path("host").path("sourcePath").asText(null);
-            result.add(new Volume(item.path("name").asText(), hostSourcePath));
+            EfsVolumeConfiguration efs = parseEfsVolumeConfiguration(item.path("efsVolumeConfiguration"));
+            result.add(new Volume(item.path("name").asText(), hostSourcePath, efs));
         }
         return result;
+    }
+
+    private EfsVolumeConfiguration parseEfsVolumeConfiguration(JsonNode node) {
+        if (node == null || !node.isObject()) {
+            return null;
+        }
+        String fileSystemId = node.path("fileSystemId").asText(null);
+        if (fileSystemId == null) {
+            return null;
+        }
+        Integer transitEncryptionPort = node.path("transitEncryptionPort").isNumber()
+                ? node.path("transitEncryptionPort").asInt() : null;
+        JsonNode auth = node.path("authorizationConfig");
+        return new EfsVolumeConfiguration(
+                fileSystemId,
+                node.path("rootDirectory").asText(null),
+                node.path("transitEncryption").asText(null),
+                transitEncryptionPort,
+                auth.path("accessPointId").asText(null),
+                auth.path("iam").asText(null));
     }
 
     private List<MountPoint> parseMountPoints(JsonNode node) {

@@ -11,6 +11,8 @@ import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ec2.model.Subnet;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DatabaseEngine;
@@ -32,8 +34,10 @@ import java.security.SecureRandom;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
@@ -56,6 +60,7 @@ public class RdsService {
     private final StorageBackend<String, DbSubnetGroup> subnetGroups;
     private final RdsContainerManager containerManager;
     private final RdsProxyManager proxyManager;
+    private final Ec2Service ec2Service;
     private final RegionResolver regionResolver;
     private final EmulatorConfig config;
     private final SecretsManagerService secretsManagerService;
@@ -67,6 +72,7 @@ public class RdsService {
     @Inject
     public RdsService(RdsContainerManager containerManager,
                       RdsProxyManager proxyManager,
+                      Ec2Service ec2Service,
                       RegionResolver regionResolver,
                       EmulatorConfig config,
                       StorageFactory storageFactory,
@@ -74,6 +80,7 @@ public class RdsService {
                       DockerHostResolver dockerHostResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
+        this.ec2Service = ec2Service;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
@@ -92,6 +99,7 @@ public class RdsService {
 
     RdsService(RdsContainerManager containerManager,
                RdsProxyManager proxyManager,
+               Ec2Service ec2Service,
                RegionResolver regionResolver,
                EmulatorConfig config,
                StorageBackend<String, DbInstance> instances,
@@ -99,27 +107,14 @@ public class RdsService {
                StorageBackend<String, DbParameterGroup> parameterGroups,
                StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
                StorageBackend<String, DbSubnetGroup> subnetGroups) {
-        this(containerManager, proxyManager, regionResolver, config,
-                instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups, null, null);
-    }
-
-    RdsService(RdsContainerManager containerManager,
-               RdsProxyManager proxyManager,
-               RegionResolver regionResolver,
-               EmulatorConfig config,
-               StorageBackend<String, DbInstance> instances,
-               StorageBackend<String, DbCluster> clusters,
-               StorageBackend<String, DbParameterGroup> parameterGroups,
-               StorageBackend<String, DbClusterParameterGroup> clusterParameterGroups,
-               StorageBackend<String, DbSubnetGroup> subnetGroups,
-               SecretsManagerService secretsManagerService) {
-        this(containerManager, proxyManager, regionResolver, config,
+        this(containerManager, proxyManager, ec2Service, regionResolver, config,
                 instances, clusters, parameterGroups, clusterParameterGroups, subnetGroups,
-                secretsManagerService, null);
+                null, null);
     }
 
     RdsService(RdsContainerManager containerManager,
                RdsProxyManager proxyManager,
+               Ec2Service ec2Service,
                RegionResolver regionResolver,
                EmulatorConfig config,
                StorageBackend<String, DbInstance> instances,
@@ -131,6 +126,7 @@ public class RdsService {
                DockerHostResolver dockerHostResolver) {
         this.containerManager = containerManager;
         this.proxyManager = proxyManager;
+        this.ec2Service = ec2Service;
         this.regionResolver = regionResolver;
         this.config = config;
         this.secretsManagerService = secretsManagerService;
@@ -157,7 +153,7 @@ public class RdsService {
                                        String dbClusterIdentifier) {
         return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
-                dbSubnetGroupName, dbClusterIdentifier, false, null);
+                dbSubnetGroupName, dbClusterIdentifier, null, false, false, null, Map.of());
     }
 
     public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
@@ -170,7 +166,7 @@ public class RdsService {
                                        String masterUserSecretKmsKeyId) {
         return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
                 dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
-                dbSubnetGroupName, dbClusterIdentifier, manageMasterUserPassword,
+                dbSubnetGroupName, dbClusterIdentifier, null, false, manageMasterUserPassword,
                 masterUserSecretKmsKeyId, Map.of());
     }
 
@@ -183,6 +179,34 @@ public class RdsService {
                                        boolean manageMasterUserPassword,
                                        String masterUserSecretKmsKeyId,
                                        Map<String, String> tags) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, null, false, manageMasterUserPassword,
+                masterUserSecretKmsKeyId, tags);
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz) {
+        return createDbInstance(id, engineParam, engineVersion, masterUsername, masterPassword,
+                dbName, dbInstanceClass, allocatedStorage, iamEnabled, paramGroupName,
+                dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                false, null, Map.of());
+    }
+
+    public DbInstance createDbInstance(String id, String engineParam, String engineVersion,
+                                       String masterUsername, String masterPassword,
+                                       String dbName, String dbInstanceClass,
+                                       int allocatedStorage, boolean iamEnabled,
+                                       String paramGroupName, String dbSubnetGroupName,
+                                       String dbClusterIdentifier, String availabilityZone,
+                                       boolean multiAz, boolean manageMasterUserPassword,
+                                       String masterUserSecretKmsKeyId,
+                                       Map<String, String> tags) {
         if (instances.get(id).isPresent()) {
             throw new AwsException("DBInstanceAlreadyExists",
                     "DB instance " + id + " already exists.", 400);
@@ -192,6 +216,7 @@ public class RdsService {
         if (dbSubnetGroupName != null && !dbSubnetGroupName.isBlank()) {
             getDbSubnetGroup(dbSubnetGroupName);
         }
+        validateInstanceParameterGroup(paramGroupName, engineParam, engineVersion);
         int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
@@ -207,6 +232,7 @@ public class RdsService {
         int containerPort = 0;
         String instanceVolumeId = null;
         String instanceDockerVolumeName = null;
+        PlacementResolution placement;
 
         if (dbClusterIdentifier != null && !dbClusterIdentifier.isBlank()) {
             // Cluster member — share the cluster's container
@@ -221,7 +247,9 @@ public class RdsService {
             instanceDockerVolumeName = cluster.getDockerVolumeName() != null
                     ? cluster.getDockerVolumeName()
                     : volumeName(cluster.getVolumeId(), cluster.getDbClusterIdentifier());
+            placement = PlacementResolution.fromCluster(cluster);
         } else {
+            placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz);
             // Standalone instance — start its own container
             String image = imageForEngine(engine, engineVersion);
             instanceVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
@@ -245,6 +273,11 @@ public class RdsService {
         instance.setVolumeId(instanceVolumeId);
         instance.setDockerVolumeName(instanceDockerVolumeName);
         instance.setTags(tags);
+        instance.setDbSubnetGroupName(placement.dbSubnetGroupName());
+        instance.setVpcId(placement.vpcId());
+        instance.setAvailabilityZone(placement.availabilityZone());
+        instance.setMultiAz(placement.multiAz());
+        instance.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
 
         String region = regionResolver.getDefaultRegion();
         instance.setDbiResourceId("db-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
@@ -479,12 +512,23 @@ public class RdsService {
                                      String masterUsername, String masterPassword,
                                      String databaseName, boolean iamEnabled,
                                      String paramGroupName) {
+        return createDbCluster(id, engineParam, engineVersion, masterUsername, masterPassword,
+                databaseName, iamEnabled, paramGroupName, null, null, false);
+    }
+
+    public DbCluster createDbCluster(String id, String engineParam, String engineVersion,
+                                     String masterUsername, String masterPassword,
+                                     String databaseName, boolean iamEnabled,
+                                     String paramGroupName, String dbSubnetGroupName,
+                                     String availabilityZone, boolean multiAz) {
         if (clusters.get(id).isPresent()) {
             throw new AwsException("DBClusterAlreadyExistsFault",
                     "DB cluster " + id + " already exists.", 400);
         }
 
         DatabaseEngine engine = resolveEngine(engineParam);
+        validateClusterParameterGroup(paramGroupName, engineParam, engineVersion);
+        PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz);
         int proxyPort = allocateProxyPort();
         String image = imageForEngine(engine, engineVersion);
         String clusterVolumeId = String.format("%06x", new SecureRandom().nextInt(0xFFFFFF));
@@ -500,6 +544,11 @@ public class RdsService {
         cluster.setContainerPort(handle.getPort());
         cluster.setVolumeId(clusterVolumeId);
         cluster.setDockerVolumeName(volumeName(clusterVolumeId, id));
+        cluster.setDbSubnetGroupName(placement.dbSubnetGroupName());
+        cluster.setVpcId(placement.vpcId());
+        cluster.setAvailabilityZone(placement.availabilityZone());
+        cluster.setMultiAz(placement.multiAz());
+        cluster.setSubnetAvailabilityZones(placement.subnetAvailabilityZones());
 
         String region = regionResolver.getDefaultRegion();
         cluster.setDbClusterResourceId("cluster-" + java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 24).toUpperCase());
@@ -566,6 +615,48 @@ public class RdsService {
         LOG.infov("DB cluster {0} deleted", id);
     }
 
+    // ── DB Subnet Groups ──────────────────────────────────────────────────────
+
+    public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds) {
+        if (name == null || name.isBlank()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter DBSubnetGroupName.", 400);
+        }
+        if (subnetGroups.get(name).isPresent() || "default".equalsIgnoreCase(name)) {
+            throw new AwsException("DBSubnetGroupAlreadyExists",
+                    "DB subnet group " + name + " already exists.", 400);
+        }
+        if (subnetIds == null || subnetIds.isEmpty()) {
+            throw new AwsException("MissingParameter", "The request must contain the parameter SubnetIds.", 400);
+        }
+
+        DbSubnetGroup group = buildSubnetGroup(name, description, subnetIds);
+        subnetGroups.put(name, group);
+        return group;
+    }
+
+    public Collection<DbSubnetGroup> listDbSubnetGroups(String filterName) {
+        List<DbSubnetGroup> groups = new ArrayList<>();
+        if (filterName == null || filterName.isBlank() || "default".equalsIgnoreCase(filterName)) {
+            groups.add(buildDefaultSubnetGroup());
+        }
+        if (filterName != null && !filterName.isBlank()) {
+            subnetGroups.get(filterName).ifPresent(groups::add);
+            return groups;
+        }
+        groups.addAll(subnetGroups.scan(k -> true));
+        return groups;
+    }
+
+    public DbSubnetGroup resolveDbSubnetGroupView(String name) {
+        String effectiveName = (name == null || name.isBlank()) ? "default" : name;
+        if ("default".equalsIgnoreCase(effectiveName)) {
+            return buildDefaultSubnetGroup();
+        }
+        return subnetGroups.get(effectiveName).orElseThrow(() ->
+                new AwsException("DBSubnetGroupNotFoundFault",
+                        "DB subnet group " + effectiveName + " not found.", 404));
+    }
+
     // ── Parameter Groups ──────────────────────────────────────────────────────
 
     public DbParameterGroup createDbParameterGroup(String name, String family, String description) {
@@ -581,7 +672,7 @@ public class RdsService {
     public DbParameterGroup getDbParameterGroup(String name) {
         return parameterGroups.get(name).orElseThrow(() ->
                 new AwsException("DBParameterGroupNotFound",
-                        "DB parameter group " + name + " not found.", 404));
+                        "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404));
     }
 
     public Collection<DbParameterGroup> listDbParameterGroups(String filterName) {
@@ -594,7 +685,7 @@ public class RdsService {
     public void deleteDbParameterGroup(String name) {
         if (parameterGroups.get(name).isEmpty()) {
             throw new AwsException("DBParameterGroupNotFound",
-                    "DB parameter group " + name + " not found.", 404);
+                    "DBParameterGroupName doesn't refer to an existing DB parameter group.", 404);
         }
         parameterGroups.delete(name);
     }
@@ -609,40 +700,22 @@ public class RdsService {
         return group;
     }
 
-    public DbSubnetGroup createDbSubnetGroup(String name, String description, List<String> subnetIds) {
-        if (subnetGroups.get(name).isPresent()) {
-            throw new AwsException("DBSubnetGroupAlreadyExists",
-                    "DB subnet group " + name + " already exists.", 400);
-        }
-        if (subnetIds == null || subnetIds.isEmpty()) {
-            throw new AwsException("InvalidParameterValue",
-                    "SubnetIds must contain at least one subnet.", 400);
-        }
-        DbSubnetGroup group = new DbSubnetGroup(name, description, "vpc-00000000", subnetIds);
-        subnetGroups.put(name, group);
-        return group;
-    }
-
     public DbSubnetGroup getDbSubnetGroup(String name) {
+        if ("default".equalsIgnoreCase(name)) {
+            return buildDefaultSubnetGroup();
+        }
         return subnetGroups.get(name).orElseThrow(() ->
                 new AwsException("DBSubnetGroupNotFoundFault",
                         "DB subnet group " + name + " not found.", 404));
     }
 
-    public Collection<DbSubnetGroup> listDbSubnetGroups(String filterName) {
-        if (filterName != null && !filterName.isBlank()) {
-            return subnetGroups.get(filterName).map(List::of).orElse(List.of());
-        }
-        return subnetGroups.scan(k -> true);
-    }
-
     public DbSubnetGroup modifyDbSubnetGroup(String name, List<String> subnetIds) {
-        DbSubnetGroup group = getDbSubnetGroup(name);
+        DbSubnetGroup existing = getDbSubnetGroup(name);
         if (subnetIds == null || subnetIds.isEmpty()) {
             throw new AwsException("InvalidParameterValue",
                     "SubnetIds must contain at least one subnet.", 400);
         }
-        group.setSubnetIds(subnetIds);
+        DbSubnetGroup group = buildSubnetGroup(name, existing.getDescription(), subnetIds);
         subnetGroups.put(name, group);
         return group;
     }
@@ -669,8 +742,8 @@ public class RdsService {
 
     public DbClusterParameterGroup getDbClusterParameterGroup(String name) {
         return clusterParameterGroups.get(name).orElseThrow(() ->
-                new AwsException("DBParameterGroupNotFound",
-                        "DB cluster parameter group " + name + " not found.", 404));
+                new AwsException("DBClusterParameterGroupNotFound",
+                        "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404));
     }
 
     public Collection<DbClusterParameterGroup> listDbClusterParameterGroups(String filterName) {
@@ -682,8 +755,8 @@ public class RdsService {
 
     public void deleteDbClusterParameterGroup(String name) {
         if (clusterParameterGroups.get(name).isEmpty()) {
-            throw new AwsException("DBParameterGroupNotFound",
-                    "DB cluster parameter group " + name + " not found.", 404);
+            throw new AwsException("DBClusterParameterGroupNotFound",
+                    "DBClusterParameterGroupName doesn't refer to an existing DB cluster parameter group.", 404);
         }
         clusterParameterGroups.delete(name);
     }
@@ -732,8 +805,7 @@ public class RdsService {
             case "postgres", "aurora-postgresql" -> DatabaseEngine.POSTGRES;
             case "mysql", "aurora-mysql", "aurora" -> DatabaseEngine.MYSQL;
             case "mariadb" -> DatabaseEngine.MARIADB;
-            default -> throw new AwsException("InvalidParameterValue",
-                    "Unsupported engine: " + engineParam + ". Supported: postgres, mysql, mariadb.", 400);
+            default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
         };
     }
 
@@ -744,6 +816,54 @@ public class RdsService {
             case MARIADB -> config.services().rds().defaultMariadbImage();
         };
         return imageForRequestedVersion(defaultImage, engineVersion);
+    }
+
+    private void validateInstanceParameterGroup(String paramGroupName, String engineParam, String engineVersion) {
+        if (paramGroupName == null || paramGroupName.isBlank()) {
+            return;
+        }
+        DbParameterGroup group = getDbParameterGroup(paramGroupName);
+        validateParameterGroupFamily(paramGroupName, group.getDbParameterGroupFamily(), engineParam, engineVersion);
+    }
+
+    private void validateClusterParameterGroup(String paramGroupName, String engineParam, String engineVersion) {
+        if (paramGroupName == null || paramGroupName.isBlank()) {
+            return;
+        }
+        DbClusterParameterGroup group = getDbClusterParameterGroup(paramGroupName);
+        validateParameterGroupFamily(paramGroupName, group.getDbParameterGroupFamily(), engineParam, engineVersion);
+    }
+
+    private void validateParameterGroupFamily(String groupName, String family, String engineParam, String engineVersion) {
+        String normalizedFamily = family == null ? "" : family.toLowerCase();
+        String expectedPrefix = expectedFamilyPrefix(engineParam);
+        if (!normalizedFamily.startsWith(expectedPrefix)) {
+            throw new AwsException("InvalidParameterCombination", invalidParameterCombinationMessage(), 400);
+        }
+    }
+
+    private String expectedFamilyPrefix(String engineParam) {
+        String normalizedEngine = effectiveEngineName(engineParam).toLowerCase();
+        return switch (normalizedEngine) {
+            case "postgres" -> "postgres";
+            case "aurora-postgresql" -> "aurora-postgresql";
+            case "mysql" -> "mysql";
+            case "aurora", "aurora-mysql" -> "aurora-mysql";
+            case "mariadb" -> "mariadb";
+            default -> throw new AwsException("InvalidParameterValue", invalidParameterValueMessage(), 400);
+        };
+    }
+
+    private String effectiveEngineName(String engineParam) {
+        return engineParam == null || engineParam.isBlank() ? "postgres" : engineParam;
+    }
+
+    private String invalidParameterValueMessage() {
+        return "A value that you provided for a parameter isn't valid. Check the parameter constraints and try again.";
+    }
+
+    private String invalidParameterCombinationMessage() {
+        return "Parameters that must not be used together were used together. Remove one of the conflicting parameters and try again.";
     }
 
     static String imageForRequestedVersion(String defaultImage, String engineVersion) {
@@ -914,6 +1034,99 @@ public class RdsService {
         return allocateProxyPort();
     }
 
+    private PlacementResolution resolvePlacement(String dbSubnetGroupName, String availabilityZone, boolean multiAz) {
+        String effectiveSubnetGroupName = (dbSubnetGroupName == null || dbSubnetGroupName.isBlank())
+                ? "default"
+                : dbSubnetGroupName;
+        DbSubnetGroup group = "default".equals(effectiveSubnetGroupName)
+                ? buildDefaultSubnetGroup()
+                : subnetGroups.get(effectiveSubnetGroupName).orElseThrow(() ->
+                        new AwsException("DBSubnetGroupNotFoundFault",
+                                "DB subnet group " + effectiveSubnetGroupName + " not found.", 404));
+
+        Map<String, String> subnetAvailabilityZones = group.getSubnetAvailabilityZones();
+        String vpcId = group.getVpcId();
+
+        if (multiAz && availabilityZone != null && !availabilityZone.isBlank()) {
+            throw new AwsException("InvalidParameterCombination",
+                    "AvailabilityZone cannot be specified when MultiAZ is enabled.", 400);
+        }
+
+        String effectiveAvailabilityZone = availabilityZone;
+        if (effectiveAvailabilityZone == null || effectiveAvailabilityZone.isBlank()) {
+            effectiveAvailabilityZone = subnetAvailabilityZones.values().stream()
+                    .filter(Objects::nonNull)
+                    .findFirst()
+                    .orElse(config.defaultAvailabilityZone());
+        } else if (!subnetAvailabilityZones.containsValue(effectiveAvailabilityZone)) {
+            throw new AwsException("InvalidVPCNetworkStateFault",
+                    "Availability Zone " + effectiveAvailabilityZone
+                            + " is not valid for DB subnet group " + effectiveSubnetGroupName + ".", 400);
+        }
+
+        if (multiAz) {
+            long distinctZoneCount = subnetAvailabilityZones.values().stream()
+                    .filter(Objects::nonNull)
+                    .distinct()
+                    .count();
+            if (distinctZoneCount < 2) {
+                throw new AwsException("DBSubnetGroupDoesNotCoverEnoughAZs",
+                        "DB subnet group " + effectiveSubnetGroupName
+                                + " does not cover multiple Availability Zones.", 400);
+            }
+        }
+
+        return new PlacementResolution(
+                effectiveSubnetGroupName,
+                vpcId,
+                effectiveAvailabilityZone,
+                multiAz,
+                new LinkedHashMap<>(subnetAvailabilityZones));
+    }
+
+    private DbSubnetGroup buildDefaultSubnetGroup() {
+        String region = regionResolver.getDefaultRegion();
+        List<Subnet> subnets = ec2Service.describeSubnets(region, List.of(), Map.of("vpc-id", List.of("vpc-default")));
+        if (subnets.isEmpty()) {
+            throw new AwsException("InvalidVPCNetworkStateFault",
+                    "No subnets available for DB subnet group default.", 400);
+        }
+        return buildSubnetGroup("default", "default subnet group", extractSubnetIds(subnets));
+    }
+
+    private DbSubnetGroup buildSubnetGroup(String name, String description, List<String> subnetIds) {
+        String region = regionResolver.getDefaultRegion();
+        List<Subnet> resolvedSubnets = ec2Service.describeSubnets(region, subnetIds, Map.of());
+        if (resolvedSubnets.size() != subnetIds.size()) {
+            throw new AwsException("InvalidSubnet",
+                    "One or more subnets for DB subnet group " + name + " do not exist.", 400);
+        }
+
+        String vpcId = resolvedSubnets.getFirst().getVpcId();
+        boolean sameVpc = resolvedSubnets.stream()
+                .map(Subnet::getVpcId)
+                .filter(Objects::nonNull)
+                .allMatch(vpcId::equals);
+        if (!sameVpc) {
+            throw new AwsException("InvalidVPCNetworkStateFault",
+                    "DB subnet group " + name + " contains subnets in multiple VPCs.", 400);
+        }
+
+        Map<String, String> subnetAvailabilityZones = new LinkedHashMap<>();
+        for (Subnet subnet : resolvedSubnets) {
+            subnetAvailabilityZones.put(subnet.getSubnetId(), subnet.getAvailabilityZone());
+        }
+
+        DbSubnetGroup group = new DbSubnetGroup(name, description, vpcId, subnetIds, subnetAvailabilityZones);
+        group.setDbSubnetGroupArn(regionResolver.buildArn("rds", region, "subgrp:" + name));
+        group.setSubnetGroupStatus("Complete");
+        return group;
+    }
+
+    private static List<String> extractSubnetIds(List<Subnet> subnets) {
+        return subnets.stream().map(Subnet::getSubnetId).toList();
+    }
+
     private String volumeName(String volumeId, String fallbackId) {
         return ContainerStorageHelper.resourceName("rds", volumeId, fallbackId);
     }
@@ -926,5 +1139,17 @@ public class RdsService {
     private RdsContainerHandle buildClusterHandle(DbCluster cluster) {
         return new RdsContainerHandle(cluster.getContainerId(), cluster.getDbClusterIdentifier(),
                 cluster.getContainerHost(), cluster.getContainerPort());
+    }
+
+    private record PlacementResolution(String dbSubnetGroupName, String vpcId, String availabilityZone,
+                                       boolean multiAz, Map<String, String> subnetAvailabilityZones) {
+        private static PlacementResolution fromCluster(DbCluster cluster) {
+            return new PlacementResolution(
+                    cluster.getDbSubnetGroupName(),
+                    cluster.getVpcId(),
+                    cluster.getAvailabilityZone(),
+                    cluster.isMultiAz(),
+                    cluster.getSubnetAvailabilityZones());
+        }
     }
 }

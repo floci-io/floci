@@ -53,6 +53,12 @@ final class AwsManagedPolicies {
                 "Provides permissions required to use the CloudWatch agent on servers."),
         new ManagedPolicyDef("AWSLambdaFullAccess", "/",
                 "Provides full access to Lambda, S3, DynamoDB, CloudWatch Metrics and Logs."),
+        new ManagedPolicyDef("AWSCloudFormationFullAccess", "/",
+                "Provides full access to AWS CloudFormation."),
+        new ManagedPolicyDef("AWSXRayDaemonWriteAccess", "/",
+                "Allows write permissions to the AWS X-Ray daemon."),
+        new ManagedPolicyDef("AmazonElasticFileSystemClientFullAccess", "/",
+                "Provides root client access to an Amazon EFS file system."),
 
         // Lambda execution role policies
         new ManagedPolicyDef("AWSLambdaBasicExecutionRole", "/service-role/",

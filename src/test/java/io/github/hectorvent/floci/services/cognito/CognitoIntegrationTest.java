@@ -20,6 +20,8 @@ import java.security.KeyFactory;
 import java.security.PublicKey;
 import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.Base64;
 import java.util.List;
 import java.util.Spliterators;
@@ -41,6 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class CognitoIntegrationTest {
 
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+    private static final Pattern SIX_DIGIT_CODE = Pattern.compile("\\b(\\d{6})\\b");
 
     private static String poolId;
     private static String clientId;
@@ -292,6 +295,126 @@ class CognitoIntegrationTest {
 
     @Test
     @Order(7)
+    void confirmSignUpRequiresValidConfirmationCode() throws Exception {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ConfirmSignUpCodePool",
+                  "AutoVerifiedAttributes": ["email"]
+                }
+                """);
+        String signUpPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "confirm-sign-up-client"
+                }
+                """.formatted(signUpPoolId));
+        String signUpClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String signUpUsername = "signup+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(signUpClientId, signUpUsername, signUpUsername))
+                .then()
+                .statusCode(200);
+
+        JsonNode unconfirmedUser = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(signUpPoolId, signUpUsername));
+        assertEquals("UNCONFIRMED", unconfirmedUser.path("UserStatus").asText());
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "000000"
+                }
+                """.formatted(signUpClientId, signUpUsername))
+                .then()
+                .statusCode(400)
+                .body("__type", org.hamcrest.Matchers.equalTo("CodeMismatchException"))
+                .body("message", org.hamcrest.Matchers.equalTo("Invalid verification code provided, please try again."));
+
+        JsonNode stillUnconfirmedUser = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(signUpPoolId, signUpUsername));
+        assertEquals("UNCONFIRMED", stillUnconfirmedUser.path("UserStatus").asText());
+    }
+
+    @Test
+    @Order(8)
+    void confirmSignUpAcceptsIssuedConfirmationCode() throws Exception {
+        given().delete("/_aws/ses").then().statusCode(200);
+
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "ConfirmSignUpSuccessPool",
+                  "AutoVerifiedAttributes": ["email"]
+                }
+                """);
+        String signUpPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "confirm-sign-up-success-client"
+                }
+                """.formatted(signUpPoolId));
+        String signUpClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
+        String signUpUsername = "signup+" + UUID.randomUUID() + "@example.com";
+        cognitoAction("SignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "Password": "Passw0rd!",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
+                }
+                """.formatted(signUpClientId, signUpUsername, signUpUsername))
+                .then()
+                .statusCode(200);
+
+        String confirmationCode = fetchLatestSesVerificationCode(signUpUsername);
+
+        cognitoAction("ConfirmSignUp", """
+                {
+                  "ClientId": "%s",
+                  "Username": "%s",
+                  "ConfirmationCode": "%s"
+                }
+                """.formatted(signUpClientId, signUpUsername, confirmationCode))
+                .then()
+                .statusCode(200);
+
+        JsonNode confirmedUser = cognitoJson("AdminGetUser", """
+                {
+                  "UserPoolId": "%s",
+                  "Username": "%s"
+                }
+                """.formatted(signUpPoolId, signUpUsername));
+        assertEquals("CONFIRMED", confirmedUser.path("UserStatus").asText());
+    }
+
+    @Test
+    @Order(8)
     void forgotPasswordRequiresVerifiedRecoveryDestination() throws Exception {
         JsonNode poolResponse = cognitoJson("CreateUserPool", """
                 {
@@ -1355,15 +1478,33 @@ class CognitoIntegrationTest {
     @Test
     @Order(91)
     void adminConfirmSignUp() throws Exception {
+        JsonNode poolResponse = cognitoJson("CreateUserPool", """
+                {
+                  "PoolName": "AdminConfirmSignUpPool"
+                }
+                """);
+        String localPoolId = poolResponse.path("UserPool").path("Id").asText();
+
+        JsonNode clientResponse = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "admin-confirm-sign-up-client"
+                }
+                """.formatted(localPoolId));
+        String localClientId = clientResponse.path("UserPoolClient").path("ClientId").asText();
+
         String testUser = "unconfirmed+" + UUID.randomUUID() + "@example.com";
         // SignUp user - initially UNCONFIRMED
         cognitoJson("SignUp", """
                 {
                   "ClientId": "%s",
                   "Username": "%s",
-                  "Password": "%s"
+                  "Password": "%s",
+                  "UserAttributes": [
+                    { "Name": "email", "Value": "%s" }
+                  ]
                 }
-                """.formatted(clientId, testUser, PASSWORD));
+                """.formatted(localClientId, testUser, PASSWORD, testUser));
 
         // Get user details to verify user status is UNCONFIRMED
         JsonNode userResp = cognitoJson("AdminGetUser", """
@@ -1371,7 +1512,7 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "Username": "%s"
                 }
-                """.formatted(poolId, testUser));
+                """.formatted(localPoolId, testUser));
         assertEquals("UNCONFIRMED", userResp.path("UserStatus").asText());
 
         // Admin confirms user
@@ -1380,7 +1521,7 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "Username": "%s"
                 }
-                """.formatted(poolId, testUser))
+                """.formatted(localPoolId, testUser))
                 .then()
                 .statusCode(200);
 
@@ -1390,7 +1531,7 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "Username": "%s"
                 }
-                """.formatted(poolId, testUser));
+                """.formatted(localPoolId, testUser));
         assertEquals("CONFIRMED", userRespConfirmed.path("UserStatus").asText());
     }
 
@@ -2055,6 +2196,22 @@ class CognitoIntegrationTest {
                 }
                 """.formatted(clientId, USERNAME, PASSWORD));
         return auth.path("AuthenticationResult").path("AccessToken").asText();
+    }
+
+    private static String fetchLatestSesVerificationCode(String recipient) throws Exception {
+        String response = given()
+                .queryParam("email", recipient)
+                .when()
+                .get("/_aws/ses")
+                .then()
+                .statusCode(200)
+                .extract()
+                .asString();
+        JsonNode payload = OBJECT_MAPPER.readTree(response);
+        String body = payload.path("messages").get(0).path("Body").path("text_part").asText();
+        Matcher matcher = SIX_DIGIT_CODE.matcher(body);
+        assertTrue(matcher.find(), "verification code email should contain a 6-digit code");
+        return matcher.group(1);
     }
 
     private static String padBase64(String value) {

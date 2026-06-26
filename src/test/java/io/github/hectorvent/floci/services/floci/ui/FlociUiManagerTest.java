@@ -9,11 +9,16 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import com.github.dockerjava.api.exception.DockerClientException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import org.junit.jupiter.api.Test;
 
+import java.net.BindException;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -114,6 +119,53 @@ class FlociUiManagerTest {
         when(containerDetector.isRunningInContainer()).thenReturn(false);
 
         assertEquals(4500, newManager().resolveHostPort(null, 4500));
+    }
+
+    @Test
+    void startFailureFromMissingImageKeepsPullGuidance() {
+        // A genuinely missing image (docker-java's pull-callback wrapper) — keep "docker pull".
+        Exception e = new DockerClientException("Could not pull image: not found");
+
+        String msg = FlociUiManager.describeStartFailure("floci/floci-ui:latest", e);
+
+        assertTrue(msg.contains("docker pull floci/floci-ui:latest"),
+                "missing-image failure should still suggest docker pull, was: " + msg);
+        assertTrue(msg.contains("unavailable"));
+    }
+
+    @Test
+    void startFailureFromMissingImageNotFoundKeepsPullGuidance() {
+        Exception e = new NotFoundException("no such image");
+
+        String msg = FlociUiManager.describeStartFailure("floci/floci-ui:latest", e);
+
+        assertTrue(msg.contains("docker pull floci/floci-ui:latest"), msg);
+    }
+
+    @Test
+    void startFailureFromUnreachableSocketDoesNotBlameImage() {
+        // The Podman/SELinux symptom: docker-java's Apache transport wraps a denied
+        // Unix-socket connect as RuntimeException -> BindException. Must NOT suggest a pull.
+        Exception e = new RuntimeException(new BindException("Permission denied"));
+
+        String msg = FlociUiManager.describeStartFailure("floci/floci-ui:latest", e);
+
+        assertFalse(msg.contains("docker pull"),
+                "socket-permission failure must not be reported as a missing image, was: " + msg);
+        assertTrue(msg.contains("could not reach the container runtime"), msg);
+        assertTrue(msg.contains("Permission denied"), msg);
+    }
+
+    @Test
+    void startFailureFromPortConflictDoesNotBlameImage() {
+        // Daemon error (e.g. port already in use) — report it as-is, no pull guidance.
+        Exception e = new RuntimeException(
+                "Status 500: listen tcp :4500: bind: address already in use");
+
+        String msg = FlociUiManager.describeStartFailure("floci/floci-ui:latest", e);
+
+        assertFalse(msg.contains("docker pull"), msg);
+        assertTrue(msg.contains("address already in use"), msg);
     }
 
     @Test

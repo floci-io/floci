@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeControll
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
+import io.github.hectorvent.floci.services.iot.IotController;
+import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
@@ -262,7 +264,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("batch"), Set.of(), Set.of(BatchController.class)),
                 descriptor("codedeploy", "codedeploy", config.services().codedeploy().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "codedeploy", storageMode(config.storage().services().codedeploy().mode(), config.storage().mode()),
+                        config.storage().services().codedeploy().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodeDeploy_20141006."), Set.of("codedeploy"), Set.of(), Set.of()),
                 descriptor("codepipeline", "codepipeline", config.services().codepipeline().enabled(), true,
@@ -285,6 +288,12 @@ public class ResolvedServiceCatalog {
                         "autoscaling", config.storage().mode(), 5000L, AwsNamespaces.AUTOSCALING, ServiceProtocol.QUERY,
                         protocols(ServiceProtocol.QUERY),
                         Set.of(), Set.of("autoscaling"), Set.of(), Set.of()),
+                descriptor("elasticbeanstalk", "elasticbeanstalk",
+                        config.services().elasticbeanstalk().enabled(), true,
+                        "elasticbeanstalk", config.storage().mode(), 5000L,
+                        AwsNamespaces.ELASTIC_BEANSTALK, ServiceProtocol.QUERY,
+                        protocols(ServiceProtocol.QUERY),
+                        Set.of(), Set.of("elasticbeanstalk"), Set.of(), Set.of()),
                 descriptor("backup", "backup", config.services().backup().enabled(), true,
                         "backup", storageMode(config.storage().services().backup().mode(), config.storage().mode()),
                         config.storage().services().backup().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
@@ -340,7 +349,15 @@ public class ResolvedServiceCatalog {
                         "s3vectors", storageMode(config.storage().services().s3vectors().mode(), config.storage().mode()),
                         config.storage().services().s3vectors().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("s3vectors"), Set.of(), Set.of(S3VectorsController.class))
+                        Set.of(), Set.of("s3vectors"), Set.of(), Set.of(S3VectorsController.class)),
+                descriptor("iot", "iot", config.services().iot().enabled(), true,
+                        "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("iot", "execute-api"), Set.of(), Set.of(IotController.class)),
+                descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
+                        "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class))
         ));
     }
 

@@ -1,0 +1,30 @@
+releaseId: ubuntu-24.04
+images:
+  - id: ubuntu-24.04-arm64
+    catalogImageId: ami-ubuntu2404-cloud-arm64
+    catalogAliases:
+      - ami-ubuntu2404-cloud
+    family: ubuntu
+    version: "24.04"
+    architecture: arm64
+    aws:
+      region: us-east-1
+      ownerId: "099720109477"
+      imageId: ami-ubuntu2404-arm64
+      name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20260515
+      creationDate: "2026-05-15T00:00:00.000Z"
+      virtualizationType: hvm
+      rootDeviceType: ebs
+    canonical:
+      baseUrl: https://cloud-images.ubuntu.com/releases/noble/release
+      rootfs: ubuntu-24.04-server-cloudimg-arm64-root.tar.xz
+      rootfsSha256: 15188696da114a3ffd3d3554f5858a0c3ac257933656e85feb4e0e83ad542b4a
+      manifest: ubuntu-24.04-server-cloudimg-arm64.manifest
+    docker:
+      image: floci/ami-ubuntu:24.04-arm64
+    guest:
+      runtime: systemd
+      cloudInit: true
+      smokePackages:
+        - systemd
+        - cloud-init

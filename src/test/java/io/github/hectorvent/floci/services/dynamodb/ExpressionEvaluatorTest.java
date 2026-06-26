@@ -8,6 +8,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 
+import io.github.hectorvent.floci.core.common.AwsException;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 class ExpressionEvaluatorTest {
@@ -569,6 +571,53 @@ class ExpressionEvaluatorTest {
         void blankExpressionMatchesAll() throws Exception {
             var i = item("{\"a\": {\"S\": \"1\"}}");
             assertTrue(ExpressionEvaluator.matches("  ", i, null, null));
+        }
+    }
+
+    // ── Validation tests ──
+
+    @Nested
+    class ValidationTests {
+
+        @Test
+        void exactAwsErrorFormatForLexicallyInvalidTokens() {
+            // Test various invalid characters that cause the tokenizer to fail
+            List<String> invalidChars = List.of("-", "+", "*", "/", "&", "|", "!", "@", "~", ";", "?");
+
+            for (String ch : invalidChars) {
+                String expression = "a " + ch + " b";
+                AwsException e = assertThrows(AwsException.class, () ->
+                                ExpressionEvaluator.validateExpression(expression, "ConditionExpression", null, null),
+                        "Expected exception for character: " + ch);
+
+                assertEquals("ValidationException", e.getErrorCode());
+                assertEquals(400, e.getHttpStatus());
+                assertEquals("Invalid ConditionExpression: Syntax error; token: \"" + ch + "\", near: \"a " + ch + " b\"", e.getMessage());
+            }
+        }
+
+        @Test
+        void missingOperandThrowsSyntaxError() {
+            AwsException e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("a =", "FilterExpression", null, null));
+            assertEquals("ValidationException", e.getErrorCode());
+            assertTrue(e.getMessage().contains("Invalid FilterExpression: Syntax error"), e.getMessage());
+        }
+
+        @Test
+        void redundantParenthesesThrowsSpecificError() {
+            AwsException e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("((a = b))", "KeyConditionExpression", null, null));
+            assertEquals("ValidationException", e.getErrorCode());
+            assertTrue(e.getMessage().contains("Invalid KeyConditionExpression: The expression has redundant parentheses;"), e.getMessage());
+        }
+
+        @Test
+        void unexpectedTokenThrowsSyntaxError() {
+            AwsException e = assertThrows(AwsException.class, () ->
+                    ExpressionEvaluator.validateExpression("a AND OR b", "ConditionExpression", null, null));
+            assertEquals("ValidationException", e.getErrorCode());
+            assertTrue(e.getMessage().contains("Invalid ConditionExpression: Syntax error"), e.getMessage());
         }
     }
 }

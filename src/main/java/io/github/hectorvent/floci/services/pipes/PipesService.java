@@ -72,6 +72,8 @@ public class PipesService implements TagHandler {
             throw new AwsException("ValidationException", "RoleArn is required", 400);
         }
 
+        validateSourceConfiguration(source, sourceParameters);
+
         String key = region + "::" + name;
         if (storage.get(key).isPresent()) {
             throw new AwsException("ConflictException",
@@ -124,6 +126,8 @@ public class PipesService implements TagHandler {
         Pipe pipe = storage.get(key)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Pipe " + name + " does not exist.", 404));
+
+        validateSourceConfiguration(pipe.getSource(), sourceParameters != null ? sourceParameters : pipe.getSourceParameters());
 
         if (target != null) pipe.setTarget(target);
         if (roleArn != null) pipe.setRoleArn(roleArn);
@@ -239,5 +243,30 @@ public class PipesService implements TagHandler {
                 .findFirst()
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Resource " + arn + " does not exist.", 404));
+    }
+
+    private void validateSourceConfiguration(String source, JsonNode sourceParameters) {
+        if (source == null) {
+            return;
+        }
+        if (source.startsWith("smk://")) {
+            requireKafkaParameters(sourceParameters, "SelfManagedKafkaParameters");
+            return;
+        }
+        if (source.contains(":kafka:")) {
+            requireKafkaParameters(sourceParameters, "ManagedStreamingKafkaParameters");
+        }
+    }
+
+    private void requireKafkaParameters(JsonNode sourceParameters, String parameterBlock) {
+        if (sourceParameters == null || sourceParameters.path(parameterBlock).isMissingNode()) {
+            throw new AwsException("ValidationException",
+                    "SourceParameters." + parameterBlock + " is required", 400);
+        }
+        String topicName = sourceParameters.path(parameterBlock).path("TopicName").asText(null);
+        if (topicName == null || topicName.isBlank()) {
+            throw new AwsException("ValidationException",
+                    "SourceParameters." + parameterBlock + ".TopicName is required", 400);
+        }
     }
 }

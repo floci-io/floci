@@ -107,6 +107,8 @@ public class RdsQueryHandler {
         boolean manageMasterUserPassword = "true".equalsIgnoreCase(params.getFirst("ManageMasterUserPassword"));
         String masterUserSecretKmsKeyId = params.getFirst("MasterUserSecretKmsKeyId");
         Map<String, String> tags = parseTags(params);
+        String availabilityZone = params.getFirst("AvailabilityZone");
+        boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
 
         if (dbInstanceClass == null) {
             dbInstanceClass = "db.t3.micro";
@@ -118,7 +120,7 @@ public class RdsQueryHandler {
         try {
             DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
                     masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
-                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier,
+                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
                     manageMasterUserPassword, masterUserSecretKmsKeyId, tags);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
@@ -237,8 +239,8 @@ public class RdsQueryHandler {
     private Response handleCreateDbSubnetGroup(MultivaluedMap<String, String> params) {
         String name = params.getFirst("DBSubnetGroupName");
         if (name == null || name.isBlank()) {
-            return AwsQueryResponse.error("InvalidParameterValue",
-                    "DBSubnetGroupName is required.", AwsNamespaces.RDS, 400);
+            return AwsQueryResponse.error("MissingParameter",
+                    "The request must contain the parameter DBSubnetGroupName.", AwsNamespaces.RDS, 400);
         }
         String description = params.getFirst("DBSubnetGroupDescription");
         List<String> subnetIds = memberList(params, "SubnetIds");
@@ -325,6 +327,9 @@ public class RdsQueryHandler {
         String databaseName = params.getFirst("DatabaseName");
         boolean iamEnabled = "true".equalsIgnoreCase(params.getFirst("EnableIAMDatabaseAuthentication"));
         String paramGroupName = params.getFirst("DBClusterParameterGroupName");
+        String dbSubnetGroupName = params.getFirst("DBSubnetGroupName");
+        String availabilityZone = params.getFirst("AvailabilityZone");
+        boolean multiAz = "true".equalsIgnoreCase(params.getFirst("MultiAZ"));
 
         if (engineVersion == null) {
             engineVersion = defaultEngineVersion(engine);
@@ -332,7 +337,8 @@ public class RdsQueryHandler {
 
         try {
             DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
-                    masterPassword, databaseName, iamEnabled, paramGroupName);
+                    masterPassword, databaseName, iamEnabled, paramGroupName,
+                    dbSubnetGroupName, availabilityZone, multiAz);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -609,10 +615,10 @@ public class RdsQueryHandler {
                .end("Endpoint");
         }
         xml.elem("IAMDatabaseAuthenticationEnabled", i.isIamDatabaseAuthenticationEnabled())
-           .elem("MultiAZ", false)
+           .elem("MultiAZ", i.isMultiAz())
            .elem("StorageType", "gp2")
            .elem("PubliclyAccessible", false)
-           .elem("AvailabilityZone", config.defaultAvailabilityZone())
+           .elem("AvailabilityZone", i.getAvailabilityZone() != null ? i.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
            .start("VpcSecurityGroups")
@@ -693,42 +699,6 @@ public class RdsQueryHandler {
                 .end("Tag"));
     }
 
-    private String dbSubnetGroupXml(DbSubnetGroup group) {
-        return new XmlBuilder().start("DBSubnetGroup").raw(dbSubnetGroupInnerXml(group)).end("DBSubnetGroup").build();
-    }
-
-    private String dbSubnetGroupInnerXml(DbSubnetGroup group) {
-        XmlBuilder xml = new XmlBuilder()
-           .elem("DBSubnetGroupName", group.getDbSubnetGroupName())
-           .elem("DBSubnetGroupDescription", group.getDbSubnetGroupDescription())
-           .elem("VpcId", group.getVpcId() != null ? group.getVpcId() : "vpc-00000000")
-           .elem("SubnetGroupStatus", "Complete")
-           .start("Subnets");
-        for (String subnetId : group.getSubnetIds()) {
-            xml.start("Subnet")
-               .elem("SubnetIdentifier", subnetId)
-               .start("SubnetAvailabilityZone")
-                 .elem("Name", config.defaultAvailabilityZone())
-               .end("SubnetAvailabilityZone")
-               .elem("SubnetStatus", "Active")
-               .end("Subnet");
-        }
-        return xml.end("Subnets").build();
-    }
-
-    private DbSubnetGroup dbSubnetGroupForInstance(DbInstance instance) {
-        String groupName = instance.getDbSubnetGroupName();
-        if (groupName != null && !groupName.isBlank()) {
-            try {
-                return service.getDbSubnetGroup(groupName);
-            } catch (AwsException ignored) {
-                return new DbSubnetGroup(groupName, "DB subnet group " + groupName,
-                        "vpc-00000000", List.of("subnet-00000000"));
-            }
-        }
-        return new DbSubnetGroup("default", "default", "vpc-00000000", List.of("subnet-00000000"));
-    }
-
     private String dbClusterXml(DbCluster c) {
         return new XmlBuilder().start("DBCluster").raw(dbClusterInnerXml(c)).end("DBCluster").build();
     }
@@ -756,8 +726,8 @@ public class RdsQueryHandler {
             xml.elem("ReaderEndpoint", readerEp.address());
         }
         xml.elem("IAMDatabaseAuthenticationEnabled", c.isIamDatabaseAuthenticationEnabled())
-           .elem("MultiAZ", false)
-           .elem("AvailabilityZone", config.defaultAvailabilityZone())
+           .elem("MultiAZ", c.isMultiAz())
+           .elem("AvailabilityZone", c.getAvailabilityZone() != null ? c.getAvailabilityZone() : config.defaultAvailabilityZone())
            .elem("PreferredMaintenanceWindow", "mon:00:00-mon:03:00")
            .elem("PreferredBackupWindow", "04:00-06:00")
            .start("VpcSecurityGroups")
@@ -766,7 +736,7 @@ public class RdsQueryHandler {
                .elem("Status", "active")
              .end("VpcSecurityGroupMembership")
            .end("VpcSecurityGroups")
-           .elem("DBSubnetGroup", "default")
+           .elem("DBSubnetGroup", c.getDbSubnetGroupName() != null ? c.getDbSubnetGroupName() : "default")
            .elem("DbClusterResourceId", c.getDbClusterResourceId())
            .elem("DBClusterArn", c.getDbClusterArn())
            .start("DBClusterMembers");
@@ -784,6 +754,72 @@ public class RdsQueryHandler {
 
     private String paramGroupXml(DbParameterGroup g) {
         return new XmlBuilder().start("DBParameterGroup").raw(paramGroupInnerXml(g)).end("DBParameterGroup").build();
+    }
+
+    private String dbSubnetGroupXml(DbSubnetGroup g) {
+        return new XmlBuilder().start("DBSubnetGroup").raw(dbSubnetGroupInnerXml(g)).end("DBSubnetGroup").build();
+    }
+
+    private String dbSubnetGroupInnerXml(DbSubnetGroup g) {
+        XmlBuilder xml = new XmlBuilder()
+                .elem("DBSubnetGroupName", g.getDbSubnetGroupName())
+                .elem("DBSubnetGroupDescription", g.getDescription())
+                .elem("VpcId", g.getVpcId() != null ? g.getVpcId() : "vpc-00000000")
+                .elem("SubnetGroupStatus", g.getSubnetGroupStatus() != null ? g.getSubnetGroupStatus() : "Complete")
+                .elem("DBSubnetGroupArn", g.getDbSubnetGroupArn())
+                .start("Subnets");
+        for (String subnetId : g.getSubnetIds()) {
+            String az = g.getSubnetAvailabilityZones().get(subnetId);
+            xml.start("Subnet")
+               .elem("SubnetIdentifier", subnetId)
+               .start("SubnetAvailabilityZone")
+                 .elem("Name", az != null ? az : config.defaultAvailabilityZone())
+               .end("SubnetAvailabilityZone")
+               .elem("SubnetStatus", "Active")
+               .end("Subnet");
+        }
+        return xml.end("Subnets").build();
+    }
+
+    private DbSubnetGroup dbSubnetGroupForInstance(DbInstance instance) {
+        String groupName = instance.getDbSubnetGroupName();
+        if (groupName != null && !groupName.isBlank()) {
+            try {
+                DbSubnetGroup group = service.getDbSubnetGroup(groupName);
+                if (group != null) {
+                    return group;
+                }
+            } catch (AwsException ignored) {
+            }
+        }
+        try {
+            DbSubnetGroup group = service.resolveDbSubnetGroupView(groupName);
+            if (group != null) {
+                return group;
+            }
+        } catch (AwsException ignored) {
+        }
+        if (groupName != null && !groupName.isBlank()) {
+            return fallbackSubnetGroup(instance, groupName, "DB subnet group " + groupName);
+        }
+        return fallbackSubnetGroup(instance, "default", "default");
+    }
+
+    private DbSubnetGroup fallbackSubnetGroup(DbInstance instance, String name, String description) {
+        DbSubnetGroup fallback = new DbSubnetGroup();
+        fallback.setDbSubnetGroupName(name);
+        fallback.setDescription(description);
+        fallback.setVpcId(instance.getVpcId() != null ? instance.getVpcId() : "vpc-00000000");
+        fallback.setSubnetGroupStatus("Complete");
+        Map<String, String> zones = instance.getSubnetAvailabilityZones();
+        if (!zones.isEmpty()) {
+            fallback.setSubnetIds(List.copyOf(zones.keySet()));
+            fallback.setSubnetAvailabilityZones(zones);
+        } else {
+            fallback.setSubnetIds(List.of("subnet-00000000"));
+            fallback.setSubnetAvailabilityZones(Map.of("subnet-00000000", config.defaultAvailabilityZone()));
+        }
+        return fallback;
     }
 
     private String paramGroupInnerXml(DbParameterGroup g) {

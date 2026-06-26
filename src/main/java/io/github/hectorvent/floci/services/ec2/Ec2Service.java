@@ -83,6 +83,7 @@ public class Ec2Service {
     private final Ec2ContainerManager containerManager;
     private final AmiImageResolver amiImageResolver;
     private final Ec2ImageCatalog imageCatalog;
+    private final Ec2InstanceTypeCatalog instanceTypeCatalog;
 
     // region::id → resource (persisted via StorageFactory so state survives a restart in
     // persistent/hybrid/wal modes; see #1297 — CloudFormation persists stacks/exports that
@@ -111,8 +112,8 @@ public class Ec2Service {
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
-                      StorageFactory storageFactory) {
-        this(config, containerManager, amiImageResolver, imageCatalog,
+                      Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
+        this(config, containerManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
                 storageFactory.create("ec2", "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
@@ -134,6 +135,7 @@ public class Ec2Service {
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
                AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
+               Ec2InstanceTypeCatalog instanceTypeCatalog,
                StorageBackend<String, Vpc> vpcs,
                StorageBackend<String, Subnet> subnets,
                StorageBackend<String, SecurityGroup> securityGroups,
@@ -155,6 +157,7 @@ public class Ec2Service {
         this.containerManager = containerManager;
         this.amiImageResolver = amiImageResolver;
         this.imageCatalog = imageCatalog;
+        this.instanceTypeCatalog = instanceTypeCatalog;
         this.vpcs = vpcs;
         this.subnets = subnets;
         this.securityGroups = securityGroups;
@@ -299,6 +302,9 @@ public class Ec2Service {
         egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
         defaultSg.getIpPermissionsEgress().add(egressAll);
         securityGroups.put(key(region, securityGroupId), defaultSg);
+        // Persist the default egress rule as a SecurityGroupRule so that
+        // DescribeSecurityGroupRules can find it immediately (#1093).
+        createRules(region, securityGroupId, egressAll, true);
     }
 
     private String createMainRouteTable(String region, Vpc vpc, String routeTableId, String associationId) {
@@ -617,7 +623,7 @@ public class Ec2Service {
             reservation.getInstances().add(inst);
 
             if (!config.services().ec2().mock()) {
-                String dockerImage = amiImageResolver.resolve(imageId);
+                ResolvedAmiImage dockerImage = amiImageResolver.resolveImage(imageId);
                 String publicKey = null;
                 if (keyName != null) {
                     KeyPair kp = findKeyPair(region, keyName);
@@ -1110,6 +1116,9 @@ public class Ec2Service {
         egressAll.getIpRanges().add(new IpRange("0.0.0.0/0"));
         sg.getIpPermissionsEgress().add(egressAll);
         securityGroups.put(key(region, sgId), sg);
+        // Persist the default egress rule as a SecurityGroupRule so that
+        // DescribeSecurityGroupRules can find it immediately (#1093).
+        createRules(region, sgId, egressAll, true);
         return sg;
     }
 
@@ -1228,8 +1237,9 @@ public class Ec2Service {
 
     public List<SecurityGroupRule> describeSecurityGroupRules(String region, String groupId, List<String> ruleIds) {
         ensureDefaultResources(region);
-        return securityGroupRules.scan(k -> true).stream()
-                .filter(r -> r.getGroupId().equals(groupId))
+        String regionPrefix = region + "::";
+        return securityGroupRules.scan(k -> k.startsWith(regionPrefix)).stream()
+                .filter(r -> groupId.isEmpty() || groupId.equals(r.getGroupId()))
                 .filter(r -> ruleIds.isEmpty() || ruleIds.contains(r.getSecurityGroupRuleId()))
                 .collect(Collectors.toList());
     }
@@ -2052,41 +2062,17 @@ public class Ec2Service {
     // ─── Instance Types ────────────────────────────────────────────────────────
 
     public List<Map<String, Object>> describeInstanceTypes(List<String> instanceTypeNames) {
-        List<Map<String, Object>> allTypes = new ArrayList<>();
-        allTypes.add(buildInstanceType("t2.micro", 1, 1024));
-        allTypes.add(buildInstanceType("t3.micro", 2, 1024));
-        allTypes.add(buildInstanceType("t3.small", 2, 2048));
-        allTypes.add(buildInstanceType("t3.medium", 2, 4096));
-        allTypes.add(buildInstanceType("m5.large", 2, 8192));
-        allTypes.add(buildInstanceType("t4g.micro", 2, 1024, List.of("arm64")));
-        allTypes.add(buildInstanceType("t4g.small", 2, 2048, List.of("arm64")));
-        allTypes.add(buildInstanceType("t4g.medium", 2, 4096, List.of("arm64")));
-        allTypes.add(buildInstanceType("m6gd.2xlarge", 8, 32768, List.of("arm64")));
-        allTypes.add(buildInstanceType("m7gd.2xlarge", 8, 32768, List.of("arm64")));
-        allTypes.add(buildInstanceType("m8gd.medium", 1, 4096, List.of("arm64")));
-        allTypes.add(buildInstanceType("m8gd.2xlarge", 8, 32768, List.of("arm64")));
-
         if (instanceTypeNames.isEmpty()) {
-            return allTypes;
+            return instanceTypeCatalog.instanceTypes().stream()
+                    .map(Ec2InstanceTypeCatalog.CatalogInstanceType::toResponseMap)
+                    .collect(Collectors.toList());
         }
-        return allTypes.stream()
-                .filter(t -> instanceTypeNames.contains(t.get("instanceType")))
+        return instanceTypeNames.stream()
+                .distinct()
+                .map(instanceTypeCatalog::find)
+                .flatMap(Optional::stream)
+                .map(Ec2InstanceTypeCatalog.CatalogInstanceType::toResponseMap)
                 .collect(Collectors.toList());
-    }
-
-    private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib) {
-        return buildInstanceType(name, vcpu, memMib, List.of("x86_64"));
-    }
-
-    private Map<String, Object> buildInstanceType(String name, int vcpu, int memMib,
-                                                  List<String> supportedArchitectures) {
-        Map<String, Object> t = new LinkedHashMap<>();
-        t.put("instanceType", name);
-        t.put("vcpu", vcpu);
-        t.put("memoryMib", memMib);
-        t.put("supportedArchitectures", supportedArchitectures);
-        t.put("currentGeneration", true);
-        return t;
     }
 
     public List<Map<String, String>> describeInstanceTypeOfferings(String region, List<String> instanceTypeNames,

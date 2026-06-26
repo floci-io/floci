@@ -25,6 +25,7 @@ import java.time.Instant;
 import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -50,6 +51,13 @@ public class IamService {
     private final StorageBackend<String, SessionCredential> sessions;
     private final RegionResolver regionResolver;
     private final boolean seedDeployerPrincipal;
+
+    /**
+     * AWS-managed policies (arn:aws:iam::aws:policy/...), keyed by ARN. These are global —
+     * not owned by any account — so they live here rather than in the account-partitioned
+     * {@link #policies} store, and {@link #getPolicy} resolves them for any caller.
+     */
+    private final Map<String, IamPolicy> awsManagedPolicies = buildAwsManagedPolicies();
 
     @Inject
     public IamService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver) {
@@ -105,17 +113,25 @@ public class IamService {
         }
     }
 
-    void seedAwsManagedPolicies() {
-        int seeded = 0;
+    private static Map<String, IamPolicy> buildAwsManagedPolicies() {
+        Map<String, IamPolicy> catalog = new LinkedHashMap<>();
         for (AwsManagedPolicies.ManagedPolicyDef def : AwsManagedPolicies.POLICIES) {
             String arn = def.arn();
-            if (policies.get(arn).isPresent()) {
+            catalog.put(arn, new IamPolicy("ANPA" + randomId(16), def.name(), def.path(), arn,
+                    def.description(), AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+        }
+        return catalog;
+    }
+
+    void seedAwsManagedPolicies() {
+        // Managed policies are served globally from the catalog (see getPolicy); this also
+        // mirrors them into the default-account store so ListPolicies(Scope=AWS) lists them.
+        int seeded = 0;
+        for (Map.Entry<String, IamPolicy> entry : awsManagedPolicies.entrySet()) {
+            if (policies.get(entry.getKey()).isPresent()) {
                 continue;
             }
-            String policyId = "ANPA" + randomId(16);
-            IamPolicy policy = new IamPolicy(policyId, def.name(), def.path(), arn,
-                    def.description(), AwsManagedPolicies.PERMISSIVE_DOCUMENT);
-            policies.put(arn, policy);
+            policies.put(entry.getKey(), entry.getValue());
             seeded++;
         }
         if (seeded > 0) {
@@ -398,6 +414,16 @@ public class IamService {
     }
 
     public IamPolicy getPolicy(String policyArn) {
+        // AWS-managed policies (arn:aws:iam::aws:policy/...) are global — not owned by any
+        // account — so they are served from the catalog rather than the account-partitioned
+        // store, which would otherwise make them visible only to the default account.
+        if (policyArn != null && policyArn.startsWith(AwsManagedPolicies.ARN_PREFIX)) {
+            IamPolicy managed = awsManagedPolicies.get(policyArn);
+            if (managed != null) {
+                return managed;
+            }
+            throw new AwsException("NoSuchEntity", "Policy " + policyArn + " does not exist.", 404);
+        }
         return policies.get(policyArn)
                 .orElseThrow(() -> new AwsException("NoSuchEntity",
                         "Policy " + policyArn + " does not exist.", 404));
@@ -431,34 +457,50 @@ public class IamService {
                             + "Member must satisfy enum value set: [All, AWS, Local]", 400);
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
-        return policies.scan(k -> true).stream()
-                .filter(p -> p.getPath().startsWith(prefix))
-                .filter(p -> {
-                    if ("AWS".equalsIgnoreCase(scope)) {
-                        return p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX);
-                    } else if ("Local".equalsIgnoreCase(scope)) {
-                        return !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX);
-                    }
-                    return true;
-                })
-                .toList();
+        boolean blankScope = scope == null || scope.isBlank();
+        boolean includeAws = blankScope || "All".equalsIgnoreCase(scope) || "AWS".equalsIgnoreCase(scope);
+        boolean includeLocal = blankScope || "All".equalsIgnoreCase(scope) || "Local".equalsIgnoreCase(scope);
+
+        List<IamPolicy> result = new ArrayList<>();
+        if (includeLocal) {
+            // Customer-managed policies live in the account-partitioned store. Exclude any
+            // AWS-managed ARNs mirrored into the default account at seed time — those are
+            // served from the global catalog below so the default account does not see them twice.
+            policies.scan(k -> true).stream()
+                    .filter(p -> !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                    .filter(p -> p.getPath().startsWith(prefix))
+                    .forEach(result::add);
+        }
+        if (includeAws) {
+            // AWS-managed policies are global (account-less arn:aws:iam::aws:policy/... ARN), so
+            // every caller sees the full set regardless of the request account — mirroring the
+            // getPolicy fix, and keeping the ListPolicies and GetPolicy read paths consistent.
+            awsManagedPolicies.values().stream()
+                    .filter(p -> p.getPath().startsWith(prefix))
+                    .forEach(result::add);
+        }
+        return result;
     }
 
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
-        int nextVersionNum = policy.getVersions().size() + 1;
-        if (nextVersionNum > 5) {
-            throw new AwsException("LimitExceeded",
-                    "A managed policy can have up to 5 versions.", 409);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        PolicyVersion version;
+        synchronized (versions) {
+            int nextVersionNum = versions.size() + 1;
+            if (nextVersionNum > 5) {
+                throw new AwsException("LimitExceeded",
+                        "A managed policy can have up to 5 versions.", 409);
+            }
+            String versionId = "v" + nextVersionNum;
+            version = new PolicyVersion(versionId, document, setAsDefault);
+            if (setAsDefault) {
+                versions.values().forEach(v -> v.setDefaultVersion(false));
+                policy.setDefaultVersionId(versionId);
+            }
+            versions.put(versionId, version);
         }
-        String versionId = "v" + nextVersionNum;
-        PolicyVersion version = new PolicyVersion(versionId, document, setAsDefault);
-        if (setAsDefault) {
-            policy.getVersions().values().forEach(v -> v.setDefaultVersion(false));
-            policy.setDefaultVersionId(versionId);
-        }
-        policy.getVersions().put(versionId, version);
         policy.setUpdateDate(Instant.now());
         policies.put(policyArn, policy);
         return version;
@@ -481,27 +523,36 @@ public class IamService {
             throw new AwsException("DeleteConflict",
                     "Cannot delete the default version of a policy.", 409);
         }
-        if (!policy.getVersions().containsKey(versionId)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            if (!versions.containsKey(versionId)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy version " + versionId + " does not exist.", 404);
+            }
+            versions.remove(versionId);
         }
-        policy.getVersions().remove(versionId);
         policies.put(policyArn, policy);
     }
 
     public List<PolicyVersion> listPolicyVersions(String policyArn) {
-        return new ArrayList<>(getPolicy(policyArn).getVersions().values());
+        Map<String, PolicyVersion> versions = getPolicy(policyArn).getVersions();
+        synchronized (versions) {
+            return new ArrayList<>(versions.values());
+        }
     }
 
     public void setDefaultPolicyVersion(String policyArn, String versionId) {
         rejectIfAwsManaged(policyArn);
         IamPolicy policy = getPolicy(policyArn);
-        if (!policy.getVersions().containsKey(versionId)) {
-            throw new AwsException("NoSuchEntity",
-                    "Policy version " + versionId + " does not exist.", 404);
+        Map<String, PolicyVersion> versions = policy.getVersions();
+        synchronized (versions) {
+            if (!versions.containsKey(versionId)) {
+                throw new AwsException("NoSuchEntity",
+                        "Policy version " + versionId + " does not exist.", 404);
+            }
+            versions.values().forEach(v -> v.setDefaultVersion(false));
+            versions.get(versionId).setDefaultVersion(true);
         }
-        policy.getVersions().values().forEach(v -> v.setDefaultVersion(false));
-        policy.getVersions().get(versionId).setDefaultVersion(true);
         policy.setDefaultVersionId(versionId);
         policies.put(policyArn, policy);
     }
@@ -826,13 +877,16 @@ public class IamService {
     public void addRoleToInstanceProfile(String instanceProfileName, String roleName) {
         InstanceProfile profile = getInstanceProfile(instanceProfileName);
         getRole(roleName); // validates existence
-        if (!profile.getRoleNames().contains(roleName)) {
-            if (!profile.getRoleNames().isEmpty()) {
-                throw new AwsException("LimitExceeded",
-                        "An instance profile can contain at most 1 role.", 409);
+        List<String> roleNames = profile.getRoleNames();
+        synchronized (roleNames) {
+            if (!roleNames.contains(roleName)) {
+                if (!roleNames.isEmpty()) {
+                    throw new AwsException("LimitExceeded",
+                            "An instance profile can contain at most 1 role.", 409);
+                }
+                roleNames.add(roleName);
+                instanceProfiles.put(instanceProfileName, profile);
             }
-            profile.getRoleNames().add(roleName);
-            instanceProfiles.put(instanceProfileName, profile);
         }
     }
 

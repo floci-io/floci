@@ -6,8 +6,7 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
 class AthenaGetWorkGroupIntegrationTest {
@@ -72,6 +71,38 @@ class AthenaGetWorkGroupIntegrationTest {
                     equalTo("s3://test-bucket/athena-results/"))
             .body("WorkGroup.Configuration.EngineVersion.EffectiveEngineVersion",
                     equalTo("Athena engine version 3"));
+    }
+
+    /**
+     * Reproduces issue #1498: the AthenaClient fails to unmarshal the {@code CreationTime} field returned by Floci's
+     * {@code GetWorkGroup} response.
+     */
+    @Test
+    void getWorkGroupCreationTimeIsSerializedAsEpochSecondsNumber() {
+        given()
+                .header("X-Amz-Target", "AmazonAthena.CreateWorkGroup")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "Name": "timestamp-format-bug-wg"
+                        }
+                        """)
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200);
+
+        var response = given()
+                .header("X-Amz-Target", "AmazonAthena.GetWorkGroup")
+                .contentType(CONTENT_TYPE)
+                .body("{ \"WorkGroup\": \"timestamp-format-bug-wg\" }")
+                .when()
+                .post("/")
+                .then()
+                .statusCode(200)
+                .body("WorkGroup.Name", equalTo("timestamp-format-bug-wg"))
+                .body("WorkGroup.CreationTime", notNullValue())
+                .body("WorkGroup.CreationTime", instanceOf(Number.class));
     }
 
     @Test

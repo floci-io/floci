@@ -389,63 +389,67 @@ public class CloudFormationResourceProvisioner {
         delete(resourceType, resource.getPhysicalId(), region);
     }
 
+    /**
+     * Deletes a single resource by type + physical id. Failures propagate to the caller
+     * (CloudFormationService#deleteStackResources) so the stack transitions to DELETE_FAILED,
+     * matching AWS — e.g. deleting a non-empty S3 bucket raises BucketNotEmpty and must not be
+     * silently reported as a successful stack deletion. Resource types that AWS itself treats
+     * leniently keep their dedicated handling: the {@code *Safe} helpers below swallow expected
+     * conflicts, and KMS keys are intentionally left for scheduled deletion.
+     */
     public void delete(String resourceType, String physicalId, String region) {
-        try {
-            switch (resourceType) {
-                case "AWS::S3::Bucket" -> s3Service.deleteBucket(physicalId);
-                case "AWS::SQS::Queue" -> sqsService.deleteQueue(physicalId, region);
-                case "AWS::SNS::Topic" -> snsService.deleteTopic(physicalId, region);
-                case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
-                case "AWS::DynamoDB::Table" -> dynamoDbService.deleteTable(physicalId, region);
-                case "AWS::Lambda::Function" -> lambdaService.deleteFunction(region, physicalId);
-                case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
-                case "AWS::IAM::Policy", "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
-                case "AWS::IAM::InstanceProfile" -> iamService.deleteInstanceProfile(physicalId);
-                case "AWS::SSM::Parameter" -> ssmService.deleteParameter(physicalId, region);
-                case "AWS::KMS::Key" -> {
-                } // KMS keys can't be immediately deleted; skip
-                case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
-                case "AWS::SecretsManager::Secret" ->
-                        secretsManagerService.deleteSecret(physicalId, null, true, region);
-                case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
-                case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
-                case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
-                case "AWS::ECR::Repository" ->
-                        ecrService.deleteRepository(physicalId, null, true, region);
-                case "AWS::Pipes::Pipe" -> pipesService.deletePipe(physicalId, region);
-                case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
-                case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
-                case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
-                case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
-                case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
-                case "AWS::ECS::Cluster" -> ecsService.deleteCluster(physicalId, region);
-                case "AWS::ECS::TaskDefinition" -> ecsService.deregisterTaskDefinition(physicalId, region);
-                case "AWS::ECS::Service" -> deleteEcsServiceSafe(physicalId, region);
-                case "AWS::ElasticLoadBalancingV2::LoadBalancer" -> elbV2Service.deleteLoadBalancer(region, physicalId);
-                case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
-                case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
-                case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
-                case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
-                case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
-                case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
-                case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
-                case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
-                case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
-                case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
-                case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
-                case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
-                case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
-                case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
-                case "AWS::CloudWatch::Alarm" ->
-                        cloudWatchMetricsService.deleteAlarms(List.of(physicalId), region);
-                case "AWS::AutoScaling::LaunchConfiguration" ->
-                        autoScalingService.deleteLaunchConfiguration(region, physicalId);
-                case "AWS::AutoScaling::AutoScalingGroup" ->
-                        autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
-                default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
-            }
-        } catch (Exception e) {
-            LOG.debugv("Error deleting {0} ({1}): {2}", resourceType, physicalId, e.getMessage());
+        switch (resourceType) {
+            case "AWS::S3::Bucket" -> s3Service.deleteBucket(physicalId);
+            case "AWS::SQS::Queue" -> sqsService.deleteQueue(physicalId, region);
+            case "AWS::SNS::Topic" -> snsService.deleteTopic(physicalId, region);
+            case "AWS::SNS::Subscription" -> snsService.unsubscribe(physicalId, region);
+            case "AWS::DynamoDB::Table" -> dynamoDbService.deleteTable(physicalId, region);
+            case "AWS::Lambda::Function" -> lambdaService.deleteFunction(region, physicalId);
+            case "AWS::IAM::Role" -> deleteRoleSafe(physicalId);
+            case "AWS::IAM::Policy", "AWS::IAM::ManagedPolicy" -> deletePolicySafe(physicalId);
+            case "AWS::IAM::InstanceProfile" -> iamService.deleteInstanceProfile(physicalId);
+            case "AWS::SSM::Parameter" -> ssmService.deleteParameter(physicalId, region);
+            case "AWS::KMS::Key" -> {
+            } // KMS keys can't be immediately deleted; skip
+            case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
+            case "AWS::SecretsManager::Secret" ->
+                    secretsManagerService.deleteSecret(physicalId, null, true, region);
+            case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
+            case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
+            case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
+            case "AWS::ECR::Repository" ->
+                    ecrService.deleteRepository(physicalId, null, true, region);
+            case "AWS::Pipes::Pipe" -> pipesService.deletePipe(physicalId, region);
+            case "AWS::StepFunctions::StateMachine" -> stepFunctionsService.deleteStateMachine(physicalId);
+            case "AWS::Lambda::EventSourceMapping" -> lambdaService.deleteEventSourceMapping(physicalId);
+            case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
+            case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
+            case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
+            case "AWS::ECS::Cluster" -> ecsService.deleteCluster(physicalId, region);
+            case "AWS::ECS::TaskDefinition" -> ecsService.deregisterTaskDefinition(physicalId, region);
+            case "AWS::ECS::Service" -> deleteEcsServiceSafe(physicalId, region);
+            case "AWS::ElasticLoadBalancingV2::LoadBalancer" -> elbV2Service.deleteLoadBalancer(region, physicalId);
+            case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
+            case "AWS::ElasticLoadBalancingV2::Listener" -> elbV2Service.deleteListener(region, physicalId);
+            case "AWS::ElasticLoadBalancingV2::ListenerRule" -> elbV2Service.deleteRule(region, physicalId);
+            case "AWS::KinesisFirehose::DeliveryStream" -> firehoseService.deleteDeliveryStream(physicalId);
+            case "AWS::EC2::SecurityGroup" -> ec2Service.deleteSecurityGroup(region, physicalId);
+            case "AWS::EC2::Instance" -> ec2Service.terminateInstances(region, List.of(physicalId));
+            case "AWS::RDS::DBInstance" -> rdsService.deleteDbInstance(physicalId);
+            case "AWS::RDS::DBCluster" -> rdsService.deleteDbCluster(physicalId);
+            case "AWS::RDS::DBSubnetGroup" -> rdsService.deleteDbSubnetGroup(physicalId);
+            case "AWS::RDS::DBParameterGroup" -> rdsService.deleteDbParameterGroup(physicalId);
+            case "AWS::RDS::DBClusterParameterGroup" -> rdsService.deleteDbClusterParameterGroup(physicalId);
+            case "AWS::EKS::Cluster" -> eksService.deleteCluster(physicalId);
+            case "AWS::Logs::LogGroup" -> logsService.deleteLogGroup(physicalId, region);
+            case "AWS::Kinesis::Stream" -> kinesisService.deleteStream(physicalId, region);
+            case "AWS::CloudWatch::Alarm" ->
+                    cloudWatchMetricsService.deleteAlarms(List.of(physicalId), region);
+            case "AWS::AutoScaling::LaunchConfiguration" ->
+                    autoScalingService.deleteLaunchConfiguration(region, physicalId);
+            case "AWS::AutoScaling::AutoScalingGroup" ->
+                    autoScalingService.deleteAutoScalingGroup(region, physicalId, true);
+            default -> LOG.debugv("Skipping delete of unsupported resource type: {0}", resourceType);
         }
     }
 
