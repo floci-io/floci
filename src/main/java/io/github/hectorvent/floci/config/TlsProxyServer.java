@@ -93,8 +93,15 @@ public class TlsProxyServer {
                 if (ar.succeeded()) {
                     LOG.infov("TLS proxy: listening on port {0} (HTTP→{1}, HTTPS→{2})",
                             String.valueOf(port), String.valueOf(httpBackendPort), String.valueOf(httpsBackendPort));
+                } else if (port == config.port()) {
+                    LOG.errorv("TLS proxy: failed to start on public port {0}: {1}",
+                            String.valueOf(port), ar.cause().getMessage());
                 } else {
-                    LOG.errorv("TLS proxy: failed to start on port {0}: {1}",
+                    // The extra AWS-HTTPS port (443 by default) is privileged; binding it fails in
+                    // unprivileged environments (e.g. CI/test). Non-fatal — HTTPS on that port is
+                    // simply unavailable. Set floci.tls.aws-https-port=0 to skip the attempt.
+                    LOG.warnv("TLS proxy: could not bind AWS-HTTPS port {0} ({1}); HTTPS on {0} unavailable. "
+                            + "Binding privileged ports needs elevated privileges — set floci.tls.aws-https-port=0 to disable.",
                             String.valueOf(port), ar.cause().getMessage());
                 }
             });

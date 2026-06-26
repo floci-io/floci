@@ -171,8 +171,10 @@ public class ContainerLauncher {
 
         // When TLS is on, the container must trust Floci's self-signed cert so HTTPS callbacks
         // to Floci succeed (e.g. a CDK custom resource's cfn-response, which hardcodes https://).
-        Optional<Path> flociCaCert = resolveFlociCaCertPath(
-                config.tls().enabled(), config.tls().certPath(), config.storage().persistentPath());
+        // Short-circuit when TLS is off so cert-path/storage config isn't read needlessly.
+        Optional<Path> flociCaCert = config.tls().enabled()
+                ? resolveFlociCaCertPath(true, config.tls().certPath(), config.storage().persistentPath())
+                : Optional.empty();
 
         // Build env vars
         List<String> env = new ArrayList<>();
