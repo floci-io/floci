@@ -569,7 +569,10 @@ public class Ec2Service {
         reservation.setReservationId(reservationId);
         reservation.setOwnerId(accountId);
 
+        String effectiveInstanceType = instanceType != null ? instanceType : "t2.micro";
+        validateArchitectureCompatibility(imageId, effectiveInstanceType);
         int count = Math.min(maxCount, Math.max(minCount, 1));
+        String architecture = architectureFor(imageId, effectiveInstanceType);
         for (int i = 0; i < count; i++) {
             String instanceId = "i-" + randomHex(17);
             String privateIp = assignPrivateIp(region, finalSubnetId);
@@ -578,7 +581,7 @@ public class Ec2Service {
             inst.setInstanceId(instanceId);
             inst.setImageId(imageId);
             inst.setState(InstanceState.pending());
-            inst.setInstanceType(instanceType != null ? instanceType : "t2.micro");
+            inst.setInstanceType(effectiveInstanceType);
             inst.setPlacement(new Placement(az));
             inst.setSubnetId(finalSubnetId);
             inst.setVpcId(vpcId);
@@ -586,7 +589,7 @@ public class Ec2Service {
             inst.setPrivateDnsName("ip-" + privateIp.replace('.', '-') + ".ec2.internal");
             inst.setKeyName(keyName);
             inst.setSecurityGroups(new ArrayList<>(sgIdentifiers));
-            inst.setArchitecture("x86_64");
+            inst.setArchitecture(architecture);
             inst.setLaunchTime(Instant.now());
             inst.setAmiLaunchIndex(i);
             inst.setClientToken(clientToken);
@@ -698,6 +701,37 @@ public class Ec2Service {
             portForwardManager.reconcile(inst, desiredPublishedPorts(region, inst));
             instances.put(key(region, inst.getInstanceId()), inst);
         }
+    }
+
+    private void validateArchitectureCompatibility(String imageId, String instanceType) {
+        Optional<String> imageArchitecture = imageCatalog.findByIdOrAlias(imageId)
+                .map(image -> image.architecture)
+                .filter(value -> !value.isBlank());
+        if (imageArchitecture.isEmpty()) {
+            return;
+        }
+        instanceTypeCatalog.find(instanceType)
+                .filter(type -> type.supportedArchitectures.stream()
+                        .noneMatch(imageArchitecture.get()::equals))
+                .ifPresent(type -> {
+                    throw new AwsException("InvalidParameterValue",
+                            "The architecture '" + imageArchitecture.get()
+                                    + "' of the specified image does not match the architecture supported by instance type '"
+                                    + instanceType + "'.",
+                            400);
+                });
+    }
+
+    private String architectureFor(String imageId, String instanceType) {
+        Optional<Ec2ImageCatalog.CatalogImage> image = Optional.ofNullable(imageCatalog.findByIdOrAlias(imageId))
+                .orElse(Optional.empty());
+        return image.map(catalogImage -> catalogImage.architecture)
+                .filter(value -> !value.isBlank())
+                .or(() -> instanceTypeCatalog.find(instanceType)
+                        .flatMap(type -> type.supportedArchitectures.stream()
+                                .filter(value -> value != null && !value.isBlank())
+                                .findFirst()))
+                .orElse("x86_64");
     }
 
     public Subnet requireSubnet(String region, String subnetId) {

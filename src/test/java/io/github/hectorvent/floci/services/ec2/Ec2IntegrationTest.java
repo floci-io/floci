@@ -1323,6 +1323,52 @@ class Ec2IntegrationTest {
     }
 
     @Test
+    @Order(80)
+    void runInstancesWithArm64ImageDescribesArm64Architecture() {
+        String armInstanceId = given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2404-cloud-arm64")
+            .formParam("InstanceType", "t4g.medium")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.architecture", equalTo("arm64"))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", armInstanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.architecture",
+                    equalTo("arm64"));
+    }
+
+    @Test
+    @Order(80)
+    void runInstancesRejectsIncompatibleImageAndInstanceTypeArchitecture() {
+        given()
+            .formParam("Action", "RunInstances")
+            .formParam("ImageId", "ami-ubuntu2404-amd64")
+            .formParam("InstanceType", "t4g.medium")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
     @Order(81)
     void describeInstances() {
         given()

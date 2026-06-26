@@ -64,6 +64,60 @@ class Ec2ServiceTest {
     }
 
     @Test
+    void runInstancesStoresArchitectureFromImageCatalog() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-ubuntu2404-cloud-arm64", "t4g.medium",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        assertEquals("arm64", reservation.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesKeepsX8664FallbackForUnknownImageAndType() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-unknown", "unknown.type",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        assertEquals("x86_64", reservation.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesFallsBackToInstanceTypeArchitectureForUnknownImage() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        Reservation reservation = service.runInstances("us-east-1", "ami-unknown", "t4g.medium",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+
+        assertEquals("arm64", reservation.getInstances().getFirst().getArchitecture());
+    }
+
+    @Test
+    void runInstancesRejectsIncompatibleImageAndInstanceTypeArchitectures() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), new Ec2ImageCatalog(), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        AwsException error = assertThrows(AwsException.class, () -> service.runInstances(
+                "us-east-1", "ami-ubuntu2404-amd64", "t4g.medium",
+                1, 1, null, List.of(), null, null, List.of(), null, null));
+
+        assertEquals("InvalidParameterValue", error.getErrorCode());
+        assertEquals(400, error.getHttpStatus());
+    }
+
+    @Test
     void launchTemplateVersionInheritsOmittedFieldsFromRequestedSourceVersion() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
                 mock(Ec2PortForwardManager.class),
