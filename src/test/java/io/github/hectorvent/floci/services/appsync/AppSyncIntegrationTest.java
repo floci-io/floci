@@ -1951,6 +1951,195 @@ class AppSyncIntegrationTest {
             .body("message", containsString("Domain name not found:"));
     }
 
+    // ── Pagination for previously untested list operations ───────────────────
+
+    @Test
+    @Order(180)
+    void listDomainNamesWithMaxResults() {
+        String d1 = "pg-domain-1-" + System.nanoTime() + ".example.com";
+        String d2 = "pg-domain-2-" + System.nanoTime() + ".example.com";
+        String cert = "arn:aws:acm:us-east-1:000000000000:certificate/pg";
+
+        for (String d : new String[]{d1, d2}) {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"domainName": "%s", "certificateArn": "%s"}
+                    """.formatted(d, cert))
+            .when()
+                .post("/v1/domainnames")
+            .then()
+                .statusCode(200);
+        }
+
+        String nextToken = given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .body("domainNameConfigs", hasSize(1))
+            .body("nextToken", notNullValue())
+            .extract().path("nextToken");
+
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+            .queryParam("nextToken", nextToken)
+        .when()
+            .get("/v1/domainnames")
+        .then()
+            .statusCode(200)
+            .body("domainNameConfigs", hasSize(greaterThanOrEqualTo(1)));
+
+        given().header("Authorization", AUTH).delete("/v1/domainnames/" + d1).then().statusCode(204);
+        given().header("Authorization", AUTH).delete("/v1/domainnames/" + d2).then().statusCode(204);
+    }
+
+    @Test
+    @Order(181)
+    void listChannelNamespacesWithMaxResults() {
+        String ns1 = "pg-ns-1-" + System.nanoTime();
+        String ns2 = "pg-ns-2-" + System.nanoTime();
+
+        for (String ns : new String[]{ns1, ns2}) {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"name": "%s"}
+                    """.formatted(ns))
+            .when()
+                .post("/v2/apis/" + apiId + "/channelNamespaces")
+            .then()
+                .statusCode(200);
+        }
+
+        String nextToken = given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v2/apis/" + apiId + "/channelNamespaces")
+        .then()
+            .statusCode(200)
+            .body("channelNamespaces", hasSize(1))
+            .body("nextToken", notNullValue())
+            .extract().path("nextToken");
+
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+            .queryParam("nextToken", nextToken)
+        .when()
+            .get("/v2/apis/" + apiId + "/channelNamespaces")
+        .then()
+            .statusCode(200)
+            .body("channelNamespaces", hasSize(greaterThanOrEqualTo(1)));
+
+        given().header("Authorization", AUTH).delete("/v2/apis/" + apiId + "/channelNamespaces/" + ns1).then().statusCode(204);
+        given().header("Authorization", AUTH).delete("/v2/apis/" + apiId + "/channelNamespaces/" + ns2).then().statusCode(204);
+    }
+
+    @Test
+    @Order(182)
+    void listSourceApiAssociationsWithMaxResults() {
+        String s1 = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "pg-src-1", "authenticationType": "API_KEY"}
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String s2 = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "pg-src-2", "authenticationType": "API_KEY"}
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        for (String s : new String[]{s1, s2}) {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"sourceApiId": "%s"}
+                    """.formatted(s))
+            .when()
+                .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+            .then()
+                .statusCode(200);
+        }
+
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 1)
+        .when()
+            .get("/v1/apis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200)
+            .body("sourceApiAssociationSummaries", hasSize(1))
+            .body("nextToken", notNullValue());
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + s1).then().statusCode(204);
+        given().header("Authorization", AUTH).delete("/v1/apis/" + s2).then().statusCode(204);
+    }
+
+    // ── Pagination edge cases ────────────────────────────────────────────────
+
+    @Test
+    @Order(195)
+    void listWithMaxResultsZero() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", 0)
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(200)
+            .body("dataSources", hasSize(0))
+            .body("nextToken", notNullValue());
+    }
+
+    @Test
+    @Order(196)
+    void listWithNegativeMaxResultsReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("maxResults", -1)
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("maxResults must be non-negative"));
+    }
+
+    @Test
+    @Order(197)
+    void listWithInvalidNextTokenNonApiReturns400() {
+        given()
+            .header("Authorization", AUTH)
+            .queryParam("nextToken", "!!!invalid-token!!!")
+        .when()
+            .get("/v1/apis/" + apiId + "/datasources")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Invalid NextToken."));
+    }
+
     // ── Phase 2: Model Completeness ─────────────────────────────────────────
 
     @Test
@@ -2311,6 +2500,38 @@ class AppSyncIntegrationTest {
             .delete("/v2/apis/" + apiId + "/channelNamespaces/" + channelNsName)
         .then()
             .statusCode(204);
+    }
+
+    @Test
+    @Order(410)
+    void updateChannelNamespace() {
+        String nsName = "update-ns-" + System.nanoTime();
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "%s", "description": "original"}
+                """.formatted(nsName))
+        .when()
+            .post("/v2/apis/" + apiId + "/channelNamespaces")
+        .then()
+            .statusCode(200)
+            .body("channelNamespace.description", equalTo("original"));
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"description": "updated-ns"}
+                """)
+        .when()
+            .post("/v2/apis/" + apiId + "/channelNamespaces/" + nsName)
+        .then()
+            .statusCode(200)
+            .body("channelNamespace.name", equalTo(nsName))
+            .body("channelNamespace.description", equalTo("updated-ns"));
+
+        given().header("Authorization", AUTH).delete("/v2/apis/" + apiId + "/channelNamespaces/" + nsName).then().statusCode(204);
     }
 
     // ── Phase 2: Schema Registry ─────────────────────────────────────────────
