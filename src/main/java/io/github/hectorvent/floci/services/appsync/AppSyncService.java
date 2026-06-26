@@ -848,12 +848,12 @@ public class AppSyncService {
     private void checkDuplicateSourceApiAssociation(String sourceApiId, String mergedApiId) {
         List<SourceApiAssociation> existing = mergedApiAssociationStore.scan(k -> true).stream()
                 .filter(a -> sourceApiId.equals(a.getSourceApiId()) && mergedApiId.equals(a.getMergedApiId()))
+                .filter(a -> !"DELETION_SCHEDULED".equals(a.getSourceApiAssociationStatus()))
                 .toList();
         if (!existing.isEmpty()) {
-            SourceApiAssociation existingAssoc = existing.get(0);
-            throw new AwsException("BadRequestException",
-                    "Source API association with ID %s or API %s already exists."
-                            .formatted(existingAssoc.getAssociationId(), sourceApiId), 400);
+            throw new AwsException("ConcurrentModificationException",
+                    "Source API association already exists for Source API ID: %s and Merged API ID: %s."
+                            .formatted(sourceApiId, mergedApiId), 409);
         }
     }
 
