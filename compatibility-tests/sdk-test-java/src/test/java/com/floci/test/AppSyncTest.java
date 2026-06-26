@@ -544,7 +544,7 @@ class AppSyncTest {
                         .apiId(apiId)
                         .definition(SdkBytes.fromUtf8String("type Query { invalid !!! }"))
                         .build()))
-                .isInstanceOf(AppSyncException.class)
+                .isInstanceOf(BadRequestException.class)
                 .hasMessageContaining("Invalid schema");
     }
 
@@ -600,9 +600,11 @@ class AppSyncTest {
                 UpdateChannelNamespaceRequest.builder()
                         .apiId(apiId)
                         .name(channelNsName)
+                        .codeHandlers("export function handler(ctx) { return ctx; }")
                         .build());
 
         assertThat(resp.channelNamespace()).isNotNull();
+        assertThat(resp.channelNamespace().codeHandlers()).contains("handler");
     }
 
     @Test
@@ -672,6 +674,7 @@ class AppSyncTest {
 
         assertThat(resp.domainNameConfig()).isNotNull();
         assertThat(resp.domainNameConfig().domainName()).isEqualTo(tempDomainName);
+        assertThat(resp.domainNameConfig().description()).isEqualTo("updated-domain");
     }
 
     @Test
@@ -949,31 +952,34 @@ class AppSyncTest {
 
     @Test
     @Order(80)
-    void getNonExistentApiThrowsException() {
+    void getNonExistentApiThrowsNotFoundException() {
         assertThatThrownBy(() -> client.getGraphqlApi(GetGraphqlApiRequest.builder()
                         .apiId("nonexistent12345678901234")
                         .build()))
-                .isInstanceOf(AppSyncException.class);
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("GraphQL API not found:");
     }
 
     @Test
     @Order(81)
-    void getNonExistentDataSourceThrowsException() {
+    void getNonExistentDataSourceThrowsNotFoundException() {
         assertThatThrownBy(() -> client.getDataSource(GetDataSourceRequest.builder()
                         .apiId(apiId)
                         .name("nonexistent-ds")
                         .build()))
-                .isInstanceOf(AppSyncException.class);
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Data source not found:");
     }
 
     @Test
     @Order(82)
-    void getNonExistentTypeThrowsException() {
+    void getNonExistentTypeThrowsNotFoundException() {
         assertThatThrownBy(() -> client.getType(GetTypeRequest.builder()
                         .apiId(apiId)
                         .typeName("NonExistentType")
                         .build()))
-                .isInstanceOf(AppSyncException.class);
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Type not found:");
     }
 
     @Test
