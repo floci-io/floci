@@ -177,7 +177,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**54 AWS services. Broad coverage. Free forever.**
+**56 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -221,7 +221,7 @@ Floci supports local emulation for application services, data services, eventing
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
-| Containers and compute | ECS, EC2, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
+| Containers and compute | ECS, EC2, Lightsail, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
 | Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract, Transcribe |
 | Databases | RDS, RDS Data API, Neptune |
 | Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
@@ -269,6 +269,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Data Firehose | In-process | Streaming delivery, NDJSON flush to S3 |
 | ECS | Real Docker | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |
+| Lightsail | In-process | Instances, disks, static IPs, key pairs, ports, tags, regions, blueprints, bundles, operations |
 | ACM | In-process | Certificate issuance and validation lifecycle |
 | ECR | In-process with real registry | Repositories, docker push / pull, image-backed Lambda functions |
 | Resource Groups Tagging API | In-process | GetResources, tag and untag resources, tag key and value discovery across services |

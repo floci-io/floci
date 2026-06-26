@@ -85,6 +85,8 @@ floci:
         flush-interval-ms: 5000
       batch:
         flush-interval-ms: 5000
+      lightsail:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
@@ -326,6 +328,8 @@ floci:
       enabled: true
       emit-mode: synchronous
     cloudtrail:
+      enabled: true
+    lightsail:
       enabled: true
     cloudfront:
       enabled: true

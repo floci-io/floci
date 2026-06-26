@@ -173,6 +173,7 @@ public interface EmulatorConfig {
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
+        LightsailStorageConfig lightsail();
     }
 
     interface SsmStorageConfig {
@@ -300,6 +301,13 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface LightsailStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -379,9 +387,15 @@ public interface EmulatorConfig {
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
+        LightsailServiceConfig lightsail();
     }
 
     interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface LightsailServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

@@ -281,6 +281,11 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>appsync</artifactId>
         </dependency>
+        <!-- Lightsail client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>lightsail</artifactId>
+        </dependency>
         <!-- AppConfig and AppConfigData clients -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

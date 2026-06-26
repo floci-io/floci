@@ -36,6 +36,8 @@ floci:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
+      lightsail:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
@@ -210,6 +212,8 @@ floci:
       enabled: true
       emit-mode: off
     cloudtrail:
+      enabled: true
+    lightsail:
       enabled: true
     cloudfront:
       enabled: true
