@@ -56,14 +56,9 @@ public class AppSyncVtlEngine {
             engine.evaluate(vc, writer, "appsync-template", template);
         } catch (ReturnSignal signal) {
             return new AppSyncVtlResult(signal.getValue(), null, ctx.getAppendedErrors());
-        } catch (VtlErrorSignal signal) {
-            return new AppSyncVtlResult("", signal, ctx.getAppendedErrors());
         } catch (Exception e) {
             Throwable cause = e;
             while (cause != null) {
-                if (cause instanceof ReturnSignal rs) {
-                    return new AppSyncVtlResult(rs.getValue(), null, ctx.getAppendedErrors());
-                }
                 if (cause instanceof VtlErrorSignal signal) {
                     return new AppSyncVtlResult("", signal, ctx.getAppendedErrors());
                 }
