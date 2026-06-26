@@ -246,6 +246,29 @@ class Ec2ContainerManagerTest {
     }
 
     @Test
+    void launchSystemdGuestUsesInitInsteadOfTail() throws Exception {
+        Ec2ContainerManager.containerBridgeIpAttempts = 1;
+        Ec2ContainerManager.containerBridgeIpPollMillis = 1;
+        LaunchHarness harness = launchHarness();
+        InspectContainerCmd inspect = mock(InspectContainerCmd.class);
+        InspectContainerResponse withIp = inspectResponse("172.18.0.11");
+        when(harness.dockerClient.inspectContainerCmd(TEST_CONTAINER_ID)).thenReturn(inspect);
+        when(inspect.exec()).thenReturn(withIp);
+        harness.stubSuccessfulExecs(new CountDownLatch(0), new CountDownLatch(0));
+        Instance instance = instance("i-systemd");
+
+        harness.manager.launch(instance,
+                new ResolvedAmiImage("floci/ami-ubuntu:24.04-arm64", ResolvedAmiImage.SYSTEMD_RUNTIME, true),
+                null,
+                "us-west-2");
+
+        awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
+        verify(harness.builder).withCmd(List.of("/sbin/init"));
+        verify(harness.builder).withCgroupnsMode("host");
+        verify(harness.builder).withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+    }
+
+    @Test
     void preferredMetadataSourceIpUsesConfiguredNetworkBeforeBridge() {
         ContainerNetwork bridge = new ContainerNetwork();
         bridge.withIpv4Address("172.17.0.8");
@@ -380,7 +403,7 @@ class Ec2ContainerManagerTest {
                 portAllocator,
                 config,
                 metadataServer);
-        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer);
+        return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder);
     }
 
     private static Instance instance(String instanceId) {
@@ -414,7 +437,8 @@ class Ec2ContainerManagerTest {
     private record LaunchHarness(Ec2ContainerManager manager,
                                  DockerClient dockerClient,
                                  Ec2MetadataServer metadataServer,
-                                 ContainerLogStreamer logStreamer) {
+                                 ContainerLogStreamer logStreamer,
+                                 ContainerBuilder.Builder builder) {
         void stubSuccessfulExecs(CountDownLatch userDataStarted, CountDownLatch finishUserData) throws Exception {
             AtomicReference<String[]> currentCommand = new AtomicReference<>();
             ExecCreateCmd execCreate = mock(ExecCreateCmd.class, withSettings().defaultAnswer(RETURNS_SELF));

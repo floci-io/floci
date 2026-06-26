@@ -33,7 +33,7 @@ class CloudFormationRdsIntegrationTest {
                       "Properties": {
                         "DBSubnetGroupName": "%s",
                         "DBSubnetGroupDescription": "managed by cfn",
-                        "SubnetIds": ["subnet-aaaa1111", "subnet-bbbb2222"]
+                        "SubnetIds": ["subnet-default-a", "subnet-default-b"]
                       }
                     }
                   },

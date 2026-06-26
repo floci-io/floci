@@ -1,9 +1,6 @@
 package io.github.hectorvent.floci.services.memorydb.proxy;
 
-import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
-import io.github.hectorvent.floci.services.memorydb.model.AuthMode;
 import jakarta.enterprise.context.ApplicationScoped;
-import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -17,20 +14,13 @@ public class MemoryDbProxyManager {
 
     private static final Logger LOG = Logger.getLogger(MemoryDbProxyManager.class);
 
-    private final SigV4Validator sigV4Validator;
     private final ConcurrentHashMap<String, MemoryDbAuthProxy> proxies = new ConcurrentHashMap<>();
 
-    @Inject
-    public MemoryDbProxyManager(SigV4Validator sigV4Validator) {
-        this.sigV4Validator = sigV4Validator;
-    }
-
-    public void startProxy(String clusterName, AuthMode authMode, int proxyPort,
+    public void startProxy(String clusterName, boolean authRequired, int proxyPort,
                            String backendHost, int backendPort,
-                           MemoryDbAuthProxy.PasswordValidator passwordValidator) {
+                           MemoryDbAuthProxy.AuthValidator authValidator) {
         MemoryDbAuthProxy proxy = new MemoryDbAuthProxy(
-                clusterName, authMode, backendHost, backendPort,
-                passwordValidator, sigV4Validator);
+                clusterName, authRequired, backendHost, backendPort, authValidator);
         try {
             proxy.start(proxyPort);
             proxies.put(clusterName, proxy);

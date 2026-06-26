@@ -96,6 +96,33 @@ public class SesEventPublisher {
         }
     }
 
+    /**
+     * Publishes a legacy Amazon SNS feedback notification to a single topic configured for an
+     * identity through {@code SetIdentityNotificationTopic}. Unlike {@link #publish}, this path
+     * is independent of any {@link ConfigurationSet} event destination: a verified identity with
+     * a Bounce/Complaint/Delivery topic receives notifications even when the send carries no
+     * configuration set. The payload uses the legacy {@code notificationType} discriminator, omits
+     * {@code mail.tags}, and includes the original headers only when {@code includeHeaders} is set
+     * (i.e. the identity has headers-in-notifications enabled for the type).
+     */
+    public void publishIdentityNotification(String topicArn, boolean includeHeaders, String eventType,
+                        String messageId, String source, String sourceArn, String sendingAccountId,
+                        String subject, List<String> toAddresses, List<String> ccAddresses,
+                        List<String> bccAddresses, List<String> envelopeDestinations,
+                        List<String> suppressionBounceRecipients,
+                        List<String> suppressionComplaintRecipients,
+                        List<MessageHeader> additionalHeaders, Instant timestamp, String defaultRegion) {
+        if (topicArn == null || topicArn.isBlank()) {
+            return;
+        }
+        ObjectNode payload = SesEventPayload.buildIdentityNotification(objectMapper, eventType,
+                messageId, source, sourceArn, sendingAccountId, subject,
+                toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
+                suppressionBounceRecipients, suppressionComplaintRecipients,
+                additionalHeaders, timestamp, includeHeaders);
+        publishSns(topicArn, payload.toString(), defaultRegion);
+    }
+
     private void dispatch(EventDestination ed, String eventType, String payloadJson,
                           String sourceArn, String configurationSetName,
                           List<MessageTag> emailTags, List<MessageHeader> additionalHeaders,

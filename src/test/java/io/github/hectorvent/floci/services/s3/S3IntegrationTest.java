@@ -2046,6 +2046,73 @@ class S3IntegrationTest {
             .body(equalTo(""));
     }
 
+    @Test
+    @Order(206)
+    void bucketLogging_roundTripAndDisable() {
+        String bucket = "bucket-logging-test";
+        String targetBucket = "bucket-logging-target";
+
+        given()
+                .when().put("/" + bucket)
+                .then().statusCode(200);
+
+        given()
+                .when().put("/" + targetBucket)
+                .then().statusCode(200);
+
+        given()
+                .queryParam("logging", "")
+                .when().get("/" + bucket)
+                .then()
+                .statusCode(200)
+                .body(containsString("BucketLoggingStatus"))
+                .body(not(containsString("LoggingEnabled")));
+
+        String loggingXml = """
+                <BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+                  <LoggingEnabled xmlns:test="http://example.com/test" test:attr="value">
+                    <TargetBucket>%s</TargetBucket>
+                    <TargetPrefix>logs/</TargetPrefix>
+                  </LoggingEnabled>
+                </BucketLoggingStatus>
+                """.formatted(targetBucket);
+
+        given()
+                .queryParam("logging", "")
+                .body(loggingXml)
+                .when().put("/" + bucket)
+                .then()
+                .statusCode(200);
+
+        given()
+                .queryParam("logging", "")
+                .when().get("/" + bucket)
+                .then()
+                .statusCode(200)
+                .body(containsString("LoggingEnabled"))
+                .body(containsString(targetBucket))
+                .body(containsString("logs/"));
+
+        String disabledXml = """
+                <BucketLoggingStatus xmlns="http://s3.amazonaws.com/doc/2006-03-01/"/>
+                """;
+
+        given()
+                .queryParam("logging", "")
+                .body(disabledXml)
+                .when().put("/" + bucket)
+                .then()
+                .statusCode(200);
+
+        given()
+                .queryParam("logging", "")
+                .when().get("/" + bucket)
+                .then()
+                .statusCode(200)
+                .body(containsString("BucketLoggingStatus"))
+                .body(not(containsString("LoggingEnabled")));
+    }
+
     private static String customerKeyMd5(String customerKey) {
         try {
             byte[] md5 = MessageDigest.getInstance("MD5").digest(Base64.getDecoder().decode(customerKey));
