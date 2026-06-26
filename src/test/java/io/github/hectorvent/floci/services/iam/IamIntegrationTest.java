@@ -386,6 +386,23 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(51)
+    void getAccessKeyLastUsedReturnsNeverUsedShape() {
+        given()
+            .formParam("Action", "GetAccessKeyLastUsed")
+            .formParam("AccessKeyId", "AKIAEXAMPLE")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("GetAccessKeyLastUsedResponse.GetAccessKeyLastUsedResult"
+                    + ".AccessKeyLastUsed.ServiceName", equalTo("N/A"));
+    }
+
+    @Test
     @Order(10)
     void createUser() {
         given()

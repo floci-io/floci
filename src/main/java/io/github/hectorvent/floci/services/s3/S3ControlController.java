@@ -77,6 +77,38 @@ public class S3ControlController {
     }
 
     /**
+     * ListAccessPoints — returns the account's S3 access points.
+     *
+     * <p>The emulator has no access-point store, so we return an empty list with HTTP 200.
+     * This is deliberate: without this route the request 404s, which the AWS SDKs
+     * deserialize to a retryable {@code UnknownError} (the S3 Control wire shape has no
+     * matching error), so the client retries the full backoff schedule (~9 attempts,
+     * minutes) before giving up. Any caller that enumerates access points during S3
+     * collection would trigger that storm on every call and stall. An empty
+     * {@code <AccessPointList/>} with no {@code <NextToken>} ends pagination immediately.
+     *
+     * GET /v20180820/accesspoint
+     * Header: x-amz-account-id
+     */
+    @GET
+    @Path("/accesspoint")
+    public Response listAccessPoints(
+            @HeaderParam("x-amz-account-id") String accountId,
+            @QueryParam("bucket") String bucket,
+            @QueryParam("maxResults") String maxResults,
+            @QueryParam("nextToken") String nextToken) {
+
+        String xml = new XmlBuilder()
+                .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                .start("ListAccessPointsResult", AwsNamespaces.S3_CONTROL)
+                .start("AccessPointList")
+                .end("AccessPointList")
+                .end("ListAccessPointsResult")
+                .build();
+        return Response.ok(xml).build();
+    }
+
+    /**
      * TagResource — replaces all tags on the specified S3 bucket.
      *
      * POST /v20180820/tags/{resourceArn+}
