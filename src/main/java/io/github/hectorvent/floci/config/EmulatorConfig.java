@@ -126,6 +126,18 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean disableCorsHeaders();
+
+        /**
+         * Whether to grant Private Network Access preflights (respond with
+         * {@code Access-Control-Allow-Private-Network: true}) when the browser asks.
+         * Only takes effect after the origin already passes the CORS allow-list, so a
+         * page served from a public/secure origin can reach this loopback backend.
+         *
+         * <p>Off by default: it lets a public origin reach the private network, so it
+         * must be opted into explicitly.</p>
+         */
+        @WithDefault("false")
+        boolean corsAllowPrivateNetwork();
     }
 
     interface StorageConfig {
@@ -418,6 +430,7 @@ public interface EmulatorConfig {
         CodeDeployServiceConfig codedeploy();
         CodePipelineServiceConfig codepipeline();
         AutoScalingServiceConfig autoscaling();
+        ElasticBeanstalkServiceConfig elasticbeanstalk();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
         DocDbServiceConfig docdb();
@@ -485,6 +498,11 @@ public interface EmulatorConfig {
     }
 
     interface AutoScalingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ElasticBeanstalkServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

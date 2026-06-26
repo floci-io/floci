@@ -63,9 +63,11 @@ class SqsEventSourcePollerTest {
 
     @Test
     void buildSqsEventIncludesAllRequiredAttributes() throws Exception {
+        Instant firstReceived = Instant.parse("2026-01-15T10:31:00Z");
         Message msg = new Message();
         msg.setBody("{\"key\":\"value\"}");
         msg.setSentTimestamp(Instant.parse("2026-01-15T10:30:00Z"));
+        msg.setFirstReceiveTimestamp(firstReceived);
 
         EventSourceMapping esm = new EventSourceMapping();
         esm.setEventSourceArn("arn:aws:sqs:us-east-1:123456789012:my-queue");
@@ -84,6 +86,8 @@ class SqsEventSourcePollerTest {
         assertEquals("123456789012", attrs.get("SenderId").asText());
         assertEquals(String.valueOf(Instant.parse("2026-01-15T10:30:00Z").toEpochMilli()),
                 attrs.get("SentTimestamp").asText());
+        assertEquals(String.valueOf(firstReceived.toEpochMilli()),
+                attrs.get("ApproximateFirstReceiveTimestamp").asText());
         assertEquals("aws:sqs", record.get("eventSource").asText());
         assertEquals("arn:aws:sqs:us-east-1:123456789012:my-queue", record.get("eventSourceARN").asText());
         assertEquals("us-east-1", record.get("awsRegion").asText());
@@ -206,6 +210,46 @@ class SqsEventSourcePollerTest {
     }
 
     @Test
+    void buildSqsEventIncludesFifoSystemAttributes() throws Exception {
+        Message msg = new Message();
+        msg.setBody("hello-fifo");
+        msg.setSentTimestamp(Instant.parse("2026-01-15T10:30:00Z"));
+        msg.setMessageGroupId("groupA");
+        msg.setSequenceNumber(27);
+        msg.setMessageDeduplicationId("6e809cbda0732ac4845916a59016f954");
+
+        EventSourceMapping esm = new EventSourceMapping();
+        esm.setEventSourceArn("arn:aws:sqs:us-east-1:123456789012:my-queue.fifo");
+        esm.setRegion("us-east-1");
+
+        String event = poller.buildSqsEvent(List.of(msg), esm);
+        JsonNode attrs = OBJECT_MAPPER.readTree(event).get("Records").get(0).get("attributes");
+
+        assertEquals("groupA", attrs.get("MessageGroupId").asText());
+        assertEquals("27", attrs.get("SequenceNumber").asText());
+        assertEquals("6e809cbda0732ac4845916a59016f954",
+                attrs.get("MessageDeduplicationId").asText());
+    }
+
+    @Test
+    void buildSqsEventOmitsFifoSystemAttributesForStandardQueueMessages() throws Exception {
+        Message msg = new Message();
+        msg.setBody("hello");
+        msg.setSentTimestamp(Instant.parse("2026-01-15T10:30:00Z"));
+
+        EventSourceMapping esm = new EventSourceMapping();
+        esm.setEventSourceArn("arn:aws:sqs:us-east-1:123456789012:my-queue");
+        esm.setRegion("us-east-1");
+
+        String event = poller.buildSqsEvent(List.of(msg), esm);
+        JsonNode attrs = OBJECT_MAPPER.readTree(event).get("Records").get(0).get("attributes");
+
+        assertNull(attrs.get("MessageGroupId"));
+        assertNull(attrs.get("SequenceNumber"));
+        assertNull(attrs.get("MessageDeduplicationId"));
+    }
+
+    @Test
     void buildSqsEventUsesDefaultAccountWhenArnParsingFails() throws Exception {
         Message msg = new Message();
         msg.setBody("test");
@@ -240,6 +284,7 @@ class SqsEventSourcePollerTest {
         msg.setReceiptHandle("rh-" + id);
         msg.setBody("body-" + id);
         msg.setSentTimestamp(Instant.now());
+        msg.setFirstReceiveTimestamp(Instant.now());
         return msg;
     }
 
@@ -321,5 +366,32 @@ class SqsEventSourcePollerTest {
 
         verify(sqsService, timeout(2000)).deleteMessage(esm.getQueueUrl(), "rh-m1", "us-east-1");
         verify(sqsService, never()).changeMessageVisibility(any(), any(), anyInt(), any());
+    }
+
+    @Test
+    void firstReceiveTimestampRemainsStableAcrossRetries() throws Exception {
+        Instant firstReceived = Instant.parse("2026-01-15T10:31:00Z");
+        Message msg = new Message();
+        msg.setBody("retry-body");
+        msg.setSentTimestamp(Instant.parse("2026-01-15T10:30:00Z"));
+        msg.setFirstReceiveTimestamp(firstReceived);
+        msg.setReceiveCount(3);
+
+        EventSourceMapping esm = new EventSourceMapping();
+        esm.setEventSourceArn("arn:aws:sqs:us-east-1:000000000000:test-queue");
+        esm.setRegion("us-east-1");
+
+        String firstCall = poller.buildSqsEvent(List.of(msg), esm);
+        Thread.sleep(10);
+        String secondCall = poller.buildSqsEvent(List.of(msg), esm);
+
+        JsonNode firstTs = OBJECT_MAPPER.readTree(firstCall)
+                .get("Records").get(0).get("attributes").get("ApproximateFirstReceiveTimestamp");
+        JsonNode secondTs = OBJECT_MAPPER.readTree(secondCall)
+                .get("Records").get(0).get("attributes").get("ApproximateFirstReceiveTimestamp");
+
+        assertEquals(String.valueOf(firstReceived.toEpochMilli()), firstTs.asText());
+        assertEquals(firstTs.asText(), secondTs.asText(),
+                "ApproximateFirstReceiveTimestamp must not change between retries");
     }
 }

@@ -87,6 +87,17 @@ class ContainerBuilderTest {
         assertEquals(List.of(), spec.dnsServers());
     }
 
+    @Test
+    void withCgroupnsModeRecordsDockerNamespaceMode() {
+        TestFixture fixture = new TestFixture();
+
+        ContainerSpec spec = fixture.builder.newContainer("alpine")
+                .withCgroupnsMode("host")
+                .build();
+
+        assertEquals("host", spec.cgroupnsMode());
+    }
+
     private static class TestFixture {
         final EmulatorConfig config = mock(EmulatorConfig.class);
         final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);

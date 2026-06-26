@@ -27,17 +27,26 @@ public class AmiImageResolver {
      * Falls back to the catalog default image for unrecognised IDs.
      */
     public String resolve(String imageId) {
+        return resolveImage(imageId).dockerImage();
+    }
+
+    public ResolvedAmiImage resolveImage(String imageId) {
         if (imageId == null || imageId.isBlank()) {
             LOG.warnv("No imageId provided; using default image {0}", imageCatalog.defaultDockerImage());
-            return imageCatalog.defaultDockerImage();
+            return ResolvedAmiImage.minimal(imageCatalog.defaultDockerImage());
         }
 
         return imageCatalog.findByIdOrAlias(imageId)
-                .map(image -> image.dockerImage)
+                .map(image -> new ResolvedAmiImage(
+                        image.dockerImage,
+                        image.guestRuntime == null || image.guestRuntime.isBlank()
+                                ? ResolvedAmiImage.DEFAULT_RUNTIME
+                                : image.guestRuntime,
+                        Boolean.TRUE.equals(image.cloudInit)))
                 .orElseGet(() -> {
                     LOG.warnv("Unknown AMI ID {0}; falling back to default image {1}",
                             imageId, imageCatalog.defaultDockerImage());
-                    return imageCatalog.defaultDockerImage();
+                    return ResolvedAmiImage.minimal(imageCatalog.defaultDockerImage());
                 });
     }
 }

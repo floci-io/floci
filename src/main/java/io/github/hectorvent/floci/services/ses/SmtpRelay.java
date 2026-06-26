@@ -279,13 +279,14 @@ public class SmtpRelay {
     }
 
     /**
-     * Structured headers extracted from a raw RFC 5322 MIME message:
-     * subject and separate To / Cc / Bcc address lists. Empty fields when the
-     * corresponding header is missing.
+     * Structured headers extracted from a raw RFC 5322 MIME message: the From
+     * address, subject, and separate To / Cc / Bcc address lists. Empty fields
+     * when the corresponding header is missing.
      */
-    public record RawMessageHeaders(String subject, List<String> to, List<String> cc, List<String> bcc) {
+    public record RawMessageHeaders(String from, String subject,
+                                    List<String> to, List<String> cc, List<String> bcc) {
         public static RawMessageHeaders empty() {
-            return new RawMessageHeaders("", List.of(), List.of(), List.of());
+            return new RawMessageHeaders("", "", List.of(), List.of(), List.of());
         }
     }
 
@@ -303,13 +304,15 @@ public class SmtpRelay {
             var builder = new DefaultMessageBuilder();
             var message = builder.parseMessage(new ByteArrayInputStream(mimeBytes));
             String subject = message.getSubject() != null ? message.getSubject() : "";
+            List<String> from = message.getFrom() != null
+                    ? toMailboxAddresses(message.getFrom()) : List.of();
             List<String> to = message.getTo() != null
                     ? toMailboxAddresses(message.getTo().flatten()) : List.of();
             List<String> cc = message.getCc() != null
                     ? toMailboxAddresses(message.getCc().flatten()) : List.of();
             List<String> bcc = message.getBcc() != null
                     ? toMailboxAddresses(message.getBcc().flatten()) : List.of();
-            return new RawMessageHeaders(subject, to, cc, bcc);
+            return new RawMessageHeaders(from.isEmpty() ? "" : from.get(0), subject, to, cc, bcc);
         } catch (Exception e) {
             return RawMessageHeaders.empty();
         }

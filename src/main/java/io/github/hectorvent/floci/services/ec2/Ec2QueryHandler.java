@@ -913,10 +913,15 @@ public class Ec2QueryHandler {
     }
 
     private Response handleDescribeSecurityGroupRules(MultivaluedMap<String, String> p, String region) {
-        String groupId = p.getFirst("Filter.1.Value.1");
+        Map<String, List<String>> filters = getFilters(p);
+        // The AWS SDK sends the security group id as a filter with name "group-id"
+        String groupId = "";
+        List<String> groupIdFilter = filters.get("group-id");
+        if (groupIdFilter != null && !groupIdFilter.isEmpty()) {
+            groupId = groupIdFilter.get(0);
+        }
         List<String> ruleIds = getList(p, "SecurityGroupRuleId");
-        List<SecurityGroupRule> rules = service.describeSecurityGroupRules(region,
-                groupId != null ? groupId : "", ruleIds);
+        List<SecurityGroupRule> rules = service.describeSecurityGroupRules(region, groupId, ruleIds);
         XmlBuilder xml = new XmlBuilder()
                 .start("DescribeSecurityGroupRulesResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

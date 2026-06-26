@@ -55,6 +55,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
 
 
 floci:
@@ -141,6 +142,9 @@ floci:
     # extra-cors-allowed-headers:
     # extra-cors-expose-headers:
     disable-cors-headers: false
+    # Grant Private Network Access preflights (Access-Control-Allow-Private-Network)
+    # so a page on a public/secure origin can reach this loopback backend.
+    cors-allow-private-network: false
 
   tls:
     enabled: false                     # FLOCI_TLS_ENABLED (default: false)
@@ -341,6 +345,8 @@ floci:
     codepipeline:
       enabled: true
     autoscaling:
+      enabled: true
+    elasticbeanstalk:
       enabled: true
     backup:
       enabled: true

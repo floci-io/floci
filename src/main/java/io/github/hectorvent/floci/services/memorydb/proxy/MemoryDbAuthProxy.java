@@ -1,8 +1,6 @@
 package io.github.hectorvent.floci.services.memorydb.proxy;
 
 import io.github.hectorvent.floci.services.elasticache.proxy.RespReader;
-import io.github.hectorvent.floci.services.elasticache.proxy.SigV4Validator;
-import io.github.hectorvent.floci.services.memorydb.model.AuthMode;
 import org.jboss.logging.Logger;
 
 import java.io.IOException;
@@ -14,12 +12,19 @@ import java.nio.charset.StandardCharsets;
 
 /**
  * TCP auth proxy for a single MemoryDB cluster.
- * Intercepts the Redis AUTH command, validates credentials (IAM or password),
- * then becomes a transparent byte relay to the backend Redis container.
+ * Intercepts the Redis AUTH command and delegates credential validation to an
+ * {@link AuthValidator}, which resolves the supplied user against the cluster's ACL
+ * (password or IAM). It then becomes a transparent byte relay to the backend Redis
+ * container.
+ *
+ * <p>Whether authentication is required at all is decided up front from the cluster's
+ * ACL: a cluster bound to {@code open-access} (or any ACL whose users require no
+ * password) is created with {@code authRequired = false}, in which case the proxy is a
+ * straight relay.
  *
  * <p>MemoryDB speaks the Redis wire protocol, so this reuses ElastiCache's
- * {@link RespReader} and {@link SigV4Validator}. A future refactor should lift
- * the shared Redis-auth pieces into a common package.
+ * {@link RespReader}. A future refactor should lift the shared Redis-auth pieces into a
+ * common package.
  */
 public class MemoryDbAuthProxy {
 
@@ -36,25 +41,22 @@ public class MemoryDbAuthProxy {
                     .getBytes(StandardCharsets.UTF_8);
 
     private final String clusterName;
-    private final AuthMode authMode;
+    private final boolean authRequired;
     private final String backendHost;
     private final int backendPort;
-    private final PasswordValidator passwordValidator;
-    private final SigV4Validator sigV4Validator;
+    private final AuthValidator authValidator;
 
     private volatile boolean running;
     private ServerSocket serverSocket;
 
-    public MemoryDbAuthProxy(String clusterName, AuthMode authMode,
+    public MemoryDbAuthProxy(String clusterName, boolean authRequired,
                              String backendHost, int backendPort,
-                             PasswordValidator passwordValidator,
-                             SigV4Validator sigV4Validator) {
+                             AuthValidator authValidator) {
         this.clusterName = clusterName;
-        this.authMode = authMode;
+        this.authRequired = authRequired;
         this.backendHost = backendHost;
         this.backendPort = backendPort;
-        this.passwordValidator = passwordValidator;
-        this.sigV4Validator = sigV4Validator;
+        this.authValidator = authValidator;
     }
 
     public void start(int proxyPort) throws IOException {
@@ -102,7 +104,7 @@ public class MemoryDbAuthProxy {
 
             if (cmd[0].equalsIgnoreCase("AUTH")) {
                 handleAuth(client, cmd);
-            } else if (authMode != AuthMode.NO_AUTH) {
+            } else if (authRequired) {
                 client.getOutputStream().write(NOAUTH_RESPONSE);
                 client.getOutputStream().flush();
                 closeQuietly(client);
@@ -152,11 +154,10 @@ public class MemoryDbAuthProxy {
     }
 
     private boolean validate(String username, String password) {
-        return switch (authMode) {
-            case IAM -> sigV4Validator.validate(password, clusterName, username);
-            case PASSWORD -> passwordValidator.validatePassword(username, password);
-            case NO_AUTH -> true;
-        };
+        if (!authRequired) {
+            return true;
+        }
+        return authValidator.authenticate(username, password);
     }
 
     private void bridge(Socket client, Socket backend) {
@@ -212,10 +213,13 @@ public class MemoryDbAuthProxy {
     }
 
     /**
-     * Callback interface for password validation, provided by MemoryDbService.
+     * Callback interface for credential validation, provided by MemoryDbService.
+     * Resolves the supplied {@code username}/{@code secret} against the cluster's ACL,
+     * handling both password and IAM users. A {@code null} username corresponds to the
+     * single-argument {@code AUTH <password>} form (the {@code default} user).
      */
     @FunctionalInterface
-    public interface PasswordValidator {
-        boolean validatePassword(String username, String password);
+    public interface AuthValidator {
+        boolean authenticate(String username, String secret);
     }
 }
