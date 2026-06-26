@@ -761,9 +761,18 @@ public class SesQueryHandler {
                                                               String region) {
         String configSet = requireParam(params, "ConfigurationSetName");
         String tlsPolicy = getParam(params, "DeliveryOptions.TlsPolicy");
+        // The V1 API accepts TlsPolicy Require/Optional (PascalCase, case-sensitive). Validate
+        // here so an invalid enum value yields the v1 ValidationError AWS returns rather than the
+        // shared service's v2-style BadRequestException. Message verified against real AWS.
+        if (tlsPolicy != null && !"Require".equals(tlsPolicy) && !"Optional".equals(tlsPolicy)) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'deliveryOptions.tlsPolicy' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [Optional, Require]",
+                    400);
+        }
         // Mirror the V2 path: an all-null DeliveryOptions clears the block rather than
-        // persisting an empty object. The V1 API uses Require/Optional for TlsPolicy, so
-        // normalize to the V2 canonical REQUIRE/OPTIONAL that Floci stores internally.
+        // persisting an empty object. Normalize the value to the V2 canonical REQUIRE/OPTIONAL
+        // that Floci stores internally.
         DeliveryOptions options = null;
         if (tlsPolicy != null) {
             options = new DeliveryOptions();

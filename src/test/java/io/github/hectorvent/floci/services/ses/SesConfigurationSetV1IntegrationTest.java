@@ -245,7 +245,10 @@ class SesConfigurationSetV1IntegrationTest {
             .post("/")
         .then()
             .statusCode(400)
-            .body(containsString("<Code>BadRequestException</Code>"))
-            .body(containsString("tlsPolicy"));
+            // Real AWS returns the Smithy enum ValidationError (not the v2 BadRequestException)
+            // for an invalid TlsPolicy value; the single quotes are XML-escaped on the wire.
+            .body(containsString("<Code>ValidationError</Code>"))
+            .body(containsString("deliveryOptions.tlsPolicy"))
+            .body(containsString("[Optional, Require]"));
     }
 }
