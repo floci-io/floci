@@ -37,12 +37,13 @@ class CognitoServiceTest {
     private CognitoService service;
     private InMemoryStorage<String, CognitoUser> userStore;
     private InMemoryStorage<String, CognitoGroup> groupStore;
+    private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
         userStore = new InMemoryStorage<>();
         groupStore = new InMemoryStorage<>();
-        RegionResolver regionResolver = new RegionResolver("us-east-1", "000000000000");
+        regionResolver = new RegionResolver("us-east-1", "000000000000");
         service = new CognitoService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
