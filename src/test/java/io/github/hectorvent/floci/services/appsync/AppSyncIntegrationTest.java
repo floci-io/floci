@@ -404,7 +404,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/types/TempType")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Type not found:"));
     }
 
     // ── Resolvers ────────────────────────────────────────────────────────────
@@ -627,7 +629,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/functions/" + tempFnId)
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Function not found:"));
     }
 
     // ── Tags ─────────────────────────────────────────────────────────────────
@@ -763,7 +767,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A GraphQL API name is required"));
     }
 
     @Test
@@ -778,7 +784,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A GraphQL API name is required"));
     }
 
     @Test
@@ -793,7 +801,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Invalid value 'INVALID_TYPE' for AuthenticationType"));
     }
 
     @Test
@@ -808,7 +818,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/datasources")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A data source name is required"));
     }
 
     @Test
@@ -823,7 +835,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/datasources")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A data source type is required"));
     }
 
     @Test
@@ -838,7 +852,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/datasources")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Invalid value 'NOT_A_REAL_TYPE' for DataSourceType"));
     }
 
     @Test
@@ -853,7 +869,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/types/Query/resolvers")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A resolver field name is required"));
     }
 
     @Test
@@ -868,7 +886,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/types/Query/resolvers")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A data source name is required for the resolver"));
     }
 
     @Test
@@ -894,7 +914,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/types")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A type name is required"));
     }
 
     @Test
@@ -909,7 +931,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/functions")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("A function name is required"));
     }
 
     @Test
@@ -920,7 +944,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/doesnotexist12345678901234")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("GraphQL API not found:"));
     }
 
     @Test
@@ -931,7 +957,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/datasources/nonexistent-ds")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Data source not found:"));
     }
 
     @Test
@@ -942,7 +970,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/types/NonExistentType")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Type not found:"));
     }
 
     // ── Delete Standalone ──────────────────────────────────────────────────
@@ -976,7 +1006,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/types/Query/resolvers/tempResolver")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Resolver not found:"));
     }
 
     @Test
@@ -1008,7 +1040,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/datasources/temp-ds-delete")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Data source not found:"));
     }
 
     @Test
@@ -1041,7 +1075,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/functions/" + tempFnId)
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Function not found:"));
     }
 
     @Test
@@ -1073,7 +1109,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/types/StandaloneDeleteType")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Type not found:"));
     }
 
     @Test
@@ -1103,7 +1141,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/apikeys/" + tempKeyId)
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("API key not found:"));
     }
 
     @Test
@@ -1187,7 +1227,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + tempApiId + "/datasources/cascade-ds")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Data source not found:"));
     }
 
     @Test
@@ -1250,7 +1292,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + tempApiId + "/functions/" + fnId)
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Function not found:"));
     }
 
     @Test
@@ -1456,7 +1500,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Invalid NextToken."));
     }
 
     // ── Phase 2: Model Completeness ─────────────────────────────────────────
@@ -1717,7 +1763,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/domainnames/nonexistent.example.com")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Domain name not found:"));
     }
 
     @Test
@@ -1751,7 +1799,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/domainnames/" + tempDomain + "/apiassociation")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("GraphQL API not found:"));
 
         // cleanup
         given().header("Authorization", AUTH).delete("/v1/domainnames/" + tempDomain).then().statusCode(204);
@@ -1833,7 +1883,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/schemacreation")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Invalid schema"));
     }
 
     @Test
@@ -2058,7 +2110,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + tempApiId + "/schemacreation")
         .then()
-            .statusCode(400);
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Unknown directive"));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2630,7 +2684,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId)
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("GraphQL API not found:"));
     }
 
     @Test
@@ -2641,7 +2697,9 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/datasources/none-ds")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Data source not found:"));
     }
 
     @Test
@@ -2652,6 +2710,8 @@ class AppSyncIntegrationTest {
         .when()
             .get("/v1/apis/" + apiId + "/types/Query")
         .then()
-            .statusCode(404);
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Type not found:"));
     }
 }
