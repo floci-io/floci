@@ -324,6 +324,12 @@ class AppSyncVtlEngineTest {
                     defaultCtx());
             assertEquals("{\"a\":1,\"c\":3}", result.output());
         }
+
+        @Test
+        void c21_utilTransformAccessible() {
+            var result = engine.evaluate("#set($t = $util.transform)$util.typeOf($t)", defaultCtx());
+            assertEquals("Object", result.output());
+        }
     }
 
     @Nested
@@ -446,6 +452,16 @@ class AppSyncVtlEngineTest {
             assertEquals(1, result.appendedErrors().size());
             assertEquals("warn", result.appendedErrors().get(0).get("message"));
             assertEquals("fatal", result.error().getMessage());
+        }
+
+        @Test
+        void e6_appendErrorWithErrorInfo() {
+            var result = engine.evaluate(
+                    "$util.appendError(\"w\", \"T\", {\"k\":\"v\"}, {\"info\":\"data\"})",
+                    defaultCtx());
+            assertEquals(1, result.appendedErrors().size());
+            assertNotNull(result.appendedErrors().get(0).get("errorInfo"));
+            assertEquals("data", ((Map<?, ?>) result.appendedErrors().get(0).get("errorInfo")).get("info"));
         }
     }
 
@@ -695,9 +711,21 @@ class AppSyncVtlEngineTest {
         }
 
         @Test
-        void j11_prevDefaultIsEmptyMap() {
+        void j11_prevDefaultIsNull() {
             var result = engine.evaluate("$util.toJson($ctx.prev)", defaultCtx());
-            assertEquals("{}", result.output());
+            assertEquals("null", result.output());
+        }
+
+        @Test
+        void j11b_prevUndefinedRendersAsLiteral() {
+            var result = engine.evaluate("$ctx.prev", defaultCtx());
+            assertEquals("$ctx.prev", result.output());
+        }
+
+        @Test
+        void j11c_prevResultUndefinedRendersAsLiteral() {
+            var result = engine.evaluate("$ctx.prev.result", defaultCtx());
+            assertEquals("$ctx.prev.result", result.output());
         }
 
         @Test
