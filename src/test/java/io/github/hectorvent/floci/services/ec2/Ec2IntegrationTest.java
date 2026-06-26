@@ -223,9 +223,10 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(1))
-            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo("ami-ubuntu2404-arm64"))
-            .body("DescribeImagesResponse.imagesSet.item.architecture", equalTo("arm64"));
+            .body("DescribeImagesResponse.imagesSet.item.size()", equalTo(2))
+            .body("DescribeImagesResponse.imagesSet.item.imageId",
+                    containsInAnyOrder("ami-ubuntu2404-arm64", "ami-ubuntu2404-cloud-arm64"))
+            .body("DescribeImagesResponse.imagesSet.item.architecture", everyItem(equalTo("arm64")));
     }
 
     @Test
@@ -244,6 +245,31 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(18)
+    void describeLargeGravitonInstanceTypes() {
+        given()
+            .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "m6gd.large")
+            .formParam("InstanceType.2", "m7gd.large")
+            .formParam("InstanceType.3", "m8gd.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", equalTo(3))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceType",
+                    containsInAnyOrder("m6gd.large", "m7gd.large", "m8gd.large"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.vCpuInfo.defaultVCpus",
+                    everyItem(equalTo("2")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.memoryInfo.sizeInMiB",
+                    everyItem(equalTo("8192")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.supportedArchitectures.item.item",
+                    everyItem(equalTo("arm64")));
+    }
+
+    @Test
+    @Order(19)
     void describeInstanceTypeOfferings() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -265,7 +291,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     void describeArmInstanceTypeOfferingByRegion() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -287,7 +313,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(20)
+    @Order(21)
     void describeModernGravitonInstanceTypeOfferingsByRegion() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -306,6 +332,31 @@ class Ec2IntegrationTest {
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(4))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
                     containsInAnyOrder("m8gd.2xlarge", "m7gd.2xlarge", "m6gd.2xlarge", "m8gd.medium"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
+                    everyItem(equalTo("region")))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
+                    everyItem(equalTo("us-east-1")));
+    }
+
+    @Test
+    @Order(22)
+    void describeLargeGravitonInstanceTypeOfferingsByRegion() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m6gd.large")
+            .formParam("Filter.1.Value.2", "m7gd.large")
+            .formParam("Filter.1.Value.3", "m8gd.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(3))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                    containsInAnyOrder("m6gd.large", "m7gd.large", "m8gd.large"))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
                     everyItem(equalTo("region")))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
@@ -573,6 +624,67 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200);
+    }
+
+    @Test
+    @Order(34)
+    void describeSecurityGroupRulesReturnsDefaultEgress() {
+        // Issue #1093: default egress rule must be visible via DescribeSecurityGroupRules
+        // immediately after CreateSecurityGroup. Terraform relies on this.
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            // Must contain at least the default egress-all rule plus the authorized
+            // ingress (ssh/22) and egress (tcp/443) rules
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
+                    greaterThanOrEqualTo(3))
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.groupId",
+                    everyItem(equalTo(securityGroupId)));
+    }
+
+    @Test
+    @Order(35)
+    void describeSecurityGroupRulesIncludesIngressRule() {
+        // Verify authorized ingress rule (tcp/22) is present in the rules list
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", securityGroupId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<fromPort>22</fromPort>"))
+            .body(containsString("<ipProtocol>tcp</ipProtocol>"))
+            .body(containsString("<cidrIpv4>0.0.0.0/0</cidrIpv4>"));
+    }
+
+    @Test
+    @Order(36)
+    void describeSecurityGroupRulesDefaultVpcEgressVisible() {
+        // Issue #1093: default VPC security group must also have its egress rule visible
+        given()
+            .formParam("Action", "DescribeSecurityGroupRules")
+            .formParam("Filter.1.Name", "group-id")
+            .formParam("Filter.1.Value.1", "sg-default")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSecurityGroupRulesResponse.securityGroupRuleSet.item.size()",
+                    greaterThanOrEqualTo(1))
+            .body(containsString("<isEgress>true</isEgress>"))
+            .body(containsString("<ipProtocol>-1</ipProtocol>"));
     }
 
     // =========================================================================

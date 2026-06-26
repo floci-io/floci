@@ -28,6 +28,11 @@ import java.util.stream.Collectors;
  * {@code FLOCI_SECURITY_EXTRA_CORS_ALLOWED_ORIGINS}). Service-level CORS
  * responses, such as S3 bucket CORS rules or API Gateway integrations, keep
  * precedence because this filter only fills missing CORS headers.</p>
+ *
+ * <p>Preflights that request Private Network Access (Chrome's
+ * {@code Access-Control-Request-Private-Network}) are granted only when opted in
+ * via {@code FLOCI_SECURITY_CORS_ALLOW_PRIVATE_NETWORK}, letting a UI served from a
+ * public/secure origin reach a loopback backend.</p>
  */
 @Provider
 @PreMatching
@@ -37,6 +42,8 @@ public class GlobalCorsFilter implements ContainerRequestFilter, ContainerRespon
     private static final String ORIGIN = "Origin";
     private static final String REQUEST_METHOD = "Access-Control-Request-Method";
     private static final String REQUEST_HEADERS = "Access-Control-Request-Headers";
+    private static final String REQUEST_PRIVATE_NETWORK = "Access-Control-Request-Private-Network";
+    private static final String ALLOW_PRIVATE_NETWORK = "Access-Control-Allow-Private-Network";
     private static final String ALLOW_ORIGIN = "Access-Control-Allow-Origin";
     private static final String ALLOW_METHODS = "Access-Control-Allow-Methods";
     private static final String ALLOW_HEADERS = "Access-Control-Allow-Headers";
@@ -96,6 +103,14 @@ public class GlobalCorsFilter implements ContainerRequestFilter, ContainerRespon
                     .header(MAX_AGE, "86400")
                     .header(VARY, ORIGIN);
 
+            // Private Network Access: a public/secure page (e.g. an HTTPS-hosted UI)
+            // probing a loopback/private-network backend sends this on the preflight;
+            // grant it (unless disabled) so the browser doesn't block the follow-up request.
+            if (s.allowPrivateNetwork()
+                    && "true".equalsIgnoreCase(requestContext.getHeaderString(REQUEST_PRIVATE_NETWORK))) {
+                builder.header(ALLOW_PRIVATE_NETWORK, "true");
+            }
+
             s.exposeHeaders().ifPresent(value -> builder.header(EXPOSE_HEADERS, value));
             requestContext.abortWith(builder.build());
         }
@@ -134,7 +149,8 @@ public class GlobalCorsFilter implements ContainerRequestFilter, ContainerRespon
     private record CorsSettings(boolean disabled,
                                 Set<String> allowedOrigins,
                                 Set<String> extraAllowedHeaders,
-                                Set<String> extraExposeHeaders) {
+                                Set<String> extraExposeHeaders,
+                                boolean allowPrivateNetwork) {
 
         static CorsSettings from(EmulatorConfig.SecurityConfig security) {
             Set<String> origins = security.extraCorsAllowedOrigins()
@@ -146,7 +162,8 @@ public class GlobalCorsFilter implements ContainerRequestFilter, ContainerRespon
             Set<String> exposeHeaders = security.extraCorsExposeHeaders()
                     .map(list -> (Set<String>) new LinkedHashSet<>(list))
                     .orElse(Set.of());
-            return new CorsSettings(security.disableCorsHeaders(), origins, allowedHeaders, exposeHeaders);
+            return new CorsSettings(security.disableCorsHeaders(), origins, allowedHeaders, exposeHeaders,
+                    security.corsAllowPrivateNetwork());
         }
 
         boolean enabled() {

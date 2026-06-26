@@ -108,6 +108,33 @@ class PipesServiceTest {
     }
 
     @Test
+    void createPipeWithManagedKafkaSourceRequiresTopicParameters() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("msk-pipe",
+                        "arn:aws:kafka:us-east-1:000000000000:cluster/test/uuid",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null, null, null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
+    void createPipeWithSelfManagedKafkaSourceRequiresTopicParameters() throws Exception {
+        var mapper = new com.fasterxml.jackson.databind.ObjectMapper();
+        AwsException ex = assertThrows(AwsException.class, () ->
+                pipesService.createPipe("smk-pipe",
+                        "smk://localhost:9092",
+                        "arn:aws:sqs:us-east-1:000000000000:target",
+                        "arn:aws:iam::000000000000:role/role",
+                        null, null, null,
+                        mapper.readTree("{\"SelfManagedKafkaParameters\":{}}"),
+                        null, null, null, "us-east-1"));
+
+        assertEquals("ValidationException", ex.getErrorCode());
+    }
+
+    @Test
     void describePipe() {
         pipesService.createPipe("my-pipe",
                 "arn:aws:sqs:us-east-1:000000000000:source",

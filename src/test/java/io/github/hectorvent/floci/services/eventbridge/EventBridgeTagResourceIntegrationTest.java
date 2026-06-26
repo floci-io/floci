@@ -355,4 +355,160 @@ class EventBridgeTagResourceIntegrationTest {
             .body("{\"Name\":\"my-event-bus\"}")
         .when().post("/").then().statusCode(200);
     }
+
+    @Test
+    @Order(9)
+    void createEventBusWithTagsAndVerifyCentralTagging() {
+        String busName = "tagged-at-creation-bus";
+        String busArn = given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.CreateEventBus")
+            .body("""
+                {
+                    "Name": "%s",
+                    "Tags": [
+                        {"Key": "CreatedBy", "Value": "TestSuite"},
+                        {"Key": "Project", "Value": "Floci"}
+                    ]
+                }
+                """.formatted(busName))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("EventBusArn");
+
+        // Verify it is registered in central tagging service
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
+            .body("{\"ResourceARNList\": [\"" + busArn + "\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList", hasSize(1))
+            .body("ResourceTagMappingList[0].ResourceARN", equalTo(busArn))
+            .body("ResourceTagMappingList[0].Tags", hasSize(2))
+            .body("ResourceTagMappingList[0].Tags.find { it.Key == 'CreatedBy' }.Value", equalTo("TestSuite"))
+            .body("ResourceTagMappingList[0].Tags.find { it.Key == 'Project' }.Value", equalTo("Floci"));
+
+        // Now delete it
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify it is removed from central tagging service
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
+            .body("{\"ResourceARNList\": [\"" + busArn + "\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList", hasSize(0));
+    }
+
+    @Test
+    @Order(10)
+    void deleteArchiveClearsCentralTagging() {
+        String busName = "archive-tag-bus";
+        String busArn = given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.CreateEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("EventBusArn");
+
+        String archiveName = "tag-test-archive";
+        String archiveArn = given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.CreateArchive")
+            .body("""
+                {
+                    "ArchiveName": "%s",
+                    "EventSourceArn": "%s",
+                    "Description": "Archive tag test",
+                    "RetentionDays": 5
+                }
+                """.formatted(archiveName, busArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().jsonPath().getString("ArchiveArn");
+
+        // Tag the archive
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.TagResource")
+            .body("""
+                {
+                    "ResourceARN": "%s",
+                    "Tags": [
+                        {"Key": "ArchiveType", "Value": "Testing"}
+                    ]
+                }
+                """.formatted(archiveArn))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify it is registered in central tagging service
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
+            .body("{\"ResourceARNList\": [\"" + archiveArn + "\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList", hasSize(1))
+            .body("ResourceTagMappingList[0].ResourceARN", equalTo(archiveArn))
+            .body("ResourceTagMappingList[0].Tags", hasSize(1))
+            .body("ResourceTagMappingList[0].Tags[0].Key", equalTo("ArchiveType"))
+            .body("ResourceTagMappingList[0].Tags[0].Value", equalTo("Testing"));
+
+        // Delete the archive
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.DeleteArchive")
+            .body("{\"ArchiveName\":\"" + archiveName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Verify it is removed from central tagging service
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "ResourceGroupsTaggingAPI_20170126.GetResources")
+            .body("{\"ResourceARNList\": [\"" + archiveArn + "\"]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ResourceTagMappingList", hasSize(0));
+
+        // Cleanup the bus
+        given()
+            .contentType(EVENT_BRIDGE_CONTENT_TYPE)
+            .header("X-Amz-Target", "AWSEvents.DeleteEventBus")
+            .body("{\"Name\":\"" + busName + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
 }
+

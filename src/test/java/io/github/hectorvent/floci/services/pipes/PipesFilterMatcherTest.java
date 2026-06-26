@@ -101,6 +101,28 @@ class PipesFilterMatcherTest {
         assertFalse(matcher.matchesRecord(record, "{\"detail\": {\"status\": [\"inactive\"]}}"));
     }
 
+    @Test
+    void kafkaDecodedValueCanBeFilteredAsJson() throws Exception {
+        JsonNode record = MAPPER.readTree("""
+                {
+                  "eventSource": "aws:kafka",
+                  "topic": "orders",
+                  "value": {"status": "active", "id": "order-1"}
+                }
+                """);
+
+        assertTrue(matcher.matchesRecord(record, "{\"value\": {\"status\": [\"active\"]}}"));
+        assertFalse(matcher.matchesRecord(record, "{\"value\": {\"status\": [\"inactive\"]}}"));
+    }
+
+    @Test
+    void kafkaDecodedKeyCanBeFilteredAsString() throws Exception {
+        JsonNode record = MAPPER.readTree("{\"key\": \"customer-123\", \"topic\": \"orders\"}");
+
+        assertTrue(matcher.matchesRecord(record, "{\"key\": [{\"prefix\": \"customer-\"}]}"));
+        assertFalse(matcher.matchesRecord(record, "{\"key\": [\"customer-999\"]}"));
+    }
+
     // ──────────────────────────── Operators ────────────────────────────
 
     @Test

@@ -40,11 +40,56 @@ final class SesEventPayload {
                             List<String> suppressionComplaintRecipients,
                             String configurationSetName, List<MessageTag> emailTags,
                             List<MessageHeader> additionalHeaders, Instant timestamp) {
+        return buildRoot(mapper, "eventType", eventType, messageId, source, sourceArn,
+                sendingAccountId, subject, toAddresses, ccAddresses, bccAddresses,
+                envelopeDestinations, suppressionBounceRecipients, suppressionComplaintRecipients,
+                configurationSetName, emailTags, additionalHeaders, timestamp, true, true);
+    }
+
+    /**
+     * Builds the legacy Amazon SNS notification JSON delivered to the per-identity feedback
+     * topics configured through {@code SetIdentityNotificationTopic}, matching the format at
+     * https://docs.aws.amazon.com/ses/latest/dg/notification-contents.html. It shares the
+     * {@code mail}/{@code bounce}/{@code complaint}/{@code delivery} blocks with the
+     * event-publishing payload from {@link #build} but differs in three spec-mandated ways:
+     * the top-level discriminator is named {@code notificationType} rather than {@code eventType};
+     * the {@code mail} object never carries a {@code tags} field; and the original headers
+     * ({@code headers}/{@code commonHeaders}/{@code headersTruncated}) appear only when the
+     * identity has headers-in-notifications enabled for the type ({@code includeHeaders}). Only
+     * the {@code BOUNCE}, {@code COMPLAINT}, and {@code DELIVERY} event types are ever published
+     * through this path.
+     */
+    static ObjectNode buildIdentityNotification(ObjectMapper mapper, String eventType,
+                            String messageId, String source, String sourceArn,
+                            String sendingAccountId, String subject,
+                            List<String> toAddresses, List<String> ccAddresses,
+                            List<String> bccAddresses, List<String> envelopeDestinations,
+                            List<String> suppressionBounceRecipients,
+                            List<String> suppressionComplaintRecipients,
+                            List<MessageHeader> additionalHeaders, Instant timestamp,
+                            boolean includeHeaders) {
+        return buildRoot(mapper, "notificationType", eventType, messageId, source, sourceArn,
+                sendingAccountId, subject, toAddresses, ccAddresses, bccAddresses,
+                envelopeDestinations, suppressionBounceRecipients, suppressionComplaintRecipients,
+                null, null, additionalHeaders, timestamp, includeHeaders, false);
+    }
+
+    private static ObjectNode buildRoot(ObjectMapper mapper, String typeField, String eventType,
+                            String messageId, String source, String sourceArn,
+                            String sendingAccountId, String subject,
+                            List<String> toAddresses, List<String> ccAddresses,
+                            List<String> bccAddresses, List<String> envelopeDestinations,
+                            List<String> suppressionBounceRecipients,
+                            List<String> suppressionComplaintRecipients,
+                            String configurationSetName, List<MessageTag> emailTags,
+                            List<MessageHeader> additionalHeaders, Instant timestamp,
+                            boolean includeHeaders, boolean includeTags) {
         ObjectNode root = mapper.createObjectNode();
-        root.put("eventType", eventTypeLabel(eventType));
+        root.put(typeField, eventTypeLabel(eventType));
         root.set("mail", buildMail(mapper, messageId, source, sourceArn, sendingAccountId,
                 subject, toAddresses, ccAddresses, bccAddresses, envelopeDestinations,
-                configurationSetName, emailTags, additionalHeaders, timestamp));
+                configurationSetName, emailTags, additionalHeaders, timestamp,
+                includeHeaders, includeTags));
         root.set(blockName(eventType),
                 buildEventBlock(mapper, eventType, messageId, envelopeDestinations,
                         suppressionBounceRecipients, suppressionComplaintRecipients, timestamp));
@@ -58,7 +103,8 @@ final class SesEventPayload {
                                         List<String> envelopeDestinations,
                                         String configurationSetName, List<MessageTag> emailTags,
                                         List<MessageHeader> additionalHeaders,
-                                        Instant timestamp) {
+                                        Instant timestamp, boolean includeHeaders,
+                                        boolean includeTags) {
         ObjectNode mail = mapper.createObjectNode();
         mail.put("timestamp", ISO_MILLIS.format(timestamp));
         if (source != null && !source.isBlank()) {
@@ -73,70 +119,74 @@ final class SesEventPayload {
         for (String d : envelopeDestinations) {
             dest.add(d);
         }
-        mail.put("headersTruncated", false);
-        ArrayNode headers = mail.putArray("headers");
-        if (source != null && !source.isBlank()) {
-            addHeader(headers, mapper, "From", source);
-        }
-        if (toAddresses != null && !toAddresses.isEmpty()) {
-            addHeader(headers, mapper, "To", String.join(", ", toAddresses));
-        }
-        if (ccAddresses != null && !ccAddresses.isEmpty()) {
-            addHeader(headers, mapper, "Cc", String.join(", ", ccAddresses));
-        }
-        if (subject != null && !subject.isEmpty()) {
-            addHeader(headers, mapper, "Subject", subject);
-        }
-        if (additionalHeaders != null) {
-            for (MessageHeader h : additionalHeaders) {
-                if (h == null || h.name() == null || h.name().isBlank()) {
-                    continue;
+        if (includeHeaders) {
+            mail.put("headersTruncated", false);
+            ArrayNode headers = mail.putArray("headers");
+            if (source != null && !source.isBlank()) {
+                addHeader(headers, mapper, "From", source);
+            }
+            if (toAddresses != null && !toAddresses.isEmpty()) {
+                addHeader(headers, mapper, "To", String.join(", ", toAddresses));
+            }
+            if (ccAddresses != null && !ccAddresses.isEmpty()) {
+                addHeader(headers, mapper, "Cc", String.join(", ", ccAddresses));
+            }
+            if (subject != null && !subject.isEmpty()) {
+                addHeader(headers, mapper, "Subject", subject);
+            }
+            if (additionalHeaders != null) {
+                for (MessageHeader h : additionalHeaders) {
+                    if (h == null || h.name() == null || h.name().isBlank()) {
+                        continue;
+                    }
+                    addHeader(headers, mapper, h.name(), h.value() == null ? "" : h.value());
                 }
-                addHeader(headers, mapper, h.name(), h.value() == null ? "" : h.value());
             }
-        }
-        ObjectNode common = mail.putObject("commonHeaders");
-        common.put("messageId", messageId);
-        common.put("date", RFC_5322_DATE.format(timestamp));
-        ArrayNode fromArr = common.putArray("from");
-        if (source != null && !source.isBlank()) {
-            fromArr.add(source);
-        }
-        ArrayNode toArr = common.putArray("to");
-        if (toAddresses != null) {
-            for (String a : toAddresses) {
-                toArr.add(a);
+            ObjectNode common = mail.putObject("commonHeaders");
+            common.put("messageId", messageId);
+            common.put("date", RFC_5322_DATE.format(timestamp));
+            ArrayNode fromArr = common.putArray("from");
+            if (source != null && !source.isBlank()) {
+                fromArr.add(source);
             }
-        }
-        if (ccAddresses != null && !ccAddresses.isEmpty()) {
-            ArrayNode ccArr = common.putArray("cc");
-            for (String a : ccAddresses) {
-                ccArr.add(a);
-            }
-        }
-        if (bccAddresses != null && !bccAddresses.isEmpty()) {
-            ArrayNode bccArr = common.putArray("bcc");
-            for (String a : bccAddresses) {
-                bccArr.add(a);
-            }
-        }
-        if (subject != null && !subject.isEmpty()) {
-            common.put("subject", subject);
-        }
-        ObjectNode tags = mail.putObject("tags");
-        if (configurationSetName != null) {
-            ArrayNode csTag = tags.putArray("ses:configuration-set");
-            csTag.add(configurationSetName);
-        }
-        if (emailTags != null) {
-            for (MessageTag t : emailTags) {
-                if (t == null || t.name() == null) {
-                    continue;
+            ArrayNode toArr = common.putArray("to");
+            if (toAddresses != null) {
+                for (String a : toAddresses) {
+                    toArr.add(a);
                 }
-                ArrayNode arr = tags.has(t.name())
-                        ? (ArrayNode) tags.get(t.name())
-                        : tags.putArray(t.name());
-                arr.add(t.value() == null ? "" : t.value());
+            }
+            if (ccAddresses != null && !ccAddresses.isEmpty()) {
+                ArrayNode ccArr = common.putArray("cc");
+                for (String a : ccAddresses) {
+                    ccArr.add(a);
+                }
+            }
+            if (bccAddresses != null && !bccAddresses.isEmpty()) {
+                ArrayNode bccArr = common.putArray("bcc");
+                for (String a : bccAddresses) {
+                    bccArr.add(a);
+                }
+            }
+            if (subject != null && !subject.isEmpty()) {
+                common.put("subject", subject);
+            }
+        }
+        if (includeTags) {
+            ObjectNode tags = mail.putObject("tags");
+            if (configurationSetName != null) {
+                ArrayNode csTag = tags.putArray("ses:configuration-set");
+                csTag.add(configurationSetName);
+            }
+            if (emailTags != null) {
+                for (MessageTag t : emailTags) {
+                    if (t == null || t.name() == null) {
+                        continue;
+                    }
+                    ArrayNode arr = tags.has(t.name())
+                            ? (ArrayNode) tags.get(t.name())
+                            : tags.putArray(t.name());
+                    arr.add(t.value() == null ? "" : t.value());
+                }
             }
         }
         return mail;

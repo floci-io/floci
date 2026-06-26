@@ -1201,6 +1201,12 @@ public class LambdaService {
         if (fn.getRuntime().startsWith("python")) {
             return modulePath.replace('.', '/');
         }
+        // A file-based handler may be given with a leading "./" (e.g.
+        // "./v1/lambda-handlers/entry.handler"); deployment-package entries are stored without
+        // it, so normalize the prefix away before matching.
+        if (modulePath.startsWith("./")) {
+            modulePath = modulePath.substring(2);
+        }
         return modulePath;
     }
 

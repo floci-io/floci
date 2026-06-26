@@ -57,6 +57,7 @@ public class CloudFrontService {
     private final StorageBackend<String, FieldLevelEncryptionProfile> fleProfileStore;
     private final StorageBackend<String, MonitoringSubscription> monitoringStore;
     private final String accountId;
+    private final String domainSuffix;
 
     @Inject
     public CloudFrontService(StorageFactory factory, EmulatorConfig config) {
@@ -95,6 +96,7 @@ public class CloudFrontService {
         this.monitoringStore = factory.create("cloudfront", "cloudfront-monitoring-subscriptions.json",
                 new TypeReference<Map<String, MonitoringSubscription>>() {});
         this.accountId = config.defaultAccountId();
+        this.domainSuffix = config.services().cloudfront().domainSuffix();
     }
 
     // ── Distributions ─────────────────────────────────────────────────────────
@@ -103,7 +105,7 @@ public class CloudFrontService {
         String id = generateDistributionId();
         dist.setId(id);
         dist.setArn("arn:aws:cloudfront::" + accountId + ":distribution/" + id);
-        dist.setDomainName(id + ".cloudfront.net");
+        dist.setDomainName(id + "." + domainSuffix);
         dist.setStatus("Deployed");
         dist.setLastModifiedTime(Instant.now());
         dist.setEtag(UUID.randomUUID().toString());
@@ -817,7 +819,7 @@ public class CloudFrontService {
         String id = generateDistributionId();
         sd.setId(id);
         sd.setArn("arn:aws:cloudfront::" + accountId + ":streaming-distribution/" + id);
-        sd.setDomainName(id + ".cloudfront.net");
+        sd.setDomainName(id + "." + domainSuffix);
         sd.setStatus("Deployed");
         sd.setLastModifiedTime(Instant.now());
         sd.setEtag(UUID.randomUUID().toString());
