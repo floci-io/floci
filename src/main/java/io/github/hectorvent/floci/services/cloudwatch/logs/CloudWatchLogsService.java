@@ -30,10 +30,13 @@ public class CloudWatchLogsService {
     /**
      * Orders events by timestamp, then by ingestion sequence so that events sharing the same
      * millisecond timestamp are returned in the order they were ingested (matching CloudWatch Logs).
+     * Falls back to {@code eventId} so ordering stays deterministic even for legacy events that
+     * predate {@code sequence} and therefore share the default value of {@code 0}.
      */
     private static final Comparator<LogEvent> EVENT_ORDER =
             Comparator.comparingLong(LogEvent::getTimestamp)
-                    .thenComparingLong(LogEvent::getSequence);
+                    .thenComparingLong(LogEvent::getSequence)
+                    .thenComparing(LogEvent::getEventId);
 
     private final StorageBackend<String, LogGroup> groupStore;
     private final StorageBackend<String, LogStream> streamStore;
