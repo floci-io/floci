@@ -14,6 +14,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.apigateway.model.Account;
@@ -172,7 +173,7 @@ public class ApiGatewayService {
         Map<String, String> tags = request.get("tags") instanceof Map<?, ?> m
                 ? (Map<String, String>) m : new HashMap<>();
 
-        String customId = tags.get("_custom_id_");
+        String customId = ReservedTags.extractOverrideId(tags);
         String apiId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
 
         RestApi api = new RestApi();
@@ -180,7 +181,7 @@ public class ApiGatewayService {
         api.setName(name);
         api.setDescription(description);
         api.setCreatedDate(System.currentTimeMillis() / 1000L);
-        api.setTags(tags);
+        api.setTags(ReservedTags.stripReservedTags(tags));
 
         EndpointConfiguration endpointConfiguration = new EndpointConfiguration();
         if (request.get(EPC_KEY) instanceof Map<?, ?> epMap) {

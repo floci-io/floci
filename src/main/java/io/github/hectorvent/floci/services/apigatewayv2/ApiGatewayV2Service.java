@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.apigatewayv2;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -80,8 +81,14 @@ public class ApiGatewayV2Service {
             routeSelectionExpression = "${request.method} ${request.path}";
         }
 
+        @SuppressWarnings("unchecked")
+        Map<String, String> tags = (Map<String, String>) request.get("tags");
+
+        String customId = ReservedTags.extractOverrideId(tags);
+        String apiId = (customId != null && !customId.isBlank()) ? customId : shortId(10);
+
         Api api = new Api();
-        api.setApiId(shortId(10));
+        api.setApiId(apiId);
         api.setName(name);
         api.setProtocolType(protocolType);
         api.setCreatedDate(System.currentTimeMillis());
@@ -95,10 +102,8 @@ public class ApiGatewayV2Service {
             api.setApiEndpoint(String.format("https://%s.execute-api.%s.amazonaws.com", api.getApiId(), region));
         }
 
-        @SuppressWarnings("unchecked")
-        Map<String, String> tags = (Map<String, String>) request.get("tags");
         if (tags != null) {
-            api.setTags(tags);
+            api.setTags(ReservedTags.stripReservedTags(tags));
         }
 
         @SuppressWarnings("unchecked")
@@ -111,6 +116,7 @@ public class ApiGatewayV2Service {
         LOG.infov("Created {0} API: {1} ({2}) in {3}", protocolType, api.getName(), api.getApiId(), region);
         return api;
     }
+
 
     public Api getApi(String region, String apiId) {
         return apiStore.get(apiKey(region, apiId))

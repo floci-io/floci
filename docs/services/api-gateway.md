@@ -2,6 +2,13 @@
 
 Floci supports both API Gateway v1 (REST APIs) and API Gateway v2 (HTTP APIs).
 
+## Custom Resource IDs
+
+When creating APIs in Floci, you can optionally pin the generated `ApiId` (or `id`) by passing a reserved tag `floci:override-id`. This is particularly useful in testing environments where you want predictable endpoint URLs. Floci uses the tag value as the created API ID and automatically strips it from the stored and returned resource tags so it is never persisted as user-visible metadata.
+
+> [!WARNING]
+> The older `_custom_id_` tag is also supported for backwards compatibility, but is considered deprecated. Unlike `floci:override-id`, the `_custom_id_` tag is not stripped and will remain attached to the API resource.
+
 ## API Gateway v1 (REST APIs) {#v1}
 
 **Protocol:** REST JSON

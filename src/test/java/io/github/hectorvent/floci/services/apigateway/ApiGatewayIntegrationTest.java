@@ -387,7 +387,7 @@ class ApiGatewayIntegrationTest {
                 .then()
                 .statusCode(201)
                 .body("id", equalTo("MYCUSTOMNAME"))
-                .body("tags._custom_id_", equalTo("MYCUSTOMNAME"));
+                .body("tags", nullValue()); // Should be stripped and thus omitted
     }
 
     @Test @Order(51)
@@ -400,10 +400,45 @@ class ApiGatewayIntegrationTest {
                 .body("name", equalTo("custom-id-api"));
     }
 
+    // ──────────────────────────── floci:override-id tag ────────────────────────────
+
     @Test @Order(52)
+    void createRestApi_flociOverrideIdTag_usesTagValueAsApiId() {
+        String body = """
+                {"name":"override-id-api","tags":{"floci:override-id":"MYOVERRIDEID"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/restapis")
+                .then()
+                .statusCode(201)
+                .body("id", equalTo("MYOVERRIDEID"))
+                .body("tags", nullValue()); // Should be stripped and thus omitted
+    }
+
+    @Test @Order(53)
+    void getRestApi_flociOverrideId_resolvesById() {
+        given()
+                .when().get("/restapis/MYOVERRIDEID")
+                .then()
+                .statusCode(200)
+                .body("id", equalTo("MYOVERRIDEID"))
+                .body("name", equalTo("override-id-api"));
+    }
+
+    @Test @Order(54)
     void deleteRestApi_customId() {
         given()
                 .when().delete("/restapis/MYCUSTOMNAME")
+                .then()
+                .statusCode(202);
+    }
+
+    @Test @Order(55)
+    void deleteRestApi_flociOverrideId() {
+        given()
+                .when().delete("/restapis/MYOVERRIDEID")
                 .then()
                 .statusCode(202);
     }

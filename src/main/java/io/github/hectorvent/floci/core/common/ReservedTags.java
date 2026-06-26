@@ -10,6 +10,7 @@ public final class ReservedTags {
 
     public static final String RESERVED_PREFIX = "floci:";
     public static final String OVERRIDE_ID_KEY = RESERVED_PREFIX + "override-id";
+    public static final String DEPRECATED_CUSTOM_ID_KEY = "_custom_id_";
 
     private ReservedTags() {
     }
@@ -18,7 +19,13 @@ public final class ReservedTags {
         if (tags == null) {
             return null;
         }
-        return tags.get(OVERRIDE_ID_KEY);
+        if (tags.containsKey(OVERRIDE_ID_KEY)) {
+            return tags.get(OVERRIDE_ID_KEY);
+        }
+        if (tags.containsKey(DEPRECATED_CUSTOM_ID_KEY)) {
+            return tags.get(DEPRECATED_CUSTOM_ID_KEY);
+        }
+        return null;
     }
 
     public static Map<String, String> stripReservedTags(Map<String, String> tags) {
@@ -50,6 +57,6 @@ public final class ReservedTags {
     }
 
     private static boolean isReserved(String key) {
-        return key != null && key.startsWith(RESERVED_PREFIX);
+        return key != null && (key.startsWith(RESERVED_PREFIX) || key.equals(DEPRECATED_CUSTOM_ID_KEY));
     }
 }

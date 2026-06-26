@@ -35,6 +35,7 @@ class ReservedTagsTest {
         Map<String, String> tags = new LinkedHashMap<>();
         tags.put("env", "test");
         tags.put(ReservedTags.OVERRIDE_ID_KEY, "my-id");
+        tags.put(ReservedTags.DEPRECATED_CUSTOM_ID_KEY, "custom-id");
         tags.put("floci:internal", "hidden");
         tags.put("team", "platform");
 
@@ -47,6 +48,7 @@ class ReservedTagsTest {
     void stripReservedTagsRemovesAllReservedTags() {
         Map<String, String> tags = Map.of(
                 ReservedTags.OVERRIDE_ID_KEY, "my-id",
+                ReservedTags.DEPRECATED_CUSTOM_ID_KEY, "custom-id",
                 "floci:internal", "hidden"
         );
 
@@ -65,7 +67,24 @@ class ReservedTagsTest {
                 "floci:internal", "hidden",
                 "env", "test"
         );
+        assertEquals("my-id", ReservedTags.extractOverrideId(tags));
+    }
 
+    @Test
+    void extractOverrideIdReturnsDeprecatedCustomId() {
+        Map<String, String> tags = Map.of(
+                ReservedTags.DEPRECATED_CUSTOM_ID_KEY, "custom-id",
+                "env", "test"
+        );
+        assertEquals("custom-id", ReservedTags.extractOverrideId(tags));
+    }
+
+    @Test
+    void extractOverrideIdFavorsReservedOverrideOverDeprecatedCustomId() {
+        Map<String, String> tags = Map.of(
+                ReservedTags.OVERRIDE_ID_KEY, "my-id",
+                ReservedTags.DEPRECATED_CUSTOM_ID_KEY, "custom-id"
+        );
         assertEquals("my-id", ReservedTags.extractOverrideId(tags));
     }
 
@@ -79,6 +98,16 @@ class ReservedTagsTest {
         AwsException exception = assertThrows(
                 AwsException.class,
                 () -> ReservedTags.rejectReservedTagsOnUpdate(Map.of(ReservedTags.OVERRIDE_ID_KEY, "my-id"))
+        );
+
+        assertEquals("ValidationException", exception.getErrorCode());
+    }
+
+    @Test
+    void rejectReservedTagsOnUpdateRejectsDeprecatedCustomId() {
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> ReservedTags.rejectReservedTagsOnUpdate(Map.of(ReservedTags.DEPRECATED_CUSTOM_ID_KEY, "custom-id"))
         );
 
         assertEquals("ValidationException", exception.getErrorCode());

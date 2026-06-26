@@ -330,4 +330,51 @@ class ApiGatewayV2IntegrationTest {
                 .then()
                 .statusCode(404);
     }
+
+    // ──────────────────────────── Override IDs ────────────────────────────
+
+    @Test @Order(100)
+    void createApi_customIdTag_usesTagValueAsApiId() {
+        String body = """
+                {"name":"custom-id-api","protocolType":"HTTP","tags":{"_custom_id_":"MYV2CUSTOM"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("apiId", equalTo("MYV2CUSTOM"))
+                .body("tags", nullValue()); // Should be stripped and thus omitted
+    }
+
+    @Test @Order(101)
+    void createApi_flociOverrideIdTag_usesTagValueAsApiId() {
+        String body = """
+                {"name":"override-id-api","protocolType":"HTTP","tags":{"floci:override-id":"MYV2OVERRIDE"}}
+                """;
+        given()
+                .contentType(ContentType.JSON)
+                .body(body)
+                .when().post("/v2/apis")
+                .then()
+                .statusCode(201)
+                .body("apiId", equalTo("MYV2OVERRIDE"))
+                .body("tags", nullValue()); // V2 omits empty maps if all tags stripped
+    }
+
+    @Test @Order(102)
+    void getApi_customId_resolvesById() {
+        given()
+                .when().get("/v2/apis/MYV2CUSTOM")
+                .then()
+                .statusCode(200)
+                .body("apiId", equalTo("MYV2CUSTOM"));
+    }
+
+    @Test @Order(103)
+    void deleteApi_customAndOverrideId() {
+        given().when().delete("/v2/apis/MYV2CUSTOM").then().statusCode(204);
+        given().when().delete("/v2/apis/MYV2OVERRIDE").then().statusCode(204);
+    }
 }
