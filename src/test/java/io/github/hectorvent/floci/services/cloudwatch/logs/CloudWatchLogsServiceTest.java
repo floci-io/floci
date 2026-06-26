@@ -175,6 +175,53 @@ class CloudWatchLogsServiceTest {
     }
 
     @Test
+    void getLogEventsPreservesIngestionOrderForSameTimestamp() {
+        // Regression for issue #1584: events written in order within the same millisecond
+        // must come back from GetLogEvents in ingestion order, not shuffled.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+
+        long ts = System.currentTimeMillis();
+        List<Map<String, Object>> events = new java.util.ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            events.add(Map.of("timestamp", ts, "message", "SEQLINE-" + i));
+        }
+        service.putLogEvents("/app/logs", "stream-1", events, REGION);
+
+        CloudWatchLogsService.LogEventsResult result = service.getLogEvents(
+                "/app/logs", "stream-1", null, null, 100, true, null, REGION);
+
+        assertEquals(10, result.events().size());
+        for (int i = 0; i < 10; i++) {
+            assertEquals("SEQLINE-" + i, result.events().get(i).getMessage(),
+                    "event at index " + i + " out of ingestion order");
+        }
+    }
+
+    @Test
+    void filterLogEventsPreservesIngestionOrderForSameTimestamp() {
+        // Same-timestamp ordering must also hold for FilterLogEvents.
+        service.createLogGroup("/app/logs", null, null, REGION);
+        service.createLogStream("/app/logs", "stream-1", REGION);
+
+        long ts = System.currentTimeMillis();
+        List<Map<String, Object>> events = new java.util.ArrayList<>();
+        for (int i = 0; i < 10; i++) {
+            events.add(Map.of("timestamp", ts, "message", "SEQLINE-" + i));
+        }
+        service.putLogEvents("/app/logs", "stream-1", events, REGION);
+
+        CloudWatchLogsService.FilteredLogEventsResult result = service.filterLogEvents(
+                "/app/logs", null, null, null, "SEQLINE", 100, REGION);
+
+        assertEquals(10, result.events().size());
+        for (int i = 0; i < 10; i++) {
+            assertEquals("SEQLINE-" + i, result.events().get(i).getMessage(),
+                    "event at index " + i + " out of ingestion order");
+        }
+    }
+
+    @Test
     void getLogEventsWithTimeRange() {
         service.createLogGroup("/app/logs", null, null, REGION);
         service.createLogStream("/app/logs", "stream-1", REGION);
