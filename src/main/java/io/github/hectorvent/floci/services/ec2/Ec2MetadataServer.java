@@ -362,7 +362,8 @@ public class Ec2MetadataServer {
                 if (profile.getRoleNames() != null && !profile.getRoleNames().isEmpty()) {
                     return profile.getRoleNames().getFirst();
                 }
-            } catch (AwsException ignored) {
+            } catch (AwsException e) {
+                LOG.debugf(e, "IMDS: instance profile %s unavailable; falling back to profile name", profileName);
                 // Fall back to the profile name when only the EC2 profile ARN was modeled.
             }
         }

@@ -165,6 +165,10 @@ public final class AmiImageTool {
                 LABEL io.floci.ami.architecture="%s"
                 ADD %s /
                 COPY %s /etc/systemd/system/systemd-networkd-wait-online.service.d/floci.conf
+                RUN set -eux; \\
+                    getent group ubuntu >/dev/null || groupadd --gid 1000 ubuntu; \\
+                    id ubuntu >/dev/null 2>&1 || useradd --uid 1000 --gid ubuntu --groups sudo --create-home --shell /bin/bash ubuntu; \\
+                    install -d -o ubuntu -g ubuntu /home/ubuntu
                 ENV container=docker
                 STOPSIGNAL SIGRTMIN+3
                 CMD ["/sbin/init"]

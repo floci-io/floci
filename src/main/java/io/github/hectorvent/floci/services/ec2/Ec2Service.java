@@ -1503,6 +1503,16 @@ public class Ec2Service {
                 .collect(Collectors.toList());
     }
 
+    public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        String resolvedVersion = resolveLaunchTemplateVersion(
+                launchTemplate,
+                version,
+                launchTemplate.getDefaultVersionNumber());
+        return new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
+    }
+
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);

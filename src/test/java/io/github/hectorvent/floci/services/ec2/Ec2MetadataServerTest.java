@@ -73,13 +73,13 @@ class Ec2MetadataServerTest {
     void iamCredentialRoleNameComesFromInstanceProfileRole() {
         IamService iamService = mock(IamService.class);
         InstanceProfile profile = new InstanceProfile();
-        profile.setInstanceProfileName("iceguard-profile");
-        profile.setRoleNames(List.of("iceguard-role"));
-        when(iamService.getInstanceProfile("iceguard-profile")).thenReturn(profile);
+        profile.setInstanceProfileName("sample-profile");
+        profile.setRoleNames(List.of("sample-role"));
+        when(iamService.getInstanceProfile("sample-profile")).thenReturn(profile);
 
         Ec2MetadataServer server = new Ec2MetadataServer(null, null, iamService);
 
-        assertEquals("iceguard-role", server.resolveRoleName(
-                "arn:aws:iam::000000000000:instance-profile/iceguard-profile"));
+        assertEquals("sample-role", server.resolveRoleName(
+                "arn:aws:iam::000000000000:instance-profile/sample-profile"));
     }
 }
