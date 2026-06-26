@@ -12,15 +12,25 @@ import java.util.concurrent.ConcurrentHashMap;
 public class SchemaRegistry {
     private final Map<String, GraphQLSchema> schemas = new ConcurrentHashMap<>();
     private final AppSyncSchemaParser appSyncSchemaParser;
+    private final SchemaCreationWorker worker;
 
     @Inject
-    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser) {
+    public SchemaRegistry(AppSyncSchemaParser appSyncSchemaParser, SchemaCreationWorker worker) {
         this.appSyncSchemaParser = appSyncSchemaParser;
+        this.worker = worker;
     }
 
     public void register(String apiId, String sdl) {
         GraphQLSchema schema = appSyncSchemaParser.parse(sdl);
         schemas.put(apiId, schema);
+    }
+
+    /**
+     * Submit a schema for async creation. The status is set to PROCESSING
+     * synchronously by the caller; this method enqueues the actual parse/register.
+     */
+    public void submitSchemaCreation(String apiId, String sdl) {
+        worker.submit(apiId, sdl);
     }
 
     public Optional<GraphQLSchema> getSchema(String apiId) {

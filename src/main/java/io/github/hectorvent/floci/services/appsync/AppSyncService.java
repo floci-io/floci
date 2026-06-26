@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.appsync.graphql.SchemaRegistry;
+import io.github.hectorvent.floci.services.appsync.graphql.SchemaStatusStoreProducer;
 import io.github.hectorvent.floci.services.appsync.model.*;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -38,10 +39,11 @@ public class AppSyncService {
 
     @Inject
     public AppSyncService(StorageFactory storageFactory, EmulatorConfig config, RegionResolver regionResolver,
-                          SchemaRegistry schemaRegistry, ObjectMapper objectMapper) {
+                          SchemaRegistry schemaRegistry, ObjectMapper objectMapper,
+                          StorageBackend<String, SchemaCreationStatus> schemaStatusStore) {
         this.apiStore = storageFactory.create("appsync", "appsync-apis.json", new TypeReference<>() {});
         this.schemaStore = storageFactory.create("appsync", "appsync-schemas.json", new TypeReference<>() {});
-        this.schemaStatusStore = storageFactory.create("appsync", "appsync-schema-status.json", new TypeReference<>() {});
+        this.schemaStatusStore = schemaStatusStore;
         this.dataSourceStore = storageFactory.create("appsync", "appsync-datasources.json", new TypeReference<>() {});
         this.resolverStore = storageFactory.create("appsync", "appsync-resolvers.json", new TypeReference<>() {});
         this.functionStore = storageFactory.create("appsync", "appsync-functions.json", new TypeReference<>() {});
@@ -59,6 +61,7 @@ public class AppSyncService {
     // ──────────────────────────── GraphQL API ────────────────────────────
 
     public GraphqlApi createGraphqlApi(Map<String, Object> request, String region) {
+        assertNoSchemaBusyAnywhere();
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
             throw new AwsException("BadRequestException", "A GraphQL API name is required", 400);
@@ -135,6 +138,7 @@ public class AppSyncService {
 
     @SuppressWarnings("unchecked")
     public GraphqlApi updateGraphqlApi(String apiId, Map<String, Object> request, String region) {
+        assertSchemaNotBusy(apiId);
         GraphqlApi existing = getGraphqlApi(apiId);
         if (request.containsKey("name")) existing.setName((String) request.get("name"));
         if (request.containsKey("authenticationType")) existing.setAuthenticationType(parseEnum(AuthenticationType.class, request.get("authenticationType")));
@@ -182,6 +186,7 @@ public class AppSyncService {
     }
 
     public void deleteGraphqlApi(String apiId) {
+        assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         apiStore.delete(apiId);
         schemaStore.delete(apiId);
@@ -201,12 +206,13 @@ public class AppSyncService {
 
     public void startSchemaCreation(String apiId, String definition) {
         getGraphqlApi(apiId);
-        schemaRegistry.register(apiId, definition);
+        assertSchemaNotBusy(apiId);
         schemaStore.put(apiId, definition);
         SchemaCreationStatus status = new SchemaCreationStatus();
-        status.setStatus(SchemaCreationStatusType.ACTIVE);
+        status.setStatus(SchemaCreationStatusType.PROCESSING);
         schemaStatusStore.put(apiId, status);
-        LOG.infov("Schema creation completed for API {0}", apiId);
+        schemaRegistry.submitSchemaCreation(apiId, definition);
+        LOG.infov("Schema creation submitted for API {0}", apiId);
     }
 
     public SchemaCreationStatus getSchemaCreationStatus(String apiId) {
@@ -222,9 +228,40 @@ public class AppSyncService {
                         "Schema not found for API: " + apiId, 404));
     }
 
+    /**
+     * Throw 409 ConcurrentModificationException if the given API has a schema
+     * creation currently in PROCESSING state. Mirrors AWS behavior where
+     * schema-mutating operations are blocked while a previous schema
+     * creation is in flight.
+     */
+    void assertSchemaNotBusy(String apiId) {
+        schemaStatusStore.get(apiId).ifPresent(s -> throwIfProcessing(s.getStatus()));
+    }
+
+    /**
+     * Throw 409 if ANY API in the account has a schema creation in
+     * PROCESSING state. Used by account-wide operations like
+     * CreateGraphqlApi / CreateApi that AWS also blocks when a schema
+     * creation is in flight.
+     */
+    void assertNoSchemaBusyAnywhere() {
+        for (String apiId : schemaStatusStore.keys()) {
+            schemaStatusStore.get(apiId).ifPresent(s -> throwIfProcessing(s.getStatus()));
+        }
+    }
+
+    private void throwIfProcessing(SchemaCreationStatusType status) {
+        if (status == SchemaCreationStatusType.PROCESSING) {
+            throw new AwsException("ConcurrentModificationException",
+                    "Another modification is in progress at this time and it must complete before you can make your change.",
+                    409);
+        }
+    }
+
     // ──────────────────────────── Data Sources ────────────────────────────
 
     public DataSource createDataSource(String apiId, Map<String, Object> request, String region) {
+        assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
@@ -256,6 +293,7 @@ public class AppSyncService {
     }
 
     public DataSource getDataSource(String apiId, String dataSourceName) {
+        assertSchemaNotBusy(apiId);
         return dataSourceStore.get(apiKey(apiId, dataSourceName))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Data source not found: " + dataSourceName, 404));
     }
@@ -266,6 +304,7 @@ public class AppSyncService {
 
     @SuppressWarnings("unchecked")
     public DataSource updateDataSource(String apiId, String dataSourceName, Map<String, Object> request) {
+        assertSchemaNotBusy(apiId);
         DataSource existing = getDataSource(apiId, dataSourceName);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("type")) existing.setType(parseEnum(DataSourceType.class, request.get("type")));
@@ -282,6 +321,7 @@ public class AppSyncService {
     }
 
     public void deleteDataSource(String apiId, String dataSourceName) {
+        assertSchemaNotBusy(apiId);
         getDataSource(apiId, dataSourceName);
         dataSourceStore.delete(apiKey(apiId, dataSourceName));
     }
@@ -289,6 +329,7 @@ public class AppSyncService {
     // ──────────────────────────── Resolvers ────────────────────────────
 
     public Resolver createResolver(String apiId, Map<String, Object> request, String region) {
+        assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String fieldName = (String) request.get("fieldName");
         if (fieldName == null || fieldName.isBlank()) {
@@ -339,6 +380,7 @@ public class AppSyncService {
     }
 
     public Resolver getResolver(String apiId, String typeName, String fieldName) {
+        assertSchemaNotBusy(apiId);
         return resolverStore.get(resolverKey(apiId, typeName, fieldName))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Resolver not found: " + typeName + "." + fieldName, 404));
@@ -361,6 +403,7 @@ public class AppSyncService {
 
     @SuppressWarnings("unchecked")
     public Resolver updateResolver(String apiId, String typeName, String fieldName, Map<String, Object> request) {
+        assertSchemaNotBusy(apiId);
         Resolver existing = getResolver(apiId, typeName, fieldName);
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
         if (request.containsKey("functionId")) existing.setFunctionId((String) request.get("functionId"));
@@ -392,6 +435,7 @@ public class AppSyncService {
     // ──────────────────────────── Functions ────────────────────────────
 
     public FunctionConfiguration createFunction(String apiId, Map<String, Object> request, String region) {
+        assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
@@ -417,6 +461,7 @@ public class AppSyncService {
     }
 
     public FunctionConfiguration getFunction(String apiId, String functionId) {
+        assertSchemaNotBusy(apiId);
         return functionStore.get(apiKey(apiId, functionId))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Function not found: " + functionId, 404));
     }
@@ -426,6 +471,7 @@ public class AppSyncService {
     }
 
     public FunctionConfiguration updateFunction(String apiId, String functionId, Map<String, Object> request) {
+        assertSchemaNotBusy(apiId);
         FunctionConfiguration existing = getFunction(apiId, functionId);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("dataSourceName")) existing.setDataSourceName((String) request.get("dataSourceName"));
@@ -445,6 +491,7 @@ public class AppSyncService {
     // ──────────────────────────── Types ────────────────────────────
 
     public AppSyncType createType(String apiId, Map<String, Object> request) {
+        assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
         String definition = (String) request.get("definition");
@@ -470,15 +517,18 @@ public class AppSyncService {
     }
 
     public AppSyncType getType(String apiId, String typeName) {
+        assertSchemaNotBusy(apiId);
         return typeStore.get(apiKey(apiId, typeName))
                 .orElseThrow(() -> new AwsException("NotFoundException", "Type not found: " + typeName, 404));
     }
 
     public Page<AppSyncType> listTypes(String apiId, Integer maxResults, String nextToken) {
+        assertSchemaNotBusy(apiId);
         return paginate(typeStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
     }
 
     public AppSyncType updateType(String apiId, String typeName, Map<String, Object> request) {
+        assertSchemaNotBusy(apiId);
         AppSyncType existing = getType(apiId, typeName);
         if (request.containsKey("definition")) existing.setDefinition((String) request.get("definition"));
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
@@ -599,6 +649,7 @@ public class AppSyncService {
     }
 
     public Map<String, String> putEnvironmentVariables(String apiId, Map<String, String> environmentVariables) {
+        assertSchemaNotBusy(apiId);
         GraphqlApi api = getGraphqlApi(apiId);
         api.setEnvironmentVariables(new HashMap<>(environmentVariables));
         apiStore.put(apiId, api);
@@ -694,6 +745,7 @@ public class AppSyncService {
     // ──────────────────────────── Channel Namespaces ────────────────────────────
 
     public ChannelNamespace createChannelNamespace(String apiId, Map<String, Object> request) {
+        assertSchemaNotBusy(apiId);
         getGraphqlApi(apiId);
         String name = (String) request.get("name");
         if (name == null || name.isBlank()) {
@@ -724,6 +776,7 @@ public class AppSyncService {
     }
 
     public ChannelNamespace updateChannelNamespace(String apiId, String name, Map<String, Object> request) {
+        assertSchemaNotBusy(apiId);
         ChannelNamespace existing = getChannelNamespace(apiId, name);
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         if (request.containsKey("codeHandlers")) existing.setCodeHandlers((String) request.get("codeHandlers"));
@@ -750,6 +803,8 @@ public class AppSyncService {
             throw new AwsException("BadRequestException", "A merged API identifier is required", 400);
         }
         getGraphqlApi(mergedApiIdentifier);
+        assertSchemaNotBusy(sourceApiIdentifier);
+        assertSchemaNotBusy(mergedApiIdentifier);
         checkDuplicateSourceApiAssociation(sourceApiIdentifier, mergedApiIdentifier);
         SourceApiAssociation assoc = new SourceApiAssociation();
         assoc.setAssociationId(generateShortId());
@@ -776,6 +831,8 @@ public class AppSyncService {
             throw new AwsException("BadRequestException", "A source API ID is required", 400);
         }
         getGraphqlApi(sourceApiId);
+        assertSchemaNotBusy(mergedApiIdentifier);
+        assertSchemaNotBusy(sourceApiId);
         checkDuplicateSourceApiAssociation(sourceApiId, mergedApiIdentifier);
         SourceApiAssociation assoc = new SourceApiAssociation();
         assoc.setAssociationId(generateShortId());
@@ -808,6 +865,7 @@ public class AppSyncService {
 
     public SourceApiAssociation updateSourceApiAssociation(String mergedApiIdentifier, String associationId,
                                                           Map<String, Object> request) {
+        assertSchemaNotBusy(mergedApiIdentifier);
         SourceApiAssociation assoc = getSourceApiAssociation(mergedApiIdentifier, associationId);
         if (request.containsKey("description")) {
             assoc.setDescription((String) request.get("description"));
@@ -837,6 +895,7 @@ public class AppSyncService {
     }
 
     public void deleteSourceApiAssociation(String mergedApiIdentifier, String associationId) {
+        assertSchemaNotBusy(mergedApiIdentifier);
         getSourceApiAssociation(mergedApiIdentifier, associationId);
         mergedApiAssociationStore.delete(associationId);
     }

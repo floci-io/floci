@@ -112,9 +112,7 @@ public class AppSyncController {
             }
         }
         service.startSchemaCreation(apiId, definition);
-        SchemaCreationStatus status = new SchemaCreationStatus();
-        status.setStatus(SchemaCreationStatusType.ACTIVE);
-        return Response.ok(status).build();
+        return Response.ok(service.getSchemaCreationStatus(apiId)).build();
     }
 
     @GET
