@@ -1,22 +1,44 @@
 package io.github.hectorvent.floci.services.rds.proxy;
 
 import org.jboss.logging.Logger;
+import org.bouncycastle.asn1.x500.X500Name;
+import org.bouncycastle.asn1.x509.Extension;
+import org.bouncycastle.asn1.x509.GeneralName;
+import org.bouncycastle.asn1.x509.GeneralNames;
+import org.bouncycastle.cert.X509v3CertificateBuilder;
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.operator.ContentSigner;
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder;
 
 import javax.crypto.Mac;
 import javax.crypto.SecretKeyFactory;
 import javax.crypto.spec.PBEKeySpec;
 import javax.crypto.spec.SecretKeySpec;
+import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
 import java.io.ByteArrayOutputStream;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.math.BigInteger;
 import java.net.Socket;
 import java.nio.charset.StandardCharsets;
+import java.security.KeyPair;
+import java.security.KeyPairGenerator;
+import java.security.KeyStore;
 import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.security.Security;
+import java.security.cert.X509Certificate;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.Base64;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +64,7 @@ public class PostgresProtocolHandler {
 
     private static final int SSL_REQUEST_CODE = 80877103;
     private static final int STARTUP_PROTOCOL_VERSION = 196608; // v3.0
+    private static volatile SSLContext serverSslContext;
 
     public static void handleAuth(Socket client, Socket backend,
                                   String masterUsername, String masterPassword, String dbName,
@@ -157,8 +180,9 @@ public class PostgresProtocolHandler {
             int proto = readInt32(in);
 
             if (proto == SSL_REQUEST_CODE) {
-                out.write('N');
+                out.write('S');
                 out.flush();
+                currentSocket = acceptSsl(currentSocket);
                 continue;
             }
 
@@ -174,6 +198,76 @@ public class PostgresProtocolHandler {
                     params.getOrDefault("user", "postgres"),
                     params.get("database"));
         }
+    }
+
+    static Socket acceptSsl(Socket socket) throws IOException {
+        try {
+            SSLSocket sslSocket = (SSLSocket) serverSslContext().getSocketFactory()
+                    .createSocket(socket, socket.getInetAddress().getHostAddress(), socket.getPort(), true);
+            sslSocket.setUseClientMode(false);
+            sslSocket.startHandshake();
+            return sslSocket;
+        } catch (Exception e) {
+            throw new IOException("Unable to negotiate PostgreSQL SSL", e);
+        }
+    }
+
+    private static SSLContext serverSslContext() throws Exception {
+        SSLContext context = serverSslContext;
+        if (context != null) {
+            return context;
+        }
+        synchronized (PostgresProtocolHandler.class) {
+            context = serverSslContext;
+            if (context == null) {
+                context = createServerSslContext();
+                serverSslContext = context;
+            }
+            return context;
+        }
+    }
+
+    private static SSLContext createServerSslContext() throws Exception {
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+        }
+
+        KeyPairGenerator generator = KeyPairGenerator.getInstance("RSA");
+        generator.initialize(2048, new SecureRandom());
+        KeyPair keyPair = generator.generateKeyPair();
+        Instant now = Instant.now();
+
+        X500Name name = new X500Name("CN=localhost");
+        X509v3CertificateBuilder certificateBuilder = new JcaX509v3CertificateBuilder(
+                name,
+                new BigInteger(128, new SecureRandom()),
+                Date.from(now.minus(1, ChronoUnit.MINUTES)),
+                Date.from(now.plus(365, ChronoUnit.DAYS)),
+                name,
+                keyPair.getPublic());
+        certificateBuilder.addExtension(Extension.subjectAlternativeName, false, new GeneralNames(new GeneralName[] {
+                new GeneralName(GeneralName.dNSName, "localhost"),
+                new GeneralName(GeneralName.iPAddress, "127.0.0.1")
+        }));
+
+        ContentSigner signer = new JcaContentSignerBuilder("SHA256withRSA")
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .build(keyPair.getPrivate());
+        X509Certificate certificate = new JcaX509CertificateConverter()
+                .setProvider(BouncyCastleProvider.PROVIDER_NAME)
+                .getCertificate(certificateBuilder.build(signer));
+
+        char[] password = new char[0];
+        KeyStore keyStore = KeyStore.getInstance("PKCS12");
+        keyStore.load(null, password);
+        keyStore.setKeyEntry("floci-rds-postgres", keyPair.getPrivate(), password, new java.security.cert.Certificate[] {certificate});
+
+        KeyManagerFactory keyManagerFactory = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm());
+        keyManagerFactory.init(keyStore, password);
+
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(keyManagerFactory.getKeyManagers(), null, new SecureRandom());
+        return context;
     }
 
     private record StartupMessage(Socket socket, String username, String database) {}

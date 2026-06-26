@@ -15,6 +15,11 @@ import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.net.ssl.SSLContext;
+import javax.net.ssl.SSLSocket;
+import javax.net.ssl.TrustManager;
+import javax.net.ssl.X509TrustManager;
+import java.security.cert.X509Certificate;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -146,7 +151,7 @@ class PostgresProtocolHandlerTest {
     }
 
     @Test
-    void declinesPostgresSslRequestAndContinuesStartup() throws Exception {
+    void acceptsPostgresSslRequestAndContinuesStartup() throws Exception {
         AtomicReference<String> backendDatabase = new AtomicReference<>();
 
         try (ServerSocket backendServer = new ServerSocket(0);
@@ -182,7 +187,13 @@ class PostgresProtocolHandlerTest {
                 DataInputStream clientIn = new DataInputStream(ourClient.getInputStream());
 
                 writeSslRequest(clientOut);
-                assertEquals('N', clientIn.readUnsignedByte());
+                assertEquals('S', clientIn.readUnsignedByte());
+
+                SSLSocket sslClient = trustedClientSocket(ourClient);
+                sslClient.startHandshake();
+                clientOut = new DataOutputStream(sslClient.getOutputStream());
+                clientIn = new DataInputStream(sslClient.getInputStream());
+
                 writeStartup(clientOut, "dbadmin", "auth_db");
                 readCleartextPasswordChallenge(clientIn);
                 writePassword(clientOut, "adminpass");
@@ -354,6 +365,26 @@ class PostgresProtocolHandlerTest {
         out.writeInt(8);
         out.writeInt(SSL_REQUEST_CODE);
         out.flush();
+    }
+
+    private static SSLSocket trustedClientSocket(Socket socket) throws Exception {
+        SSLContext context = SSLContext.getInstance("TLS");
+        context.init(null, new TrustManager[] {new X509TrustManager() {
+            @Override
+            public void checkClientTrusted(X509Certificate[] chain, String authType) {}
+
+            @Override
+            public void checkServerTrusted(X509Certificate[] chain, String authType) {}
+
+            @Override
+            public X509Certificate[] getAcceptedIssuers() {
+                return new X509Certificate[0];
+            }
+        }}, null);
+        SSLSocket sslSocket = (SSLSocket) context.getSocketFactory()
+                .createSocket(socket, socket.getInetAddress().getHostAddress(), socket.getPort(), true);
+        sslSocket.setUseClientMode(true);
+        return sslSocket;
     }
 
     private static void writePassword(DataOutputStream out, String password) throws IOException {
