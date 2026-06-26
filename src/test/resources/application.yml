@@ -213,6 +213,8 @@ floci:
       enabled: true
     autoscaling:
       enabled: true
+    elasticbeanstalk:
+      enabled: true
     transfer:
       enabled: true
     backup:

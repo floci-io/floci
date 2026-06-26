@@ -90,6 +90,10 @@ class CognitoLambdaTriggersTest {
         return new InvokeResult(200, error, new byte[0], null, "req-id");
     }
 
+    private static InvokeResult rawPayload(String payload) {
+        return new InvokeResult(200, null, payload.getBytes(StandardCharsets.UTF_8), null, "req-id");
+    }
+
     private static String decodeJwtPayload(String jwt) {
         return new String(Base64.getUrlDecoder().decode(jwt.split("\\.")[1]), StandardCharsets.UTF_8);
     }
@@ -630,7 +634,8 @@ class CognitoLambdaTriggersTest {
     void verifyAuthChallengeLambdaDecidesCorrectness() {
         UserPool pool = createPoolWithLambdaConfig(Map.of(
                 "DefineAuthChallenge", "arn:aws:lambda:::define",
-                "VerifyAuthChallengeResponse", "arn:aws:lambda:::verify"));
+                        "CreateAuthChallenge", "arn:aws:lambda:::create",
+                                "VerifyAuthChallengeResponse", "arn:aws:lambda:::verify"));
         seedUser(pool, "alice", "Perm1234!");
         UserPoolClient client = createClient(pool);
 
@@ -639,6 +644,12 @@ class CognitoLambdaTriggersTest {
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class), any()))
                 .thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
                 .thenReturn(ok(Map.of("issueTokens", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class),
+                        any())).thenReturn(
+                                        ok(Map.of("publicChallengeParameters",
+                                                        Map.of("question", "favourite-colour"),
+                                                        "privateChallengeParameters",
+                                                        Map.of("answer", "blue"))));
         when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any()))
                 .thenReturn(ok(Map.of("answerCorrect", true)));
 
@@ -652,5 +663,60 @@ class CognitoLambdaTriggersTest {
 
         assertNotNull(((Map<String, Object>) tokens.get("AuthenticationResult")).get("AccessToken"));
         verify(lambdaService).invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class), any());
+    }
+
+    @Test
+    void customAuthDoesNotIssueTokensWhenVerifyAuthChallengeTriggerErrors() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("DefineAuthChallenge",
+                        "arn:aws:lambda:::define", "CreateAuthChallenge",
+                        "arn:aws:lambda:::create", "VerifyAuthChallengeResponse",
+                        "arn:aws:lambda:::verify"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        // First Define call presents a challenge. If the flow incorrectly falls back after
+        // verify trigger failure, the second Define call will issue tokens and this test will
+        // fail.
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class),
+                        any())).thenReturn(ok(Map.of("challengeName", "CUSTOM_CHALLENGE")))
+                                        .thenReturn(ok(Map.of("issueTokens", true)));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::create"), any(byte[].class),
+                        any())).thenReturn(
+                                        ok(Map.of("publicChallengeParameters",
+                                                        Map.of("question", "favourite-colour"),
+                                                        "privateChallengeParameters",
+                                                        Map.of("answer", "blue"))));
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::verify"), any(byte[].class),
+                        any())).thenReturn(lambdaError("Unhandled"));
+
+        Map<String, Object> initResult = service.initiateAuth(client.getClientId(),
+                        "CUSTOM_AUTH", Map.of("USERNAME", "alice"));
+        String session = (String) initResult.get("Session");
+
+        AwsException ex = assertThrows(AwsException.class,
+                        () -> service.respondToAuthChallenge(client.getClientId(),
+                                        "CUSTOM_CHALLENGE", session,
+                                        Map.of("USERNAME", "alice", "ANSWER", "anything")));
+
+        assertEquals("UserLambdaValidationException", ex.getErrorCode());
+        assertEquals("VerifyAuthChallengeResponse failed with error Unhandled", ex.getMessage());
+    }
+
+    @Test
+    void customAuthFailsWhenTriggerReturnsNonObjectResponse() {
+        UserPool pool = createPoolWithLambdaConfig(Map.of("DefineAuthChallenge", "arn:aws:lambda:::define"));
+        seedUser(pool, "alice", "Perm1234!");
+        UserPoolClient client = createClient(pool);
+
+        when(lambdaService.invoke(anyString(), eq("arn:aws:lambda:::define"), any(byte[].class),
+                        any())).thenReturn(rawPayload("{\"response\":\"not-an-object\"}"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                        () -> service.initiateAuth(client.getClientId(),
+                                        "CUSTOM_AUTH", Map.of("USERNAME", "alice")));
+
+        assertEquals("InvalidLambdaResponseException", ex.getErrorCode());
+        assertEquals("DefineAuthChallenge trigger failed: DefineAuthChallenge trigger returned a non-object response",
+                        ex.getMessage());
     }
 }

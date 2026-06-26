@@ -245,6 +245,31 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(18)
+    void describeLargeGravitonInstanceTypes() {
+        given()
+            .formParam("Action", "DescribeInstanceTypes")
+            .formParam("InstanceType.1", "m6gd.large")
+            .formParam("InstanceType.2", "m7gd.large")
+            .formParam("InstanceType.3", "m8gd.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.size()", equalTo(3))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceType",
+                    containsInAnyOrder("m6gd.large", "m7gd.large", "m8gd.large"))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.vCpuInfo.defaultVCpus",
+                    everyItem(equalTo("2")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.memoryInfo.sizeInMiB",
+                    everyItem(equalTo("8192")))
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.supportedArchitectures.item.item",
+                    everyItem(equalTo("arm64")));
+    }
+
+    @Test
+    @Order(19)
     void describeInstanceTypeOfferings() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -266,7 +291,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(19)
+    @Order(20)
     void describeArmInstanceTypeOfferingByRegion() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -288,7 +313,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(20)
+    @Order(21)
     void describeModernGravitonInstanceTypeOfferingsByRegion() {
         given()
             .formParam("Action", "DescribeInstanceTypeOfferings")
@@ -307,6 +332,31 @@ class Ec2IntegrationTest {
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(4))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
                     containsInAnyOrder("m8gd.2xlarge", "m7gd.2xlarge", "m6gd.2xlarge", "m8gd.medium"))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
+                    everyItem(equalTo("region")))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
+                    everyItem(equalTo("us-east-1")));
+    }
+
+    @Test
+    @Order(22)
+    void describeLargeGravitonInstanceTypeOfferingsByRegion() {
+        given()
+            .formParam("Action", "DescribeInstanceTypeOfferings")
+            .formParam("LocationType", "region")
+            .formParam("Filter.1.Name", "instance-type")
+            .formParam("Filter.1.Value.1", "m6gd.large")
+            .formParam("Filter.1.Value.2", "m7gd.large")
+            .formParam("Filter.1.Value.3", "m8gd.large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.size()", equalTo(3))
+            .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.instanceType",
+                    containsInAnyOrder("m6gd.large", "m7gd.large", "m8gd.large"))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.locationType",
                     everyItem(equalTo("region")))
             .body("DescribeInstanceTypeOfferingsResponse.instanceTypeOfferingSet.item.location",
