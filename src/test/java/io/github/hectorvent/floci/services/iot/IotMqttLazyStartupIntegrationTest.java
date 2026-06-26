@@ -26,8 +26,28 @@ class IotMqttLazyStartupIntegrationTest {
     IotMqttBrokerService mqttBrokerService;
 
     @BeforeEach
-    void stopBroker() {
+    void stopBroker() throws InterruptedException {
         mqttBrokerService.stop();
+        awaitPortClosed(PORT);
+    }
+
+    /**
+     * Vert.x's {@code MqttServer.close()} future can resolve a moment before the OS
+     * releases the listening socket, so a fresh connect immediately after {@link
+     * IotMqttBrokerService#stop()} may still succeed. Poll until the port actually
+     * refuses connections before a test asserts the broker is not listening — this
+     * removes a startup-order race that only surfaced under the full ordered suite.
+     */
+    private static void awaitPortClosed(int port) throws InterruptedException {
+        long deadline = System.currentTimeMillis() + 5_000;
+        while (System.currentTimeMillis() < deadline) {
+            try (Socket socket = new Socket()) {
+                socket.connect(new InetSocketAddress("127.0.0.1", port), 100);
+            } catch (Exception refused) {
+                return; // connection refused — the broker port is closed
+            }
+            Thread.sleep(50); // still accepting connections; back off and retry
+        }
     }
 
     @Test
