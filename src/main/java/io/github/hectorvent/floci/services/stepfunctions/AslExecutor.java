@@ -10,6 +10,8 @@ import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
+import io.github.hectorvent.floci.services.s3.S3Service;
+import io.github.hectorvent.floci.services.s3.model.S3Object;
 import io.github.hectorvent.floci.services.sqs.SqsJsonHandler;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
@@ -50,6 +52,7 @@ public class AslExecutor {
     private final LambdaFunctionStore functionStore;
     private final DynamoDbService dynamoDbService;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
+    private final S3Service s3Service;
     private final SqsJsonHandler sqsJsonHandler;
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
@@ -63,6 +66,7 @@ public class AslExecutor {
     @Inject
     public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
                        DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
+                       S3Service s3Service,
                        SqsJsonHandler sqsJsonHandler,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService) {
@@ -70,6 +74,7 @@ public class AslExecutor {
         this.functionStore = functionStore;
         this.dynamoDbService = dynamoDbService;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
+        this.s3Service = s3Service;
         this.sqsJsonHandler = sqsJsonHandler;
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
@@ -865,19 +870,7 @@ public class AslExecutor {
 
     private StateResult executeMapState(String name, JsonNode stateDef, JsonNode input, StateMachine sm,
                                          boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
-        JsonNode items;
-        if (jsonata && stateDef.has("Items")) {
-            JsonNode itemsNode = stateDef.get("Items");
-            if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
-                JsonNode statesVar = buildStatesVar(input, null, context);
-                items = jsonataEvaluator.evaluate(itemsNode.asText(), statesVar);
-            } else {
-                items = itemsNode;
-            }
-        } else {
-            JsonNode itemsPath = stateDef.path("ItemsPath");
-            items = itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input);
-        }
+        JsonNode items = resolveMapItems(stateDef, input, sm, jsonata, context);
 
         if (!items.isArray()) {
             throw new FailStateException("States.Runtime", "Items must reference an array");
@@ -898,20 +891,20 @@ public class AslExecutor {
         ArrayNode results = objectMapper.createArrayNode();
         int index = 0;
         for (JsonNode item : items) {
+            ObjectNode iterContext = ((ObjectNode) context).deepCopy();
+            ObjectNode mapCtx = objectMapper.createObjectNode();
+            ObjectNode mapItem = objectMapper.createObjectNode();
+            mapItem.put("Index", index);
+            mapItem.set("Value", item);
+            mapCtx.set("Item", mapItem);
+            iterContext.set("Map", mapCtx);
+
             JsonNode iterInput = item;
             if (itemTransform != null) {
-                // Enrich context with Map.Item.Index and Map.Item.Value for $$.Map.* references.
                 // $ in ItemSelector resolves against the Map state's effective input, not the item.
-                ObjectNode iterContext = ((ObjectNode) context).deepCopy();
-                ObjectNode mapCtx = objectMapper.createObjectNode();
-                ObjectNode mapItem = objectMapper.createObjectNode();
-                mapItem.put("Index", index);
-                mapItem.set("Value", item);
-                mapCtx.set("Item", mapItem);
-                iterContext.set("Map", mapCtx);
                 iterInput = resolveParameters(itemTransform, mapInput, iterContext);
             }
-            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, context));
+            results.add(executeBranch(startAt, iteratorStates, iterInput, sm, topLevelQueryLanguage, iterContext));
             index++;
         }
 
@@ -923,6 +916,56 @@ public class AslExecutor {
         JsonNode output = mergeResult(stateDef, input, results);
         output = applyOutputPath(stateDef, input, output);
         return new StateResult(output, stateDef.path("Next").asText(null));
+    }
+
+    private JsonNode resolveMapItems(JsonNode stateDef, JsonNode input, StateMachine sm,
+                                     boolean jsonata, JsonNode context) throws Exception {
+        if (jsonata && stateDef.has("Items")) {
+            JsonNode itemsNode = stateDef.get("Items");
+            if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
+                JsonNode statesVar = buildStatesVar(input, null, context);
+                return jsonataEvaluator.evaluate(itemsNode.asText(), statesVar);
+            }
+            return itemsNode;
+        }
+
+        if (stateDef.has("ItemReader")) {
+            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context);
+        }
+
+        JsonNode itemsPath = stateDef.path("ItemsPath");
+        return itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input);
+    }
+
+    private JsonNode resolveItemReaderItems(JsonNode itemReader, JsonNode input,
+                                            JsonNode context) throws Exception {
+        String resource = itemReader.path("Resource").asText(null);
+        if (!"arn:aws:states:::s3:getObject".equals(resource)) {
+            throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
+        }
+
+        String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
+        if (!"JSON".equals(inputType)) {
+            throw new FailStateException("States.Runtime", "Unsupported ItemReader InputType: " + inputType);
+        }
+
+        JsonNode parameters = itemReader.path("Parameters");
+        JsonNode resolvedParameters = resolveParameters(parameters, input, context);
+        String bucket = resolvedParameters.path("Bucket").asText(null);
+        String key = resolvedParameters.path("Key").asText(null);
+        if (bucket == null || key == null) {
+            throw new FailStateException("States.Runtime", "ItemReader Parameters must include Bucket and Key");
+        }
+
+        try {
+            S3Object object = s3Service.getObject(bucket, key);
+            return objectMapper.readTree(object.getData());
+        } catch (AwsException e) {
+            throw new FailStateException("States.ItemReaderFailed", e.getMessage());
+        } catch (Exception e) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
+        }
     }
 
     private JsonNode executeBranch(String startAt, JsonNode states, JsonNode input, StateMachine sm,
