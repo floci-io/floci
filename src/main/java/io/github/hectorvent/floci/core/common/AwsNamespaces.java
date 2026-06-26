@@ -19,6 +19,7 @@ public final class AwsNamespaces {
     public static final String EC2    = "http://ec2.amazonaws.com/doc/2016-11-15/";
     public static final String ELB_V2      = "https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/";
     public static final String AUTOSCALING = "https://autoscaling.amazonaws.com/doc/2011-01-01/";
+    public static final String ELASTIC_BEANSTALK = "https://elasticbeanstalk.amazonaws.com/docs/2010-12-01/";
     public static final String ROUTE53     = "https://route53.amazonaws.com/doc/2013-04-01/";
     public static final String CLOUDFRONT  = "http://cloudfront.amazonaws.com/doc/2020-05-31/";
 

@@ -245,10 +245,15 @@ public class SesService {
         }
         validateConfigurationSet(configurationSetName, region);
         boolean hasExplicitDestinations = destinations != null && !destinations.isEmpty();
-        boolean willPublishEvents = configurationSetName != null && !configurationSetName.isBlank();
-        SmtpRelay.RawMessageHeaders headers = (hasExplicitDestinations && !willPublishEvents)
+        boolean sourceOmitted = source == null || source.isBlank();
+        boolean willPublishEvents = (configurationSetName != null && !configurationSetName.isBlank())
+                || !resolveIdentityNotificationTargets(source, region).isEmpty();
+        SmtpRelay.RawMessageHeaders headers = (hasExplicitDestinations && !willPublishEvents && !sourceOmitted)
                 ? null
                 : SmtpRelay.parseRawHeaders(rawMessage);
+        String effectiveSource = sourceOmitted && headers != null && !headers.from().isBlank()
+                ? headers.from()
+                : source;
         List<String> effectiveDestinations = hasExplicitDestinations
                 ? destinations
                 : allRecipients(headers.to(), headers.cc(), headers.bcc());
@@ -257,21 +262,21 @@ public class SesService {
                     "At least one destination address is required.", 400);
         }
         String messageId = UUID.randomUUID().toString();
-        SentEmail email = new SentEmail(messageId, region, source, effectiveDestinations, rawMessage);
+        SentEmail email = new SentEmail(messageId, region, effectiveSource, effectiveDestinations, rawMessage);
         emailStore.put("email::" + region + "::" + messageId, email);
 
         Map<String, String> suppressedReasons = collectSuppressedReasons(effectiveDestinations, configurationSetName, region);
 
         List<String> relayedDestinations = filterUnsuppressed(effectiveDestinations, suppressedReasons);
         if (!relayedDestinations.isEmpty()) {
-            smtpRelay.relayRaw(source, relayedDestinations, rawMessage);
+            smtpRelay.relayRaw(effectiveSource, relayedDestinations, rawMessage);
         } else {
             LOG.infov("SES raw email accepted but not relayed (all recipients suppressed): messageId={0}",
                     messageId);
         }
 
-        LOG.infov("SES raw email sent: from={0}, messageId={1}", source, messageId);
-        publishSendEvents(configurationSetName, messageId, source,
+        LOG.infov("SES raw email sent: from={0}, messageId={1}", effectiveSource, messageId);
+        publishSendEvents(configurationSetName, messageId, effectiveSource,
                 headers != null ? headers.subject() : "",
                 headers != null ? headers.to() : List.of(),
                 headers != null ? headers.cc() : List.of(),
@@ -330,19 +335,22 @@ public class SesService {
                                    Map<String, String> suppressedReasons,
                                    List<MessageTag> emailTags,
                                    List<MessageHeader> additionalHeaders, String region) {
-        if (eventPublisher == null) {
+        if (eventPublisher == null || messageId == null) {
             return;
         }
-        if (configurationSetName == null || configurationSetName.isBlank() || messageId == null) {
-            return;
+        ConfigurationSet cs = null;
+        if (configurationSetName != null && !configurationSetName.isBlank()) {
+            cs = configSetStore.get(configSetKey(region, configurationSetName)).orElse(null);
+            if (cs == null) {
+                LOG.warnv("SES send references unknown ConfigurationSet <{0}>; configuration-set "
+                        + "events not published (identity notifications, if any, still apply).",
+                        configurationSetName);
+            }
         }
-        ConfigurationSet cs = configSetStore.get(configSetKey(region, configurationSetName)).orElse(null);
-        if (cs == null) {
-            LOG.warnv("SES send references unknown ConfigurationSet <{0}>; events not published.",
-                    configurationSetName);
-            return;
-        }
-        if (cs.getEventDestinations().isEmpty()) {
+        boolean configSetActive = cs != null && !cs.getEventDestinations().isEmpty();
+        Map<String, IdentityNotificationTarget> identityTargets =
+                resolveIdentityNotificationTargets(source, region);
+        if (!configSetActive && identityTargets.isEmpty()) {
             return;
         }
 
@@ -352,7 +360,8 @@ public class SesService {
         String sendingAccountId = defaultAccountId;
         String sourceArn = (source == null || source.isBlank())
                 ? null
-                : AwsArnUtils.Arn.of("ses", region, sendingAccountId, "identity/" + source).toString();
+                : AwsArnUtils.Arn.of("ses", region, sendingAccountId,
+                        "identity/" + extractEmailAddress(source)).toString();
 
         List<String> suppressionBounceRecipients = new ArrayList<>();
         List<String> suppressionComplaintRecipients = new ArrayList<>();
@@ -366,11 +375,81 @@ public class SesService {
 
         for (String eventType : determineSendEventTypes(envelope,
                 suppressionBounceRecipients, suppressionComplaintRecipients)) {
-            eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
-                    subject, toAddresses, ccAddresses, bccAddresses, envelope,
-                    suppressionBounceRecipients, suppressionComplaintRecipients,
-                    emailTags, additionalHeaders, timestamp, region);
+            if (configSetActive) {
+                eventPublisher.publish(cs, eventType, messageId, source, sourceArn, sendingAccountId,
+                        subject, toAddresses, ccAddresses, bccAddresses, envelope,
+                        suppressionBounceRecipients, suppressionComplaintRecipients,
+                        emailTags, additionalHeaders, timestamp, region);
+            }
+            IdentityNotificationTarget target = identityTargets.get(eventType);
+            if (target != null) {
+                eventPublisher.publishIdentityNotification(target.topicArn(), target.includeHeaders(),
+                        eventType, messageId, source, sourceArn, sendingAccountId, subject,
+                        toAddresses, ccAddresses, bccAddresses, envelope, suppressionBounceRecipients,
+                        suppressionComplaintRecipients, additionalHeaders, timestamp, region);
+            }
         }
+    }
+
+    /**
+     * Resolves the SNS feedback notification target configured via {@code SetIdentityNotificationTopic}
+     * for the sending identity. The email-address identity's topic takes precedence over its parent
+     * domain identity's topic, per notification type; the headers-in-notifications flag is read from
+     * whichever identity supplied the topic. Returns a map keyed by the {@code SEND}-style event name
+     * ({@code BOUNCE}/{@code COMPLAINT}/{@code DELIVERY}) so it can be looked up directly against
+     * {@link #determineSendEventTypes}.
+     */
+    private Map<String, IdentityNotificationTarget> resolveIdentityNotificationTargets(String source,
+                                                                                       String region) {
+        Map<String, IdentityNotificationTarget> targets = new LinkedHashMap<>();
+        if (source == null || source.isBlank()) {
+            return targets;
+        }
+        String email = extractEmailAddress(source);
+        if (email.isBlank()) {
+            return targets;
+        }
+        Identity emailIdentity = identityStore.get(identityKey(region, email)).orElse(null);
+        Identity domainIdentity = null;
+        int at = email.indexOf('@');
+        if (at >= 0 && at < email.length() - 1) {
+            domainIdentity = identityStore.get(identityKey(region, email.substring(at + 1))).orElse(null);
+        }
+        for (String type : NOTIFICATION_TYPES) {
+            String topic = notificationTopicFor(emailIdentity, type);
+            Identity owner = emailIdentity;
+            if (topic == null) {
+                topic = notificationTopicFor(domainIdentity, type);
+                owner = domainIdentity;
+            }
+            if (topic == null) {
+                continue;
+            }
+            boolean includeHeaders = Boolean.TRUE.equals(
+                    owner.getHeadersInNotificationsEnabled().get(type));
+            targets.put(type.toUpperCase(Locale.ROOT),
+                    new IdentityNotificationTarget(topic, includeHeaders));
+        }
+        return targets;
+    }
+
+    private static String notificationTopicFor(Identity identity, String type) {
+        if (identity == null) {
+            return null;
+        }
+        String topic = identity.getNotificationAttributes().get(type + "Topic");
+        return topic != null && !topic.isBlank() ? topic : null;
+    }
+
+    private record IdentityNotificationTarget(String topicArn, boolean includeHeaders) {}
+
+    private static String extractEmailAddress(String source) {
+        int open = source.indexOf('<');
+        int close = source.indexOf('>', open + 1);
+        if (open >= 0 && close > open) {
+            return source.substring(open + 1, close).trim();
+        }
+        return source.trim();
     }
 
     private static List<String> determineSendEventTypes(List<String> destinations,

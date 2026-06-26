@@ -100,6 +100,13 @@
             <version>9.2.1</version>
         </dependency>
 
+        <!-- Kafka client for MSK/self-managed Kafka pipe polling -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>4.3.0</version>
+        </dependency>
+
 
         <!-- Docker client for Lambda container lifecycle management -->
         <dependency>
@@ -244,6 +251,11 @@
             <groupId>org.neo4j.driver</groupId>
             <artifactId>neo4j-java-driver</artifactId>
             <version>5.28.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

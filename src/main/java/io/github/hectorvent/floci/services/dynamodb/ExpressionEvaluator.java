@@ -148,8 +148,13 @@ final class ExpressionEvaluator {
                 continue;
             }
 
+            int nearStart = Math.max(0, i - 15);
+            int nearEnd = Math.min(expression.length(), i + 15);
+            
+            String near = expression.substring(nearStart, nearEnd);
+
             throw new IllegalArgumentException(
-                    "Unexpected character '%c' at position %d in expression: %s".formatted(c, i, expression));
+                    "token: \"%c\", near: \"%s\"".formatted(c, near));
         }
 
         tokens.add(new Token(TokenType.EOF, "", len));
@@ -389,14 +394,22 @@ final class ExpressionEvaluator {
     static void validateExpression(String expression, String exprType,
                                    JsonNode exprAttrNames, JsonNode exprAttrValues) {
         if (expression == null || expression.isBlank()) return;
-        List<Token> tokens = tokenize(expression.trim());
-        checkRedundantParentheses(tokens, exprType);
+        List<Token> tokens;
         Expr expr;
         try {
+            tokens = tokenize(expression.trim());
+            checkRedundantParentheses(tokens, exprType);
             expr = parse(expression);
         } catch (IllegalArgumentException e) {
-            // Other syntax errors are surfaced by the existing parse/evaluate paths.
-            return;
+            String detail = e.getMessage();
+            
+            if (detail.startsWith("token:")) {
+                throw new AwsException("ValidationException", 
+                    "Invalid " + exprType + ": Syntax error; " + detail, 400);
+            } else {
+                throw new AwsException("ValidationException", 
+                    "Invalid " + exprType + ": Syntax error", 400);
+            }
         }
         validateSemantics(expr, exprType, exprAttrNames, exprAttrValues);
     }
