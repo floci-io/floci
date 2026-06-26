@@ -1,5 +1,8 @@
 package io.github.hectorvent.floci.services.appsync;
 
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatus;
+import io.github.hectorvent.floci.services.appsync.model.SchemaCreationStatusType;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
 import org.junit.jupiter.api.BeforeAll;
@@ -8,7 +11,11 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.time.Duration;
+
 import static io.restassured.RestAssured.given;
+import static org.awaitility.Awaitility.await;
+import static org.hamcrest.MatcherAssert.assertThat;
 import static org.hamcrest.Matchers.*;
 
 @QuarkusTest
@@ -19,9 +26,71 @@ class AppSyncIntegrationTest {
     private static String apiId;
     private static String keyId;
 
+    @jakarta.inject.Inject
+    StorageBackend<String, SchemaCreationStatus> schemaStatusStore;
+
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
+    }
+
+    /**
+     * Polls GetSchemaCreationStatus until status is no longer PROCESSING
+     * (i.e. ACTIVE or FAILED) and returns the full response payload. Mirrors
+     * how a real AWS SDK client would poll after StartSchemaCreation
+     * returns PROCESSING. Use {@link #getTerminalStatus(String)} if only
+     * the status string is needed.
+     */
+    private static java.util.Map<String, Object> awaitSchemaTerminal(String apiId) {
+        return await().atMost(Duration.ofSeconds(10))
+                .pollInterval(Duration.ofMillis(25))
+                .until(() -> given()
+                            .header("Authorization", AUTH)
+                        .when()
+                            .get("/v1/apis/" + apiId + "/schemacreation")
+                        .then()
+                            .statusCode(200)
+                            .extract().jsonPath().getMap(""),
+                        m -> !"PROCESSING".equals(m.get("status")));
+    }
+
+    /**
+     * Asserts that the schema reaches the expected terminal status (ACTIVE or FAILED).
+     * Used after a StartSchemaCreation that returns PROCESSING.
+     */
+    private static void assertTerminalStatus(String apiId, String expected) {
+        assertThat(awaitSchemaTerminal(apiId).get("status"), equalTo(expected));
+    }
+
+    /**
+     * Posts a StartSchemaCreation, then polls to FAILED and returns the
+     * deserialized extended data (containing reason + detail.codeErrors).
+     * Used by tests that previously expected a synchronous 400 with the
+     * extended format body — AWS now returns 200 + PROCESSING and the
+     * error surfaces in the polled FAILED status.
+     */
+    @SuppressWarnings("unchecked")
+    private static java.util.Map<String, Object> postSchemaAndAwaitFailed(String apiId, String body) {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body(body)
+        .when()
+            .post("/v1/apis/" + apiId + "/schemacreation")
+        .then()
+            .statusCode(200)
+            .body("status", equalTo("PROCESSING"));
+
+        java.util.Map<String, Object> full = awaitSchemaTerminal(apiId);
+        assertThat(full.get("status"), equalTo("FAILED"));
+        String detailsJson = (String) full.get("details");
+        assertThat(detailsJson, notNullValue());
+        try {
+            return new com.fasterxml.jackson.databind.ObjectMapper()
+                    .readValue(detailsJson, java.util.Map.class);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new RuntimeException(e);
+        }
     }
 
     // ── GraphQL API ──────────────────────────────────────────────────────────
@@ -113,12 +182,14 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + apiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("PROCESSING"));
+        assertTerminalStatus(apiId, "ACTIVE");
     }
 
     @Test
     @Order(21)
     void getSchemaCreationStatus() {
+        assertTerminalStatus(apiId, "ACTIVE");
         given()
             .header("Authorization", AUTH)
         .when()
@@ -2606,11 +2677,12 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/schemacreation")
         .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("reason", equalTo("CODE_ERROR"))
-            .body("detail.codeErrors[0].errorType", equalTo("PARSER_ERROR"))
-            .body("detail.codeErrors[0].value", notNullValue());
+            .statusCode(200)
+            .body("status", equalTo("PROCESSING"));
+        java.util.Map<String, Object> body = awaitSchemaTerminal(apiId);
+        assertThat(body.get("status"), equalTo("FAILED"));
+        String details = (String) body.get("details");
+        assertThat(details, notNullValue());
     }
 
     @Test
@@ -2640,7 +2712,8 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + tempApiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("PROCESSING"));
+        assertTerminalStatus(tempApiId, "ACTIVE");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2672,7 +2745,8 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + tempApiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("PROCESSING"));
+        assertTerminalStatus(tempApiId, "ACTIVE");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2704,7 +2778,8 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + tempApiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("PROCESSING"));
+        assertTerminalStatus(tempApiId, "ACTIVE");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2736,7 +2811,8 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + tempApiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("PROCESSING"));
+        assertTerminalStatus(tempApiId, "ACTIVE");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2768,7 +2844,8 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + tempApiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("PROCESSING"));
+        assertTerminalStatus(tempApiId, "ACTIVE");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2804,7 +2881,8 @@ class AppSyncIntegrationTest {
             .post("/v1/apis/" + tempApiId + "/schemacreation")
         .then()
             .statusCode(200)
-            .body("status", equalTo("ACTIVE"));
+            .body("status", equalTo("PROCESSING"));
+        assertTerminalStatus(tempApiId, "ACTIVE");
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2824,22 +2902,16 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
-        given()
-            .header("Authorization", AUTH)
-            .contentType("application/json")
-            .body("""
+        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
                 {
                   "definition": "type Query { hello: String } directive @unknownDirective on FIELD_DEFINITION"
                 }
-                """)
-        .when()
-            .post("/v1/apis/" + tempApiId + "/schemacreation")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("reason", equalTo("CODE_ERROR"))
-            .body("detail.codeErrors[0].errorType", equalTo("VALIDATION_ERROR"))
-            .body("detail.codeErrors[0].value", containsString("Unknown directive"));
+                """);
+        assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
+        java.util.List<java.util.Map<String, Object>> codeErrors =
+                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        assertThat(codeErrors.get(0).get("errorType"), equalTo("VALIDATION_ERROR"));
+        assertThat((String) codeErrors.get(0).get("value"), containsString("Unknown directive"));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2847,27 +2919,22 @@ class AppSyncIntegrationTest {
     @Test
     @Order(700)
     void startSchemaCreation_syntaxError_returnsExtendedBadRequest() {
-        given()
-            .header("Authorization", AUTH)
-            .contentType("application/json")
-            .body("""
+        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(apiId, """
                 {
                   "definition": "type Query { invalid syntax!!! }"
                 }
-                """)
-        .when()
-            .post("/v1/apis/" + apiId + "/schemacreation")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("reason", equalTo("CODE_ERROR"))
-            .body("detail.codeErrors", hasSize(greaterThanOrEqualTo(1)))
-            .body("detail.codeErrors[0].errorType", equalTo("PARSER_ERROR"))
-            .body("detail.codeErrors[0].value", notNullValue())
-            .body("detail.codeErrors[0].location", notNullValue())
-            .body("detail.codeErrors[0].location.line", notNullValue())
-            .body("detail.codeErrors[0].location.column", notNullValue())
-            .body("detail.codeErrors[0].location.span", equalTo(-1));
+                """);
+        assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
+        java.util.List<java.util.Map<String, Object>> codeErrors =
+                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        assertThat(codeErrors.size(), greaterThanOrEqualTo(1));
+        assertThat(codeErrors.get(0).get("errorType"), equalTo("PARSER_ERROR"));
+        assertThat(codeErrors.get(0).get("value"), notNullValue());
+        java.util.Map<String, Object> location = (java.util.Map<String, Object>) codeErrors.get(0).get("location");
+        assertThat(location, notNullValue());
+        assertThat(location.get("line"), notNullValue());
+        assertThat(location.get("column"), notNullValue());
+        assertThat(location.get("span"), equalTo(-1));
     }
 
     @Test
@@ -2885,25 +2952,20 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
-        given()
-            .header("Authorization", AUTH)
-            .contentType("application/json")
-            .body("""
+        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
                 {
                   "definition": "type Query { hello: NonExistentType }"
                 }
-                """)
-        .when()
-            .post("/v1/apis/" + tempApiId + "/schemacreation")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("reason", equalTo("CODE_ERROR"))
-            .body("detail.codeErrors[0].errorType", equalTo("VALIDATION_ERROR"))
-            .body("detail.codeErrors[0].value", containsString("NonExistentType"))
-            .body("detail.codeErrors[0].location.line", notNullValue())
-            .body("detail.codeErrors[0].location.column", notNullValue())
-            .body("detail.codeErrors[0].location.span", equalTo(-1));
+                """);
+        assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
+        java.util.List<java.util.Map<String, Object>> codeErrors =
+                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        assertThat(codeErrors.get(0).get("errorType"), equalTo("VALIDATION_ERROR"));
+        assertThat((String) codeErrors.get(0).get("value"), containsString("NonExistentType"));
+        java.util.Map<String, Object> location = (java.util.Map<String, Object>) codeErrors.get(0).get("location");
+        assertThat(location.get("line"), notNullValue());
+        assertThat(location.get("column"), notNullValue());
+        assertThat(location.get("span"), equalTo(-1));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
@@ -2923,25 +2985,257 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .extract().path("graphqlApi.apiId");
 
-        given()
-            .header("Authorization", AUTH)
-            .contentType("application/json")
-            .body("""
+        java.util.Map<String, Object> ext = postSchemaAndAwaitFailed(tempApiId, """
                 {
                   "definition": "type Query { hello: String @unknownDirective }"
                 }
-                """)
-        .when()
-            .post("/v1/apis/" + tempApiId + "/schemacreation")
-        .then()
-            .statusCode(400)
-            .body("__type", equalTo("BadRequestException"))
-            .body("reason", equalTo("CODE_ERROR"))
-            .body("detail.codeErrors[0].errorType", equalTo("VALIDATION_ERROR"))
-            .body("detail.codeErrors[0].value", containsString("Unknown directive: @unknownDirective"))
-            .body("detail.codeErrors[0].location.span", equalTo(-1));
+                """);
+        assertThat(ext.get("reason"), equalTo("CODE_ERROR"));
+        java.util.List<java.util.Map<String, Object>> codeErrors =
+                (java.util.List<java.util.Map<String, Object>>) ((java.util.Map<?, ?>) ext.get("detail")).get("codeErrors");
+        assertThat(codeErrors.get(0).get("errorType"), equalTo("VALIDATION_ERROR"));
+        assertThat((String) codeErrors.get(0).get("value"), containsString("Unknown directive: @unknownDirective"));
+        java.util.Map<String, Object> location = (java.util.Map<String, Object>) codeErrors.get(0).get("location");
+        assertThat(location.get("span"), equalTo(-1));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    // ── Phase 2: Schema-Creation 409 Gates ───────────────────────────────────
+
+    /**
+     * Sets the schema status of {@code apiId} to PROCESSING directly via the
+     * shared storage backend. Used by the 409-gate tests below to simulate an
+     * in-flight schema creation deterministically, without relying on the
+     * async worker timing.
+     */
+    private void setSchemaProcessing(String apiId) {
+        SchemaCreationStatus s = new SchemaCreationStatus();
+        s.setStatus(SchemaCreationStatusType.PROCESSING);
+        schemaStatusStore.put(apiId, s);
+    }
+
+    /**
+     * Removes any schema status for {@code apiId}, cleaning up after a test.
+     */
+    private void clearSchemaStatus(String apiId) {
+        schemaStatusStore.delete(apiId);
+    }
+
+    /**
+     * Creates a temporary API for use by 409-gate tests. Returns its id.
+     */
+    private String createTempApi(String name) {
+        return given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("{\"name\":\"" + name + "\",\"authenticationType\":\"API_KEY\"}")
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+    }
+
+    /**
+     * Deletes a temporary API. Used in {@link #assertBusyReturns409}.
+     */
+    private void deleteTempApi(String apiId) {
+        given().header("Authorization", AUTH)
+            .delete("/v1/apis/" + apiId)
+        .then()
+            .statusCode(204);
+    }
+
+    /**
+     * Sets the schema status of {@code tempApiId} to PROCESSING, runs the given
+     * body (which should expect 409), and finally cleans up the status and
+     * deletes the temporary API. Centralizes the boilerplate of the 9
+     * 409-gate tests below.
+     */
+    private void assertBusyReturns409(String tempApiId, Runnable body) {
+        setSchemaProcessing(tempApiId);
+        try {
+            body.run();
+        } finally {
+            clearSchemaStatus(tempApiId);
+            deleteTempApi(tempApiId);
+        }
+    }
+
+    @Test
+    @Order(703)
+    void createDataSource_busy_returns409() {
+        String tempApiId = createTempApi("busy-703-ds");
+        assertBusyReturns409(tempApiId, () -> {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    { "name": "ds-busy", "type": "NONE" }
+                    """)
+            .when()
+                .post("/v1/apis/" + tempApiId + "/datasources")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"))
+                .body("message", containsString("Another modification is in progress"));
+        });
+    }
+
+    @Test
+    @Order(704)
+    void createResolver_busy_returns409() {
+        String tempApiId = createTempApi("busy-704");
+        assertBusyReturns409(tempApiId, () -> {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    { "dataSourceName": "ds-704", "fieldName": "hello", "typeName": "Query",
+                      "requestMappingTemplate": "{\\"version\\":\\"2018-05-29\\",\\"operation\\":\\"GetItem\\"}",
+                      "responseMappingTemplate": "$util.toJson($ctx.result)" }
+                    """)
+            .when()
+                .post("/v1/apis/" + tempApiId + "/types/Query/resolvers")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"));
+        });
+    }
+
+    @Test
+    @Order(705)
+    void createFunction_busy_returns409() {
+        String tempApiId = createTempApi("busy-705");
+        assertBusyReturns409(tempApiId, () -> {
+            given().header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    { "name": "fn-705", "dataSourceName": "ds-705",
+                      "requestMappingTemplate": "{\\"version\\":\\"2018-05-29\\",\\"operation\\":\\"GetItem\\"}",
+                      "responseMappingTemplate": "$util.toJson($ctx.result)" }
+                    """)
+            .when()
+                .post("/v1/apis/" + tempApiId + "/functions")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"));
+        });
+    }
+
+    @Test
+    @Order(706)
+    void createType_busy_returns409() {
+        String tempApiId = createTempApi("busy-706");
+        assertBusyReturns409(tempApiId, () -> {
+            given().header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    { "name": "CustomType", "definition": "type CustomType { x: String }", "format": "SDL" }
+                    """)
+            .when()
+                .post("/v1/apis/" + tempApiId + "/types")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"));
+        });
+    }
+
+    @Test
+    @Order(707)
+    void putEnvironmentVariables_busy_returns409() {
+        String tempApiId = createTempApi("busy-707");
+        assertBusyReturns409(tempApiId, () -> {
+            given().header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("{\"environmentVariables\":{\"FOO\":\"bar\"}}")
+            .when()
+                .put("/v1/apis/" + tempApiId + "/environmentVariables")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"));
+        });
+    }
+
+    @Test
+    @Order(708)
+    void startSchemaCreation_busy_returns409() {
+        // The StartSchemaCreation gate is self-blocking: a second submission
+        // for the same API while one is PROCESSING must return 409.
+        String tempApiId = createTempApi("busy-708");
+        assertBusyReturns409(tempApiId, () -> {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("{\"definition\":\"type Query { a: String }\"}")
+            .when()
+                .post("/v1/apis/" + tempApiId + "/schemacreation")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"))
+                .body("message", containsString("Another modification is in progress"));
+        });
+    }
+
+    @Test
+    @Order(709)
+    void createGraphqlApi_anyApiBusy_returns409() {
+        // Account-level gate: when ANY API has a schema creation in
+        // PROCESSING, creating a new GraphqlApi is blocked.
+        String tempApiId = createTempApi("busy-709-any");
+        assertBusyReturns409(tempApiId, () -> {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    { "name": "should-fail-709", "authenticationType": "API_KEY" }
+                    """)
+            .when()
+                .post("/v1/apis")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"));
+        });
+    }
+
+    @Test
+    @Order(710)
+    void updateGraphqlApi_busy_returns409() {
+        String tempApiId = createTempApi("busy-710-update");
+        assertBusyReturns409(tempApiId, () -> {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    { "name": "renamed-710" }
+                    """)
+            .when()
+                .post("/v1/apis/" + tempApiId)
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"));
+        });
+    }
+
+    @Test
+    @Order(711)
+    void deleteGraphqlApi_busy_returns409() {
+        // For delete we need the API to exist when the gate fires; clear
+        // status BEFORE the delete so the finally block's delete succeeds.
+        String tempApiId = createTempApi("busy-711-delete");
+        setSchemaProcessing(tempApiId);
+        try {
+            given()
+                .header("Authorization", AUTH)
+            .when()
+                .delete("/v1/apis/" + tempApiId)
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"));
+        } finally {
+            clearSchemaStatus(tempApiId);
+        }
     }
 
     // ── Phase 2: Merged APIs ───────────────────────────────────────────────
