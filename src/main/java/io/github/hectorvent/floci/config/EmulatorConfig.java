@@ -192,6 +192,7 @@ public interface EmulatorConfig {
         EcsStorageConfig ecs();
         CodeBuildStorageConfig codebuild();
         ConfigStorageConfig config();
+        CodeDeployStorageConfig codedeploy();
     }
 
     interface SsmStorageConfig {
@@ -359,6 +360,13 @@ public interface EmulatorConfig {
     }
 
     interface ConfigStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface CodeDeployStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")

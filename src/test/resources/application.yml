@@ -48,6 +48,8 @@ floci:
         flush-interval-ms: 60000
       config:
         flush-interval-ms: 60000
+      codedeploy:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
