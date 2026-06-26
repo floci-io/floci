@@ -249,7 +249,7 @@ public class AppSyncService {
 
         String dsKey = apiKey(apiId, ds.getName());
         if (dataSourceStore.get(dsKey).isPresent()) {
-            throw new AwsException("ConflictException", "Data source already exists: " + name, 409);
+            throw new AwsException("BadRequestException", "Data source with name %s already exists.".formatted(name), 400);
         }
         dataSourceStore.put(dsKey, ds);
         return ds;
@@ -332,8 +332,7 @@ public class AppSyncService {
 
         String key = resolverKey(apiId, resolver.getTypeName(), resolver.getFieldName());
         if (resolverStore.get(key).isPresent()) {
-            throw new AwsException("ConflictException",
-                "Resolver already exists for " + typeName + "." + fieldName, 409);
+            throw new AwsException("BadRequestException", "Only one resolver is allowed per field.", 400);
         }
         resolverStore.put(key, resolver);
         return resolver;
@@ -461,7 +460,7 @@ public class AppSyncService {
         }
         String typeKey = apiKey(apiId, name);
         if (typeStore.get(typeKey).isPresent()) {
-            throw new AwsException("ConflictException", "Type already exists: " + name, 409);
+            throw new AwsException("BadRequestException", "Type with name %s already exists.".formatted(name), 400);
         }
         AppSyncType type = new AppSyncType();
         type.setApiId(apiId);
@@ -503,8 +502,8 @@ public class AppSyncService {
         getGraphqlApi(apiId);
         long existingCount = apiKeyStore.scan(k -> k.startsWith(apiId + "::")).size();
         if (existingCount >= 2) {
-            throw new AwsException("LimitExceededException",
-                "Maximum of 2 API keys per API reached", 429);
+            throw new AwsException("ApiKeyLimitExceededException",
+                    "The API key exceeded a limit.", 400);
         }
         ApiKey key = new ApiKey();
         key.setId(generateShortId());
@@ -618,7 +617,7 @@ public class AppSyncService {
             throw new AwsException("BadRequestException", "A domain name is required", 400);
         }
         if (domainStore.get(domainName).isPresent()) {
-            throw new AwsException("ConflictException", "Domain name already exists: " + domainName, 409);
+            throw new AwsException("BadRequestException", "The domain name you provided already exists.", 400);
         }
         DomainName dn = new DomainName();
         dn.setDomainName(domainName);
@@ -667,8 +666,8 @@ public class AppSyncService {
         getDomainName(domainName);
         getGraphqlApi(apiId);
         if (associationStore.get(domainName).isPresent()) {
-            throw new AwsException("ConflictException",
-                "Domain name already associated with an API", 409);
+            throw new AwsException("BadRequestException",
+                    "The domain name %s is already associated with API %s.".formatted(domainName, apiId), 400);
         }
         associationStore.put(domainName, apiId);
         ApiAssociation assoc = new ApiAssociation();
@@ -755,6 +754,7 @@ public class AppSyncService {
             throw new AwsException("BadRequestException", "A merged API identifier is required", 400);
         }
         getGraphqlApi(mergedApiIdentifier);
+        checkDuplicateSourceApiAssociation(sourceApiIdentifier, mergedApiIdentifier);
         SourceApiAssociation assoc = new SourceApiAssociation();
         assoc.setAssociationId(generateShortId());
         assoc.setAssociationArn(regionResolver.buildArn("appsync", region,
@@ -780,6 +780,7 @@ public class AppSyncService {
             throw new AwsException("BadRequestException", "A source API ID is required", 400);
         }
         getGraphqlApi(sourceApiId);
+        checkDuplicateSourceApiAssociation(sourceApiId, mergedApiIdentifier);
         SourceApiAssociation assoc = new SourceApiAssociation();
         assoc.setAssociationId(generateShortId());
         assoc.setAssociationArn(regionResolver.buildArn("appsync", region,
@@ -842,6 +843,18 @@ public class AppSyncService {
     public void deleteSourceApiAssociation(String mergedApiIdentifier, String associationId) {
         getSourceApiAssociation(mergedApiIdentifier, associationId);
         mergedApiAssociationStore.delete(associationId);
+    }
+
+    private void checkDuplicateSourceApiAssociation(String sourceApiId, String mergedApiId) {
+        List<SourceApiAssociation> existing = mergedApiAssociationStore.scan(k -> true).stream()
+                .filter(a -> sourceApiId.equals(a.getSourceApiId()) && mergedApiId.equals(a.getMergedApiId()))
+                .toList();
+        if (!existing.isEmpty()) {
+            SourceApiAssociation existingAssoc = existing.get(0);
+            throw new AwsException("BadRequestException",
+                    "Source API association with ID %s or API %s already exists."
+                            .formatted(existingAssoc.getAssociationId(), sourceApiId), 400);
+        }
     }
 
     public SourceApiAssociation deleteMergedApiAssociation(String sourceApiIdentifier, String associationId) {

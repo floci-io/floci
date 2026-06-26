@@ -1080,7 +1080,7 @@ class AppSyncTest {
 
     @Test
     @Order(130)
-    void createDataSourceDuplicateThrowsConflictException() {
+    void createDataSourceDuplicateThrowsBadRequestException() {
         String dsName = "sdk-conflict-ds-" + java.util.UUID.randomUUID().toString().substring(0, 8);
         client.createDataSource(CreateDataSourceRequest.builder()
                 .apiId(apiId)
@@ -1093,15 +1093,15 @@ class AppSyncTest {
                         .name(dsName)
                         .type("NONE")
                         .build()))
-                .isInstanceOf(ConflictException.class)
-                .hasMessageContaining("Data source already exists:");
+                .isInstanceOf(BadRequestException.class)
+                .hasMessageContaining("Data source with name");
 
         client.deleteDataSource(r -> r.apiId(apiId).name(dsName));
     }
 
     @Test
     @Order(131)
-    void createApiKeyExceedsLimitThrowsLimitExceededException() {
+    void createApiKeyExceedsLimitThrowsApiKeyLimitExceededException() {
         CreateGraphqlApiResponse tempApi = client.createGraphqlApi(CreateGraphqlApiRequest.builder()
                 .name("sdk-limit-test-" + java.util.UUID.randomUUID().toString().substring(0, 8))
                 .authenticationType("API_KEY")
@@ -1113,8 +1113,8 @@ class AppSyncTest {
             client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build());
 
             assertThatThrownBy(() -> client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build()))
-                    .isInstanceOf(LimitExceededException.class)
-                    .hasMessageContaining("Maximum of 2 API keys per API reached");
+                    .isInstanceOf(ApiKeyLimitExceededException.class)
+                    .hasMessageContaining("The API key exceeded a limit");
         } finally {
             client.deleteGraphqlApi(r -> r.apiId(tempApiId));
         }

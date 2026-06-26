@@ -1505,11 +1505,11 @@ class AppSyncIntegrationTest {
             .body("message", containsString("Invalid NextToken."));
     }
 
-    // ── ConflictException (409) ──────────────────────────────────────────────
+    // ── BadRequestException (400) for duplicates ──────────────────────────────
 
     @Test
     @Order(150)
-    void createDataSourceDuplicateReturns409() {
+    void createDataSourceDuplicateReturns400() {
         String dsName = "conflict-ds-" + System.nanoTime();
         given()
             .header("Authorization", AUTH)
@@ -1531,16 +1531,16 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/datasources")
         .then()
-            .statusCode(409)
-            .body("__type", equalTo("ConflictException"))
-            .body("message", containsString("Data source already exists:"));
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Data source with name"));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + apiId + "/datasources/" + dsName).then().statusCode(204);
     }
 
     @Test
     @Order(151)
-    void createResolverDuplicateReturns409() {
+    void createResolverDuplicateReturns400() {
         String fieldName = "conflictField" + System.nanoTime();
         given()
             .header("Authorization", AUTH)
@@ -1562,16 +1562,16 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/types/Query/resolvers")
         .then()
-            .statusCode(409)
-            .body("__type", equalTo("ConflictException"))
-            .body("message", containsString("Resolver already exists for"));
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Only one resolver is allowed per field"));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + apiId + "/types/Query/resolvers/" + fieldName).then().statusCode(204);
     }
 
     @Test
     @Order(152)
-    void createTypeDuplicateReturns409() {
+    void createTypeDuplicateReturns400() {
         String typeName = "ConflictType" + System.nanoTime();
         given()
             .header("Authorization", AUTH)
@@ -1593,16 +1593,16 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + apiId + "/types")
         .then()
-            .statusCode(409)
-            .body("__type", equalTo("ConflictException"))
-            .body("message", containsString("Type already exists:"));
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("Type with name"));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + apiId + "/types/" + typeName).then().statusCode(204);
     }
 
     @Test
     @Order(153)
-    void createDomainNameDuplicateReturns409() {
+    void createDomainNameDuplicateReturns400() {
         String domain = "conflict-" + System.nanoTime() + ".example.com";
         given()
             .header("Authorization", AUTH)
@@ -1624,9 +1624,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/domainnames")
         .then()
-            .statusCode(409)
-            .body("__type", equalTo("ConflictException"))
-            .body("message", containsString("Domain name already exists:"));
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("The domain name you provided already exists"));
 
         given().header("Authorization", AUTH).delete("/v1/domainnames/" + domain).then().statusCode(204);
     }
@@ -1664,7 +1664,7 @@ class AppSyncIntegrationTest {
 
     @Test
     @Order(155)
-    void associateApiDuplicateReturns409() {
+    void associateApiDuplicateReturns400() {
         String domain = "assoc-conflict-" + System.nanoTime() + ".example.com";
         String tempApiId = given()
             .header("Authorization", AUTH)
@@ -1709,19 +1709,19 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/domainnames/" + domain + "/apiassociation")
         .then()
-            .statusCode(409)
-            .body("__type", equalTo("ConflictException"))
-            .body("message", containsString("Domain name already associated with an API"));
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", containsString("already associated with API"));
 
         given().header("Authorization", AUTH).delete("/v1/domainnames/" + domain).then().statusCode(204);
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
 
-    // ── LimitExceededException (429) ─────────────────────────────────────────
+    // ── ApiKeyLimitExceededException (400) ─────────────────────────────────
 
     @Test
     @Order(160)
-    void createApiKeyExceedsLimitReturns429() {
+    void createApiKeyExceedsLimitReturns400() {
         String tempApiId = given()
             .header("Authorization", AUTH)
             .contentType("application/json")
@@ -1765,9 +1765,9 @@ class AppSyncIntegrationTest {
         .when()
             .post("/v1/apis/" + tempApiId + "/apikeys")
         .then()
-            .statusCode(429)
-            .body("__type", equalTo("LimitExceededException"))
-            .body("message", containsString("Maximum of 2 API keys per API reached"));
+            .statusCode(400)
+            .body("__type", equalTo("ApiKeyLimitExceededException"))
+            .body("message", containsString("The API key exceeded a limit"));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
