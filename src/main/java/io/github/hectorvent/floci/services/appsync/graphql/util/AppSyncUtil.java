@@ -128,12 +128,12 @@ public class AppSyncUtil {
         return UUID.randomUUID().toString();
     }
 
-    public String quiet(String s) {
+    public String quiet(Object o) {
         return "";
     }
 
-    public String qr(String s) {
-        return quiet(s);
+    public String qr(Object o) {
+        return quiet(o);
     }
 
     public boolean matches(String pattern, String value) {
