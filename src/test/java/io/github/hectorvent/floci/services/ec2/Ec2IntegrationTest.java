@@ -52,6 +52,7 @@ class Ec2IntegrationTest {
     private static String launchTemplateId;
     private static String vpcEndpointId;
     private static String natGatewayId;
+    private static String registeredImageId;
 
     // =========================================================================
     // Default resources
@@ -227,6 +228,139 @@ class Ec2IntegrationTest {
             .body("DescribeImagesResponse.imagesSet.item.imageId",
                     containsInAnyOrder("ami-ubuntu2404-arm64", "ami-ubuntu2404-cloud-arm64"))
             .body("DescribeImagesResponse.imagesSet.item.architecture", everyItem(equalTo("arm64")));
+    }
+
+    @Test
+    @Order(10)
+    void registerImageCreatesDescribableImageWithSnapshotMapping() {
+        registeredImageId = given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "test-image")
+            .formParam("Description", "test image")
+            .formParam("Architecture", "x86_64")
+            .formParam("RootDeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.Ebs.SnapshotId", "snap-1234567890abcdef0")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeSize", "8")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeType", "gp3")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("RegisterImageResponse.imageId", startsWith("ami-"))
+            .extract().path("RegisterImageResponse.imageId");
+
+        given()
+            .formParam("Action", "DescribeImages")
+            .formParam("Filter.1.Name", "name")
+            .formParam("Filter.1.Value.1", "test-image")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeImagesResponse.imagesSet.item.imageId", equalTo(registeredImageId))
+            .body("DescribeImagesResponse.imagesSet.item.blockDeviceMapping.item.ebs.snapshotId",
+                    equalTo("snap-1234567890abcdef0"));
+    }
+
+    @Test
+    @Order(11)
+    void describeSnapshotsReturnsRegisteredImageSnapshot() {
+        given()
+            .formParam("Action", "DescribeSnapshots")
+            .formParam("SnapshotId.1", "snap-1234567890abcdef0")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSnapshotsResponse.snapshotSet.item.snapshotId", equalTo("snap-1234567890abcdef0"))
+            .body("DescribeSnapshotsResponse.snapshotSet.item.status", equalTo("completed"))
+            .body("DescribeSnapshotsResponse.snapshotSet.item.volumeSize", equalTo("8"));
+    }
+
+    @Test
+    @Order(12)
+    void describeSnapshotsAcceptsOwnerIdParameter() {
+        given()
+            .formParam("Action", "DescribeSnapshots")
+            .formParam("SnapshotId.1", "snap-1234567890abcdef0")
+            .formParam("OwnerId.1", "self")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSnapshotsResponse.snapshotSet.item.snapshotId", equalTo("snap-1234567890abcdef0"));
+    }
+
+    @Test
+    @Order(13)
+    void describeSnapshotsAcceptsOwnerIdsParameter() {
+        given()
+            .formParam("Action", "DescribeSnapshots")
+            .formParam("SnapshotId.1", "snap-1234567890abcdef0")
+            .formParam("OwnerIds.1", "000000000000")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("DescribeSnapshotsResponse.snapshotSet.item.snapshotId", equalTo("snap-1234567890abcdef0"));
+    }
+
+    @Test
+    @Order(14)
+    void registerImageRejectsInvalidBlockDeviceVolumeSize() {
+        given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "bad-volume-size-image")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.Ebs.VolumeSize", "large")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    @Order(15)
+    void registerImageRejectsInvalidBlockDeviceBoolean() {
+        given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "bad-boolean-image")
+            .formParam("BlockDeviceMapping.1.DeviceName", "/dev/sda1")
+            .formParam("BlockDeviceMapping.1.Ebs.Encrypted", "sometimes")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
+    }
+
+    @Test
+    @Order(16)
+    void registerImageRejectsBlockDeviceMappingWithoutDeviceName() {
+        given()
+            .formParam("Action", "RegisterImage")
+            .formParam("Name", "missing-device-image")
+            .formParam("BlockDeviceMapping.1.Ebs.SnapshotId", "snap-missing-device")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("Response.Errors.Error.Code", equalTo("InvalidParameterValue"));
     }
 
     @Test

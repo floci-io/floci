@@ -7,12 +7,15 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.ec2.model.BlockDeviceMapping;
+import io.github.hectorvent.floci.services.ec2.model.EbsBlockDevice;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
+import io.github.hectorvent.floci.services.ec2.model.Snapshot;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import org.junit.jupiter.api.Test;
@@ -191,6 +194,71 @@ class Ec2ServiceTest {
         assertEquals("InvalidGroup.NotFound", error.getErrorCode());
     }
 
+    @Test
+    void registerImageNamesAreScopedToRegion() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.registerImage("us-east-1", "shared-name", null, null, null, List.of());
+        service.registerImage("us-west-2", "shared-name", null, null, null, List.of());
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.registerImage("us-east-1", "shared-name", null, null, null, List.of()));
+        assertEquals("InvalidAMIName.Duplicate", error.getErrorCode());
+    }
+
+    @Test
+    void registerImageReusingSnapshotDoesNotOverwriteSnapshotMetadata() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+
+        service.registerImage("us-east-1", "first-image", null, null, null,
+                List.of(blockDeviceMapping("snap-reused", 8)));
+        service.registerImage("us-east-1", "second-image", null, null, null,
+                List.of(blockDeviceMapping("snap-reused", 64)));
+
+        List<Snapshot> snapshots = service.describeSnapshots("us-east-1", List.of("snap-reused"), List.of(), Map.of());
+        assertEquals(1, snapshots.size());
+        assertEquals(8, snapshots.getFirst().getVolumeSize());
+        assertEquals("Created by RegisterImage for first-image", snapshots.getFirst().getDescription());
+    }
+
+    @Test
+    void describeSnapshotsDefaultsToOwnedSnapshots() {
+        InMemoryStorage<String, Snapshot> snapshotStore = new InMemoryStorage<>();
+        Snapshot foreign = new Snapshot();
+        foreign.setSnapshotId("snap-foreign");
+        foreign.setOwnerId("111111111111");
+        foreign.setRegion("us-east-1");
+        snapshotStore.put("us-east-1::snap-foreign", foreign);
+
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory(Map.of("ec2-snapshots.json", snapshotStore)));
+        service.registerImage("us-east-1", "owned-image", null, null, null,
+                List.of(blockDeviceMapping("snap-owned", 16)));
+
+        List<Snapshot> snapshots = service.describeSnapshots("us-east-1", List.of(), List.of(), Map.of());
+
+        assertEquals(1, snapshots.size());
+        assertEquals("snap-owned", snapshots.getFirst().getSnapshotId());
+    }
+
+    private static BlockDeviceMapping blockDeviceMapping(String snapshotId, int volumeSize) {
+        EbsBlockDevice ebs = new EbsBlockDevice();
+        ebs.setSnapshotId(snapshotId);
+        ebs.setVolumeSize(volumeSize);
+        BlockDeviceMapping mapping = new BlockDeviceMapping();
+        mapping.setDeviceName("/dev/sda1");
+        mapping.setEbs(ebs);
+        return mapping;
+    }
+
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -203,13 +271,25 @@ class Ec2ServiceTest {
     }
 
     private static final class InMemoryStorageFactory extends StorageFactory {
+        private final Map<String, StorageBackend<String, ?>> overrides;
+
         private InMemoryStorageFactory() {
+            this(Map.of());
+        }
+
+        private InMemoryStorageFactory(Map<String, StorageBackend<String, ?>> overrides) {
             super(null, null);
+            this.overrides = overrides;
         }
 
         @Override
+        @SuppressWarnings("unchecked")
         public <V> StorageBackend<String, V> create(String serviceName, String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
+            StorageBackend<String, ?> override = overrides.get(fileName);
+            if (override != null) {
+                return (StorageBackend<String, V>) override;
+            }
             return new InMemoryStorage<>();
         }
     }
