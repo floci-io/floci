@@ -80,4 +80,77 @@ class IamManagedPolicyAccountScopeTest {
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AWSCloudFormationFullAccess"));
         assertTrue(arns.contains(AwsManagedPolicies.ARN_PREFIX + "/AmazonElasticFileSystemClientFullAccess"));
     }
+
+    @Test
+    void listPoliciesScopeAwsAndAllReturnManagedCatalogFromAnyAccount() {
+        // Request runs as account 111..., default is 000... Managed policies are only mirrored
+        // into the default account at seed time, so a Scope=AWS scan of the request account's
+        // partition was empty before this fix — the same account-scoping bug GetPolicy had.
+        AccountAwareStorageBackend<IamPolicy> policies = new AccountAwareStorageBackend<>(
+                new InMemoryStorage<>(), requestContextFor(REQUEST_ACCT), DEFAULT_ACCT);
+        IamService service = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                policies,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+
+        int catalogSize = AwsManagedPolicies.POLICIES.size();
+        String lambdaBasicArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
+
+        // Scope=AWS now serves the full global catalog from a non-default account.
+        List<IamPolicy> aws = service.listPolicies("AWS", null);
+        assertEquals(catalogSize, aws.size());
+        assertTrue(aws.stream().anyMatch(p -> lambdaBasicArn.equals(p.getArn())));
+
+        // The data.aws_iam_policy name-lookup path (ListPolicies + name filter) now resolves
+        // managed policies for a caller outside the default account.
+        assertTrue(aws.stream().anyMatch(p -> "AWSLambdaBasicExecutionRole".equals(p.getPolicyName())));
+
+        // Scope=All and the default (blank) scope also include the managed catalog.
+        assertEquals(catalogSize, service.listPolicies("All", null).size());
+        assertEquals(catalogSize, service.listPolicies(null, null).size());
+    }
+
+    @Test
+    void listPoliciesScopesLocalToCallerAndDoesNotDuplicateMirroredManaged() {
+        InMemoryStorage<String, IamPolicy> raw = new InMemoryStorage<>();
+
+        // A customer policy owned by the request account 111...
+        AccountAwareStorageBackend<IamPolicy> reqPolicies =
+                new AccountAwareStorageBackend<>(raw, requestContextFor(REQUEST_ACCT), DEFAULT_ACCT);
+        String customerArn = "arn:aws:iam::" + REQUEST_ACCT + ":policy/app-policy";
+        reqPolicies.putForAccount(REQUEST_ACCT, customerArn,
+                new IamPolicy("ANPAAPP000000001", "app-policy", "/", customerArn,
+                        "app", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+
+        // Simulate the seed-time mirror: a managed policy copied into the default account store.
+        String mirroredManagedArn = AwsManagedPolicies.ARN_PREFIX + "/AdministratorAccess";
+        reqPolicies.putForAccount(DEFAULT_ACCT, mirroredManagedArn,
+                new IamPolicy("ANPAADMIN0000001", "AdministratorAccess", "/", mirroredManagedArn,
+                        "admin", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+
+        IamService reqService = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                reqPolicies,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+
+        // Scope=Local returns only the caller's customer policy — never AWS-managed policies.
+        List<IamPolicy> local = reqService.listPolicies("Local", null);
+        assertEquals(1, local.size());
+        assertEquals(customerArn, local.get(0).getArn());
+
+        // From the default account, the mirrored managed policy must appear once, not twice
+        // (once from the account store and again from the catalog).
+        AccountAwareStorageBackend<IamPolicy> defPolicies =
+                new AccountAwareStorageBackend<>(raw, requestContextFor(DEFAULT_ACCT), DEFAULT_ACCT);
+        IamService defService = new IamService(
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                defPolicies,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+        List<IamPolicy> defAll = defService.listPolicies("All", null);
+        assertEquals(AwsManagedPolicies.POLICIES.size(), defAll.size());
+        assertEquals(1L, defAll.stream().filter(p -> mirroredManagedArn.equals(p.getArn())).count());
+    }
 }

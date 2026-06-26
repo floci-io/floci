@@ -457,17 +457,29 @@ public class IamService {
                             + "Member must satisfy enum value set: [All, AWS, Local]", 400);
         }
         String prefix = pathPrefix != null ? pathPrefix : "/";
-        return policies.scan(k -> true).stream()
-                .filter(p -> p.getPath().startsWith(prefix))
-                .filter(p -> {
-                    if ("AWS".equalsIgnoreCase(scope)) {
-                        return p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX);
-                    } else if ("Local".equalsIgnoreCase(scope)) {
-                        return !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX);
-                    }
-                    return true;
-                })
-                .toList();
+        boolean blankScope = scope == null || scope.isBlank();
+        boolean includeAws = blankScope || "All".equalsIgnoreCase(scope) || "AWS".equalsIgnoreCase(scope);
+        boolean includeLocal = blankScope || "All".equalsIgnoreCase(scope) || "Local".equalsIgnoreCase(scope);
+
+        List<IamPolicy> result = new ArrayList<>();
+        if (includeLocal) {
+            // Customer-managed policies live in the account-partitioned store. Exclude any
+            // AWS-managed ARNs mirrored into the default account at seed time — those are
+            // served from the global catalog below so the default account does not see them twice.
+            policies.scan(k -> true).stream()
+                    .filter(p -> !p.getArn().startsWith(AwsManagedPolicies.ARN_PREFIX))
+                    .filter(p -> p.getPath().startsWith(prefix))
+                    .forEach(result::add);
+        }
+        if (includeAws) {
+            // AWS-managed policies are global (account-less arn:aws:iam::aws:policy/... ARN), so
+            // every caller sees the full set regardless of the request account — mirroring the
+            // getPolicy fix, and keeping the ListPolicies and GetPolicy read paths consistent.
+            awsManagedPolicies.values().stream()
+                    .filter(p -> p.getPath().startsWith(prefix))
+                    .forEach(result::add);
+        }
+        return result;
     }
 
     public PolicyVersion createPolicyVersion(String policyArn, String document, boolean setAsDefault) {
