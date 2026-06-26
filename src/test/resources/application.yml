@@ -4,6 +4,8 @@ quarkus:
     test-port: 0
     limits:
       max-body-size: ${floci.max-request-size}M
+  datasource:
+    active: false
 
 floci:
   base-url: "http://localhost:4566"
@@ -37,6 +39,18 @@ floci:
       batch:
         flush-interval-ms: 60000
       lightsail:
+        flush-interval-ms: 60000
+      codepipeline:
+        flush-interval-ms: 60000
+      s3vectors:
+        flush-interval-ms: 60000
+      ecs:
+        flush-interval-ms: 60000
+      codebuild:
+        flush-interval-ms: 60000
+      config:
+        flush-interval-ms: 60000
+      codedeploy:
         flush-interval-ms: 60000
       cloudfront:
 
@@ -87,6 +101,7 @@ floci:
     iam:
       enabled: true
       enforcement-enabled: false
+      seed-deployer-principal: false
     msk:
       enabled: true
       mock: true
@@ -97,6 +112,12 @@ floci:
       proxy-max-port: 6399
       default-image: "valkey/valkey:8"
       default-memcached-image: "memcached:1.6"
+    memorydb:
+      enabled: true
+      mock: false
+      proxy-base-port: 6400
+      proxy-max-port: 6419
+      default-image: "valkey/valkey:8"
     rds:
       enabled: true
       proxy-base-port: 7001
@@ -172,6 +193,8 @@ floci:
       enabled: true
     ecr:
       enabled: true
+    ui:
+      enabled: true
     bedrock-runtime:
       enabled: true
     eks:
@@ -190,7 +213,11 @@ floci:
       runner-mode: immediate
     codedeploy:
       enabled: true
+    codepipeline:
+      enabled: true
     autoscaling:
+      enabled: true
+    elasticbeanstalk:
       enabled: true
     transfer:
       enabled: true
@@ -218,4 +245,15 @@ floci:
     cloudfront:
       enabled: true
     appsync:
+      enabled: true
+    s3vectors:
+      enabled: true
+    iot:
+      enabled: true
+      mqtt:
+        enabled: true
+        auto-start: false
+        host: 127.0.0.1
+        port: 1883
+    iotdata:
       enabled: true

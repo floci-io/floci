@@ -4,10 +4,10 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -19,10 +19,10 @@ public class IamUser {
     private String arn;
     private Instant createDate;
     private Instant passwordLastUsed;
-    private Map<String, String> tags = new HashMap<>();
-    private List<String> groupNames = new ArrayList<>();
-    private List<String> attachedPolicyArns = new ArrayList<>();
-    private Map<String, String> inlinePolicies = new HashMap<>();
+    private Map<String, String> tags = new ConcurrentHashMap<>();
+    private List<String> groupNames = new CopyOnWriteArrayList<>();
+    private List<String> attachedPolicyArns = new CopyOnWriteArrayList<>();
+    private Map<String, String> inlinePolicies = new ConcurrentHashMap<>();
     private String permissionsBoundaryArn;
 
     public IamUser() {}
@@ -54,16 +54,24 @@ public class IamUser {
     public void setPasswordLastUsed(Instant passwordLastUsed) { this.passwordLastUsed = passwordLastUsed; }
 
     public Map<String, String> getTags() { return tags; }
-    public void setTags(Map<String, String> tags) { this.tags = tags; }
+    public void setTags(Map<String, String> tags) {
+        this.tags = new ConcurrentHashMap<>(tags);
+    }
 
     public List<String> getGroupNames() { return groupNames; }
-    public void setGroupNames(List<String> groupNames) { this.groupNames = groupNames; }
+    public void setGroupNames(List<String> groupNames) {
+        this.groupNames = new CopyOnWriteArrayList<>(groupNames);
+    }
 
     public List<String> getAttachedPolicyArns() { return attachedPolicyArns; }
-    public void setAttachedPolicyArns(List<String> attachedPolicyArns) { this.attachedPolicyArns = attachedPolicyArns; }
+    public void setAttachedPolicyArns(List<String> attachedPolicyArns) {
+        this.attachedPolicyArns = new CopyOnWriteArrayList<>(attachedPolicyArns);
+    }
 
     public Map<String, String> getInlinePolicies() { return inlinePolicies; }
-    public void setInlinePolicies(Map<String, String> inlinePolicies) { this.inlinePolicies = inlinePolicies; }
+    public void setInlinePolicies(Map<String, String> inlinePolicies) {
+        this.inlinePolicies = new ConcurrentHashMap<>(inlinePolicies);
+    }
 
     public String getPermissionsBoundaryArn() { return permissionsBoundaryArn; }
     public void setPermissionsBoundaryArn(String permissionsBoundaryArn) { this.permissionsBoundaryArn = permissionsBoundaryArn; }

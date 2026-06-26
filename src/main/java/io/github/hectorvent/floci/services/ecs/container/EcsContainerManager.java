@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.NetworkBinding;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
@@ -74,12 +75,20 @@ public class EcsContainerManager {
         List<Closeable> logStreams = new ArrayList<>();
         List<Container> runtimeContainers = new ArrayList<>();
 
-        // Task-level volumes: map volume name -> host source path, consumed by per-container mountPoints.
+        // Task-level volumes consumed by per-container mountPoints: host volumes map their
+        // name -> absolute host source path; efsVolumeConfiguration volumes map their
+        // name -> EFS configuration (materialised below as a shared local Docker volume).
         Map<String, String> volumeSourcePaths = new LinkedHashMap<>();
+        Map<String, EfsVolumeConfiguration> efsVolumes = new LinkedHashMap<>();
         if (taskDef.getVolumes() != null) {
             for (Volume v : taskDef.getVolumes()) {
-                if (v.name() != null && v.hostSourcePath() != null) {
+                if (v.name() == null) {
+                    continue;
+                }
+                if (v.hostSourcePath() != null) {
                     volumeSourcePaths.put(v.name(), v.hostSourcePath());
+                } else if (v.efs() != null) {
+                    efsVolumes.put(v.name(), v.efs());
                 }
             }
         }
@@ -142,16 +151,28 @@ public class EcsContainerManager {
             // so it must be an absolute host path. Unresolved volume references are skipped.
             if (def.getMountPoints() != null) {
                 for (MountPoint mp : def.getMountPoints()) {
-                    String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
-                    if (sourcePath == null || mp.containerPath() == null) {
-                        LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
-                                mp.sourceVolume(), def.getName());
+                    if (mp.containerPath() == null) {
                         continue;
                     }
-                    if (mp.readOnly()) {
-                        specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
+                    String sourcePath = volumeSourcePaths.get(mp.sourceVolume());
+                    EfsVolumeConfiguration efs = efsVolumes.get(mp.sourceVolume());
+                    if (sourcePath != null) {
+                        // Host volume: bind-mount an absolute path on the Docker host.
+                        if (mp.readOnly()) {
+                            specBuilder.withReadOnlyBind(sourcePath, mp.containerPath());
+                        } else {
+                            specBuilder.withBind(sourcePath, mp.containerPath());
+                        }
+                    } else if (efs != null) {
+                        // EFS volume: a shared local Docker named volume, so every task
+                        // container that mounts the same EFS file system shares persistent
+                        // storage — the local stand-in for an EFS mount (Docker cannot mount
+                        // a real EFS file system).
+                        specBuilder.withNamedVolume(efsVolumeName(efs.fileSystemId()),
+                                mp.containerPath(), mp.readOnly());
                     } else {
-                        specBuilder.withBind(sourcePath, mp.containerPath());
+                        LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
+                                mp.sourceVolume(), def.getName());
                     }
                 }
             }
@@ -405,6 +426,11 @@ public class EcsContainerManager {
     private static String extractTaskId(String taskArn) {
         int slash = taskArn.lastIndexOf('/');
         return slash >= 0 ? taskArn.substring(slash + 1) : taskArn;
+    }
+
+    /** Name of the local Docker named volume backing an EFS file system. */
+    private static String efsVolumeName(String fileSystemId) {
+        return "floci-efs-" + fileSystemId;
     }
 
     // Inner enum to avoid import cycle — mirrors model.TaskStatus for readability

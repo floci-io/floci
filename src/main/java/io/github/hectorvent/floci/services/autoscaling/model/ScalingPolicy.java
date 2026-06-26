@@ -15,6 +15,8 @@ public class ScalingPolicy {
     private int scalingAdjustment;
     private int cooldown;
     private String metricAggregationType;
+    private Integer estimatedInstanceWarmup;
+    private TargetTrackingConfiguration targetTrackingConfiguration;
     private String region;
 
     public ScalingPolicy() {}
@@ -43,6 +45,38 @@ public class ScalingPolicy {
     public String getMetricAggregationType() { return metricAggregationType; }
     public void setMetricAggregationType(String v) { this.metricAggregationType = v; }
 
+    public Integer getEstimatedInstanceWarmup() { return estimatedInstanceWarmup; }
+    public void setEstimatedInstanceWarmup(Integer v) { this.estimatedInstanceWarmup = v; }
+
+    public TargetTrackingConfiguration getTargetTrackingConfiguration() { return targetTrackingConfiguration; }
+    public void setTargetTrackingConfiguration(TargetTrackingConfiguration v) { this.targetTrackingConfiguration = v; }
+
     public String getRegion() { return region; }
     public void setRegion(String v) { this.region = v; }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class TargetTrackingConfiguration {
+        private PredefinedMetricSpecification predefinedMetricSpecification;
+        private Double targetValue;
+
+        public TargetTrackingConfiguration() {}
+
+        public PredefinedMetricSpecification getPredefinedMetricSpecification() { return predefinedMetricSpecification; }
+        public void setPredefinedMetricSpecification(PredefinedMetricSpecification v) { this.predefinedMetricSpecification = v; }
+
+        public Double getTargetValue() { return targetValue; }
+        public void setTargetValue(Double v) { this.targetValue = v; }
+    }
+
+    @RegisterForReflection
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    public static class PredefinedMetricSpecification {
+        private String predefinedMetricType;
+
+        public PredefinedMetricSpecification() {}
+
+        public String getPredefinedMetricType() { return predefinedMetricType; }
+        public void setPredefinedMetricType(String v) { this.predefinedMetricType = v; }
+    }
 }

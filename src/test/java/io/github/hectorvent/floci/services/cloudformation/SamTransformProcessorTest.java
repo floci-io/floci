@@ -5,6 +5,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.Iterator;
+import java.util.Map;
+
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -394,5 +397,249 @@ class SamTransformProcessorTest {
         assertEquals("arn:aws:sqs:us-east-1:123456789012:my-queue",
                 esmProps.path("EventSourceArn").asText());
         assertEquals(10, esmProps.path("BatchSize").asInt());
+    }
+
+    @Test
+    void expandSamTemplate_generatesImplicitApiFromApiEvents() throws Exception {
+        // Functions with Api events and no explicit RestApiId must produce a full implicit REST API.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": { "Api": { "Name": "MyServiceApi" } },
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "Docs":  { "Type": "Api", "Properties": { "Path": "/docs",      "Method": "GET" } },
+                      "Proxy": { "Type": "Api", "Properties": { "Path": "/{proxy+}",  "Method": "ANY" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+
+        // RestApi created, with the name from Globals.Api
+        assertEquals("AWS::ApiGateway::RestApi", resources.path("ServerlessRestApi").path("Type").asText());
+        assertEquals("MyServiceApi", resources.path("ServerlessRestApi").path("Properties").path("Name").asText());
+
+        // Deployment + Prod stage
+        assertEquals("AWS::ApiGateway::Deployment", resources.path("ServerlessRestApiDeployment").path("Type").asText());
+        assertEquals("Prod", resources.path("ServerlessRestApiProdStage").path("Properties").path("StageName").asText());
+
+        // A /docs resource exists, and there is a Method with an AWS_PROXY integration + a Lambda permission
+        boolean hasDocsResource = false;
+        boolean hasProxyMethod = false;
+        boolean hasPermission = false;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            JsonNode n = it.next().getValue();
+            String type = n.path("Type").asText();
+            if ("AWS::ApiGateway::Resource".equals(type) && "docs".equals(n.path("Properties").path("PathPart").asText())) {
+                hasDocsResource = true;
+            }
+            if ("AWS::ApiGateway::Method".equals(type)
+                    && "AWS_PROXY".equals(n.path("Properties").path("Integration").path("Type").asText())) {
+                hasProxyMethod = true;
+            }
+            if ("AWS::Lambda::Permission".equals(type)
+                    && "apigateway.amazonaws.com".equals(n.path("Properties").path("Principal").asText())) {
+                hasPermission = true;
+            }
+        }
+        assertTrue(hasDocsResource, "expected an API Gateway Resource for /docs");
+        assertTrue(hasProxyMethod, "expected an API Gateway Method with AWS_PROXY integration");
+        assertTrue(hasPermission, "expected a Lambda permission for apigateway.amazonaws.com");
+    }
+
+    @Test
+    void expandSamTemplate_dedupesDuplicateApiRoutes() throws Exception {
+        // Two events resolving to the same (path, method) must collapse to a single API Gateway Method.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "A": { "Type": "Api", "Properties": { "Path": "/docs", "Method": "GET" } },
+                      "B": { "Type": "Api", "Properties": { "Path": "/docs", "Method": "GET" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        int methods = 0;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            if ("AWS::ApiGateway::Method".equals(it.next().getValue().path("Type").asText())) {
+                methods++;
+            }
+        }
+        assertEquals(1, methods, "duplicate (path, method) routes must collapse to a single Method");
+    }
+
+    @Test
+    void expandSamTemplate_skipsApiRouteWithNonLiteralPath() throws Exception {
+        // A Path given as an intrinsic (Ref/Fn::Sub) can't be turned into a literal API Gateway
+        // resource path, so the route must be skipped rather than registered as the API root.
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Resources": {
+                "Fn": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Handler": "bootstrap",
+                    "Runtime": "provided.al2023",
+                    "InlineCode": "x",
+                    "Events": {
+                      "A": { "Type": "Api", "Properties": { "Path": { "Ref": "SomePath" }, "Method": "GET" } }
+                    }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode resources = processor.expandSamTemplate(template).path("Resources");
+        int methods = 0;
+        Iterator<Map.Entry<String, JsonNode>> it = resources.fields();
+        while (it.hasNext()) {
+            if ("AWS::ApiGateway::Method".equals(it.next().getValue().path("Type").asText())) {
+                methods++;
+            }
+        }
+        assertEquals(0, methods, "a route with a non-literal Path must not be registered");
+    }
+
+    @Test
+    void expandSamTemplate_appliesGlobalsFunctionToFunction() throws Exception {
+        // Handler/Runtime defined only in Globals.Function (common SAM pattern, e.g. Go provided.al2023)
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "Handler": "bootstrap",
+                  "Runtime": "provided.al2023"
+                }
+              },
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "InlineCode": "bootstrap"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+
+        // Globals is a SAM-only section and must be stripped from the emitted CFN template
+        assertTrue(expanded.path("Globals").isMissingNode());
+
+        JsonNode lambdaProps = expanded.path("Resources").path("MyFunc").path("Properties");
+        assertEquals("AWS::Lambda::Function",
+                expanded.path("Resources").path("MyFunc").path("Type").asText());
+        // Handler/Runtime from Globals must be propagated onto the generated function
+        assertEquals("bootstrap", lambdaProps.path("Handler").asText());
+        assertEquals("provided.al2023", lambdaProps.path("Runtime").asText());
+    }
+
+    @Test
+    void expandSamTemplate_functionPropertiesOverrideGlobals() throws Exception {
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "Handler": "bootstrap",
+                  "Runtime": "provided.al2023",
+                  "Timeout": 3
+                }
+              },
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "Runtime": "nodejs20.x",
+                    "Handler": "index.handler",
+                    "InlineCode": "exports.handler = async () => ({});"
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode lambdaProps = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties");
+
+        // Function-level values win; Globals-only values still apply
+        assertEquals("index.handler", lambdaProps.path("Handler").asText());
+        assertEquals("nodejs20.x", lambdaProps.path("Runtime").asText());
+        assertEquals(3, lambdaProps.path("Timeout").asInt());
+    }
+
+    @Test
+    void expandSamTemplate_mergesNestedMapsFromGlobals() throws Exception {
+        // Environment.Variables must merge key-wise: globals-only keys preserved, function keys win on clash
+        JsonNode template = objectMapper.readTree("""
+            {
+              "Transform": "AWS::Serverless-2016-10-31",
+              "Globals": {
+                "Function": {
+                  "Handler": "bootstrap",
+                  "Runtime": "provided.al2023",
+                  "Environment": { "Variables": { "GLOBAL_VAR": "g", "SHARED": "from-globals" } }
+                }
+              },
+              "Resources": {
+                "MyFunc": {
+                  "Type": "AWS::Serverless::Function",
+                  "Properties": {
+                    "InlineCode": "bootstrap",
+                    "Environment": { "Variables": { "LOCAL_VAR": "l", "SHARED": "from-function" } }
+                  }
+                }
+              }
+            }
+            """);
+
+        JsonNode vars = processor.expandSamTemplate(template)
+                .path("Resources").path("MyFunc").path("Properties")
+                .path("Environment").path("Variables");
+
+        assertEquals("g", vars.path("GLOBAL_VAR").asText());          // globals-only key preserved
+        assertEquals("l", vars.path("LOCAL_VAR").asText());           // function-only key added
+        assertEquals("from-function", vars.path("SHARED").asText());  // clash resolved in favor of function
+    }
+
+    @Test
+    void expandSamTemplate_stripsGlobalsWhenResourcesAbsent() throws Exception {
+        // SAM-only Globals must be stripped even on the early return (no/!object Resources)
+        JsonNode template = objectMapper.readTree("""
+            {"Transform": "AWS::Serverless-2016-10-31", "Globals": {"Function": {"Runtime": "provided.al2023"}}}
+            """);
+
+        JsonNode expanded = processor.expandSamTemplate(template);
+
+        assertTrue(expanded.path("Transform").isMissingNode());
+        assertTrue(expanded.path("Globals").isMissingNode());
     }
 }

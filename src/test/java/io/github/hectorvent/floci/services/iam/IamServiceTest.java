@@ -25,15 +25,24 @@ class IamServiceTest {
 
     @BeforeEach
     void setUp() {
-        iamService = new IamService(
+        iamService = iamService(false);
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal) {
+        return iamService(seedDeployerPrincipal, new InMemoryStorage<>());
+    }
+
+    private static IamService iamService(boolean seedDeployerPrincipal, InMemoryStorage<String, AccessKey> accessKeys) {
+        return new IamService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
+                accessKeys,
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
-                new RegionResolver("us-east-1", "000000000000")
+                new RegionResolver("us-east-1", "000000000000"),
+                seedDeployerPrincipal
         );
     }
 
@@ -481,6 +490,18 @@ class IamServiceTest {
                 "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole");
         assertEquals("AWSLambdaBasicExecutionRole", lambda.getPolicyName());
         assertEquals("/service-role/", lambda.getPath());
+
+        IamPolicy ssm = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore");
+        assertEquals("AmazonSSMManagedInstanceCore", ssm.getPolicyName());
+        assertEquals("/", ssm.getPath());
+
+        IamPolicy cloudWatchAgent = iamService.getPolicy("arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy");
+        assertEquals("CloudWatchAgentServerPolicy", cloudWatchAgent.getPolicyName());
+        assertEquals("/", cloudWatchAgent.getPath());
+
+        IamPolicy ecrReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly");
+        assertEquals("AmazonEC2ContainerRegistryReadOnly", ecrReadOnly.getPolicyName());
+        assertEquals("/", ecrReadOnly.getPath());
     }
 
     @Test
@@ -495,6 +516,53 @@ class IamServiceTest {
     }
 
     @Test
+    void seedDefaultsDoesNotCreateDefaultDeployerPrincipalByDefault() {
+        iamService.seedDefaults();
+
+        assertThrows(AwsException.class, () -> iamService.getUser("floci-deployer"));
+        assertTrue(iamService.resolveCallerArn("floci").isEmpty());
+    }
+
+    @Test
+    void seedDefaultsCreatesConfiguredDefaultDeployerPrincipal() {
+        iamService = iamService(true);
+        iamService.seedDefaults();
+
+        IamUser user = iamService.getUser("floci-deployer");
+        assertEquals("arn:aws:iam::000000000000:user/floci-deployer", user.getArn());
+        assertTrue(user.getAttachedPolicyArns().contains("arn:aws:iam::aws:policy/AdministratorAccess"));
+        assertEquals(
+                "arn:aws:iam::000000000000:user/floci-deployer",
+                iamService.resolveCallerArn("floci").orElseThrow());
+        assertNotNull(iamService.resolveCallerContext("floci"));
+        assertNotNull(iamService.resolvePrincipalContext(user.getArn()));
+    }
+
+    @Test
+    void simulatePrincipalPolicyRejectsUnsupportedPrincipalArnType() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> iamService.resolvePrincipalContext("arn:aws:iam::000000000000:group/admins"));
+
+        assertEquals("InvalidInput", ex.getErrorCode());
+        assertEquals("PolicySourceArn must identify an IAM user or role.", ex.getMessage());
+    }
+
+    @Test
+    void seedDefaultsDoesNotReplaceExistingDeployerAccessKey() {
+        InMemoryStorage<String, AccessKey> accessKeys = new InMemoryStorage<>();
+        iamService = iamService(true, accessKeys);
+        iamService.createUser("existing", "/");
+        accessKeys.put("floci", new AccessKey("floci", "existing-secret", "existing"));
+
+        iamService.seedDefaults();
+
+        assertEquals(
+                "arn:aws:iam::000000000000:user/existing",
+                iamService.resolveCallerArn("floci").orElseThrow());
+        assertEquals("existing-secret", iamService.findSecretKey("floci").orElseThrow());
+    }
+
+    @Test
     void attachManagedPolicyToRole() {
         iamService.seedAwsManagedPolicies();
         iamService.createRole("LambdaExec", "/", "{}", null, 0, null);
@@ -503,6 +571,45 @@ class IamServiceTest {
         iamService.attachRolePolicy("LambdaExec", policyArn);
 
         List<IamPolicy> attached = iamService.listAttachedRolePolicies("LambdaExec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachSsmManagedInstanceCorePolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachCloudWatchAgentServerPolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachEcrReadOnlyPolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("Ec2Exec", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly";
+        iamService.attachRolePolicy("Ec2Exec", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
         assertEquals(1, attached.size());
         assertEquals(policyArn, attached.getFirst().getArn());
     }

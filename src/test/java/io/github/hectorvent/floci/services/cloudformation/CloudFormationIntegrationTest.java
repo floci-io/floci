@@ -23,6 +23,7 @@ import static org.hamcrest.Matchers.contains;
 import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.matchesRegex;
 import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.notNullValue;
@@ -1013,6 +1014,48 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createChangeSet_recordsReviewInProgressEvent() {
+        // A CREATE change set for a brand-new stack must record a REVIEW_IN_PROGRESS stack event,
+        // so DescribeStackEvents is non-empty right after CreateChangeSet (matching AWS/LocalStack).
+        // Tooling such as the AWS SAM CLI reads StackEvents[0] at this point.
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": { "BucketName": "review-event-bucket" }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateChangeSet")
+            .formParam("StackName", "review-event-stack")
+            .formParam("ChangeSetName", "cs1")
+            .formParam("ChangeSetType", "CREATE")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // Before the change set is executed the stack is REVIEW_IN_PROGRESS and must already
+        // carry a matching stack-level event.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackEvents")
+            .formParam("StackName", "review-event-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<ResourceType>AWS::CloudFormation::Stack</ResourceType>"))
+            .body(containsString("<ResourceStatus>REVIEW_IN_PROGRESS</ResourceStatus>"));
+    }
+
+    @Test
     void describeDeletedStackEvents_byArn_returnsDeleteCompleteEvents() throws Exception {
         String template = """
             {
@@ -1093,6 +1136,95 @@ class CloudFormationIntegrationTest {
         .then()
             .statusCode(400)
             .body(containsString("does not exist"));
+    }
+
+    // Regression: issue #1539. Deleting a stack that owns a NON-EMPTY S3 bucket must leave the
+    // stack in DELETE_FAILED (S3 refuses to delete a non-empty bucket) and keep the bucket — it
+    // must not silently report DELETE_COMPLETE while the bucket and its objects still exist.
+    @Test
+    void deleteStack_withNonEmptyS3Bucket_failsAndKeepsBucket() throws Exception {
+        String bucket = "cfn-nonempty-delete-test-bucket";
+        String template = """
+            {
+              "Resources": {
+                "MyBucket": {
+                  "Type": "AWS::S3::Bucket",
+                  "Properties": {
+                    "BucketName": "%s"
+                  }
+                }
+              }
+            }
+            """.formatted(bucket);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-nonempty-delete-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // The managed bucket exists.
+        given()
+            .header("Host", bucket + ".localhost")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200);
+
+        // Put an object so the bucket is non-empty.
+        given()
+            .contentType("text/plain")
+            .body("hello floci 1539")
+        .when()
+            .put("/" + bucket + "/object.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-nonempty-delete-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // The stack must settle into DELETE_FAILED — never DELETE_COMPLETE.
+        String statusXml = null;
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            statusXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", "cfn-nonempty-delete-stack")
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .extract().asString();
+
+            if (statusXml.contains("<StackStatus>DELETE_FAILED</StackStatus>")
+                    || statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")) {
+                break;
+            }
+            Thread.sleep(200);
+        }
+
+        assertThat(statusXml, containsString("<StackStatus>DELETE_FAILED</StackStatus>"));
+        assertThat(statusXml, not(containsString("<StackStatus>DELETE_COMPLETE</StackStatus>")));
+
+        // The managed bucket must still exist after the failed delete.
+        given()
+            .header("Host", bucket + ".localhost")
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
@@ -3971,6 +4103,78 @@ class CloudFormationIntegrationTest {
             .body("item[0].type", equalTo("TOKEN"));
     }
 
+    // ── Issue #1163: AWS::ApiGateway::Deployment with inline StageName creates the stage ──
+
+    @Test
+    void createStack_withApiGatewayDeploymentStageName_createsStage() {
+        // Regression test for issue #1163: a Deployment carrying an inline StageName created
+        // the deployment but never the stage, so `get-stages` returned empty and invoking
+        // .../{stage}/_user_request_/... returned "Stage not found".
+        String stackName = "cfn-apigw-deploy-stagename-stack";
+        String template = """
+            {
+              "Resources": {
+                "RestApi": {
+                  "Type": "AWS::ApiGateway::RestApi",
+                  "Properties": {
+                    "Name": "cfn-apigw-deploy-stagename-api"
+                  }
+                },
+                "Deployment": {
+                  "Type": "AWS::ApiGateway::Deployment",
+                  "Properties": {
+                    "RestApiId": {"Ref": "RestApi"},
+                    "StageName": "prod"
+                  }
+                }
+              }
+            }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"));
+
+        String resourcesXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackResources")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().asString();
+
+        String apiId = physicalIdByLogicalId(resourcesXml, "RestApi");
+        String deploymentId = physicalIdByLogicalId(resourcesXml, "Deployment");
+
+        // The inline StageName must have produced a real stage bound to this deployment.
+        given()
+        .when()
+            .get("/restapis/" + apiId + "/stages")
+        .then()
+            .statusCode(200)
+            .body("item.size()", equalTo(1))
+            .body("item[0].stageName", equalTo("prod"))
+            .body("item[0].deploymentId", equalTo(deploymentId));
+    }
+
     @Test
     void createStack_withApiGatewayMethod_wiresAuthorizerIdViaRef() {
         // Core scenario from issue #788: `AuthorizationType: CUSTOM` plus
@@ -4604,6 +4808,107 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void createStack_withCognitoUserPoolClientOAuthFlowsAndCallbacks() {
+        String template = """
+            {
+              "Resources": {
+                "Pool": {
+                  "Type": "AWS::Cognito::UserPool",
+                  "Properties": {
+                    "UserPoolName": "cfn-oauth-test-pool"
+                  }
+                },
+                "Client": {
+                  "Type": "AWS::Cognito::UserPoolClient",
+                  "Properties": {
+                    "ClientName": "web-client",
+                    "UserPoolId": {"Ref": "Pool"},
+                    "AllowedOAuthFlows": ["implicit", "code"],
+                    "AllowedOAuthFlowsUserPoolClient": true,
+                    "AllowedOAuthScopes": ["openid", "profile", "email"],
+                    "CallbackURLs": ["https://example.local/signin-redirect"],
+                    "LogoutURLs": ["https://example.local"],
+                    "SupportedIdentityProviders": ["COGNITO"],
+                    "GenerateSecret": false
+                  }
+                }
+              },
+              "Outputs": {
+                "PoolId": { "Value": { "Ref": "Pool" } },
+                "ClientId": { "Value": { "Ref": "Client" } }
+              }
+            }
+            """;
+
+        String stackName = "cognito-oauth-stack";
+
+        // 1. Create Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // 2. Describe Stacks and capture outputs
+        String describeXml = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        String poolId = describeXml.split("<OutputKey>PoolId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+        String clientId = describeXml.split("<OutputKey>ClientId</OutputKey>")[1].split("<OutputValue>")[1].split("</OutputValue>")[0];
+
+        // 3. Verify UserPoolClient via Cognito API
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("UserPoolClient.ClientName", equalTo("web-client"))
+            .body("UserPoolClient.UserPoolId", equalTo(poolId))
+            .body("UserPoolClient.AllowedOAuthFlowsUserPoolClient", equalTo(true))
+            .body("UserPoolClient.AllowedOAuthFlows", hasItems("implicit", "code"))
+            .body("UserPoolClient.AllowedOAuthScopes", hasItems("openid", "profile", "email"))
+            .body("UserPoolClient.CallbackURLs", hasItems("https://example.local/signin-redirect"))
+            .body("UserPoolClient.LogoutURLs", hasItems("https://example.local"))
+            .body("UserPoolClient.SupportedIdentityProviders", hasItems("COGNITO"));
+
+        // 4. Delete Stack
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 5. Verify resources are deleted
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.DescribeUserPoolClient")
+            .contentType(COGNITO_CONTENT_TYPE)
+            .body("{\"UserPoolId\": \"" + poolId + "\", \"ClientId\": \"" + clientId + "\"}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(404);
+    }
+
+    @Test
     void createStack_withNestedStack_resourcesAreProvisioned() {
         String childTemplate = """
             {
@@ -5008,6 +5313,75 @@ class CloudFormationIntegrationTest {
             .body("services[0].desiredCount", equalTo(3))
             .body("services[0].taskDefinition",
                     equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/cfn-ecs-update-taskdef:2"));
+    }
+    
+    @Test
+    void deleteStack_ec2SecurityGroup_leavesNoOrphans() {
+        String stackName = "sg-delete-cleanup-stack";
+        String groupName = "sg-delete-cleanup-group";
+
+        String template = """
+                {
+                  "Resources": {
+                    "AppSecurityGroup": {
+                      "Type": "AWS::EC2::SecurityGroup",
+                      "Properties": {
+                        "GroupName": "%s",
+                        "GroupDescription": "Security group created by CloudFormation",
+                        "VpcId": "vpc-default"
+                      }
+                    }
+                  }
+                }
+                """.formatted(groupName);
+
+        given()
+                .formParam("Action", "CreateStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeSecurityGroups")
+                .formParam("Version", "2016-11-15")
+                .formParam("GroupName.1", groupName)
+                .when().post("/")
+                .then().statusCode(200)
+                .body(containsString(groupName));
+
+        given()
+                .formParam("Action", "DeleteStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .when().post("/")
+                .then().statusCode(200);
+
+        given()
+                .formParam("Action", "DescribeSecurityGroups")
+                .formParam("Version", "2016-11-15")
+                .formParam("GroupName.1", groupName)
+                .when().post("/")
+                .then().statusCode(200)
+                .body(not(containsString(groupName)));
+
+        given()
+                .formParam("Action", "CreateStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .formParam("TemplateBody", template)
+                .when().post("/")
+                .then().statusCode(200);
+
+        // Tear the recreated stack back down so the security group is not left behind in the
+        // shared in-memory EC2 store, where it would pollute other tests' DescribeSecurityGroups.
+        given()
+                .formParam("Action", "DeleteStack")
+                .formParam("Version", "2010-05-15")
+                .formParam("StackName", stackName)
+                .when().post("/")
+                .then().statusCode(200);
     }
 
     @Test

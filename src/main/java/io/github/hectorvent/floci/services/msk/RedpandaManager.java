@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.E
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
+import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.msk.model.MskCluster;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -40,6 +41,7 @@ public class RedpandaManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final PortAllocator portAllocator;
     private final Map<String, Closeable> logStreams = new ConcurrentHashMap<>();
 
     @Inject
@@ -48,13 +50,15 @@ public class RedpandaManager {
                            ContainerLogStreamer logStreamer,
                            ContainerDetector containerDetector,
                            EmulatorConfig config,
-                           RegionResolver regionResolver) {
+                           RegionResolver regionResolver,
+                           PortAllocator portAllocator) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.containerDetector = containerDetector;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.portAllocator = portAllocator;
     }
 
     public void startContainer(MskCluster cluster) {
@@ -66,10 +70,32 @@ public class RedpandaManager {
         // Cleanup stale container
         lifecycleManager.removeIfExists(containerName);
 
+        // Redpanda embeds broker addresses in Kafka protocol responses (Metadata,
+        // FindCoordinator, ...) and clients reconnect directly to whatever address
+        // it advertises. Without --advertise-kafka-addr, Redpanda advertises its own
+        // self-perceived loopback (127.0.0.1:9092), which no client outside the
+        // container can ever reach — so we must resolve and pass the externally
+        // reachable address up front. The host port has to be known before the
+        // container starts (the flag is a startup arg), so in native mode we
+        // pre-allocate it ourselves instead of letting Docker assign one dynamically.
+        String kafkaAdvertiseAddr;
+        int kafkaHostPort = 0;
+        if (!containerDetector.isRunningInContainer()) {
+            kafkaHostPort = portAllocator.allocate(
+                    config.services().msk().kafkaHostPortBase(),
+                    config.services().msk().kafkaHostPortMax());
+            kafkaAdvertiseAddr = "localhost:" + kafkaHostPort;
+        } else {
+            // Sibling containers on the docker network resolve the broker via its
+            // container name through Docker's embedded DNS.
+            kafkaAdvertiseAddr = containerName + ":" + KAFKA_PORT;
+        }
+
         // Build command
         List<String> cmd = new ArrayList<>(List.of(
                 "redpanda", "start", "--overprovisioned", "--smp", "1",
-                "--memory", "512M", "--reserve-memory", "0M"));
+                "--memory", "512M", "--reserve-memory", "0M",
+                "--advertise-kafka-addr", kafkaAdvertiseAddr));
 
         // Build container spec. Publish Kafka/admin ports to the host only in
         // native mode; in Docker mode producers/consumers reach the broker via
@@ -80,7 +106,7 @@ public class RedpandaManager {
                 .withLogRotation();
 
         if (!containerDetector.isRunningInContainer()) {
-            specBuilder.withDynamicPort(KAFKA_PORT).withDynamicPort(ADMIN_PORT);
+            specBuilder.withPortBinding(KAFKA_PORT, kafkaHostPort).withDynamicPort(ADMIN_PORT);
         } else {
             specBuilder.withExposedPort(KAFKA_PORT).withExposedPort(ADMIN_PORT);
         }
@@ -102,7 +128,15 @@ public class RedpandaManager {
         ContainerSpec spec = specBuilder.build();
 
         // Create and start container
-        ContainerInfo info = lifecycleManager.createAndStart(spec);
+        ContainerInfo info;
+        try {
+            info = lifecycleManager.createAndStart(spec);
+        } catch (RuntimeException e) {
+            if (!containerDetector.isRunningInContainer()) {
+                portAllocator.release(kafkaHostPort);
+            }
+            throw e;
+        }
         cluster.setContainerId(info.containerId());
 
         // Resolve endpoints
@@ -170,6 +204,27 @@ public class RedpandaManager {
 
         lifecycleManager.stopAndRemove(cluster.getContainerId(), logHandle);
         LOG.infov("Redpanda container {0} stopped and removed", cluster.getContainerId());
+
+        releaseKafkaHostPort(cluster);
+    }
+
+    private void releaseKafkaHostPort(MskCluster cluster) {
+        if (containerDetector.isRunningInContainer()) {
+            return;
+        }
+        String bootstrap = cluster.getBootstrapBrokers();
+        if (bootstrap == null) {
+            return;
+        }
+        int separatorIndex = bootstrap.lastIndexOf(':');
+        if (separatorIndex < 0) {
+            return;
+        }
+        try {
+            portAllocator.release(Integer.parseInt(bootstrap.substring(separatorIndex + 1)));
+        } catch (NumberFormatException e) {
+            // bootstrap string not in host:port form - nothing to release
+        }
     }
 
     public void removeClusterStorage(MskCluster cluster) {

@@ -156,6 +156,27 @@ class EcrIntegrationTest {
 
     @Test
     @Order(8)
+    void batchGetRepositoryScanningConfiguration() {
+        given()
+            .header("X-Amz-Target", PREFIX + "BatchGetRepositoryScanningConfiguration")
+            .contentType(CT)
+            .body("""
+                { "repositoryNames": ["%s"] }
+                """.formatted(REPO))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("scanningConfigurations[0].repositoryName", equalTo(REPO))
+            .body("scanningConfigurations[0].repositoryArn", startsWith("arn:aws:ecr:"))
+            .body("scanningConfigurations[0].scanOnPush", equalTo(false))
+            .body("scanningConfigurations[0].scanFrequency", equalTo("MANUAL"))
+            .body("scanningConfigurations[0].appliedScanFilters", empty())
+            .body("failures", empty());
+    }
+
+    @Test
+    @Order(9)
     void deleteRepositoryForce() {
         given()
             .header("X-Amz-Target", PREFIX + "DeleteRepository")

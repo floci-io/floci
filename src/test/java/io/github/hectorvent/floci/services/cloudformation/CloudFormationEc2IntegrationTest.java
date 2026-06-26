@@ -130,6 +130,76 @@ class CloudFormationEc2IntegrationTest {
             .body(containsString("<LoadBalancerArn>"));
     }
 
+    @Test
+    void subnetAzAndCidrResolveFromGetAzsAndCidr() {
+        String suffix = Long.toString(System.nanoTime(), 36);
+        String stackName = "cfn-ec2-fn-" + suffix;
+
+        // Subnet AZ comes from Fn::Select(Fn::GetAZs("")) and its CIDR from Fn::Cidr — the
+        // pattern CDK emits. Both must resolve to real values on the provisioned subnet.
+        String template = """
+                {
+                  "Resources": {
+                    "Vpc": {
+                      "Type": "AWS::EC2::VPC",
+                      "Properties": {"CidrBlock": "10.30.0.0/16"}
+                    },
+                    "Subnet1": {
+                      "Type": "AWS::EC2::Subnet",
+                      "Properties": {
+                        "VpcId": {"Ref": "Vpc"},
+                        "CidrBlock": {"Fn::Select": [1, {"Fn::Cidr": ["10.30.0.0/16", 4, 8]}]},
+                        "AvailabilityZone": {"Fn::Select": [0, {"Fn::GetAZs": ""}]}
+                      }
+                    }
+                  },
+                  "Outputs": {
+                    "Subnet1Id": {"Value": {"Ref": "Subnet1"}}
+                  }
+                }
+                """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", stackName)
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        String describeStacks = given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", CFN_AUTH)
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", stackName)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackStatus>CREATE_COMPLETE</StackStatus>"))
+            .extract().asString();
+
+        List<String> subnetIds = extractSubnetIds(describeStacks);
+        assertEquals(1, subnetIds.size(), "expected one exported subnet id, got: " + subnetIds);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", EC2_AUTH)
+            .formParam("Action", "DescribeSubnets")
+            .formParam("SubnetId.1", subnetIds.get(0))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            // AZ resolved from Fn::Select(0, Fn::GetAZs("")) in the stack's region.
+            .body(containsString("ap-southeast-2a"))
+            // CIDR resolved from Fn::Select(1, Fn::Cidr(["10.30.0.0/16", 4, 8])).
+            .body(containsString("10.30.1.0/24"));
+    }
+
     private static List<String> extractSubnetIds(String xml) {
         Matcher m = Pattern.compile("<OutputValue>(subnet-[0-9a-fA-F]+)</OutputValue>").matcher(xml);
         List<String> ids = new ArrayList<>();

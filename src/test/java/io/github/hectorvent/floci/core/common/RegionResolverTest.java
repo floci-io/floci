@@ -78,6 +78,35 @@ class RegionResolverTest {
         assertEquals("ap-southeast-1", custom.resolveRegion(null));
     }
 
+    // --- resolveRegionFromPresignedCredential(String credentialValue) tests ---
+
+    @Test
+    void resolveRegionFromPresignedCredential_validCredential_returnsRegion() {
+        assertEquals("us-west-2",
+                resolver.resolveRegionFromPresignedCredential("000000000001/20260617/us-west-2/s3/aws4_request"));
+    }
+
+    @Test
+    void resolveRegionFromPresignedCredential_differentRegion() {
+        assertEquals("eu-central-1",
+                resolver.resolveRegionFromPresignedCredential("AKID/20260617/eu-central-1/s3/aws4_request"));
+    }
+
+    @Test
+    void resolveRegionFromPresignedCredential_null_returnsDefault() {
+        assertEquals("us-east-1", resolver.resolveRegionFromPresignedCredential(null));
+    }
+
+    @Test
+    void resolveRegionFromPresignedCredential_empty_returnsDefault() {
+        assertEquals("us-east-1", resolver.resolveRegionFromPresignedCredential(""));
+    }
+
+    @Test
+    void resolveRegionFromPresignedCredential_malformedTooFewParts_returnsDefault() {
+        assertEquals("us-east-1", resolver.resolveRegionFromPresignedCredential("only-two/parts"));
+    }
+
     private static HttpHeaders stubHeaders(String authorizationValue) {
         return new HttpHeaders() {
             @Override public List<String> getRequestHeader(String name) {

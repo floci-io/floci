@@ -133,11 +133,26 @@ public class CloudFormationService {
                                      Map<String, String> tags, String region) {
         String resolvedTemplate = resolveTemplate(templateBody, templateUrl);
 
+        // Detect first creation atomically: the mapping function runs at most once per key, so the
+        // flag is only set for the thread that actually creates the stack (no double-recording under
+        // concurrent CreateChangeSet calls).
+        boolean[] stackCreated = {false};
         Stack stack = stacks.computeIfAbsent(key(stackName, region), k -> {
+            stackCreated[0] = true;
             Stack s = newStack(stackName, region);
             if (tags != null) s.getTags().putAll(tags);
             return s;
         });
+
+        // A CREATE change set puts a brand-new stack into REVIEW_IN_PROGRESS. Record the matching
+        // stack-level event (as AWS and LocalStack do) so DescribeStackEvents is non-empty straight
+        // after change-set creation — tooling such as the AWS SAM CLI reads StackEvents[0] there and
+        // otherwise fails with an IndexError. (CreateChangeSet defaults a null type to CREATE.)
+        boolean isCreateType = changeSetType == null || "CREATE".equalsIgnoreCase(changeSetType);
+        if (stackCreated[0] && isCreateType) {
+            addEvent(stack, stack.getStackName(), stack.getStackId(),
+                    "AWS::CloudFormation::Stack", "REVIEW_IN_PROGRESS", "User Initiated");
+        }
 
         ChangeSet cs = new ChangeSet();
         cs.setChangeSetId(AwsArnUtils.Arn.of("cloudformation", region, regionResolver.getAccountId(), "changeSet/" + changeSetName + "/" + UUID.randomUUID()).toString());
@@ -534,15 +549,47 @@ public class CloudFormationService {
             List<StackResource> resources = new ArrayList<>(stack.getResources().values());
             Collections.reverse(resources); // Delete in reverse order
 
+            List<String> failedResources = new ArrayList<>();
             for (StackResource resource : resources) {
-                if (resource.getPhysicalId() != null && "CREATE_COMPLETE".equals(resource.getStatus())) {
-                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
-                            resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+                // CREATE_COMPLETE: first delete attempt. DELETE_FAILED: a previous delete left the
+                // resource behind (e.g. the bucket was non-empty); AWS re-attempts it on retry.
+                boolean deletable = "CREATE_COMPLETE".equals(resource.getStatus())
+                        || "DELETE_FAILED".equals(resource.getStatus());
+                if (resource.getPhysicalId() == null || !deletable) {
+                    continue;
+                }
+                addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                        resource.getResourceType(), "DELETE_IN_PROGRESS", null);
+                try {
                     provisioner.delete(resource, region);
                     resource.setStatus("DELETE_COMPLETE");
                     addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
                             resource.getResourceType(), "DELETE_COMPLETE", null);
+                } catch (Exception e) {
+                    // AWS leaves the stack in DELETE_FAILED when a managed resource cannot be
+                    // deleted (e.g. a non-empty S3 bucket raises BucketNotEmpty). The stack must
+                    // not be reported as a successful deletion while the resource still exists.
+                    // Remaining resources are still attempted, matching AWS.
+                    failedResources.add(resource.getLogicalId());
+                    resource.setStatus("DELETE_FAILED");
+                    resource.setStatusReason(e.getMessage());
+                    addEvent(stack, resource.getLogicalId(), resource.getPhysicalId(),
+                            resource.getResourceType(), "DELETE_FAILED", e.getMessage());
+                    LOG.warnv("Failed to delete {0} ({1}) in stack {2}: {3}",
+                            resource.getResourceType(), resource.getPhysicalId(),
+                            stack.getStackName(), e.getMessage());
                 }
+            }
+
+            if (!failedResources.isEmpty()) {
+                String reason = "The following resource(s) failed to delete: ["
+                        + String.join(", ", failedResources) + "].";
+                stack.setStatus("DELETE_FAILED");
+                stack.setStatusReason(reason);
+                addEvent(stack, stack.getStackName(), stack.getStackId(),
+                        "AWS::CloudFormation::Stack", "DELETE_FAILED", reason);
+                LOG.errorv("Stack {0} delete failed: {1}", stack.getStackName(), reason);
+                return;
             }
 
             stack.setStatus("DELETE_COMPLETE");

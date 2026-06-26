@@ -1,6 +1,6 @@
 <p align="center">
-  <img src="floci-black.svg#gh-light-mode-only" alt="Floci" width="500" />
-  <img src="floci-white.svg#gh-dark-mode-only" alt="Floci" width="500" />
+  <img src="docs/assets/floci-black.svg#gh-light-mode-only" alt="Floci" width="500" />
+  <img src="docs/assets/floci-white.svg#gh-dark-mode-only" alt="Floci" width="500" />
 </p>
 
 <p align="center">
@@ -173,11 +173,12 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | Cognito | Yes | No |
 | RDS, ElastiCache, MSK | Real Docker | No |
 | Neptune (graph DB + Gremlin WebSocket) | Real Docker | No |
+| DocumentDB (MongoDB-compatible) | Real Docker | No |
 | ECS, EC2, EKS | Real Docker | No |
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**56 AWS services. Broad coverage. Free forever.**
+**66 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -189,7 +190,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nCodeDeploy · Backup · Bedrock Runtime · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -218,13 +219,14 @@ Floci supports local emulation for application services, data services, eventing
 
 | Category | Services |
 |---|---|
-| Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, STS, KMS, Secrets Manager |
+| Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, KMS, Secrets Manager, SSM |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
-| Containers and compute | ECS, EC2, Lightsail, EKS, CodeBuild, CodeDeploy, Auto Scaling, ELB v2 |
-| Data and analytics | Athena, Glue, Firehose, OpenSearch, Textract, Transcribe |
-| Databases | RDS, RDS Data API, Neptune |
-| Messaging and transfer | SES, SES v2, Kinesis, Transfer Family |
+| Containers and compute | ECS, EC2, Lightsail, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Elastic Beanstalk, ELB v2 |
+| Data, analytics, and AI | Athena, Glue, EMR, Firehose, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
+| Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
+| Messaging and transfer | SES, Kinesis, MSK, Transfer Family |
+| Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
 
@@ -235,19 +237,17 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 
 | Service | How it works | Notable features |
 |---|---|---|
-| SSM Parameter Store | In-process | Version history, labels, SecureString, tagging |
-| SSM Run Command | In-process | SendCommand, GetCommandInvocation, ListCommands, CancelCommand, agent polling via ec2messages |
+| SSM | In-process + EC2 containers | Parameter Store (version history, labels, SecureString, tagging); Run Command (SendCommand, GetCommandInvocation, direct EC2 container execution, agent polling) |
 | SQS | In-process | Standard and FIFO queues, DLQ, visibility timeout, batch operations, tagging |
 | SNS | In-process | Topics, subscriptions, SQS, Lambda and HTTP delivery, tagging |
 | S3 | In-process | Versioning, multipart upload, pre-signed URLs, Object Lock, event notifications |
-| DynamoDB | In-process | GSI, LSI, Query, Scan, TTL, transactions, batch operations |
-| DynamoDB Streams | In-process | Shard iterators, records, Lambda event source mapping trigger |
+| S3 Vectors | In-process | Vector buckets, indexes, put / get / list / delete vectors, cosine similarity queries |
+| DynamoDB | In-process | GSI, LSI, Query, Scan, TTL, transactions, batch operations; Streams with shard iterators and Lambda event source mapping |
 | Lambda | Real Docker | Runtime environment, execution model, warm container pool, aliases, Function URLs |
 | API Gateway REST | In-process | Resources, methods, stages, Lambda proxy, MOCK integrations, AWS integrations |
 | API Gateway v2 | In-process | HTTP APIs, routes, integrations, JWT authorizers, stages |
 | AppSync | In-process | GraphQL API management API, schema registry, AWS scalars, domain names, channel namespaces |
-| IAM | In-process | Users, roles, groups, policies, instance profiles, access keys |
-| STS | In-process | AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
+| IAM | In-process | Users, roles, groups, policies, instance profiles, access keys; STS AssumeRole, WebIdentity, SAML, GetFederationToken, GetSessionToken |
 | Cognito | In-process | User pools, app clients, auth flows, JWKS and OpenID well-known endpoints |
 | KMS | In-process | Encrypt, decrypt, sign, verify, data keys, aliases |
 | Kinesis | In-process | Streams, shards, enhanced fan-out, split and merge |
@@ -260,12 +260,15 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | CloudWatch Logs | In-process | Log groups, streams, ingestion, filtering |
 | CloudWatch Metrics | In-process | Custom metrics, statistics, alarms |
 | ElastiCache | Real Docker | Redis / Valkey protocol, IAM auth, SigV4 validation |
+| MemoryDB | Real Docker | Redis / Valkey protocol via real containers; JSON 1.1 control plane; reuses ElastiCache RESP proxy |
 | RDS | Real Docker | PostgreSQL, MySQL, MariaDB, IAM auth, JDBC-compatible engines |
 | RDS Data API | REST JSON over real RDS containers | Raw SQL execution and transactions for local MySQL / MariaDB RDS resources |
-| Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server; RDS-shaped control plane; Gremlin WebSocket on port 8182 with SigV4 proxy |
+| Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server (default) or Neo4j for openCypher/Bolt (`NEPTUNE_DB_TYPE`); RDS-shaped control plane; SigV4 proxy on port 8182 |
+| DocumentDB | Real Docker, mock mode available | MongoDB-compatible cluster via real MongoDB containers; RDS-shaped control plane; MongoDB wire protocol on port 27017 |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
+| EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets, steps, security configurations, tagging |
 | Data Firehose | In-process | Streaming delivery, NDJSON flush to S3 |
 | ECS | Real Docker | Clusters, task definitions, tasks, services, capacity providers, task sets |
 | EC2 | Real Docker | RunInstances launches containers, SSH key injection, UserData, IMDS, VPC resources |
@@ -273,8 +276,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | ACM | In-process | Certificate issuance and validation lifecycle |
 | ECR | In-process with real registry | Repositories, docker push / pull, image-backed Lambda functions |
 | Resource Groups Tagging API | In-process | GetResources, tag and untag resources, tag key and value discovery across services |
-| SES | In-process | Send email, raw email, identity verification, DKIM, templates |
-| SES v2 | In-process | REST JSON API, identities, DKIM, account sending, templates |
+| SES | In-process | v1 and v2 APIs: send email, raw email, identity verification, DKIM, templates, configuration sets, account sending |
 | OpenSearch | Real Docker | Domain CRUD, tags, versions, instance types, upgrade stubs |
 | AppConfig | In-process | Applications, environments, profiles, hosted versions, deployments |
 | AppConfigData | In-process | Configuration sessions and dynamic configuration retrieval |
@@ -283,9 +285,15 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | ELB v2 | In-process | ALB, NLB, target groups, listeners, routing rules, Lambda targets, tags |
 | CodeBuild | In-process with real Docker | Real buildspec execution, CloudWatch logs, S3 artifacts |
 | CodeDeploy | In-process with Lambda traffic shifting | Deployment groups, configs, lifecycle hooks, auto-rollback |
+| CodePipeline | In-process orchestration | Pipelines, executions, S3 artifacts, approvals, local providers, custom workers |
+| AWS Batch | In-process | Compute environments, job queues, job definitions, job submission and lifecycle |
 | Auto Scaling | In-process with reconciler | Launch configs, ASGs, desired capacity reconciliation, lifecycle hooks |
+| Elastic Beanstalk | In-process | Applications, application versions, environments, configuration templates, platform and solution stack metadata |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
+| CloudTrail | In-process | Trail lifecycle, event selectors, logging status; management API only |
+| CloudFront | In-process | Distributions, origins, cache behaviors, invalidations, tagging |
+| WAF v2 | In-process | Web ACLs, IP sets, regex pattern sets, rule groups, logging configs, resource associations, tagging (REGIONAL and CLOUDFRONT scopes) |
 | Route53 | In-process | Hosted zones, SOA and NS records, resource record sets, change tracking, tagging |
 | Cloud Map | In-process | HTTP and DNS namespaces, services, instance registration, discovery queries, operations, tagging |
 | Transfer Family | In-process | Server lifecycle, user management, SSH key import, tagging |
@@ -310,6 +318,8 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | RDS MySQL / Aurora | `mysql:8.0` | MySQL engine, IAM auth, JDBC-compatible access |
 | RDS MariaDB | `mariadb:11` | MariaDB engine, IAM auth, JDBC-compatible access |
 | Neptune | `tinkerpop/gremlin-server:3.7.3` | TinkerPop Gremlin Server; Gremlin WebSocket on port 8182; SigV4 auth proxy |
+| Neptune (openCypher) | `neo4j:5-community` | Neo4j backend when `FLOCI_SERVICES_NEPTUNE_DB_TYPE=neo4j`; openCypher over Bolt |
+| DocumentDB | `mongo:7.0` | MongoDB engine; MongoDB wire protocol on port 27017 |
 | MSK | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda |
 | EC2 | AMI-mapped Linux images | Linux containers, SSH key injection, UserData, IMDS, IAM credentials |
 | ECS | User-specified task image | Container lifecycle, start, stop, health checks |
@@ -339,6 +349,8 @@ docker run -d --name floci \
 | `FLOCI_SERVICES_MSK_DEFAULT_IMAGE` | `redpandadata/redpanda:latest` |
 | `FLOCI_SERVICES_OPENSEARCH_DEFAULT_IMAGE` | `opensearchproject/opensearch:2` |
 | `FLOCI_SERVICES_NEPTUNE_DEFAULT_IMAGE` | `tinkerpop/gremlin-server:3.7.3` |
+| `FLOCI_SERVICES_NEPTUNE_DEFAULT_NEO4J_IMAGE` | `neo4j:5-community` |
+| `FLOCI_SERVICES_DOCDB_DEFAULT_IMAGE` | `mongo:7.0` |
 | `FLOCI_SERVICES_EKS_DEFAULT_IMAGE` | `rancher/k3s:latest` |
 | `FLOCI_SERVICES_ECR_REGISTRY_IMAGE` | `registry:2` |
 | `FLOCI_ECR_BASE_URI` | `public.ecr.aws` |

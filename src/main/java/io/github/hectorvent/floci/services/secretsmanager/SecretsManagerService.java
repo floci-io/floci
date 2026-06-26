@@ -8,9 +8,18 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
 import io.github.hectorvent.floci.services.secretsmanager.model.SecretVersion;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.services.lambda.LambdaService;
+import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import jakarta.annotation.PreDestroy;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 import java.time.Instant;
 import java.util.ArrayList;
@@ -33,24 +42,40 @@ public class SecretsManagerService {
     private final StorageBackend<String, Secret> store;
     private final int defaultRecoveryWindowDays;
     private final RegionResolver regionResolver;
+    private final LambdaService lambdaService;
+    private final ObjectMapper objectMapper;
+    private final ExecutorService rotationExecutor = Executors.newCachedThreadPool();
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> rotationLocks = new java.util.concurrent.ConcurrentHashMap<>();
+
+    private Object lockFor(String secretArn) {
+        return rotationLocks.computeIfAbsent(secretArn, k -> new Object());
+    }
 
     @Inject
-    public SecretsManagerService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver) {
+    public SecretsManagerService(StorageFactory factory, EmulatorConfig config, RegionResolver regionResolver,
+                                 LambdaService lambdaService, ObjectMapper objectMapper) {
         this(factory.create("secretsmanager", "secretsmanager-secrets.json",
                         new TypeReference<Map<String, Secret>>() {}),
                 config.services().secretsmanager().defaultRecoveryWindowDays(),
-                regionResolver);
+                regionResolver, lambdaService, objectMapper);
     }
 
     SecretsManagerService(StorageBackend<String, Secret> store, int defaultRecoveryWindowDays) {
-        this(store, defaultRecoveryWindowDays, new RegionResolver("us-east-1", "000000000000"));
+        this(store, defaultRecoveryWindowDays, new RegionResolver("us-east-1", "000000000000"), null, new ObjectMapper());
     }
 
     SecretsManagerService(StorageBackend<String, Secret> store, int defaultRecoveryWindowDays,
-                          RegionResolver regionResolver) {
+                          RegionResolver regionResolver, LambdaService lambdaService, ObjectMapper objectMapper) {
         this.store = store;
         this.defaultRecoveryWindowDays = defaultRecoveryWindowDays;
         this.regionResolver = regionResolver;
+        this.lambdaService = lambdaService;
+        this.objectMapper = objectMapper;
+    }
+
+    @PreDestroy
+    void shutdown() {
+        rotationExecutor.shutdown();
     }
 
     public Secret createSecret(String name, String secretString, String secretBinary,
@@ -126,7 +151,7 @@ public class SecretsManagerService {
     }
 
     public SecretVersion putSecretValue(String secretId, String secretString,
-                                        String secretBinary, String region,
+                                        String secretBinary, String clientRequestToken, String region,
                                         List<String> versionStages) {
         Secret secret = resolveSecret(secretId, region);
 
@@ -135,8 +160,29 @@ public class SecretsManagerService {
                     "Secrets Manager can't find the specified secret.", 400);
         }
 
+        if (clientRequestToken != null && (clientRequestToken.length() < 32 || clientRequestToken.length() > 64)) {
+            throw new AwsException("InvalidParameterException", "ClientRequestToken must be between 32 and 64 characters long.", 400);
+        }
+
+        if (clientRequestToken != null && secret.getVersions() != null && secret.getVersions().containsKey(clientRequestToken)) {
+            SecretVersion existingVersion = secret.getVersions().get(clientRequestToken);
+            boolean isPendingPlaceholder = existingVersion.getSecretString() == null
+                    && existingVersion.getSecretBinary() == null
+                    && existingVersion.getVersionStages() != null
+                    && existingVersion.getVersionStages().contains("AWSPENDING");
+            if (!isPendingPlaceholder) {
+                if (!Objects.equals(existingVersion.getSecretString(), secretString) ||
+                    !Objects.equals(existingVersion.getSecretBinary(), secretBinary)) {
+                    throw new AwsException("ResourceExistsException",
+                        "You can't use ClientRequestToken " + clientRequestToken
+                            + " because that value is already in use for a version of secret " + secret.getArn(), 400);
+                }
+                return existingVersion;
+            }
+        }
+
         Instant now = Instant.now();
-        String newVersionId = UUID.randomUUID().toString();
+        String newVersionId = clientRequestToken != null ? clientRequestToken : UUID.randomUUID().toString();
 
         List<String> stages;
         if (versionStages != null) {
@@ -280,7 +326,7 @@ public class SecretsManagerService {
         return secret;
     }
 
-    public Secret rotateSecret(String secretId, String rotationLambdaArn, Map<String, Integer> rotationRules,
+    public Secret rotateSecret(String secretId, String clientRequestToken, String rotationLambdaArn, Secret.RotationRules rotationRules,
                                boolean rotateImmediately, String region) {
         Secret secret = resolveSecret(secretId, region);
 
@@ -289,12 +335,147 @@ public class SecretsManagerService {
                     "Secrets Manager can't find the specified secret.", 400);
         }
 
-        secret.setRotationEnabled(true);
-        secret.setLastChangedDate(Instant.now());
+        if (clientRequestToken != null && (clientRequestToken.length() < 32 || clientRequestToken.length() > 64)) {
+            throw new AwsException("InvalidParameterException", "ClientRequestToken must be between 32 and 64 characters long.", 400);
+        }
 
-        store.put(regionKey(region, secret.getName()), secret);
-        LOG.infov("Stub: Rotated secret: {0} (rotation enabled)", secret.getName());
+        if (rotationRules != null && rotationRules.automaticallyAfterDays() != null && rotationRules.scheduleExpression() != null) {
+            throw new AwsException("InvalidParameterException",
+                    "RotationRules can't include both AutomaticallyAfterDays and ScheduleExpression.", 400);
+        }
+
+        String finalLambdaArn = rotationLambdaArn != null ? rotationLambdaArn : secret.getRotationLambdaArn();
+        if (finalLambdaArn == null) {
+            throw new AwsException("InvalidRequestException",
+                    "You tried to enable rotation on a secret that doesn't already have a Lambda function ARN configured and you didn't include such an ARN as a parameter in this call.", 400);
+        }
+
+        // Validate Lambda exists synchronously
+        if (lambdaService != null) {
+            try {
+                lambdaService.getFunction(region, finalLambdaArn);
+            } catch (AwsException e) {
+                if (e.getHttpStatus() == 404) {
+                    throw new AwsException("ResourceNotFoundException",
+                            "Secrets Manager cannot find the specified Lambda function.", 404);
+                }
+                throw e;
+            }
+        }
+
+        synchronized (lockFor(secret.getArn())) {
+            SecretVersion pendingVersion = findVersionByStage(secret, "AWSPENDING");
+            if (pendingVersion != null) {
+                SecretVersion currentVersion = findVersionByStage(secret, "AWSCURRENT");
+                if (currentVersion == null || !pendingVersion.getVersionId().equals(currentVersion.getVersionId())) {
+                    throw new AwsException("InvalidRequestException",
+                            "A previous rotation isn't complete. That rotation will be reattempted.", 400);
+                }
+            }
+
+            if (rotationLambdaArn != null) {
+                secret.setRotationLambdaArn(rotationLambdaArn);
+            }
+            if (rotationRules != null) {
+                secret.setRotationRules(rotationRules);
+            }
+            secret.setRotationEnabled(true);
+            secret.setLastChangedDate(Instant.now());
+
+            store.put(regionKey(region, secret.getName()), secret);
+        }
+
+        String arn = secret.getArn();
+        String finalToken = clientRequestToken != null && !clientRequestToken.isEmpty() ? clientRequestToken : UUID.randomUUID().toString();
+        boolean isExistingVersion = secret.getVersions() != null && secret.getVersions().containsKey(finalToken);
+        
+        rotationExecutor.submit(() -> {
+            try {
+                executeRotationLifecycle(arn, finalToken, finalLambdaArn, rotateImmediately, isExistingVersion, region);
+            } catch (Exception e) {
+                LOG.errorv(e, "Rotation lifecycle failed for secret {0}", arn);
+            }
+        });
+
+        LOG.infov("Started background rotation for secret: {0}", secret.getName());
         return secret;
+    }
+
+
+    private void executeRotationLifecycle(String secretArn, String clientRequestToken, String lambdaArn, boolean rotateImmediately, boolean isExistingVersion, String region) {
+        if (!rotateImmediately) {
+            invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
+            
+            Secret refreshed = resolveSecret(secretArn, region);
+            SecretVersion pending = findVersionByStage(refreshed, "AWSPENDING");
+            if (pending != null) {
+                List<String> stages = new ArrayList<>(pending.getVersionStages());
+                stages.remove("AWSPENDING");
+                pending.setVersionStages(stages);
+                store.put(regionKey(region, refreshed.getName()), refreshed);
+            }
+            return;
+        }
+
+        try {
+            if (!isExistingVersion) {
+                synchronized (lockFor(secretArn)) {
+                    Secret secret = resolveSecret(secretArn, region);
+                    if (secret.getVersions() != null && secret.getVersions().containsKey(clientRequestToken)) {
+                        isExistingVersion = true;
+                    } else {
+                        SecretVersion pendingVersion = new SecretVersion();
+                        pendingVersion.setVersionId(clientRequestToken);
+                        pendingVersion.setVersionStages(List.of("AWSPENDING"));
+                        pendingVersion.setCreatedDate(Instant.now());
+                        if (secret.getVersions() == null) {
+                            secret.setVersions(new java.util.HashMap<>());
+                        }
+                        secret.getVersions().put(clientRequestToken, pendingVersion);
+                        store.put(regionKey(region, secret.getName()), secret);
+                    }
+                }
+            }
+            if (!isExistingVersion) {
+                invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "createSecret", region);
+                invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "setSecret", region);
+            }
+            invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "testSecret", region);
+            invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "finishSecret", region);
+            
+            Secret refreshed = resolveSecret(secretArn, region);
+            refreshed.setLastRotatedDate(Instant.now());
+            store.put(regionKey(region, refreshed.getName()), refreshed);
+        } catch (Exception e) {
+            LOG.errorv(e, "Error during rotation steps for secret {0}", secretArn);
+            throw e;
+        }
+    }
+
+    private void invokeRotationLambda(String secretArn, String clientRequestToken, String lambdaArn, String step, String region) {
+        if (lambdaService == null) {
+            LOG.warnv("LambdaService is not available; skipping rotation lambda invocation for step {0}", step);
+            return;
+        }
+        try {
+            ObjectNode payload = objectMapper.createObjectNode();
+            payload.put("Step", step);
+            payload.put("SecretId", secretArn);
+            payload.put("ClientRequestToken", clientRequestToken);
+            payload.put("RotationToken", clientRequestToken);
+
+            String payloadStr = objectMapper.writeValueAsString(payload);
+
+            InvokeResult result = lambdaService.invoke(region, lambdaArn, payloadStr.getBytes(java.nio.charset.StandardCharsets.UTF_8), InvocationType.RequestResponse);
+            if (result.getFunctionError() != null) {
+                throw new AwsException("InternalServiceError",
+                        "Rotation lambda returned an error during " + step + ": " + result.getFunctionError(), 500);
+            }
+        } catch (AwsException e) {
+            throw e;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to invoke rotation lambda for step " + step, e);
+        }
     }
 
     public void tagResource(String secretId, List<Secret.Tag> tags, String region) {
@@ -418,6 +599,8 @@ public class SecretsManagerService {
                     mutablePrevStages.remove(AWSPREVIOUS);
                     previous.setVersionStages(mutablePrevStages);
                 }
+
+                // we will set currentVersionId further down
             }
             secret.getVersions().get(removeFromVersionId).setVersionStages(mutableStages);
         }
@@ -434,6 +617,10 @@ public class SecretsManagerService {
             List<String> mutableStages = new ArrayList<>(secret.getVersions().get(moveToVersionId).getVersionStages());
             mutableStages.add(versionStage);
             secret.getVersions().get(moveToVersionId).setVersionStages(mutableStages);
+            
+            if (AWSCURRENT.equals(versionStage)) {
+                secret.setCurrentVersionId(moveToVersionId);
+            }
         }
 
         store.put(regionKey(region, secret.getName()), secret);

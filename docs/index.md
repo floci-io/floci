@@ -12,7 +12,7 @@ Floci is a fast, free, and open-source local AWS service emulator built for deve
 
 ## Supported Services
 
-Floci emulates 56 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
+Floci emulates 66 AWS services. See the [Services Overview](services/index.md) for per-service operation counts, endpoints, and full protocol details.
 
 | Service | Protocol |
 |---|---|
@@ -38,6 +38,7 @@ Floci emulates 56 AWS services. See the [Services Overview](services/index.md) f
 | RDS (PostgreSQL / MySQL) | Query + wire proxy |
 | RDS Data API | REST JSON |
 | Neptune (graph DB / Gremlin) | Query + WebSocket proxy |
+| DocumentDB (MongoDB-compatible) | Query + MongoDB wire |
 | MSK (Kafka / Redpanda) | REST JSON + Kafka |
 | Athena | JSON 1.1 |
 | Glue Data Catalog + Schema Registry | JSON 1.1 |
@@ -58,8 +59,10 @@ Floci emulates 56 AWS services. See the [Services Overview](services/index.md) f
 | EKS | REST JSON |
 | ELB v2 | Query |
 | Auto Scaling | Query |
+| Elastic Beanstalk | Query |
 | CodeBuild | JSON 1.1 |
 | CodeDeploy | JSON 1.1 |
+| CodePipeline | JSON 1.1 |
 | AWS Backup | REST JSON |
 | CloudFront | REST XML |
 | Route53 | REST XML |
@@ -107,7 +110,7 @@ docker compose up -d
 aws --endpoint-url http://localhost:4566 s3 mb s3://my-bucket
 ```
 
-All 56 AWS services are immediately available at `http://localhost:4566`.
+All 66 AWS services are immediately available at `http://localhost:4566`.
 
 [Get started →](getting-started/quick-start.md){ .md-button .md-button--primary }
 [View services →](services/index.md){ .md-button }

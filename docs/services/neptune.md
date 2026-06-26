@@ -1,10 +1,21 @@
 # Neptune
 
-**Protocol:** Query (XML) for management API + Gremlin / HTTP for data plane
+**Protocol:** Query (XML) for management API + Gremlin / HTTP / Bolt for data plane
 **Management Endpoint:** `POST http://localhost:4566/`
-**Data Endpoint:** `localhost:<proxy-port>` (TCP / WebSocket)
+**Data Endpoint:** `localhost:<proxy-port>` (TCP / WebSocket / Bolt)
 
-Floci manages real [Apache TinkerPop Gremlin Server](https://tinkerpop.apache.org/) Docker containers and proxies connections to them, providing an API-compatible Neptune emulation for local development and testing.
+Floci manages real graph-database Docker containers and proxies connections to them, providing an API-compatible Neptune emulation for local development and testing.
+
+## Backend engine (`db-type`)
+
+Neptune supports multiple query languages. Floci backs each one with a different container and proxies the matching wire protocol, selected globally via `FLOCI_SERVICES_NEPTUNE_DB_TYPE` (mirroring LocalStack's `NEPTUNE_DB_TYPE`):
+
+| `db-type` | Backend image | Query language | Wire protocol |
+|-----------|---------------|----------------|---------------|
+| `gremlin` _(default)_ | [Apache TinkerPop Gremlin Server](https://tinkerpop.apache.org/) | Gremlin | WebSocket |
+| `neo4j` | [Neo4j](https://neo4j.com/) | openCypher | Bolt |
+
+The proxy is a transparent byte relay, so the host-facing proxy port range is unchanged regardless of engine — only the protocol you connect with differs. Connect to a cluster's proxy port (from the `8182`–`8282` range, returned by `DescribeDBClusters`), not the backend's native port. The Neo4j backend runs with `NEO4J_AUTH=none`, matching Neptune's model of authenticating at the AWS edge (IAM) rather than at the graph protocol; connect your Bolt/openCypher driver with no auth.
 
 ## Supported Actions
 
@@ -25,8 +36,10 @@ Floci manages real [Apache TinkerPop Gremlin Server](https://tinkerpop.apache.or
 |----------|---------|-------------|
 | `FLOCI_SERVICES_NEPTUNE_ENABLED` | `true` | Enable or disable Neptune |
 | `FLOCI_SERVICES_NEPTUNE_PROXY_BASE_PORT` | `8182` | First host port in the Gremlin proxy range |
-| `FLOCI_SERVICES_NEPTUNE_PROXY_MAX_PORT` | `8282` | Last host port in the Gremlin proxy range |
-| `FLOCI_SERVICES_NEPTUNE_DEFAULT_IMAGE` | `tinkerpop/gremlin-server:3.7.3` | Gremlin Server Docker image |
+| `FLOCI_SERVICES_NEPTUNE_PROXY_MAX_PORT` | `8282` | Last host port in the proxy range |
+| `FLOCI_SERVICES_NEPTUNE_DB_TYPE` | `gremlin` | Backend engine: `gremlin` (Gremlin/WebSocket) or `neo4j` (openCypher/Bolt) |
+| `FLOCI_SERVICES_NEPTUNE_DEFAULT_IMAGE` | `tinkerpop/gremlin-server:3.7.3` | Image used when `db-type=gremlin` |
+| `FLOCI_SERVICES_NEPTUNE_DEFAULT_NEO4J_IMAGE` | `neo4j:5-community` | Image used when `db-type=neo4j` |
 | `FLOCI_SERVICES_NEPTUNE_DOCKER_NETWORK` | _(host default)_ | Docker network for container connectivity |
 
 ### Docker Compose
@@ -103,6 +116,25 @@ result = gremlin.submit("g.V().valueMap(true)").all().result()
 print(result)
 
 gremlin.close()
+```
+
+### Graph data plane — openCypher (Python + neo4j driver)
+
+Start Floci with `FLOCI_SERVICES_NEPTUNE_DB_TYPE=neo4j`, then connect with any Bolt
+driver and run openCypher:
+
+```python
+from neo4j import GraphDatabase
+
+# Use the port returned by DescribeDBClusters; no auth (NEO4J_AUTH=none)
+driver = GraphDatabase.driver("bolt://localhost:8182", auth=None)
+
+with driver.session() as session:
+    session.run("CREATE (:Person {name: 'Alice'})")
+    count = session.run("MATCH (p:Person) RETURN count(p) AS c").single()["c"]
+    print(count)
+
+driver.close()
 ```
 
 ### Management API (Python / boto3)

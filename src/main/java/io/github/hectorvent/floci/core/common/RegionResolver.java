@@ -49,6 +49,24 @@ public class RegionResolver {
         return matcher.find() ? matcher.group(1) : defaultRegion;
     }
 
+    /**
+     * Resolves the region from an X-Amz-Credential value found in
+     * presigned URL query parameters.
+     * Format: accessKeyID/date/region/service/aws4_request
+     * Falls back to the configured default region if the credential value
+     * is null, empty, or does not contain enough segments.
+     */
+    public String resolveRegionFromPresignedCredential(String credentialValue) {
+        if (credentialValue == null || credentialValue.isEmpty()) {
+            return defaultRegion;
+        }
+        String[] parts = credentialValue.split("/");
+        if (parts.length >= 3) {
+            return parts[2];
+        }
+        return defaultRegion;
+    }
+
     public String getDefaultRegion() {
         return defaultRegion;
     }

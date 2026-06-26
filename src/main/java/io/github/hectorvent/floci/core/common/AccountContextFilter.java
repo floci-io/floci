@@ -10,7 +10,8 @@ import jakarta.ws.rs.ext.Provider;
 
 /**
  * Populates {@link RequestContext} with the account ID and region derived from
- * the incoming AWS Authorization header. Runs at AUTHENTICATION priority so that
+ * the incoming AWS Authorization header or, for presigned URL requests, the
+ * X-Amz-Credential query parameter. Runs at AUTHENTICATION priority so that
  * downstream filters (e.g. IAM enforcement) can rely on the context being set.
  */
 @Provider
@@ -34,7 +35,18 @@ public class AccountContextFilter implements ContainerRequestFilter {
     @Override
     public void filter(ContainerRequestContext ctx) {
         String auth = ctx.getHeaderString("Authorization");
-        requestContext.setAccountId(accountResolver.resolve(auth));
-        requestContext.setRegion(regionResolver.resolveRegionFromAuth(auth));
+        if (auth != null && !auth.isEmpty()) {
+            requestContext.setAccountId(accountResolver.resolve(auth));
+            requestContext.setRegion(regionResolver.resolveRegionFromAuth(auth));
+        } else {
+            String credential = ctx.getUriInfo().getQueryParameters().getFirst("X-Amz-Credential");
+            if (credential != null && !credential.isEmpty()) {
+                requestContext.setAccountId(accountResolver.resolveFromPresignedCredential(credential));
+                requestContext.setRegion(regionResolver.resolveRegionFromPresignedCredential(credential));
+            } else {
+                requestContext.setAccountId(accountResolver.resolve(null));
+                requestContext.setRegion(regionResolver.resolveRegionFromAuth(null));
+            }
+        }
     }
 }

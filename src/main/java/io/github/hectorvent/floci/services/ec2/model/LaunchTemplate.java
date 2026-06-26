@@ -26,6 +26,7 @@ public class LaunchTemplate {
     private String userData;
     private List<String> securityGroupIds = new ArrayList<>();
     private List<Tag> tags = new ArrayList<>();
+    private List<Tag> instanceTags = new ArrayList<>();
     private Map<String, LaunchTemplateData> versions = new LinkedHashMap<>();
 
     public LaunchTemplate() {}
@@ -68,6 +69,11 @@ public class LaunchTemplate {
 
     public List<Tag> getTags() { return tags; }
     public void setTags(List<Tag> tags) { this.tags = tags; }
+
+    public List<Tag> getInstanceTags() { return instanceTags; }
+    public void setInstanceTags(List<Tag> instanceTags) {
+        this.instanceTags = instanceTags != null ? new ArrayList<>(instanceTags) : new ArrayList<>();
+    }
 
     public Map<String, LaunchTemplateData> getVersions() { return versions; }
     public void setVersions(Map<String, LaunchTemplateData> versions) {

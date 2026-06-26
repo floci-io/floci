@@ -45,8 +45,8 @@ class AcmImportExportTest {
             KeyAlgorithm.RSA_2048
         );
 
-        validTestCertificate = generated.certificatePem();
-        validTestPrivateKey = generated.privateKeyPem();
+        validTestCertificate = generated.certificatePem().replace("\r\n", "\n");
+        validTestPrivateKey = generated.privateKeyPem().replace("\r\n", "\n");
     }
 
     // ==================== ImportCertificate Tests ====================

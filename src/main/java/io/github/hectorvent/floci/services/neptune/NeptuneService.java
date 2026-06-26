@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerHandle;
 import io.github.hectorvent.floci.services.neptune.container.NeptuneContainerManager;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneCluster;
+import io.github.hectorvent.floci.services.neptune.model.NeptuneDbType;
 import io.github.hectorvent.floci.services.neptune.model.NeptuneInstance;
 import io.github.hectorvent.floci.services.neptune.proxy.NeptuneProxyManager;
 import jakarta.enterprise.context.ApplicationScoped;
@@ -62,11 +63,21 @@ public class NeptuneService {
         }
 
         int proxyPort = allocateProxyPort();
-        String image = config.services().neptune().defaultImage();
+        String configuredDbType = config.services().neptune().dbType();
+        NeptuneDbType dbType = NeptuneDbType.fromConfig(configuredDbType).orElseGet(() -> {
+            LOG.warnv("Unsupported Neptune db-type ''{0}'', falling back to {1}. Supported: gremlin, neo4j.",
+                    configuredDbType, NeptuneDbType.GREMLIN);
+            return NeptuneDbType.GREMLIN;
+        });
+        String image = switch (dbType) {
+            case GREMLIN -> config.services().neptune().defaultImage();
+            case NEO4J -> config.services().neptune().defaultNeo4jImage();
+        };
 
-        LOG.infov("Creating Neptune cluster {0} on proxy port {1}, image={2}", id, String.valueOf(proxyPort), image);
+        LOG.infov("Creating Neptune cluster {0} on proxy port {1}, dbType={2}, image={3}",
+                id, String.valueOf(proxyPort), dbType, image);
 
-        NeptuneContainerHandle handle = containerManager.start(id, image);
+        NeptuneContainerHandle handle = containerManager.start(id, image, dbType);
 
         String region = regionResolver.getDefaultRegion();
         String endpointHost = resolveEndpointHost();
@@ -92,7 +103,8 @@ public class NeptuneService {
         proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
 
         clusters.put(id, cluster);
-        LOG.infov("Neptune cluster {0} created, Gremlin endpoint={1}:{2}", id, endpointHost, String.valueOf(proxyPort));
+        LOG.infov("Neptune cluster {0} created ({1}), endpoint={2}:{3}",
+                id, dbType, endpointHost, String.valueOf(proxyPort));
         return cluster;
     }
 

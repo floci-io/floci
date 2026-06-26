@@ -157,6 +157,68 @@ class SecretsManagerJsonHandlerTest {
         assertThat(secret.has("CreatedDate"), is(true));
     }
 
+    private void createSecret(String name) {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("Name", name);
+        handler.handle("CreateSecret", req, REGION);
+    }
+
+    @Test
+    void listSecretsHonorsMaxResultsAndPaginatesWithNextToken() {
+        for (int i = 1; i <= 5; i++) {
+            createSecret("secret-" + i);
+        }
+
+        ObjectNode pageReq = MAPPER.createObjectNode();
+        pageReq.put("MaxResults", 2);
+        ObjectNode page1 = (ObjectNode) handler.handle("ListSecrets", pageReq, REGION).getEntity();
+        assertThat(page1.get("SecretList").size(), is(2));
+        assertThat(page1.has("NextToken"), is(true));
+
+        // Walk the remaining pages via NextToken; every secret appears exactly once.
+        int total = page1.get("SecretList").size();
+        String nextToken = page1.get("NextToken").asText();
+        while (nextToken != null) {
+            ObjectNode req = MAPPER.createObjectNode();
+            req.put("MaxResults", 2);
+            req.put("NextToken", nextToken);
+            ObjectNode page = (ObjectNode) handler.handle("ListSecrets", req, REGION).getEntity();
+            assertThat(page.get("SecretList").size(), lessThanOrEqualTo(2));
+            total += page.get("SecretList").size();
+            nextToken = page.has("NextToken") ? page.get("NextToken").asText() : null;
+        }
+        assertThat(total, is(5));
+    }
+
+    @Test
+    void listSecretsWithoutMaxResultsReturnsAllAndNoNextToken() {
+        for (int i = 1; i <= 3; i++) {
+            createSecret("secret-" + i);
+        }
+
+        ObjectNode body = (ObjectNode) handler.handle("ListSecrets", MAPPER.createObjectNode(), REGION).getEntity();
+        assertThat(body.get("SecretList").size(), is(3));
+        assertThat(body.has("NextToken"), is(false));
+    }
+
+    @Test
+    void listSecretsRejectsMaxResultsOutOfRange() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("MaxResults", 101);
+        Response response = handler.handle("ListSecrets", req, REGION);
+        assertThat(response.getStatus(), is(400));
+        // ListSecrets does not model ValidationException; AWS returns InvalidParameterException.
+        assertThat(((io.github.hectorvent.floci.core.common.AwsErrorResponse) response.getEntity()).type(),
+                is("InvalidParameterException"));
+    }
+
+    @Test
+    void listSecretsRejectsInvalidNextToken() {
+        ObjectNode req = MAPPER.createObjectNode();
+        req.put("NextToken", "not-a-number");
+        assertThat(handler.handle("ListSecrets", req, REGION).getStatus(), is(400));
+    }
+
     @Test
     void batchGetSecretValue() {
         ObjectNode createReq1 = MAPPER.createObjectNode();
@@ -184,5 +246,80 @@ class SecretsManagerJsonHandlerTest {
         ObjectNode batchReq = MAPPER.createObjectNode();
         Response response = handler.handle("BatchGetSecretValue", batchReq, REGION);
         assertThat(response.getStatus(), is(400));
+    }
+
+    @Test
+    void rotateSecretParsesRotationRules() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "rotate-test-secret");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rotate-test-secret");
+        rotateReq.put("RotationLambdaARN", "arn:aws:lambda:us-east-1:000000000000:function:rotate");
+        ObjectNode rules = MAPPER.createObjectNode();
+        rules.put("ScheduleExpression", "cron(0 16 ? * 2 *)");
+        rotateReq.set("RotationRules", rules);
+
+        Response response = handler.handle("RotateSecret", rotateReq, REGION);
+        assertThat(response.getStatus(), is(200));
+        
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rotate-test-secret");
+        Response describeResponse = handler.handle("DescribeSecret", describeReq, REGION);
+        ObjectNode body = (ObjectNode) describeResponse.getEntity();
+        assertThat(body.has("RotationRules"), is(true));
+        assertThat(body.get("RotationRules").get("ScheduleExpression").asText(), is("cron(0 16 ? * 2 *)"));
+        assertThat(body.get("RotationRules").has("AutomaticallyAfterDays"), is(false));
+    }
+
+    @Test
+    void rotateSecretFailsWithMutuallyExclusiveRotationRules() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "rotate-test-secret-2");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rotate-test-secret-2");
+        rotateReq.put("RotationLambdaARN", "arn:aws:lambda:us-east-1:000000000000:function:rotate");
+        ObjectNode rules = MAPPER.createObjectNode();
+        rules.put("AutomaticallyAfterDays", 30);
+        rules.put("ScheduleExpression", "cron(0 16 ? * 2 *)");
+        rotateReq.set("RotationRules", rules);
+
+        io.github.hectorvent.floci.core.common.AwsException ex = org.junit.jupiter.api.Assertions.assertThrows(
+                io.github.hectorvent.floci.core.common.AwsException.class, 
+                () -> handler.handle("RotateSecret", rotateReq, REGION)
+        );
+        assertThat(ex.getErrorCode(), is("InvalidParameterException"));
+    }
+
+    @Test
+    void rotateSecretParsesAllPascalCaseRules() {
+        ObjectNode createReq = MAPPER.createObjectNode();
+        createReq.put("Name", "rotate-test-secret-all-pascal");
+        handler.handle("CreateSecret", createReq, REGION);
+
+        ObjectNode rotateReq = MAPPER.createObjectNode();
+        rotateReq.put("SecretId", "rotate-test-secret-all-pascal");
+        rotateReq.put("RotationLambdaARN", "arn:aws:lambda:us-east-1:000000000000:function:rotate");
+        rotateReq.put("RotateImmediately", false);
+        
+        ObjectNode rules = MAPPER.createObjectNode();
+        rules.put("AutomaticallyAfterDays", 45);
+        rules.put("Duration", "2h");
+        rotateReq.set("RotationRules", rules);
+
+        Response response = handler.handle("RotateSecret", rotateReq, REGION);
+        assertThat(response.getStatus(), is(200));
+
+        ObjectNode describeReq = MAPPER.createObjectNode();
+        describeReq.put("SecretId", "rotate-test-secret-all-pascal");
+        Response describeResponse = handler.handle("DescribeSecret", describeReq, REGION);
+        ObjectNode body = (ObjectNode) describeResponse.getEntity();
+        
+        assertThat(body.has("RotationRules"), is(true));
+        assertThat(body.get("RotationRules").get("AutomaticallyAfterDays").asInt(), is(45));
+        assertThat(body.get("RotationRules").get("Duration").asText(), is("2h"));
     }
 }

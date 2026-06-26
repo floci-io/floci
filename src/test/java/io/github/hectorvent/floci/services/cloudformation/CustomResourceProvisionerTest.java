@@ -48,7 +48,7 @@ class CustomResourceProvisionerTest {
 
         provisioner = new CloudFormationResourceProvisioner(
                 null, null, null, null, lambdaService, null, null, null, null, null,
-                null, null, null, null, null, null, mapper, store, endpoint, null, null, null, null, null);
+                null, null, null, null, null, null, mapper, store, endpoint, null, null, null, null, null, null, null, null, null, null, null, null);
     }
 
     private CloudFormationTemplateEngine engine() {

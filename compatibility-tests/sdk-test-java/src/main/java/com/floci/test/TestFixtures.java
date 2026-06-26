@@ -44,21 +44,28 @@ import software.amazon.awssdk.services.resourcegroupstaggingapi.ResourceGroupsTa
 import software.amazon.awssdk.services.apigateway.ApiGatewayClient;
 import software.amazon.awssdk.services.apigatewayv2.ApiGatewayV2Client;
 import software.amazon.awssdk.services.elasticache.ElastiCacheClient;
+import software.amazon.awssdk.services.elasticbeanstalk.ElasticBeanstalkClient;
 import software.amazon.awssdk.services.acm.AcmClient;
 import software.amazon.awssdk.services.ec2.Ec2Client;
 import software.amazon.awssdk.services.ecr.EcrClient;
 import software.amazon.awssdk.services.pipes.PipesClient;
 import software.amazon.awssdk.services.codebuild.CodeBuildClient;
 import software.amazon.awssdk.services.codedeploy.CodeDeployClient;
+import software.amazon.awssdk.services.codepipeline.CodePipelineClient;
 import software.amazon.awssdk.services.ecs.EcsClient;
 import software.amazon.awssdk.services.eks.EksClient;
+import software.amazon.awssdk.services.iot.IotClient;
+import software.amazon.awssdk.services.iotdataplane.IotDataPlaneClient;
+import software.amazon.awssdk.services.iotjobsdataplane.IotJobsDataPlaneClient;
 import software.amazon.awssdk.services.scheduler.SchedulerClient;
 import software.amazon.awssdk.services.appconfig.AppConfigClient;
 import software.amazon.awssdk.services.appconfigdata.AppConfigDataClient;
+import software.amazon.awssdk.services.autoscaling.AutoScalingClient;
 import software.amazon.awssdk.services.backup.BackupClient;
 import software.amazon.awssdk.services.elasticloadbalancingv2.ElasticLoadBalancingV2Client;
 import software.amazon.awssdk.services.appsync.AppSyncClient;
 import software.amazon.awssdk.services.lightsail.LightsailClient;
+import software.amazon.awssdk.services.s3vectors.S3VectorsClient;
 
 import software.amazon.awssdk.core.SdkBytes;
 import software.amazon.awssdk.services.lambda.model.CreateFunctionRequest;
@@ -553,6 +560,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static ElasticBeanstalkClient elasticBeanstalkClient() {
+        return ElasticBeanstalkClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static ApiGatewayClient apiGatewayClient() {
         return ApiGatewayClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -625,6 +640,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static AutoScalingClient autoScalingClient() {
+        return AutoScalingClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static AppConfigClient appConfigClient() {
         return AppConfigClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -643,6 +666,30 @@ public final class TestFixtures {
 
     public static PipesClient pipesClient() {
         return PipesClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static IotClient iotClient() {
+        return IotClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static IotDataPlaneClient iotDataClient() {
+        return IotDataPlaneClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static IotJobsDataPlaneClient iotJobsDataClient() {
+        return IotJobsDataPlaneClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)
@@ -673,6 +720,14 @@ public final class TestFixtures {
                 .build();
     }
 
+    public static CodePipelineClient codePipelineClient() {
+        return CodePipelineClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
     public static BackupClient backupClient() {
         return BackupClient.builder()
                 .endpointOverride(ENDPOINT)
@@ -691,6 +746,14 @@ public final class TestFixtures {
 
     public static LightsailClient lightsailClient() {
         return LightsailClient.builder()
+                .endpointOverride(ENDPOINT)
+                .region(REGION)
+                .credentialsProvider(CREDENTIALS)
+                .build();
+    }
+
+    public static S3VectorsClient s3vectorsClient() {
+        return S3VectorsClient.builder()
                 .endpointOverride(ENDPOINT)
                 .region(REGION)
                 .credentialsProvider(CREDENTIALS)

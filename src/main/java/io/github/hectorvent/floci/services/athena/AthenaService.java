@@ -8,7 +8,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.athena.model.*;
 import io.github.hectorvent.floci.services.glue.model.Column;
-import io.github.hectorvent.floci.services.floci.FlociDuckClient;
+import io.github.hectorvent.floci.services.floci.duck.FlociDuckClient;
 import io.github.hectorvent.floci.services.glue.GlueService;
 import io.github.hectorvent.floci.services.glue.model.Database;
 import io.github.hectorvent.floci.services.glue.model.Table;
@@ -369,7 +369,7 @@ public class AthenaService {
             detail.put("Description", workGroup.getDescription());
         }
         if (workGroup.getCreationTime() != null) {
-            detail.put("CreationTime", workGroup.getCreationTime());
+            detail.put("CreationTime", workGroup.getCreationTime().getEpochSecond());
         }
         if (workGroup.getConfiguration() != null) {
             detail.put("Configuration", workGroup.getConfiguration());
@@ -475,19 +475,27 @@ public class AthenaService {
     private Map<String, Object> tableMetadata(String catalog, String database, Table table) {
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("Name", table.getName());
-        metadata.put("CreateTime", table.getCreateTime() != null ? table.getCreateTime() : Instant.now());
-        metadata.put("LastAccessTime", table.getLastAccessTime() != null ? table.getLastAccessTime() : Instant.now());
+        metadata.put("CreateTime", (table.getCreateTime() != null ? table.getCreateTime() : Instant.now()).getEpochSecond());
+        metadata.put("LastAccessTime", (table.getLastAccessTime() != null ? table.getLastAccessTime() : Instant.now()).getEpochSecond());
         metadata.put("TableType", table.getTableType() != null ? table.getTableType() : "EXTERNAL_TABLE");
         metadata.put("Columns", athenaColumns(table));
         metadata.put("Parameters", table.getParameters() != null ? table.getParameters() : Map.of());
+        metadata.put("PartitionKeys", athenaColumns(table.getPartitionKeys()));
         return metadata;
     }
 
     private List<Map<String, String>> athenaColumns(Table table) {
-        if (table.getStorageDescriptor() == null || table.getStorageDescriptor().getColumns() == null) {
+        if (table.getStorageDescriptor() == null) {
             return List.of();
         }
-        return table.getStorageDescriptor().getColumns().stream()
+        return athenaColumns(table.getStorageDescriptor().getColumns());
+    }
+
+    private List<Map<String, String>> athenaColumns(List<Column> columns) {
+        if (columns == null) {
+            return List.of();
+        }
+        return columns.stream()
                 .map(column -> Map.of(
                         "Name", column.getName(),
                         "Type", glueTypeToAthena(column)
