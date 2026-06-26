@@ -370,6 +370,22 @@ class IamIntegrationTest {
     // =========================================================================
 
     @Test
+    @Order(50)
+    void listMfaDevicesReturnsEmptyList() {
+        given()
+            .formParam("Action", "ListMFADevices")
+            .formParam("UserName", "any-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("ListMFADevicesResponse.ListMFADevicesResult.IsTruncated", equalTo("false"));
+    }
+
+    @Test
     @Order(10)
     void createUser() {
         given()

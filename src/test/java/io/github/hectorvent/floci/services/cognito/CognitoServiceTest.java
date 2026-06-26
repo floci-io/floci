@@ -1642,91 +1642,31 @@ class CognitoServiceTest {
     }
 
     // =========================================================================
-    // CUSTOM_AUTH flow (no Lambda triggers — falls back to deterministic stub)
+    // CUSTOM_AUTH flow (requires Lambda triggers)
     // =========================================================================
 
     @Test
-    @SuppressWarnings("unchecked")
-    void customAuthInitiateReturnsCustomChallenge() {
+    void customAuthInitiateFailsWhenDefineTriggerIsMissing() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "c", false, false, List.of(), List.of());
-
-        Map<String, Object> result = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A"));
-
-        assertEquals("CUSTOM_CHALLENGE", result.get("ChallengeName"));
-        assertNotNull(result.get("Session"));
-        Map<String, String> params = (Map<String, String>) result.get("ChallengeParameters");
-        assertEquals("alice", params.get("USERNAME"));
-        assertEquals("SRP_A", params.get("CHALLENGE_NAME"),
-                "InitiateAuth-supplied metadata should pass through to ChallengeParameters");
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void customAuthAcceptsAnyAnswerWhenNoExpectedAttribute() {
-        UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
-
-        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice"));
-        String session = (String) initResult.get("Session");
-
-        Map<String, Object> tokenResult = service.respondToAuthChallenge(
-                client.getClientId(), "CUSTOM_CHALLENGE", session,
-                Map.of("USERNAME", "alice", "ANSWER", "any-non-empty-answer"));
-
-        Map<String, Object> auth = (Map<String, Object>) tokenResult.get("AuthenticationResult");
-        assertNotNull(auth, "AuthenticationResult should be present after correct answer");
-        assertNotNull(auth.get("AccessToken"));
-        assertNotNull(auth.get("RefreshToken"));
-    }
-
-    @Test
-    void customAuthRejectsWhenAnswerDoesNotMatchExpectedAttribute() {
-        UserPool pool = createPoolAndUser();
-        // Stamp an expected answer attribute on the user
-        service.adminUpdateUserAttributes(pool.getId(), "alice",
-                Map.of("custom:expectedAuthAnswer", "secret-otp"));
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
-
-        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice"));
-        String session = (String) initResult.get("Session");
-
-        // First wrong attempt — flow should request another challenge, not fail outright
-        Map<String, Object> retryResult = service.respondToAuthChallenge(
-                client.getClientId(), "CUSTOM_CHALLENGE", session,
-                Map.of("USERNAME", "alice", "ANSWER", "wrong"));
-        assertEquals("CUSTOM_CHALLENGE", retryResult.get("ChallengeName"));
-        String session2 = (String) retryResult.get("Session");
-
-        // Eventually correct answer issues tokens
-        Map<String, Object> tokenResult = service.respondToAuthChallenge(
-                client.getClientId(), "CUSTOM_CHALLENGE", session2,
-                Map.of("USERNAME", "alice", "ANSWER", "secret-otp"));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> auth = (Map<String, Object>) tokenResult.get("AuthenticationResult");
-        assertNotNull(auth);
-        assertNotNull(auth.get("AccessToken"));
-    }
-
-    @Test
-    void customAuthRequiresNonEmptyAnswer() {
-        UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
-        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice"));
-        String session = (String) initResult.get("Session");
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
-                        Map.of("USERNAME", "alice", "ANSWER", "")));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+                service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                        Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A")));
+        assertEquals("InvalidUserPoolConfigurationException", ex.getErrorCode());
+    }
+
+    @Test
+    void customAuthRejectsWhenNoLambdaTriggersAreConfigured() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                        Map.of("USERNAME", "alice")));
+        assertEquals("InvalidUserPoolConfigurationException", ex.getErrorCode());
     }
 
     @Test

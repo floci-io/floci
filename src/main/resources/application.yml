@@ -55,6 +55,7 @@ quarkus:
       - --initialize-at-run-time=io.github.hectorvent.floci.services.kms.KmsService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.cloudfront.CloudFrontService
       - --initialize-at-run-time=io.github.hectorvent.floci.services.emr.EmrService
+      - --initialize-at-run-time=io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkService
 
 
 floci:
@@ -344,6 +345,8 @@ floci:
     codepipeline:
       enabled: true
     autoscaling:
+      enabled: true
+    elasticbeanstalk:
       enabled: true
     backup:
       enabled: true

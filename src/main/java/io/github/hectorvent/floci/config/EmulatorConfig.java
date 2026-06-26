@@ -430,6 +430,7 @@ public interface EmulatorConfig {
         CodeDeployServiceConfig codedeploy();
         CodePipelineServiceConfig codepipeline();
         AutoScalingServiceConfig autoscaling();
+        ElasticBeanstalkServiceConfig elasticbeanstalk();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
         DocDbServiceConfig docdb();
@@ -497,6 +498,11 @@ public interface EmulatorConfig {
     }
 
     interface AutoScalingServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface ElasticBeanstalkServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
