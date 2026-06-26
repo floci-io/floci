@@ -216,23 +216,6 @@ public class AppSyncController {
     }
 
     @GET
-    @Path("/v1/apis/{apiId}/resolvers")
-    public Response listResolvers(@PathParam("apiId") String apiId,
-                                  @QueryParam("maxResults") Integer maxResults,
-                                  @QueryParam("nextToken") String nextToken) {
-        var page = service.listResolvers(apiId, maxResults, nextToken);
-        ObjectNode root = objectMapper.createObjectNode();
-        ArrayNode items = root.putArray("resolvers");
-        page.items().forEach(items::addPOJO);
-        if (page.nextToken() != null) {
-            root.put("nextToken", page.nextToken());
-        } else {
-            root.putNull("nextToken");
-        }
-        return Response.ok(root).build();
-    }
-
-    @GET
     @Path("/v1/apis/{apiId}/types/{typeName}/resolvers")
     public Response listResolversByType(@PathParam("apiId") String apiId,
                                         @PathParam("typeName") String typeName,
@@ -451,15 +434,6 @@ public class AppSyncController {
         } else {
             root.putNull("nextToken");
         }
-        return Response.ok(root).build();
-    }
-
-    @GET
-    @Path("/v1/apis/{apiId}/apikeys/{keyId}")
-    public Response getApiKey(@PathParam("apiId") String apiId, @PathParam("keyId") String keyId) {
-        ApiKey key = service.getApiKey(apiId, keyId);
-        ObjectNode root = objectMapper.createObjectNode();
-        root.set("apiKey", objectMapper.valueToTree(key));
         return Response.ok(root).build();
     }
 

@@ -344,10 +344,6 @@ public class AppSyncService {
                         "Resolver not found: " + typeName + "." + fieldName, 404));
     }
 
-    public Page<Resolver> listResolvers(String apiId, Integer maxResults, String nextToken) {
-        return paginate(resolverStore.scan(k -> k.startsWith(apiId + "::")), nextToken, maxResults);
-    }
-
     public Page<Resolver> listResolversByType(String apiId, String typeName, Integer maxResults, String nextToken) {
         List<Resolver> filtered = resolverStore.scan(k -> k.startsWith(apiId + "::")).stream()
                 .filter(r -> typeName.equals(r.getTypeName()))
