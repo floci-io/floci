@@ -712,7 +712,7 @@ class AppSyncIntegrationTest {
                 }
                 """)
         .when()
-            .put("/v1/apis/" + apiId + "/environmentvariables")
+            .put("/v1/apis/" + apiId + "/environmentVariables")
         .then()
             .statusCode(200)
             .body("environmentVariables.TABLE_NAME", equalTo("my-table"))
@@ -725,7 +725,7 @@ class AppSyncIntegrationTest {
         given()
             .header("Authorization", AUTH)
         .when()
-            .get("/v1/apis/" + apiId + "/environmentvariables")
+            .get("/v1/apis/" + apiId + "/environmentVariables")
         .then()
             .statusCode(200)
             .body("environmentVariables.TABLE_NAME", equalTo("my-table"))
@@ -746,7 +746,7 @@ class AppSyncIntegrationTest {
                 }
                 """)
         .when()
-            .put("/v1/apis/" + apiId + "/environmentvariables")
+            .put("/v1/apis/" + apiId + "/environmentVariables")
         .then()
             .statusCode(200)
             .body("environmentVariables.NEW_VAR", equalTo("new-value"))

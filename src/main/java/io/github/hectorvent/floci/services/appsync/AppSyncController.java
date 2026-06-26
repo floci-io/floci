@@ -517,7 +517,7 @@ public class AppSyncController {
     // ──────────────────────────── Environment Variables ────────────────────────────
 
     @GET
-    @Path("/v1/apis/{apiId}/environmentvariables")
+    @Path("/v1/apis/{apiId}/environmentVariables")
     public Response getEnvironmentVariables(@PathParam("apiId") String apiId) {
         Map<String, String> envVars = service.getEnvironmentVariables(apiId);
         ObjectNode root = objectMapper.createObjectNode();
@@ -527,7 +527,7 @@ public class AppSyncController {
     }
 
     @PUT
-    @Path("/v1/apis/{apiId}/environmentvariables")
+    @Path("/v1/apis/{apiId}/environmentVariables")
     public Response putEnvironmentVariables(@PathParam("apiId") String apiId,
                                             String body) throws IOException {
         @SuppressWarnings("unchecked")

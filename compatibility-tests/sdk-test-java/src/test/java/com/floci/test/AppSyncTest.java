@@ -992,4 +992,191 @@ class AppSyncTest {
         assertThat(resp.apiKey()).isNotNull();
         assertThat(resp.apiKey().id()).isNotBlank();
     }
+
+    // ── SDK Coverage Gaps: Environment Variables ───────────────────────────
+
+    @Test
+    @Order(120)
+    void putGraphqlApiEnvironmentVariables() {
+        PutGraphqlApiEnvironmentVariablesResponse resp = client.putGraphqlApiEnvironmentVariables(
+                PutGraphqlApiEnvironmentVariablesRequest.builder()
+                        .apiId(apiId)
+                        .environmentVariables(Map.of("TABLE_NAME", "my-table", "REGION", "us-east-1"))
+                        .build());
+
+        assertThat(resp.environmentVariables())
+                .containsEntry("TABLE_NAME", "my-table")
+                .containsEntry("REGION", "us-east-1");
+    }
+
+    @Test
+    @Order(121)
+    void getGraphqlApiEnvironmentVariables() {
+        GetGraphqlApiEnvironmentVariablesResponse resp = client.getGraphqlApiEnvironmentVariables(
+                GetGraphqlApiEnvironmentVariablesRequest.builder()
+                        .apiId(apiId)
+                        .build());
+
+        assertThat(resp.environmentVariables())
+                .containsEntry("TABLE_NAME", "my-table")
+                .containsEntry("REGION", "us-east-1");
+    }
+
+    // ── SDK Coverage Gaps: Pagination ──────────────────────────────────────
+
+    @Test
+    @Order(122)
+    void listGraphqlApisWithMaxResults() {
+        for (int i = 0; i < 2; i++) {
+            client.createGraphqlApi(CreateGraphqlApiRequest.builder()
+                    .name("pg-sdk-api-" + i + "-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                    .authenticationType("API_KEY")
+                    .build());
+        }
+
+        ListGraphqlApisResponse page1 = client.listGraphqlApis(ListGraphqlApisRequest.builder()
+                .maxResults(2)
+                .build());
+
+        assertThat(page1.graphqlApis()).hasSizeLessThanOrEqualTo(2);
+        if (page1.nextToken() != null) {
+            ListGraphqlApisResponse page2 = client.listGraphqlApis(ListGraphqlApisRequest.builder()
+                    .maxResults(2)
+                    .nextToken(page1.nextToken())
+                    .build());
+            assertThat(page2.graphqlApis()).isNotEmpty();
+        }
+    }
+
+    @Test
+    @Order(123)
+    void listDataSourcesWithMaxResults() {
+        for (int i = 0; i < 2; i++) {
+            client.createDataSource(CreateDataSourceRequest.builder()
+                    .apiId(apiId)
+                    .name("pg-sdk-ds-" + i + "-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                    .type("NONE")
+                    .build());
+        }
+
+        ListDataSourcesResponse page1 = client.listDataSources(ListDataSourcesRequest.builder()
+                .apiId(apiId)
+                .maxResults(1)
+                .build());
+
+        assertThat(page1.dataSources()).hasSize(1);
+        assertThat(page1.nextToken()).isNotNull();
+
+        ListDataSourcesResponse page2 = client.listDataSources(ListDataSourcesRequest.builder()
+                .apiId(apiId)
+                .maxResults(1)
+                .nextToken(page1.nextToken())
+                .build());
+
+        assertThat(page2.dataSources()).isNotEmpty();
+    }
+
+    // ── SDK Coverage Gaps: Mirror Error Tests (409/429/404) ────────────────
+
+    @Test
+    @Order(130)
+    void createDataSourceDuplicateThrowsConflictException() {
+        String dsName = "sdk-conflict-ds-" + java.util.UUID.randomUUID().toString().substring(0, 8);
+        client.createDataSource(CreateDataSourceRequest.builder()
+                .apiId(apiId)
+                .name(dsName)
+                .type("NONE")
+                .build());
+
+        assertThatThrownBy(() -> client.createDataSource(CreateDataSourceRequest.builder()
+                        .apiId(apiId)
+                        .name(dsName)
+                        .type("NONE")
+                        .build()))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("Data source already exists:");
+
+        client.deleteDataSource(r -> r.apiId(apiId).name(dsName));
+    }
+
+    @Test
+    @Order(131)
+    void createApiKeyExceedsLimitThrowsLimitExceededException() {
+        CreateGraphqlApiResponse tempApi = client.createGraphqlApi(CreateGraphqlApiRequest.builder()
+                .name("sdk-limit-test-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                .authenticationType("API_KEY")
+                .build());
+        String tempApiId = tempApi.graphqlApi().apiId();
+
+        try {
+            client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build());
+            client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build());
+
+            assertThatThrownBy(() -> client.createApiKey(CreateApiKeyRequest.builder().apiId(tempApiId).build()))
+                    .isInstanceOf(LimitExceededException.class)
+                    .hasMessageContaining("Maximum of 2 API keys per API reached");
+        } finally {
+            client.deleteGraphqlApi(r -> r.apiId(tempApiId));
+        }
+    }
+
+    @Test
+    @Order(132)
+    void updateResolverNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.updateResolver(UpdateResolverRequest.builder()
+                        .apiId(apiId)
+                        .typeName("Query")
+                        .fieldName("nonExistentSdkField")
+                        .dataSourceName("none-ds")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Resolver not found:");
+    }
+
+    @Test
+    @Order(133)
+    void deleteFunctionNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.deleteFunction(DeleteFunctionRequest.builder()
+                        .apiId(apiId)
+                        .functionId("nonexistent00000000000")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Function not found:");
+    }
+
+    @Test
+    @Order(134)
+    void updateApiKeyNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.updateApiKey(UpdateApiKeyRequest.builder()
+                        .apiId(apiId)
+                        .id("nonexistent00000000000")
+                        .description("updated")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("API key not found:");
+    }
+
+    @Test
+    @Order(135)
+    void updateDomainNameNonExistentThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.updateDomainName(UpdateDomainNameRequest.builder()
+                        .domainName("nonexistent.example.com")
+                        .description("updated")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Domain name not found:");
+    }
+
+    @Test
+    @Order(136)
+    void createResolverMissingDataSourceThrowsNotFoundException() {
+        assertThatThrownBy(() -> client.createResolver(CreateResolverRequest.builder()
+                        .apiId(apiId)
+                        .typeName("Query")
+                        .fieldName("crossRefSdkField")
+                        .dataSourceName("nonexistent-ds-for-sdk-resolver")
+                        .build()))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("Data source not found:");
+    }
 }
