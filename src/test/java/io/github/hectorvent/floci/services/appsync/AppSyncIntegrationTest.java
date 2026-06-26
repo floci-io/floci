@@ -1772,6 +1772,185 @@ class AppSyncIntegrationTest {
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
 
+    // ── NotFoundException (404) on update/delete of missing resources ────────
+
+    @Test
+    @Order(170)
+    void updateResolverNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"dataSourceName": "none-ds"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers/nonExistentField")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Resolver not found:"));
+    }
+
+    @Test
+    @Order(171)
+    void deleteResolverNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/types/Query/resolvers/nonExistentField")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Resolver not found:"));
+    }
+
+    @Test
+    @Order(172)
+    void updateFunctionNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "nonexistent-fn", "dataSourceName": "none-ds"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/functions/nonexistent00000000000")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Function not found:"));
+    }
+
+    @Test
+    @Order(173)
+    void deleteFunctionNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/functions/nonexistent00000000000")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Function not found:"));
+    }
+
+    @Test
+    @Order(174)
+    void updateApiKeyNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"description": "updated"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/apikeys/nonexistent00000000000")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("API key not found:"));
+    }
+
+    @Test
+    @Order(175)
+    void deleteApiKeyNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+        .when()
+            .delete("/v1/apis/" + apiId + "/apikeys/nonexistent00000000000")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("API key not found:"));
+    }
+
+    @Test
+    @Order(176)
+    void updateDomainNameNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"description": "updated"}
+                """)
+        .when()
+            .post("/v1/domainnames/nonexistent.example.com")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Domain name not found:"));
+    }
+
+    @Test
+    @Order(177)
+    void updateChannelNamespaceNonExistentReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"description": "updated"}
+                """)
+        .when()
+            .post("/v2/apis/" + apiId + "/channelNamespaces/nonexistent-ns")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Channel namespace not found:"));
+    }
+
+    // ── Cross-resource 404 on create (missing referenced resource) ───────────
+
+    @Test
+    @Order(190)
+    void createResolverMissingDataSourceReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"fieldName": "crossRefField", "dataSourceName": "nonexistent-ds-for-resolver"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/types/Query/resolvers")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Data source not found:"));
+    }
+
+    @Test
+    @Order(191)
+    void createFunctionMissingDataSourceReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"name": "cross-ref-fn", "dataSourceName": "nonexistent-ds-for-fn"}
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/functions")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Data source not found:"));
+    }
+
+    @Test
+    @Order(192)
+    void associateApiMissingDomainReturns404() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {"apiId": "%s"}
+                """.formatted(apiId))
+        .when()
+            .post("/v1/domainnames/nonexistent-for-assoc.example.com/apiassociation")
+        .then()
+            .statusCode(404)
+            .body("__type", equalTo("NotFoundException"))
+            .body("message", containsString("Domain name not found:"));
+    }
+
     // ── Phase 2: Model Completeness ─────────────────────────────────────────
 
     @Test
