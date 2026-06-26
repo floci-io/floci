@@ -42,20 +42,24 @@ public class RdsQueryHandler {
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
+        return handle(action, params, null);
+    }
+
+    public Response handle(String action, MultivaluedMap<String, String> params, String region) {
         LOG.infov("RDS action: {0}", action);
         try {
             return switch (action) {
-                case "CreateDBInstance" -> handleCreateDbInstance(params);
+                case "CreateDBInstance" -> handleCreateDbInstance(params, region);
                 case "DescribeDBInstances" -> handleDescribeDbInstances(params);
                 case "DeleteDBInstance" -> handleDeleteDbInstance(params);
                 case "ModifyDBInstance" -> handleModifyDbInstance(params);
                 case "RebootDBInstance" -> handleRebootDbInstance(params);
                 case "DescribeOrderableDBInstanceOptions" -> handleDescribeOrderableDbInstanceOptions(params);
-                case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params);
+                case "CreateDBSubnetGroup" -> handleCreateDbSubnetGroup(params, region);
                 case "DescribeDBSubnetGroups" -> handleDescribeDbSubnetGroups(params);
-                case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params);
+                case "ModifyDBSubnetGroup" -> handleModifyDbSubnetGroup(params, region);
                 case "DeleteDBSubnetGroup" -> handleDeleteDbSubnetGroup(params);
-                case "CreateDBCluster" -> handleCreateDbCluster(params);
+                case "CreateDBCluster" -> handleCreateDbCluster(params, region);
                 case "DescribeDBClusters" -> handleDescribeDbClusters(params);
                 case "DeleteDBCluster" -> handleDeleteDbCluster(params);
                 case "ModifyDBCluster" -> handleModifyDbCluster(params);
@@ -88,7 +92,7 @@ public class RdsQueryHandler {
 
     // ── DB Instances ──────────────────────────────────────────────────────────
 
-    private Response handleCreateDbInstance(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbInstance(MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBInstanceIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue",
@@ -121,10 +125,15 @@ public class RdsQueryHandler {
         }
 
         try {
-            DbInstance instance = service.createDbInstance(id, engine, engineVersion, masterUsername,
-                    masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
-                    paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
-                    manageMasterUserPassword, masterUserSecretKmsKeyId, tags);
+            DbInstance instance = region == null
+                    ? service.createDbInstance(id, engine, engineVersion, masterUsername,
+                            masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                            paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, tags)
+                    : service.createDbInstance(id, engine, engineVersion, masterUsername,
+                            masterPassword, dbName, dbInstanceClass, allocatedStorage, iamEnabled,
+                            paramGroupName, dbSubnetGroupName, dbClusterIdentifier, availabilityZone, multiAz,
+                            manageMasterUserPassword, masterUserSecretKmsKeyId, tags, region);
             String result = dbInstanceXml(instance);
             return Response.ok(AwsQueryResponse.envelope("CreateDBInstance", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {
@@ -239,7 +248,7 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleCreateDbSubnetGroup(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbSubnetGroup(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBSubnetGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("MissingParameter",
@@ -248,7 +257,9 @@ public class RdsQueryHandler {
         String description = params.getFirst("DBSubnetGroupDescription");
         List<String> subnetIds = memberList(params, "SubnetIds");
         try {
-            DbSubnetGroup group = service.createDbSubnetGroup(name, description, subnetIds);
+            DbSubnetGroup group = region == null
+                    ? service.createDbSubnetGroup(name, description, subnetIds)
+                    : service.createDbSubnetGroup(name, description, subnetIds, region);
             return Response.ok(AwsQueryResponse.envelope("CreateDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -271,7 +282,7 @@ public class RdsQueryHandler {
         }
     }
 
-    private Response handleModifyDbSubnetGroup(MultivaluedMap<String, String> params) {
+    private Response handleModifyDbSubnetGroup(MultivaluedMap<String, String> params, String region) {
         String name = params.getFirst("DBSubnetGroupName");
         if (name == null || name.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue",
@@ -279,7 +290,9 @@ public class RdsQueryHandler {
         }
         List<String> subnetIds = memberList(params, "SubnetIds");
         try {
-            DbSubnetGroup group = service.modifyDbSubnetGroup(name, subnetIds);
+            DbSubnetGroup group = region == null
+                    ? service.modifyDbSubnetGroup(name, subnetIds)
+                    : service.modifyDbSubnetGroup(name, subnetIds, region);
             return Response.ok(AwsQueryResponse.envelope("ModifyDBSubnetGroup",
                     AwsNamespaces.RDS, dbSubnetGroupXml(group))).build();
         } catch (AwsException e) {
@@ -317,7 +330,7 @@ public class RdsQueryHandler {
 
     // ── DB Clusters ───────────────────────────────────────────────────────────
 
-    private Response handleCreateDbCluster(MultivaluedMap<String, String> params) {
+    private Response handleCreateDbCluster(MultivaluedMap<String, String> params, String region) {
         String id = params.getFirst("DBClusterIdentifier");
         if (id == null || id.isBlank()) {
             return AwsQueryResponse.error("InvalidParameterValue", "DBClusterIdentifier is required.", AwsNamespaces.RDS, 400);
@@ -339,9 +352,13 @@ public class RdsQueryHandler {
         }
 
         try {
-            DbCluster cluster = service.createDbCluster(id, engine, engineVersion, masterUsername,
-                    masterPassword, databaseName, iamEnabled, paramGroupName,
-                    dbSubnetGroupName, availabilityZone, multiAz);
+            DbCluster cluster = region == null
+                    ? service.createDbCluster(id, engine, engineVersion, masterUsername,
+                            masterPassword, databaseName, iamEnabled, paramGroupName,
+                            dbSubnetGroupName, availabilityZone, multiAz)
+                    : service.createDbCluster(id, engine, engineVersion, masterUsername,
+                            masterPassword, databaseName, iamEnabled, paramGroupName,
+                            dbSubnetGroupName, availabilityZone, multiAz, region);
             String result = dbClusterXml(cluster);
             return Response.ok(AwsQueryResponse.envelope("CreateDBCluster", AwsNamespaces.RDS, result)).build();
         } catch (AwsException e) {

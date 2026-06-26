@@ -434,6 +434,25 @@ class RdsQueryHandlerTest {
     }
 
     @Test
+    void createDbSubnetGroupPassesRequestRegionToService() {
+        when(service.createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2"))
+                .thenReturn(new DbSubnetGroup(
+                        "sample-db-subnets", "test", "vpc-123", List.of("subnet-aaa", "subnet-bbb"),
+                        Map.of("subnet-aaa", "us-west-2a", "subnet-bbb", "us-west-2b")));
+
+        MultivaluedMap<String, String> p = params();
+        p.add("DBSubnetGroupName", "sample-db-subnets");
+        p.add("DBSubnetGroupDescription", "test");
+        p.add("SubnetIds.SubnetIdentifier.1", "subnet-aaa");
+        p.add("SubnetIds.SubnetIdentifier.2", "subnet-bbb");
+
+        Response response = handler.handle("CreateDBSubnetGroup", p, "us-west-2");
+
+        assertEquals(200, response.getStatus());
+        verify(service).createDbSubnetGroup("sample-db-subnets", "test", List.of("subnet-aaa", "subnet-bbb"), "us-west-2");
+    }
+
+    @Test
     void modifyDbSubnetGroup_passesSubnetMembersToService() {
         when(service.modifyDbSubnetGroup("sample-db-subnets", List.of("subnet-new-a", "subnet-new-b")))
                 .thenReturn(new DbSubnetGroup(
