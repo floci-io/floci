@@ -64,19 +64,6 @@ class GlueJsonHandlerEmptyListTest {
         assertEmptyList("GetSecurityConfigurations", "SecurityConfigurations");
     }
 
-    @Test
-    void getTagsReturnsEmptyTagsMap() throws Exception {
-        Response response = handler.handle("GetTags", mapper.createObjectNode(), REGION);
-
-        assertEquals(200, response.getStatus());
-
-        JsonNode body = mapper.valueToTree(response.getEntity());
-        assertTrue(body.has("Tags"), "GetTags response must contain Tags");
-        assertTrue(body.get("Tags").isObject(), "Tags must be a JSON object");
-        assertEquals(0, body.get("Tags").size(), "Tags must be empty");
-        assertEquals(1, body.size(), "GetTags response must contain only Tags");
-    }
-
     private void assertEmptyList(String action, String listKey) throws Exception {
         Response response = handler.handle(action, mapper.createObjectNode(), REGION);
 

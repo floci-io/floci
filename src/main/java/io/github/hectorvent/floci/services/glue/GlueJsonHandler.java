@@ -166,10 +166,10 @@ public class GlueJsonHandler {
             case "QuerySchemaVersionMetadata" -> handleQuerySchemaVersionMetadata(request);
             case "TagResource" -> handleTagResource(request);
             case "UntagResource" -> handleUntagResource(request);
+            case "GetTags" -> handleGetTags(request);
             // Read-only Glue actions for resources the emulator does not model. The AWS SDK
             // expects each to return a 200 with its result key present (empty), so we emit the
             // documented empty shape rather than an InvalidAction 400 that callers can't read.
-            case "GetTags" -> Response.ok(Map.of("Tags", Map.of())).build();
             case "GetJobs" -> Response.ok(Map.of("Jobs", List.of())).build();
             case "GetCrawlers" -> Response.ok(Map.of("Crawlers", List.of())).build();
             case "ListDataQualityRulesets" -> Response.ok(Map.of("Rulesets", List.of())).build();
@@ -715,5 +715,11 @@ public class GlueJsonHandler {
                 : null;
         schemaRegistryService.untagResource(arn, tagsToRemove);
         return Response.ok(Map.of()).build();
+    }
+
+    private Response handleGetTags(JsonNode request) {
+        String arn = request.path("ResourceArn").asText(null);
+        Map<String, String> tags = schemaRegistryService.getTags(arn);
+        return Response.ok(Map.of("Tags", tags)).build();
     }
 }
