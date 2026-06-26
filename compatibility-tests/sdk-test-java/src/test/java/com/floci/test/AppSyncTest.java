@@ -107,12 +107,11 @@ class AppSyncTest {
     @Test
     @Order(11)
     void getSchemaCreationStatus() {
-        GetSchemaCreationStatusResponse resp = client.getSchemaCreationStatus(
-                GetSchemaCreationStatusRequest.builder()
-                        .apiId(apiId)
-                        .build());
-
-        assertThat(resp.statusAsString()).isEqualTo("ACTIVE");
+        // Schema creation is async in real AWS: poll until terminal (ACTIVE
+        // or FAILED). All subsequent tests in this class depend on the
+        // schema being ACTIVE because the 409 gate fires while PROCESSING.
+        SchemaStatus status = pollSchemaStatusToTerminal();
+        assertThat(status).isEqualTo(SchemaStatus.ACTIVE);
     }
 
     // ── API Keys ────────────────────────────────────────────────────────
@@ -541,12 +540,28 @@ class AppSyncTest {
     @Test
     @Order(93)
     void startSchemaCreation_invalidSchema() {
-        assertThatThrownBy(() -> client.startSchemaCreation(StartSchemaCreationRequest.builder()
-                        .apiId(apiId)
-                        .definition(SdkBytes.fromUtf8String("type Query { invalid !!! }"))
-                        .build()))
-                .isInstanceOf(BadRequestException.class)
-                .hasMessageContaining("Invalid schema");
+        StartSchemaCreationResponse resp = client.startSchemaCreation(StartSchemaCreationRequest.builder()
+                .apiId(apiId)
+                .definition(SdkBytes.fromUtf8String("type Query { invalid !!! }"))
+                .build());
+        assertThat(resp.status()).isEqualTo(SchemaStatus.PROCESSING);
+        SchemaStatus terminal = pollSchemaStatusToTerminal();
+        assertThat(terminal).isEqualTo(SchemaStatus.FAILED);
+    }
+
+    private SchemaStatus pollSchemaStatusToTerminal() {
+        Instant deadline = Instant.now().plus(Duration.ofSeconds(10));
+        SchemaStatus s = client.getSchemaCreationStatus(r -> r.apiId(apiId)).status();
+        while (s == SchemaStatus.PROCESSING && Instant.now().isBefore(deadline)) {
+            try {
+                Thread.sleep(50);
+            } catch (InterruptedException ie) {
+                Thread.currentThread().interrupt();
+                throw new RuntimeException(ie);
+            }
+            s = client.getSchemaCreationStatus(r -> r.apiId(apiId)).status();
+        }
+        return s;
     }
 
     @Test
@@ -1222,14 +1237,22 @@ class AppSyncTest {
                 .build();
         HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
 
-        assertThat(resp.statusCode()).isEqualTo(400);
+        // Async path: 200 + PROCESSING; the error surfaces in the FAILED details.
+        assertThat(resp.statusCode()).isEqualTo(200);
         @SuppressWarnings("unchecked")
         Map<String, Object> jsonBody = mapper.readValue(resp.body(), Map.class);
-        assertThat(jsonBody.get("__type")).isEqualTo("BadRequestException");
-        assertThat(jsonBody.get("reason")).isEqualTo("CODE_ERROR");
-        assertThat(jsonBody).containsKey("detail");
+        assertThat(jsonBody.get("status")).isEqualTo("PROCESSING");
+
+        SchemaStatus terminal = pollSchemaStatusToTerminal();
+        assertThat(terminal).isEqualTo(SchemaStatus.FAILED);
+
+        GetSchemaCreationStatusResponse status = client.getSchemaCreationStatus(r -> r.apiId(apiId));
         @SuppressWarnings("unchecked")
-        Map<String, Object> detail = (Map<String, Object>) jsonBody.get("detail");
+        Map<String, Object> extended = mapper.readValue(status.details(), Map.class);
+        assertThat(extended.get("reason")).isEqualTo("CODE_ERROR");
+        assertThat(extended).containsKey("detail");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> detail = (Map<String, Object>) extended.get("detail");
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> codeErrors = (List<Map<String, Object>>) detail.get("codeErrors");
         assertThat(codeErrors).isNotEmpty();
