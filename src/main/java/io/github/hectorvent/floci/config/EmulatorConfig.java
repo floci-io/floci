@@ -1312,6 +1312,14 @@ public interface EmulatorConfig {
         String dockerHost();
 
         /**
+         * Optional registry/repository base for every Docker image Floci launches.
+         * When set, images such as {@code postgres:16-alpine} and
+         * {@code public.ecr.aws/docker/library/ubuntu:24.04} resolve under this
+         * base before the container is created.
+         */
+        Optional<String> imageRegistryBase();
+
+        /**
          * Path to a directory containing Docker's config.json (e.g. /root/.docker).
          * When set, overrides the system default. Useful when Floci runs inside Docker
          * and the host ~/.docker directory is mounted in.
