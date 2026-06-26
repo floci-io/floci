@@ -12,6 +12,7 @@ import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.*;
@@ -1178,5 +1179,67 @@ class AppSyncTest {
                         .build()))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessageContaining("Data source not found:");
+    }
+
+    @Test
+    @Order(137)
+    void createSourceApiAssociationDuplicateThrowsConcurrentModificationException() {
+        String sourceApiId = client.createGraphqlApi(CreateGraphqlApiRequest.builder()
+                .name("sdk-dup-source-" + java.util.UUID.randomUUID().toString().substring(0, 8))
+                .authenticationType("API_KEY")
+                .build()).graphqlApi().apiId();
+
+        try {
+            client.associateSourceGraphqlApi(AssociateSourceGraphqlApiRequest.builder()
+                    .mergedApiIdentifier(apiId)
+                    .sourceApiIdentifier(sourceApiId)
+                    .build());
+
+            assertThatThrownBy(() -> client.associateSourceGraphqlApi(AssociateSourceGraphqlApiRequest.builder()
+                            .mergedApiIdentifier(apiId)
+                            .sourceApiIdentifier(sourceApiId)
+                            .build()))
+                    .isInstanceOf(ConcurrentModificationException.class)
+                    .hasMessageContaining("Source API association already exists for Source API ID")
+                    .hasMessageContaining("and Merged API ID");
+        } finally {
+            client.deleteGraphqlApi(r -> r.apiId(sourceApiId));
+        }
+    }
+
+    @Test
+    @Order(200)
+    void startSchemaCreation_syntaxError_throwsBadRequestWithExtendedBody() throws Exception {
+        String body = """
+            { "definition": "type Query { invalid syntax!!! }" }
+            """;
+        String url = TestFixtures.endpoint() + "/v1/apis/" + apiId + "/schemacreation";
+        HttpRequest req = HttpRequest.newBuilder()
+                .uri(URI.create(url))
+                .header("Authorization", "AWS4-HMAC-SHA256 Credential=test/20260205/us-east-1/appsync/aws4_request")
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        HttpResponse<String> resp = HttpClient.newHttpClient().send(req, HttpResponse.BodyHandlers.ofString());
+
+        assertThat(resp.statusCode()).isEqualTo(400);
+        @SuppressWarnings("unchecked")
+        Map<String, Object> jsonBody = mapper.readValue(resp.body(), Map.class);
+        assertThat(jsonBody.get("__type")).isEqualTo("BadRequestException");
+        assertThat(jsonBody.get("reason")).isEqualTo("CODE_ERROR");
+        assertThat(jsonBody).containsKey("detail");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> detail = (Map<String, Object>) jsonBody.get("detail");
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> codeErrors = (List<Map<String, Object>>) detail.get("codeErrors");
+        assertThat(codeErrors).isNotEmpty();
+        Map<String, Object> first = codeErrors.get(0);
+        assertThat(first.get("errorType")).isEqualTo("PARSER_ERROR");
+        assertThat(first.get("value")).isNotNull();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> location = (Map<String, Object>) first.get("location");
+        assertThat(location.get("line")).isNotNull();
+        assertThat(location.get("column")).isNotNull();
+        assertThat(location.get("span")).isEqualTo(-1);
     }
 }
