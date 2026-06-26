@@ -465,7 +465,7 @@ class IamIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ListUsersResponse.ListUsersResult.Users.member.UserName",
+            .body("ListUsersResponse.ListUsersResult.Users.member.find { it.UserName == 'test-user' }.UserName",
                     equalTo("test-user"));
     }
 
@@ -548,7 +548,7 @@ class IamIntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("ListRolesResponse.ListRolesResult.Roles.member.RoleName",
+            .body("ListRolesResponse.ListRolesResult.Roles.member.find { it.RoleName == 'TestRole' }.RoleName",
                     equalTo("TestRole"));
     }
 

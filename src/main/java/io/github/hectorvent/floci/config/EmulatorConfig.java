@@ -485,6 +485,7 @@ public interface EmulatorConfig {
         BcmDataExportsServiceConfig bcmDataExports();
         ConfigServiceConfig configservice();
         CloudTrailServiceConfig cloudtrail();
+        CloudControlServiceConfig cloudcontrol();
         CloudFrontServiceConfig cloudfront();
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
@@ -521,6 +522,11 @@ public interface EmulatorConfig {
     }
 
     interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CloudControlServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
