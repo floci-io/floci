@@ -8,9 +8,6 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import java.net.URLEncoder;
-import java.nio.charset.StandardCharsets;
-
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.*;
 
@@ -25,10 +22,6 @@ class AppSyncIntegrationTest {
     @BeforeAll
     static void configureRestAssured() {
         RestAssuredJsonUtils.configureAwsContentTypes();
-    }
-
-    private static String encodeArn(String arn) {
-        return URLEncoder.encode(arn, StandardCharsets.UTF_8).replace("+", "%20");
     }
 
     // ── GraphQL API ──────────────────────────────────────────────────────────
@@ -182,19 +175,6 @@ class AppSyncIntegrationTest {
             .statusCode(200)
             .body("apiKeys", hasSize(greaterThanOrEqualTo(1)))
             .body("apiKeys[0].id", notNullValue());
-    }
-
-    @Test
-    @Order(32)
-    void getApiKey() {
-        given()
-            .header("Authorization", AUTH)
-        .when()
-            .get("/v1/apis/" + apiId + "/apikeys/" + keyId)
-        .then()
-            .statusCode(200)
-            .body("apiKey.id", equalTo(keyId))
-            .body("apiKey.description", equalTo("test-key"));
     }
 
     @Test
@@ -457,20 +437,6 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(200)
             .body("resolvers", hasSize(greaterThanOrEqualTo(1)));
-    }
-
-    @Test
-    @Order(62)
-    void listAllResolvers() {
-        given()
-            .header("Authorization", AUTH)
-        .when()
-            .get("/v1/apis/" + apiId + "/resolvers")
-        .then()
-            .statusCode(200)
-            .body("resolvers", hasSize(greaterThanOrEqualTo(1)))
-            .body("resolvers[0].typeName", notNullValue())
-            .body("resolvers[0].fieldName", notNullValue());
     }
 
     @Test
@@ -1136,14 +1102,14 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(204);
 
+        // Verify deletion by listing (getApiKey endpoint does not exist in AWS)
         given()
             .header("Authorization", AUTH)
         .when()
-            .get("/v1/apis/" + apiId + "/apikeys/" + tempKeyId)
+            .get("/v1/apis/" + apiId + "/apikeys")
         .then()
-            .statusCode(404)
-            .body("__type", equalTo("NotFoundException"))
-            .body("message", containsString("API key not found:"));
+            .statusCode(200)
+            .body("apiKeys.id", not(hasItem(tempKeyId)));
     }
 
     @Test
@@ -1660,6 +1626,96 @@ class AppSyncIntegrationTest {
             .body("message", containsString("Channel namespace already exists:"));
 
         given().header("Authorization", AUTH).delete("/v2/apis/" + apiId + "/channelNamespaces/" + nsName).then().statusCode(204);
+    }
+
+    @Test
+    @Order(157)
+    void createSourceApiAssociationDuplicateReturns409() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "dup-source-157", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ConcurrentModificationException"))
+            .body("message", containsString("Source API association already exists for Source API ID"))
+            .body("message", containsString("and Merged API ID"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(158)
+    void createSourceApiAssociationReplacesDeletionScheduled() {
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "replace-source-158", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        String assocId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200)
+            .extract().path("sourceApiAssociation.associationId");
+
+        given()
+            .header("Authorization", AUTH)
+            .delete("/v1/mergedApis/" + apiId + "/sourceApiAssociations/" + assocId)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "sourceApiId": "%s" }
+                """.formatted(sourceApiId))
+        .when()
+            .post("/v1/mergedApis/" + apiId + "/sourceApiAssociations")
+        .then()
+            .statusCode(200);
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
     }
 
     @Test
@@ -2552,7 +2608,9 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"))
-            .body("message", containsString("Invalid schema"));
+            .body("reason", equalTo("CODE_ERROR"))
+            .body("detail.codeErrors[0].errorType", equalTo("PARSER_ERROR"))
+            .body("detail.codeErrors[0].value", notNullValue());
     }
 
     @Test
@@ -2779,7 +2837,109 @@ class AppSyncIntegrationTest {
         .then()
             .statusCode(400)
             .body("__type", equalTo("BadRequestException"))
-            .body("message", containsString("Unknown directive"));
+            .body("reason", equalTo("CODE_ERROR"))
+            .body("detail.codeErrors[0].errorType", equalTo("VALIDATION_ERROR"))
+            .body("detail.codeErrors[0].value", containsString("Unknown directive"));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(700)
+    void startSchemaCreation_syntaxError_returnsExtendedBadRequest() {
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { invalid syntax!!! }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + apiId + "/schemacreation")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("reason", equalTo("CODE_ERROR"))
+            .body("detail.codeErrors", hasSize(greaterThanOrEqualTo(1)))
+            .body("detail.codeErrors[0].errorType", equalTo("PARSER_ERROR"))
+            .body("detail.codeErrors[0].value", notNullValue())
+            .body("detail.codeErrors[0].location", notNullValue())
+            .body("detail.codeErrors[0].location.line", notNullValue())
+            .body("detail.codeErrors[0].location.column", notNullValue())
+            .body("detail.codeErrors[0].location.span", equalTo(-1));
+    }
+
+    @Test
+    @Order(701)
+    void startSchemaCreation_semanticError_returnsExtendedBadRequest() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "semantic-701", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { hello: NonExistentType }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("reason", equalTo("CODE_ERROR"))
+            .body("detail.codeErrors[0].errorType", equalTo("VALIDATION_ERROR"))
+            .body("detail.codeErrors[0].value", containsString("NonExistentType"))
+            .body("detail.codeErrors[0].location.line", notNullValue())
+            .body("detail.codeErrors[0].location.column", notNullValue())
+            .body("detail.codeErrors[0].location.span", equalTo(-1));
+
+        given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
+    }
+
+    @Test
+    @Order(702)
+    void startSchemaCreation_unknownDirective_returnsExtendedBadRequest() {
+        String tempApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "unknown-dir-702", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                {
+                  "definition": "type Query { hello: String @unknownDirective }"
+                }
+                """)
+        .when()
+            .post("/v1/apis/" + tempApiId + "/schemacreation")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("reason", equalTo("CODE_ERROR"))
+            .body("detail.codeErrors[0].errorType", equalTo("VALIDATION_ERROR"))
+            .body("detail.codeErrors[0].value", containsString("Unknown directive: @unknownDirective"))
+            .body("detail.codeErrors[0].location.span", equalTo(-1));
 
         given().header("Authorization", AUTH).delete("/v1/apis/" + tempApiId).then().statusCode(204);
     }
