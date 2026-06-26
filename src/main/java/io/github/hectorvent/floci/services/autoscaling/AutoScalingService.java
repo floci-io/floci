@@ -30,7 +30,7 @@ public class AutoScalingService {
             "Valid requests must contain either the InstanceID parameter "
                     + "or both the ImageId and InstanceType parameters.";
     static final String ACTIVE_INSTANCE_REFRESH_DESIRED_CONFIGURATION_MESSAGE =
-            "Cannot update Auto Scaling group desired configuration while an instance refresh with desired configuration is active.";
+            "You cannot update the launch template, launch configuration, or mixed instances policy while an instance refresh with a desired configuration is active.";
 
     @Inject
     RegionResolver regionResolver;
