@@ -279,6 +279,43 @@ class LambdaIntegrationTest {
         given().delete(BASE_PATH + "/functions/large-zip-fn");
     }
 
+    @Test
+    @Order(15)
+    void createFunctionWithDotSlashNestedHandler() throws Exception {
+        // A handler given with a leading "./" and a nested path (e.g.
+        // "./v1/lambda-handlers/entry.handler") must resolve against the zip entry
+        // "v1/lambda-handlers/entry.js" — the "./" prefix is normalized away.
+        ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        try (ZipOutputStream zos = new ZipOutputStream(baos)) {
+            zos.putNextEntry(new ZipEntry("v1/lambda-handlers/entry.js"));
+            zos.write("exports.handler = async () => ({ ok: true });".getBytes());
+            zos.closeEntry();
+        }
+        String base64Zip = Base64.getEncoder().encodeToString(baos.toByteArray());
+
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "dotslash-fn",
+                    "Runtime": "nodejs20.x",
+                    "Role": "arn:aws:iam::000000000000:role/lambda-role",
+                    "Handler": "./v1/lambda-handlers/entry.handler",
+                    "Code": {
+                        "ZipFile": "%s"
+                    }
+                }
+                """.formatted(base64Zip))
+        .when()
+            .post(BASE_PATH + "/functions")
+        .then()
+            .statusCode(201)
+            .body("FunctionName", equalTo("dotslash-fn"));
+
+        // cleanup
+        given().delete(BASE_PATH + "/functions/dotslash-fn");
+    }
+
     // ── ImageConfig ───────────────────────────────────────────────────────────
 
     @Test

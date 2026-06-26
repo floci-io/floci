@@ -4,10 +4,10 @@ import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -18,9 +18,9 @@ public class IamGroup {
     private String path;
     private String arn;
     private Instant createDate;
-    private List<String> userNames = new ArrayList<>();
-    private List<String> attachedPolicyArns = new ArrayList<>();
-    private Map<String, String> inlinePolicies = new HashMap<>();
+    private List<String> userNames = new CopyOnWriteArrayList<>();
+    private List<String> attachedPolicyArns = new CopyOnWriteArrayList<>();
+    private Map<String, String> inlinePolicies = new ConcurrentHashMap<>();
 
     public IamGroup() {}
 
@@ -48,11 +48,17 @@ public class IamGroup {
     public void setCreateDate(Instant createDate) { this.createDate = createDate; }
 
     public List<String> getUserNames() { return userNames; }
-    public void setUserNames(List<String> userNames) { this.userNames = userNames; }
+    public void setUserNames(List<String> userNames) {
+        this.userNames = new CopyOnWriteArrayList<>(userNames);
+    }
 
     public List<String> getAttachedPolicyArns() { return attachedPolicyArns; }
-    public void setAttachedPolicyArns(List<String> attachedPolicyArns) { this.attachedPolicyArns = attachedPolicyArns; }
+    public void setAttachedPolicyArns(List<String> attachedPolicyArns) {
+        this.attachedPolicyArns = new CopyOnWriteArrayList<>(attachedPolicyArns);
+    }
 
     public Map<String, String> getInlinePolicies() { return inlinePolicies; }
-    public void setInlinePolicies(Map<String, String> inlinePolicies) { this.inlinePolicies = inlinePolicies; }
+    public void setInlinePolicies(Map<String, String> inlinePolicies) {
+        this.inlinePolicies = new ConcurrentHashMap<>(inlinePolicies);
+    }
 }

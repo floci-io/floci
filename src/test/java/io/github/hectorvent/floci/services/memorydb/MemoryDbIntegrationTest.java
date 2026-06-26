@@ -21,6 +21,7 @@ import java.util.List;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.notNullValue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -38,7 +39,9 @@ class MemoryDbIntegrationTest {
     private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final String OPEN_CLUSTER = "it-mdb-open";
     private static final String AUTH_CLUSTER = "it-mdb-auth";
-    private static final String AUTH_TOKEN = "it-mdb-token";
+    private static final String AUTH_USER = "it-mdb-user";
+    private static final String AUTH_ACL = "it-mdb-acl";
+    private static final String AUTH_PASSWORD = "it-mdb-password";
 
     private static final int SOCKET_TIMEOUT_MS = 10_000;
     private static final int READ_LINE_MAX_ATTEMPTS = 3;
@@ -61,6 +64,16 @@ class MemoryDbIntegrationTest {
             } catch (Exception ignored) {
                 // best-effort
             }
+        }
+        try {
+            memorydb("DeleteACL", "{\"ACLName\":\"" + AUTH_ACL + "\"}");
+        } catch (Exception ignored) {
+            // best-effort
+        }
+        try {
+            memorydb("DeleteUser", "{\"UserName\":\"" + AUTH_USER + "\"}");
+        } catch (Exception ignored) {
+            // best-effort
         }
     }
 
@@ -109,31 +122,56 @@ class MemoryDbIntegrationTest {
 
     @Test
     @Order(4)
-    void createClusterWithAuthToken() {
+    void createPasswordUserAndAcl() {
+        // A password user attached to an ACL is how real MemoryDB models auth — the
+        // cluster then references that ACL via ACLName.
+        memorydb("CreateUser", "{"
+                + "\"UserName\":\"" + AUTH_USER + "\","
+                + "\"AccessString\":\"on ~* +@all\","
+                + "\"AuthenticationMode\":{\"Type\":\"password\",\"Passwords\":[\"" + AUTH_PASSWORD + "\"]}}")
+            .then()
+                .statusCode(200)
+                .body("User.Name", equalTo(AUTH_USER))
+                .body("User.Authentication.Type", equalTo("password"));
+
+        // An ACL must include the built-in "default" user (DefaultUserRequired otherwise).
+        memorydb("CreateACL", "{"
+                + "\"ACLName\":\"" + AUTH_ACL + "\","
+                + "\"UserNames\":[\"default\",\"" + AUTH_USER + "\"]}")
+            .then()
+                .statusCode(200)
+                .body("ACL.Name", equalTo(AUTH_ACL))
+                .body("ACL.UserNames", hasItems("default", AUTH_USER));
+    }
+
+    @Test
+    @Order(5)
+    void createClusterReferencingAcl() {
         authPort = memorydb("CreateCluster", "{"
                 + "\"ClusterName\":\"" + AUTH_CLUSTER + "\","
-                + "\"AuthToken\":\"" + AUTH_TOKEN + "\"}")
+                + "\"ACLName\":\"" + AUTH_ACL + "\"}")
             .then()
                 .statusCode(200)
                 .body("Cluster.Name", equalTo(AUTH_CLUSTER))
                 .body("Cluster.Status", equalTo("available"))
+                .body("Cluster.ACLName", equalTo(AUTH_ACL))
             .extract()
                 .path("Cluster.ClusterEndpoint.Port");
     }
 
     @Test
-    @Order(5)
-    void passwordClusterRejectsUnauthenticatedCommand() throws Exception {
+    @Order(6)
+    void aclClusterRejectsUnauthenticatedCommand() throws Exception {
         assertEquals("-NOAUTH Authentication required.\r\n",
                 sendCommand(authPort, respArray("PING")));
     }
 
     @Test
-    @Order(6)
-    void authTokenAllowsAccess() throws Exception {
-        // Exercises end-to-end that CreateCluster propagated AuthToken to the proxy.
+    @Order(7)
+    void aclUserCredentialsAllowAccess() throws Exception {
+        // Exercises end-to-end that the proxy resolves auth through the ACL's user.
         try (Socket socket = openSocket(authPort)) {
-            write(socket, respArray("AUTH", AUTH_TOKEN));
+            write(socket, respArray("AUTH", AUTH_USER, AUTH_PASSWORD));
             assertEquals("+OK\r\n", readLine(socket));
 
             write(socket, respArray("PING"));
@@ -142,14 +180,14 @@ class MemoryDbIntegrationTest {
     }
 
     @Test
-    @Order(7)
+    @Order(8)
     void wrongPasswordRejected() throws Exception {
         assertEquals("-ERR invalid username-password pair or user is disabled.\r\n",
-                sendCommand(authPort, respArray("AUTH", "wrong-token")));
+                sendCommand(authPort, respArray("AUTH", AUTH_USER, "wrong-password")));
     }
 
     @Test
-    @Order(8)
+    @Order(9)
     void deleteClusterReleasesProxyPortForReuse() {
         deleteCluster(OPEN_CLUSTER)
             .then()
@@ -157,7 +195,7 @@ class MemoryDbIntegrationTest {
                 .body("Cluster.Name", equalTo(OPEN_CLUSTER));
 
         int reusedPort = memorydb("CreateCluster",
-                "{\"ClusterName\":\"" + OPEN_CLUSTER + "-reused\"}")
+                "{\"ClusterName\":\"" + OPEN_CLUSTER + "-reused\",\"ACLName\":\"open-access\"}")
             .then()
                 .statusCode(200)
                 .body("Cluster.ClusterEndpoint.Address", equalTo("localhost"))

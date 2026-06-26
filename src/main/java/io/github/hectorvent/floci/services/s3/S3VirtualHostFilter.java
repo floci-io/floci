@@ -205,6 +205,10 @@ public class S3VirtualHostFilter implements ContainerRequestFilter {
         if (remainder.endsWith(".localhost.floci.io") || "localhost.floci.io".equals(remainder)) {
             return remainder.startsWith("s3.") || "localhost.floci.io".equals(remainder);
         }
+        // S3 website endpoints: bucket.s3-website-<region>.amazonaws.com, bucket.s3-website-<region>.localhost, etc.
+        if (remainder.startsWith("s3-website")) {
+            return true;
+        }
         return false;
     }
 }

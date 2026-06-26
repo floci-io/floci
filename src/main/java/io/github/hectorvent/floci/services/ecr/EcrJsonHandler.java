@@ -42,6 +42,8 @@ public class EcrJsonHandler {
         return switch (action) {
             case "CreateRepository" -> handleCreateRepository(request, region);
             case "DescribeRepositories" -> handleDescribeRepositories(request, region);
+            case "BatchGetRepositoryScanningConfiguration" ->
+                    handleBatchGetRepositoryScanningConfiguration(request, region);
             case "DeleteRepository" -> handleDeleteRepository(request, region);
             case "GetAuthorizationToken" -> handleGetAuthorizationToken(request);
             case "ListImages" -> handleListImages(request, region);
@@ -96,6 +98,34 @@ public class EcrJsonHandler {
             arr.add(buildRepository(r));
         }
         response.set("repositories", arr);
+        return Response.ok(response).build();
+    }
+
+    private Response handleBatchGetRepositoryScanningConfiguration(JsonNode request, String region) {
+        // Scanning configuration is not modeled. Resolve names via describeRepositories
+        // and synthesize a wire-accurate RepositoryScanningConfiguration per repo:
+        // scanFrequency derived from scanOnPush (AWS enum: SCAN_ON_PUSH|CONTINUOUS_SCAN|
+        // MANUAL), with empty appliedScanFilters. Note: real AWS reports unknown repos
+        // in the `failures` array; here describeRepositories throws
+        // RepositoryNotFoundException, failing the whole batch instead.
+        List<String> names = parseStringList(request.path("repositoryNames"));
+        String registryId = request.path("registryId").asText(null);
+
+        List<Repository> repos = service.describeRepositories(names, registryId, region);
+
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode configs = objectMapper.createArrayNode();
+        for (Repository r : repos) {
+            ObjectNode cfg = objectMapper.createObjectNode();
+            cfg.put("repositoryArn", r.getRepositoryArn());
+            cfg.put("repositoryName", r.getRepositoryName());
+            cfg.put("scanOnPush", r.isScanOnPush());
+            cfg.put("scanFrequency", r.isScanOnPush() ? "SCAN_ON_PUSH" : "MANUAL");
+            cfg.set("appliedScanFilters", objectMapper.createArrayNode());
+            configs.add(cfg);
+        }
+        response.set("scanningConfigurations", configs);
+        response.set("failures", objectMapper.createArrayNode());
         return Response.ok(response).build();
     }
 

@@ -1,0 +1,105 @@
+instanceTypes:
+  - instanceType: t2.micro
+    vcpu: 1
+    memoryMib: 1024
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+
+  - instanceType: t3.micro
+    vcpu: 2
+    memoryMib: 1024
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+
+  - instanceType: t3.small
+    vcpu: 2
+    memoryMib: 2048
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+
+  - instanceType: t3.medium
+    vcpu: 2
+    memoryMib: 4096
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+
+  - instanceType: m5.large
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - x86_64
+    currentGeneration: true
+
+  - instanceType: t4g.micro
+    vcpu: 2
+    memoryMib: 1024
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: t4g.small
+    vcpu: 2
+    memoryMib: 2048
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: t4g.medium
+    vcpu: 2
+    memoryMib: 4096
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: m6gd.large
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: m6gd.2xlarge
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: m7gd.large
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: m7gd.2xlarge
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: m8gd.medium
+    vcpu: 1
+    memoryMib: 4096
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: m8gd.large
+    vcpu: 2
+    memoryMib: 8192
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true
+
+  - instanceType: m8gd.2xlarge
+    vcpu: 8
+    memoryMib: 32768
+    supportedArchitectures:
+      - arm64
+    currentGeneration: true

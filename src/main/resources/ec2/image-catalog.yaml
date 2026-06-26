@@ -59,6 +59,22 @@ images:
     architecture: x86_64
     creationDate: "2026-05-15T00:00:00.000Z"
 
+  - imageId: ami-ubuntu2404-cloud-arm64
+    aliases:
+      - ami-ubuntu2404-cloud
+    dockerImage: floci/ami-ubuntu:24.04-arm64
+    name: ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-arm64-server-20260515
+    description: Canonical, Ubuntu, 24.04 LTS cloud image
+    ownerId: "099720109477"
+    imageOwnerAlias: canonical
+    architecture: arm64
+    rootDeviceType: ebs
+    virtualizationType: hvm
+    creationDate: "2026-05-15T00:00:00.000Z"
+    guestRuntime: systemd
+    cloudInit: true
+    provenance: target/ami-images/ubuntu-24.04-arm64/provenance.yaml
+
   - imageId: ami-debian12
     dockerImage: public.ecr.aws/docker/library/debian:12
     name: debian-12-amd64-20230411

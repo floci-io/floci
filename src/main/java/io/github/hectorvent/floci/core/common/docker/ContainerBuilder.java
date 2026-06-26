@@ -89,6 +89,7 @@ public class ContainerBuilder {
         private final List<String> extraHosts = new ArrayList<>();
         private LogConfig logConfig;
         private boolean privileged;
+        private String cgroupnsMode;
         private final List<String> dnsServers = new ArrayList<>();
 
         Builder(String image, EmulatorConfig config, DockerHostResolver dockerHostResolver,
@@ -315,6 +316,11 @@ public class ContainerBuilder {
             return this;
         }
 
+        public Builder withCgroupnsMode(String cgroupnsMode) {
+            this.cgroupnsMode = cgroupnsMode;
+            return this;
+        }
+
         /**
          * Injects Floci's embedded DNS server into the container so virtual-hosted
          * S3 hostnames (my-bucket.localhost.floci.io) resolve to Floci's Docker
@@ -357,6 +363,7 @@ public class ContainerBuilder {
                     List.copyOf(extraHosts),
                     logConfig,
                     privileged,
+                    cgroupnsMode,
                     List.copyOf(dnsServers),
                     workingDir
             );

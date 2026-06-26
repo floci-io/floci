@@ -70,6 +70,32 @@ class CloudWatchLogsHandlerTest {
         assertEquals(STREAM, streams.get(0).path("logStreamName").asText());
     }
 
+    // ──────────────────────────── GetDataProtectionPolicy ────────────────────────────
+
+    @Test
+    void getDataProtectionPolicyReturnsEmptyPolicyWith200() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupIdentifier", GROUP);
+
+        Response response = handler.handle("GetDataProtectionPolicy", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        JsonNode body = (JsonNode) response.getEntity();
+        assertEquals(GROUP, body.path("logGroupIdentifier").asText());
+        assertTrue(body.path("policyDocument").isMissingNode());
+    }
+
+    @Test
+    void getDataProtectionPolicyByNameAlsoSucceeds() {
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", GROUP);
+
+        Response response = handler.handle("GetDataProtectionPolicy", request, REGION);
+
+        assertEquals(200, response.getStatus());
+        assertEquals(GROUP, ((JsonNode) response.getEntity()).path("logGroupIdentifier").asText());
+    }
+
     @Test
     void describeLogStreamsByLogGroupIdentifierArnWithWildcardSuffix() {
         ObjectNode request = MAPPER.createObjectNode();
