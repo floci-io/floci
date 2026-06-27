@@ -49,6 +49,7 @@ import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -202,7 +203,7 @@ class Ec2ContainerManagerTest {
         harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
 
-        verify(harness.logStreamer).streamToCloudWatchLogs(
+        verify(harness.logStreamer, timeout(2000)).streamToCloudWatchLogs(
             any(String.class), any(String.class), eq("us-west-2"), eq(TEST_USER_DATA_OUTPUT)
         );
     }
