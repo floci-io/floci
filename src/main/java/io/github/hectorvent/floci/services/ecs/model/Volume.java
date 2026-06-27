@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.ecs.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * A task-level volume in an ECS task definition. Two shapes are modelled:
  * <ul>
@@ -11,6 +13,7 @@ package io.github.hectorvent.floci.services.ecs.model;
  * The two are mutually exclusive. A container references the volume by {@code name} via a
  * {@link MountPoint}.
  */
+@RegisterForReflection
 public record Volume(String name, String hostSourcePath, EfsVolumeConfiguration efs) {
 
     /** Convenience constructor for a {@code host} volume (no EFS configuration). */
