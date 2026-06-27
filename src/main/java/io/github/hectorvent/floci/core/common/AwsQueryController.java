@@ -175,6 +175,7 @@ public class AwsQueryController {
             "CreateLaunchTemplate", "CreateLaunchTemplateVersion", "DescribeLaunchTemplates", "DescribeLaunchTemplateVersions",
             "ModifyLaunchTemplate", "DeleteLaunchTemplate",
             "DescribeNetworkInterfaces",
+            "CreateFlowLogs", "DescribeFlowLogs", "DeleteFlowLogs",
             "CreateVolume", "DescribeVolumes", "DeleteVolume"
     );
 

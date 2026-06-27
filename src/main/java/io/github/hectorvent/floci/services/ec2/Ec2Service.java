@@ -1013,6 +1013,15 @@ public class Ec2Service {
         return deleted;
     }
 
+    /**
+     * Network interfaces owned by interface VPC endpoints (PrivateLink ENIs).
+     * Floci does not currently model per-endpoint ENIs, so this returns empty;
+     * flow log generation uses it as an optional enrichment seam.
+     */
+    public List<NetworkInterface> endpointNetworkInterfaces(String region) {
+        return Collections.emptyList();
+    }
+
     private VpcEndpoint getRequiredVpcEndpoint(String region, String endpointId) {
         VpcEndpoint endpoint = vpcEndpoints.get(key(region, endpointId)).orElse(null);
         if (endpoint == null) {
