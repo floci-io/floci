@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
 import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.ContactList;
 import io.github.hectorvent.floci.services.ses.model.DedicatedIpPool;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.Identity;
@@ -53,6 +54,7 @@ class SesServiceDkimLookupCacheTest {
                 new InMemoryStorage<String, SuppressedDestination>(),
                 new InMemoryStorage<String, AccountSuppressionAttributes>(),
                 new InMemoryStorage<String, DedicatedIpPool>(),
+                new InMemoryStorage<String, ContactList>(),
                 mock(SmtpRelay.class),
                 new ObjectMapper(),
                 route53Service,
