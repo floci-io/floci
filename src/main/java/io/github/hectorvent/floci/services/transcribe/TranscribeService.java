@@ -1,14 +1,20 @@
 package io.github.hectorvent.floci.services.transcribe;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.transcribe.model.TranscriptionJob;
 import io.github.hectorvent.floci.services.transcribe.model.TranscriptionJobSummary;
 import io.github.hectorvent.floci.services.transcribe.model.VocabularyInfo;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 
 import java.time.Instant;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 /**
@@ -20,8 +26,25 @@ import java.util.concurrent.ConcurrentHashMap;
 @ApplicationScoped
 public class TranscribeService {
 
+    private final StorageFactory storageFactory;
+
+    // Transcription jobs are transient (async work deleted after processing); vocabularies are durable.
     private final ConcurrentHashMap<String, TranscriptionJob> transcriptionJobs = new ConcurrentHashMap<>();
-    private final ConcurrentHashMap<String, VocabularyInfo> vocabularies = new ConcurrentHashMap<>();
+    private Map<String, VocabularyInfo> vocabularies = new ConcurrentHashMap<>();
+
+    @Inject
+    public TranscribeService(StorageFactory storageFactory) {
+        this.storageFactory = storageFactory;
+    }
+
+    @PostConstruct
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.vocabularies = new StorageBackedMap<>(storageFactory.create("transcribe",
+                "transcribe-vocabularies.json", new TypeReference<Map<String, VocabularyInfo>>() {}));
+    }
 
     public TranscriptionJob startTranscriptionJob(String jobName, String mediaFileUri,
                                                   String languageCode, String mediaFormat) {
