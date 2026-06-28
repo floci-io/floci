@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.services.sns.SnsQueryHandler;
 import io.github.hectorvent.floci.services.s3.model.Bucket;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesParts;
 import io.github.hectorvent.floci.services.s3.model.GetObjectAttributesResult;
@@ -29,6 +30,7 @@ import jakarta.ws.rs.*;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
+import jakarta.ws.rs.core.MultivaluedMap;
 import jakarta.ws.rs.core.Response;
 import jakarta.ws.rs.core.StreamingOutput;
 import jakarta.ws.rs.core.UriInfo;
@@ -86,17 +88,20 @@ public class S3Controller {
     private final S3Service s3Service;
     private final S3SelectService s3SelectService;
     private final RegionResolver regionResolver;
+    private final SnsQueryHandler snsQueryHandler;
     private final io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest;
     private final io.github.hectorvent.floci.services.floci.ui.UiPages uiPages;
 
     @Inject
     public S3Controller(S3Service s3Service, S3SelectService s3SelectService,
                         RegionResolver regionResolver,
+                        SnsQueryHandler snsQueryHandler,
                         io.quarkus.vertx.http.runtime.CurrentVertxRequest currentVertxRequest,
                         io.github.hectorvent.floci.services.floci.ui.UiPages uiPages) {
         this.s3Service = s3Service;
         this.s3SelectService = s3SelectService;
         this.regionResolver = regionResolver;
+        this.snsQueryHandler = snsQueryHandler;
         this.currentVertxRequest = currentVertxRequest;
         this.uiPages = uiPages;
     }
@@ -106,9 +111,17 @@ public class S3Controller {
     @GET
     @Produces({MediaType.APPLICATION_XML, MediaType.TEXT_HTML})
     public Response listBuckets(@HeaderParam("X-Amz-Target") String target,
-                                @HeaderParam("Accept") String accept) {
+                                @HeaderParam("Accept") String accept,
+                                @Context HttpHeaders httpHeaders,
+                                @Context UriInfo uriInfo) {
         if (target != null) {
             return null;
+        }
+        MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
+        String action = queryParams.getFirst("Action");
+        if ("ConfirmSubscription".equals(action)) {
+            String region = regionResolver.resolveRegion(httpHeaders);
+            return snsQueryHandler.handle(action, queryParams, region);
         }
         // A browser hitting the root endpoint (Accept: text/html) gets the Floci
         // landing page; SDK/CLI callers (no Accept, */*, or an XML/JSON Accept) fall

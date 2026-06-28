@@ -45,6 +45,22 @@ class SnsHttpDeliveryIntegrationTest {
             exchange.sendResponseHeaders(200, 0);
             exchange.close();
         });
+        httpServer.createContext("/confirming-webhook", exchange -> {
+            byte[] bodyBytes = exchange.getRequestBody().readAllBytes();
+            String body = new String(bodyBytes, StandardCharsets.UTF_8);
+            Map<String, List<String>> headers = exchange.getRequestHeaders();
+            receivedRequests.add(new ReceivedRequest(body, headers));
+            try {
+                if ("SubscriptionConfirmation".equals(firstHeader(headers, "X-amz-sns-message-type"))) {
+                    confirmSubscription(new ReceivedRequest(body, headers));
+                }
+                exchange.sendResponseHeaders(200, 0);
+            } catch (Exception e) {
+                exchange.sendResponseHeaders(500, 0);
+            } finally {
+                exchange.close();
+            }
+        });
         httpServer.start();
     }
 
@@ -63,6 +79,11 @@ class SnsHttpDeliveryIntegrationTest {
         while (receivedRequests.size() < expectedCount && System.nanoTime() < deadline) {
             Thread.sleep(50);
         }
+    }
+
+    private static String firstHeader(Map<String, List<String>> headers, String name) {
+        List<String> values = headers.get(name);
+        return values == null || values.isEmpty() ? null : values.get(0);
     }
 
     /**
@@ -176,6 +197,117 @@ class SnsHttpDeliveryIntegrationTest {
         assertTrue(msgAttrs.has("env"));
         assertEquals("String", msgAttrs.get("env").get("Type").asText());
         assertEquals("production", msgAttrs.get("env").get("Value").asText());
+    }
+
+    @Test
+    void publish_toHttpSubscriber_confirmedDuringSuccessfulHandshake_deliversNotification() throws Exception {
+        receivedRequests.clear();
+        String endpoint = "http://localhost:" + httpPort + "/confirming-webhook";
+
+        String topicArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "http-inline-confirm-test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "http")
+            .formParam("Endpoint", endpoint)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SubscriptionArn>"));
+
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        assertEquals("SubscriptionConfirmation", firstHeader(receivedRequests.get(0).headers(), "X-amz-sns-message-type"));
+        receivedRequests.clear();
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "delivered after inline confirm")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        ReceivedRequest req = receivedRequests.get(0);
+        assertEquals("Notification", firstHeader(req.headers(), "X-amz-sns-message-type"));
+        JsonNode envelope = objectMapper.readTree(req.body());
+        assertEquals("Notification", envelope.get("Type").asText());
+        assertEquals("delivered after inline confirm", envelope.get("Message").asText());
+    }
+
+    @Test
+    void subscribeUrl_getConfirmsSubscriptionAndAllowsDelivery() throws Exception {
+        receivedRequests.clear();
+        String endpoint = "http://localhost:" + httpPort + "/webhook";
+
+        String topicArn = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "http-subscribe-url-get-test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "http")
+            .formParam("Endpoint", endpoint)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SubscriptionArn>"));
+
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        JsonNode confirmation = objectMapper.readTree(receivedRequests.get(0).body());
+
+        given()
+            .queryParam("Action", "ConfirmSubscription")
+            .queryParam("TopicArn", confirmation.get("TopicArn").asText())
+            .queryParam("Token", confirmation.get("Token").asText())
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SubscriptionArn>"));
+
+        receivedRequests.clear();
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Publish")
+            .formParam("TopicArn", topicArn)
+            .formParam("Message", "delivered after SubscribeURL GET")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<MessageId>"));
+
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        assertEquals("Notification", firstHeader(receivedRequests.get(0).headers(), "X-amz-sns-message-type"));
     }
 
     @Test
