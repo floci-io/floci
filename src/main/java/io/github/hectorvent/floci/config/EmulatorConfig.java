@@ -430,6 +430,7 @@ public interface EmulatorConfig {
         AcmServiceConfig acm();
         AthenaServiceConfig athena();
         GlueServiceConfig glue();
+        LakeFormationServiceConfig lakeformation();
         SesServiceConfig ses();
         OpenSearchServiceConfig opensearch();
         Ec2ServiceConfig ec2();
@@ -903,6 +904,11 @@ public interface EmulatorConfig {
     }
 
     interface GlueServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface LakeFormationServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }

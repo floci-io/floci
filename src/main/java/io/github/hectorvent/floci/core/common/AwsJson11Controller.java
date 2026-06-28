@@ -31,6 +31,7 @@ import io.github.hectorvent.floci.services.memorydb.MemoryDbHandler;
 import io.github.hectorvent.floci.services.wafv2.WafV2Handler;
 import io.github.hectorvent.floci.services.kinesis.KinesisJsonHandler;
 import io.github.hectorvent.floci.services.kms.KmsJsonHandler;
+import io.github.hectorvent.floci.services.lakeformation.LakeFormationJsonHandler;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerJsonHandler;
 import io.github.hectorvent.floci.services.ssm.Ec2MessagesJsonHandler;
 import io.github.hectorvent.floci.services.ssm.SsmJsonHandler;
@@ -75,6 +76,7 @@ public class AwsJson11Controller {
     private final EcsJsonHandler ecsJsonHandler;
     private final EcrJsonHandler ecrJsonHandler;
     private final GlueJsonHandler glueJsonHandler;
+    private final LakeFormationJsonHandler lakeFormationJsonHandler;
     private final AthenaJsonHandler athenaJsonHandler;
     private final FirehoseJsonHandler firehoseJsonHandler;
     private final ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler;
@@ -107,6 +109,7 @@ public class AwsJson11Controller {
                                KmsJsonHandler kmsJsonHandler, CognitoJsonHandler cognitoJsonHandler,
                                AcmJsonHandler acmJsonHandler, EcsJsonHandler ecsJsonHandler,
                                EcrJsonHandler ecrJsonHandler, GlueJsonHandler glueJsonHandler,
+                               LakeFormationJsonHandler lakeFormationJsonHandler,
                                AthenaJsonHandler athenaJsonHandler,
                                FirehoseJsonHandler firehoseJsonHandler,
                                ResourceGroupsTaggingJsonHandler resourceGroupsTaggingJsonHandler,
@@ -142,6 +145,7 @@ public class AwsJson11Controller {
         this.ecsJsonHandler = ecsJsonHandler;
         this.ecrJsonHandler = ecrJsonHandler;
         this.glueJsonHandler = glueJsonHandler;
+        this.lakeFormationJsonHandler = lakeFormationJsonHandler;
         this.athenaJsonHandler = athenaJsonHandler;
         this.firehoseJsonHandler = firehoseJsonHandler;
         this.resourceGroupsTaggingJsonHandler = resourceGroupsTaggingJsonHandler;
@@ -202,6 +206,7 @@ public class AwsJson11Controller {
                 case "ecs" -> ecsJsonHandler.handle(action, request, region);
                 case "ecr" -> ecrJsonHandler.handle(action, request, region);
                 case "glue" -> glueJsonHandler.handle(action, request, region);
+                case "lakeformation" -> lakeFormationJsonHandler.handle(action, request, region);
                 case "athena" -> athenaJsonHandler.handle(action, request, region);
                 case "firehose" -> firehoseJsonHandler.handle(action, request, region);
                 case "tagging" -> resourceGroupsTaggingJsonHandler.handle(action, request, region);

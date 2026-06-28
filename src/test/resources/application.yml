@@ -171,6 +171,8 @@ floci:
       mock: true
     glue:
       enabled: true
+    lakeformation:
+      enabled: true
     ses:
       enabled: true
     opensearch:
