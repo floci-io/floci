@@ -225,6 +225,10 @@
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>sesv2</artifactId>
         </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>route53</artifactId>
+        </dependency>
         <!-- OpenSearch Service management client -->
         <dependency>
             <groupId>software.amazon.awssdk</groupId>

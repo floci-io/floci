@@ -24,9 +24,9 @@ import software.amazon.awssdk.services.ses.model.TrackingOptionsAlreadyExistsExc
 import software.amazon.awssdk.services.ses.model.TrackingOptionsDoesNotExistException;
 import software.amazon.awssdk.services.ses.model.UpdateConfigurationSetReputationMetricsEnabledRequest;
 import software.amazon.awssdk.services.ses.model.UpdateConfigurationSetTrackingOptionsRequest;
-import software.amazon.awssdk.services.ses.model.VerifyDomainIdentityRequest;
 
 import software.amazon.awssdk.services.sesv2.SesV2Client;
+import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetResponse;
 
@@ -58,8 +58,8 @@ class SesConfigurationSetTrackingOptionsTest {
         sesV1 = TestFixtures.sesClient();
         sesV2 = TestFixtures.sesV2Client();
         deleteCsQuietly();
-        sesV1.verifyDomainIdentity(VerifyDomainIdentityRequest.builder().domain(DOMAIN).build());
-        sesV1.verifyDomainIdentity(VerifyDomainIdentityRequest.builder().domain(DOMAIN_2).build());
+        TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, DOMAIN);
+        TestFixtures.verifySesDomainIdentityViaRoute53(sesV2, DOMAIN_2);
         sesV1.createConfigurationSet(CreateConfigurationSetRequest.builder()
                 .configurationSet(ConfigurationSet.builder().name(CS).build()).build());
     }
@@ -71,6 +71,14 @@ class SesConfigurationSetTrackingOptionsTest {
             sesV1.close();
         }
         if (sesV2 != null) {
+            try {
+                sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
+                        .emailIdentity(DOMAIN).build());
+            } catch (Exception ignored) {}
+            try {
+                sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
+                        .emailIdentity(DOMAIN_2).build());
+            } catch (Exception ignored) {}
             sesV2.close();
         }
     }
