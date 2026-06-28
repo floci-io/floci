@@ -32,6 +32,9 @@ public class Identity {
     @JsonProperty("DkimVerificationStatus")
     private String dkimVerificationStatus;
 
+    @JsonProperty("DkimTokens")
+    private List<String> dkimTokens;
+
     @JsonProperty("NotificationAttributes")
     private Map<String, String> notificationAttributes = new HashMap<>();
 
@@ -85,6 +88,9 @@ public class Identity {
 
     public String getDkimVerificationStatus() { return dkimVerificationStatus; }
     public void setDkimVerificationStatus(String dkimVerificationStatus) { this.dkimVerificationStatus = dkimVerificationStatus; }
+
+    public List<String> getDkimTokens() { return dkimTokens; }
+    public void setDkimTokens(List<String> dkimTokens) { this.dkimTokens = dkimTokens; }
 
     public Map<String, String> getNotificationAttributes() { return notificationAttributes; }
     public void setNotificationAttributes(Map<String, String> notificationAttributes) { this.notificationAttributes = notificationAttributes; }

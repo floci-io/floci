@@ -103,7 +103,8 @@ public class SesController {
 
             ObjectNode result = objectMapper.createObjectNode();
             result.put("IdentityType", toV2IdentityType(identity.getIdentityType()));
-            result.put("VerifiedForSendingStatus", true);
+            result.put("VerifiedForSendingStatus",
+                    "Success".equals(identity.getVerificationStatus()));
             result.set("DkimAttributes", buildDkimAttributes(identity));
 
             LOG.infov("SES V2 CreateEmailIdentity: {0}", emailIdentity);
@@ -1456,7 +1457,12 @@ public class SesController {
         ObjectNode dkim = objectMapper.createObjectNode();
         dkim.put("SigningEnabled", identity.isDkimEnabled());
         dkim.put("Status", toV2Status(identity.getDkimVerificationStatus()));
-        dkim.putArray("Tokens");
+        ArrayNode tokens = dkim.putArray("Tokens");
+        if (identity.getDkimTokens() != null) {
+            for (String token : identity.getDkimTokens()) {
+                tokens.add(token);
+            }
+        }
         return dkim;
     }
 

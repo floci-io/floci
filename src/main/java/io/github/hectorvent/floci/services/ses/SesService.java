@@ -5,6 +5,10 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.route53.Route53Service;
+import io.github.hectorvent.floci.services.route53.model.HostedZone;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecord;
+import io.github.hectorvent.floci.services.route53.model.ResourceRecordSet;
 import io.github.hectorvent.floci.services.ses.model.AccountSuppressionAttributes;
 import io.github.hectorvent.floci.services.ses.model.ArchivingOptions;
 import io.github.hectorvent.floci.services.ses.model.BulkEmailEntry;
@@ -77,10 +81,11 @@ public class SesService {
     private final ObjectMapper objectMapper;
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
+    private final Route53Service route53Service;
 
     @Inject
     public SesService(StorageFactory storageFactory, SmtpRelay smtpRelay, ObjectMapper objectMapper,
-                       SesEventPublisher eventPublisher, EmulatorConfig config) {
+                       SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
@@ -101,6 +106,7 @@ public class SesService {
         this.objectMapper = objectMapper;
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
+        this.route53Service = route53Service;
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -125,6 +131,7 @@ public class SesService {
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
+        this.route53Service = null;
     }
 
     public Identity verifyEmailIdentity(String emailAddress, String region) {
@@ -152,6 +159,10 @@ public class SesService {
         if (existing != null) return existing;
 
         Identity identity = new Identity(domain, "Domain");
+        identity.setDkimTokens(generateDkimTokens());
+        identity.setVerificationStatus("Pending");
+        identity.setDkimEnabled(true);
+        identity.setDkimVerificationStatus("Pending");
         identityStore.put(key, identity);
         LOG.infov("Verified domain identity: {0} in region {1}", domain, region);
         return identity;
@@ -191,7 +202,8 @@ public class SesService {
 
     public Identity getIdentityVerificationAttributes(String identityValue, String region) {
         String key = identityKey(region, identityValue);
-        return identityStore.get(key).orElse(null);
+        Identity identity = identityStore.get(key).orElse(null);
+        return refreshIdentityState(identity, region);
     }
 
     public String sendEmail(String source, List<String> toAddresses, List<String> ccAddresses,
@@ -535,6 +547,112 @@ public class SesService {
         }
         identityStore.put(key, identity);
         LOG.infov("Updated DKIM attributes for {0}: signingEnabled={1}", identityValue, signingEnabled);
+    }
+
+    private List<String> generateDkimTokens() {
+        List<String> tokens = new ArrayList<>(3);
+        for (int i = 0; i < 3; i++) {
+            tokens.add(UUID.randomUUID().toString().replace("-", ""));
+        }
+        return tokens;
+    }
+
+    private Identity refreshIdentityState(Identity identity, String region) {
+        if (identity == null) {
+            return null;
+        }
+
+        boolean changed = false;
+        if ("Domain".equals(identity.getIdentityType()) && identity.getDkimTokens() == null) {
+            identity.setDkimTokens(generateDkimTokens());
+            changed = true;
+        }
+
+        if ("Domain".equals(identity.getIdentityType()) && hasDkimTokens(identity)) {
+            changed |= normalizePendingDomainState(identity);
+            if (!"Success".equals(identity.getVerificationStatus())
+                    && hasAllExpectedDkimRecords(identity)) {
+                identity.setVerificationStatus("Success");
+                if (identity.isDkimEnabled()) {
+                    identity.setDkimVerificationStatus("Success");
+                }
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            identityStore.put(identityKey(region, identity.getIdentity()), identity);
+        }
+        return identity;
+    }
+
+    private boolean hasDkimTokens(Identity identity) {
+        return identity.getDkimTokens() != null && !identity.getDkimTokens().isEmpty();
+    }
+
+    private boolean normalizePendingDomainState(Identity identity) {
+        boolean changed = false;
+        if (!"Success".equals(identity.getVerificationStatus())
+                && !"Pending".equals(identity.getVerificationStatus())) {
+            identity.setVerificationStatus("Pending");
+            changed = true;
+        }
+        if (identity.isDkimEnabled()
+                && !"Success".equals(identity.getDkimVerificationStatus())
+                && !"Pending".equals(identity.getDkimVerificationStatus())) {
+            identity.setDkimVerificationStatus("Pending");
+            changed = true;
+        }
+        return changed;
+    }
+
+    private boolean hasAllExpectedDkimRecords(Identity identity) {
+        if (route53Service == null) {
+            return false;
+        }
+        for (String token : identity.getDkimTokens()) {
+            if (!hasExpectedDkimRecord(identity.getIdentity(), token)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean hasExpectedDkimRecord(String domain, String token) {
+        String expectedName = normalizeDnsName(token + "._domainkey." + domain);
+        String expectedValue = normalizeDnsName(token + ".dkim.amazonses.com");
+        for (HostedZone zone : route53Service.listHostedZones(null, Integer.MAX_VALUE)) {
+            for (ResourceRecordSet recordSet : route53Service.listResourceRecordSets(zone.getId(), null, null,
+                    Integer.MAX_VALUE)) {
+                if (!"CNAME".equalsIgnoreCase(recordSet.getType())) {
+                    continue;
+                }
+                if (!expectedName.equals(normalizeDnsName(recordSet.getName()))) {
+                    continue;
+                }
+                List<ResourceRecord> records = recordSet.getRecords();
+                if (records == null) {
+                    continue;
+                }
+                for (ResourceRecord record : records) {
+                    if (record != null && expectedValue.equals(normalizeDnsName(record.getValue()))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private String normalizeDnsName(String value) {
+        if (value == null) {
+            return "";
+        }
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        while (normalized.endsWith(".")) {
+            normalized = normalized.substring(0, normalized.length() - 1);
+        }
+        return normalized;
     }
 
     public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
