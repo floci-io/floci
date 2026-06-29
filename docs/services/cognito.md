@@ -19,17 +19,91 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 
 ## Supported Actions
 
-| Category                  | Actions                                                                                                                                              |
-|---------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **User Pools**            | CreateUserPool, DescribeUserPool, ListUserPools, UpdateUserPool, DeleteUserPool                                                                      |
-| **User Pool Tags**        | TagResource, UntagResource, ListTagsForResource                                                                                                      |
-| **User Pool Clients**     | CreateUserPoolClient, DescribeUserPoolClient, ListUserPoolClients, DeleteUserPoolClient                                                              |
-| **Resource Servers**      | CreateResourceServer, DescribeResourceServer, ListResourceServers, DeleteResourceServer                                                              |
-| **Admin User Management** | AdminCreateUser (including `MessageAction=RESEND`), AdminGetUser, AdminDeleteUser, AdminSetUserPassword, AdminUpdateUserAttributes                   |
-| **User Operations**       | SignUp, ConfirmSignUp, GetUser, UpdateUserAttributes, ChangePassword, ForgotPassword, ConfirmForgotPassword                                          |
-| **Authentication**        | InitiateAuth, AdminInitiateAuth, RespondToAuthChallenge (supports USER_PASSWORD_AUTH, USER_SRP_AUTH, ADMIN_USER_SRP_AUTH)                            |
-| **User Listing**          | ListUsers                                                                                                                                            |
-| **Groups**                | CreateGroup, GetGroup, UpdateGroup, ListGroups, ListUsersInGroup, DeleteGroup, AdminAddUserToGroup, AdminRemoveUserFromGroup, AdminListGroupsForUser |
+### User Pools
+
+| Action | Description |
+|--------|-------------|
+| CreateUserPool | - |
+| DescribeUserPool | - |
+| ListUserPools | - |
+| UpdateUserPool | - |
+| DeleteUserPool | - |
+
+### User Pool Tags
+
+| Action | Description |
+|--------|-------------|
+| TagResource | - |
+| UntagResource | - |
+| ListTagsForResource | - |
+
+### User Pool Clients
+
+| Action | Description |
+|--------|-------------|
+| CreateUserPoolClient | - |
+| DescribeUserPoolClient | - |
+| ListUserPoolClients | - |
+| DeleteUserPoolClient | - |
+
+### Resource Servers
+
+| Action | Description |
+|--------|-------------|
+| CreateResourceServer | - |
+| DescribeResourceServer | - |
+| ListResourceServers | - |
+| DeleteResourceServer | - |
+
+### Admin User Management
+
+| Action | Description |
+|--------|-------------|
+| AdminCreateUser | - |
+| AdminGetUser | - |
+| AdminDeleteUser | - |
+| AdminSetUserPassword | - |
+| AdminUpdateUserAttributes | - |
+
+### User Operations
+
+| Action | Description |
+|--------|-------------|
+| SignUp | - |
+| ConfirmSignUp | - |
+| GetUser | - |
+| UpdateUserAttributes | - |
+| ChangePassword | - |
+| ForgotPassword | - |
+| ConfirmForgotPassword | - |
+
+### Authentication
+
+| Action | Description |
+|--------|-------------|
+| InitiateAuth | - |
+| AdminInitiateAuth | - |
+| RespondToAuthChallenge | - |
+
+### User Listing
+
+| Action | Description |
+|--------|-------------|
+| ListUsers | - |
+
+### Groups
+
+| Action | Description |
+|--------|-------------|
+| CreateGroup | - |
+| GetGroup | - |
+| UpdateGroup | - |
+| ListGroups | - |
+| ListUsersInGroup | - |
+| DeleteGroup | - |
+| AdminAddUserToGroup | - |
+| AdminRemoveUserFromGroup | - |
+| AdminListGroupsForUser | - |
 
 ## Well-Known And OAuth Endpoints
 
