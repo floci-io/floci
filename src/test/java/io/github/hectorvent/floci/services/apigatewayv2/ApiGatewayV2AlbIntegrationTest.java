@@ -52,6 +52,7 @@ class ApiGatewayV2AlbIntegrationTest {
     private static int stubPort;
 
     private static String lbArn;
+    private static String lbDnsName;
     private static String tgArn;
     private static String listenerArn;
     private static String vpcLinkId;
@@ -86,7 +87,7 @@ class ApiGatewayV2AlbIntegrationTest {
     @Test
     @Order(1)
     void createLoadBalancer() {
-        lbArn = given()
+        Response response = given()
                 .formParam("Action", "CreateLoadBalancer")
                 .formParam("Name", "apigw-alb-test")
                 .formParam("Type", "application")
@@ -97,7 +98,9 @@ class ApiGatewayV2AlbIntegrationTest {
             .then()
                 .statusCode(200)
                 .extract()
-                .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+                .response();
+        lbArn = response.path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
+        lbDnsName = response.path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.DNSName");
     }
 
     @Test
@@ -258,7 +261,7 @@ class ApiGatewayV2AlbIntegrationTest {
                 .connectTimeout(Duration.ofSeconds(2))
                 .build();
         HttpRequest req = HttpRequest.newBuilder()
-                .uri(URI.create("http://127.0.0.1:" + LISTENER_PORT + "/health"))
+                .uri(URI.create("http://" + lbDnsName + ":" + LISTENER_PORT + "/health"))
                 .timeout(Duration.ofSeconds(3))
                 .GET()
                 .build();
