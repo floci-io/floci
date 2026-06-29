@@ -1,6 +1,6 @@
 # Services Overview
 
-Floci emulates 65 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
+Floci emulates 66 AWS services on a single port (`4566`). All services use the real AWS wire protocol, your existing AWS CLI commands and SDK clients work without modification.
 
 This page is the canonical reference for supported service and operation counts. Some services expose separate control-plane and data-plane rows below. Other docs (and the README) should link here rather than duplicating the table.
 
@@ -37,6 +37,7 @@ Operation counts are exact. For dispatch-table services (Query and JSON 1.1) eac
 | [RDS](rds.md) | `POST /` with `Action=` param + TCP proxy | Query + wire | 14 |
 | [RDS Data API](rds-data.md) | `/Execute`, `/BeginTransaction`, `/CommitTransaction`, `/RollbackTransaction` | REST JSON | 4 |
 | [MSK](msk.md) | `/v1/clusters/...`, `/api/v2/clusters/...` + Redpanda broker | REST JSON + Kafka | 8 |
+| [Amazon MQ](amazonmq.md) | `/v1/brokers/...` + RabbitMQ broker | REST JSON + AMQP | 5 |
 | [Athena](athena.md) | `POST /` + `X-Amz-Target: AmazonAthena.*` | JSON 1.1 | 4 |
 | [Glue](glue.md) | `POST /` + `X-Amz-Target: AWSGlue.*` | JSON 1.1 | 38 |
 | [Neptune](neptune.md) | `POST /` with `Action=` param + Gremlin TCP proxy | Query + WebSocket | 8 |

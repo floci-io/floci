@@ -178,7 +178,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**65 AWS services. Broad coverage. Free forever.**
+**66 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -225,7 +225,7 @@ Floci supports local emulation for application services, data services, eventing
 | Containers and compute | ECS, EC2, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Elastic Beanstalk, ELB v2 |
 | Data, analytics, and AI | Athena, Glue, EMR, Firehose, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
-| Messaging and transfer | SES, Kinesis, MSK, Transfer Family |
+| Messaging and transfer | SES, Kinesis, MSK, Amazon MQ, Transfer Family |
 | Security and governance | WAF v2, CloudTrail, CloudFront, Resource Groups Tagging API |
 | Cost and billing | Pricing, Cost Explorer, Cost and Usage Reports, BCM Data Exports |
 | Backup and config | AWS Backup, AWS Config, AppConfig, AppConfigData, CloudFormation |
@@ -266,6 +266,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | Neptune | Real Docker | Graph DB via TinkerPop Gremlin Server (default) or Neo4j for openCypher/Bolt (`NEPTUNE_DB_TYPE`); RDS-shaped control plane; SigV4 proxy on port 8182 |
 | DocumentDB | Real Docker, mock mode available | MongoDB-compatible cluster via real MongoDB containers; RDS-shaped control plane; MongoDB wire protocol on port 27017 |
 | MSK | Real Docker | Kafka-compatible broker via Redpanda |
+| Amazon MQ | Real Docker | RabbitMQ broker via rabbitmq:3-management; AMQP + management console |
 | Athena | In-process with DuckDB sidecar | Real SQL execution over S3 and Glue-backed views |
 | Glue | In-process | Data Catalog, Schema Registry, tables consumed by Athena |
 | EMR | In-process | Cluster (job flow) lifecycle, instance groups and fleets, steps, security configurations, tagging |
@@ -320,6 +321,7 @@ Floci uses real Docker containers when in-process emulation would reduce fidelit
 | Neptune (openCypher) | `neo4j:5-community` | Neo4j backend when `FLOCI_SERVICES_NEPTUNE_DB_TYPE=neo4j`; openCypher over Bolt |
 | DocumentDB | `mongo:7.0` | MongoDB engine; MongoDB wire protocol on port 27017 |
 | MSK | `redpandadata/redpanda:latest` | Kafka-compatible broker via Redpanda |
+| Amazon MQ | `rabbitmq:3-management` | RabbitMQ broker; AMQP on port 5672, management console on 15672 |
 | EC2 | AMI-mapped Linux images | Linux containers, SSH key injection, UserData, IMDS, IAM credentials |
 | ECS | User-specified task image | Container lifecycle, start, stop, health checks |
 | EKS | `rancher/k3s:latest` | Kubernetes API server via k3s |
