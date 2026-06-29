@@ -416,6 +416,58 @@ class IamServiceTest {
     }
 
     // =========================================================================
+    // Session account routing (SessionAccountLookup)
+    // =========================================================================
+
+    @Test
+    void resolveAccountIdUsesRoleArnAccount() {
+        iamService.registerSession(
+                "ASIACROSSACCOUNT",
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().plusSeconds(3600),
+                null,
+                "111122223333"
+        );
+
+        assertEquals("222233334444", iamService.resolveAccountId("ASIACROSSACCOUNT").orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdFallsBackToOriginAccountWhenNoRoleArn() {
+        iamService.registerSession(
+                "ASIASESSIONTOKEN",
+                "temp-secret",
+                null,
+                Instant.now().plusSeconds(3600),
+                null,
+                "111122223333"
+        );
+
+        assertEquals("111122223333", iamService.resolveAccountId("ASIASESSIONTOKEN").orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdEmptyForUnknownKey() {
+        assertTrue(iamService.resolveAccountId("ASIANOTREGISTERED").isEmpty());
+        assertTrue(iamService.resolveAccountId(null).isEmpty());
+    }
+
+    @Test
+    void resolveAccountIdEmptyForExpiredSession() {
+        iamService.registerSession(
+                "ASIAEXPIRED",
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().minusSeconds(60),
+                null,
+                "111122223333"
+        );
+
+        assertTrue(iamService.resolveAccountId("ASIAEXPIRED").isEmpty());
+    }
+
+    // =========================================================================
     // Instance Profiles
     // =========================================================================
 

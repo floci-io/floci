@@ -15,6 +15,8 @@ import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.async.ResultCallback;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.Frame;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.apache.commons.compress.archivers.tar.TarArchiveEntry;
@@ -99,6 +101,10 @@ public class Ec2ContainerManager {
      * @param region      AWS region (for CloudWatch log group naming)
      */
     public void launch(Instance instance, String dockerImage, String publicKey, String region) {
+        launch(instance, ResolvedAmiImage.minimal(dockerImage), publicKey, region);
+    }
+
+    public void launch(Instance instance, ResolvedAmiImage image, String publicKey, String region) {
         instance.setState(InstanceState.pending());
 
         executor.submit(() -> {
@@ -118,9 +124,9 @@ public class Ec2ContainerManager {
                 String imdsEndpoint = "http://" + flociHost + ":" + imdsPort;
                 String serviceEndpoint = "http://" + flociHost + ":4566";
 
-                // Build container spec — use tail -f /dev/null to keep container alive
-                // regardless of the base image's default CMD.
-                ContainerSpec spec = containerBuilder.newContainer(dockerImage)
+                // Build container spec — minimal images keep the historic tail
+                // command, while cloud-image AMI guests can boot their init.
+                ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(image.dockerImage())
                         .withName(containerName)
                         .withEmbeddedDns()
                         .withDockerNetwork(Optional.empty())
@@ -133,8 +139,15 @@ public class Ec2ContainerManager {
                         // needs network administration privileges in the local
                         // container to attach that link-local address.
                         .withPrivileged(true)
-                        .withCmd(List.of("tail", "-f", "/dev/null"))
-                        .build();
+                        .withCmd(image.systemd() ? List.of("/sbin/init") : List.of("tail", "-f", "/dev/null"));
+                if (image.systemd()) {
+                    specBuilder
+                            .withCgroupnsMode("host")
+                            .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run"))
+                            .withMount(new Mount().withType(MountType.TMPFS).withTarget("/run/lock"))
+                            .withBind("/sys/fs/cgroup", "/sys/fs/cgroup");
+                }
+                ContainerSpec spec = specBuilder.build();
 
                 // Create container without starting it
                 String containerId = lifecycleManager.create(spec);
@@ -417,21 +430,31 @@ public class Ec2ContainerManager {
 
     private void executeUserData(String containerId, String instanceId, String userData, String region) {
         try {
+            String logGroup = "/aws/ec2/" + instanceId;
+            String logStream = logStreamer.generateLogStreamName("user-data");
+
             List<String> shellScripts = userDataShellScripts(userData);
             if (shellScripts.isEmpty()) {
                 LOG.infov("UserData for EC2 instance {0} did not contain executable shellscript parts", instanceId);
                 return;
             }
 
+            // Execute the script and stream output to CloudWatch
             for (int i = 0; i < shellScripts.size(); i++) {
-                executeUserDataShellScript(containerId, instanceId, shellScripts.get(i), i + 1, shellScripts.size());
+                executeUserDataShellScript(
+                    containerId, instanceId, shellScripts.get(i), i + 1, shellScripts.size(),
+                    logGroup, logStream, region
+                );
             }
         } catch (Exception e) {
             LOG.warnv("UserData execution failed for EC2 instance {0}: {1}", instanceId, e.getMessage());
         }
     }
 
-    private void executeUserDataShellScript(String containerId, String instanceId, String scriptContent, int partNumber, int partCount) throws Exception {
+    private void executeUserDataShellScript(
+        String containerId, String instanceId, String scriptContent, int partNumber, int partCount,
+        String logGroup, String logStream, String region
+    ) throws Exception {
         byte[] script = scriptContent.getBytes(StandardCharsets.UTF_8);
         byte[] tar = buildSingleFileTar("user-data.sh", script, 0755);
         dockerClient.copyArchiveToContainerCmd(containerId)
@@ -453,8 +476,12 @@ public class Ec2ContainerManager {
         dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
             @Override
             public void onNext(Frame frame) {
-                if (frame.getPayload() != null) {
-                    try { output.write(frame.getPayload()); } catch (IOException ignored) {}
+                byte[] payload = frame.getPayload();
+                if (payload == null) return;
+                try { output.write(payload); } catch (IOException ignored) {}
+                String line = new String(payload, StandardCharsets.UTF_8).stripTrailing();
+                if (!line.isEmpty()) {
+                    logStreamer.streamToCloudWatchLogs(logGroup, logStream, region, line);
                 }
             }
             @Override

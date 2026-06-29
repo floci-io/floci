@@ -38,6 +38,20 @@ floci:
         flush-interval-ms: 60000
       batch:
         flush-interval-ms: 60000
+      codepipeline:
+        flush-interval-ms: 60000
+      s3vectors:
+        flush-interval-ms: 60000
+      ecs:
+        flush-interval-ms: 60000
+      codebuild:
+        flush-interval-ms: 60000
+      config:
+        flush-interval-ms: 60000
+      transcribe:
+        flush-interval-ms: 60000
+      codedeploy:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
@@ -199,7 +213,11 @@ floci:
       runner-mode: immediate
     codedeploy:
       enabled: true
+    codepipeline:
+      enabled: true
     autoscaling:
+      enabled: true
+    elasticbeanstalk:
       enabled: true
     transfer:
       enabled: true
@@ -225,4 +243,15 @@ floci:
     cloudfront:
       enabled: true
     appsync:
+      enabled: true
+    s3vectors:
+      enabled: true
+    iot:
+      enabled: true
+      mqtt:
+        enabled: true
+        auto-start: false
+        host: 127.0.0.1
+        port: 1883
+    iotdata:
       enabled: true

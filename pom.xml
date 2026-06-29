@@ -6,7 +6,7 @@
 
     <groupId>io.github.hectorvent</groupId>
     <artifactId>floci</artifactId>
-    <version>1.5.26</version>
+    <version>1.5.28</version>
     <packaging>jar</packaging>
 
     <name>Floci</name>
@@ -42,6 +42,11 @@
                 <groupId>com.google.api.grpc</groupId>
                 <artifactId>proto-google-common-protos</artifactId>
                 <version>2.49.0</version>
+            </dependency>
+            <dependency>
+                <groupId>com.h2database</groupId>
+                <artifactId>h2-mvstore</artifactId>
+                <version>2.3.232</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -92,12 +97,23 @@
             <groupId>io.quarkus</groupId>
             <artifactId>quarkus-vertx</artifactId>
         </dependency>
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-mqtt</artifactId>
+        </dependency>
 
         <!-- cron-utils for EventBridge schedule expression parsing -->
         <dependency>
             <groupId>com.cronutils</groupId>
             <artifactId>cron-utils</artifactId>
             <version>9.2.1</version>
+        </dependency>
+
+        <!-- Kafka client for MSK/self-managed Kafka pipe polling -->
+        <dependency>
+            <groupId>org.apache.kafka</groupId>
+            <artifactId>kafka-clients</artifactId>
+            <version>4.3.0</version>
         </dependency>
 
 
@@ -226,6 +242,18 @@
             <scope>test</scope>
         </dependency>
         <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.client.mqttv3</artifactId>
+            <version>1.2.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.eclipse.paho</groupId>
+            <artifactId>org.eclipse.paho.mqttv5.client</artifactId>
+            <version>1.2.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-annotations</artifactId>
         </dependency>
@@ -244,6 +272,11 @@
             <groupId>org.neo4j.driver</groupId>
             <artifactId>neo4j-java-driver</artifactId>
             <version>5.28.5</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.awaitility</groupId>
+            <artifactId>awaitility</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>

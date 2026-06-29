@@ -291,9 +291,39 @@ public class SqsEventSourcePoller implements Resettable {
                 attrs.put("ApproximateReceiveCount", String.valueOf(msg.getReceiveCount()));
                 attrs.put("SentTimestamp", String.valueOf(msg.getSentTimestamp().toEpochMilli()));
                 attrs.put("SenderId", AwsArnUtils.accountOrDefault(esm.getEventSourceArn(), "000000000000"));
-                attrs.put("ApproximateFirstReceiveTimestamp", String.valueOf(System.currentTimeMillis()));
-                record.putObject("messageAttributes");
+                attrs.put("ApproximateFirstReceiveTimestamp",
+                        String.valueOf(msg.getFirstReceiveTimestamp() != null
+                                ? msg.getFirstReceiveTimestamp().toEpochMilli()
+                                : System.currentTimeMillis()));
+                if (msg.getSequenceNumber() > 0) {
+                    attrs.put("SequenceNumber", String.valueOf(msg.getSequenceNumber()));
+                }
+                if (msg.getMessageGroupId() != null) {
+                    attrs.put("MessageGroupId", msg.getMessageGroupId());
+                }
+                if (msg.getMessageDeduplicationId() != null) {
+                    attrs.put("MessageDeduplicationId", msg.getMessageDeduplicationId());
+                }
+                // Populate messageAttributes from the message model
+                ObjectNode msgAttrs = record.putObject("messageAttributes");
+                if (msg.getMessageAttributes() != null) {
+                    msg.getMessageAttributes().forEach((name, val) -> {
+                        ObjectNode attrNode = msgAttrs.putObject(name);
+                        attrNode.put("dataType", val.getDataType() != null ? val.getDataType() : "String");
+                        if (val.getBinaryValue() != null) {
+                            attrNode.put("binaryValue",
+                                    java.util.Base64.getEncoder().encodeToString(val.getBinaryValue()));
+                        } else if (val.getStringValue() != null) {
+                            attrNode.put("stringValue", val.getStringValue());
+                        }
+                        attrNode.putArray("stringListValues");
+                        attrNode.putArray("binaryListValues");
+                    });
+                }
                 record.put("md5OfBody", msg.getMd5OfBody() != null ? msg.getMd5OfBody() : "");
+                if (msg.getMd5OfMessageAttributes() != null) {
+                    record.put("md5OfMessageAttributes", msg.getMd5OfMessageAttributes());
+                }
                 record.put("eventSource", "aws:sqs");
                 record.put("eventSourceARN", esm.getEventSourceArn());
                 record.put("awsRegion", esm.getRegion());

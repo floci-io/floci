@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.28] - 2026-06-26
+
+### Added
+
+- **iot:** add experimental IoT Core support with an in-process MQTT broker ([#1359](https://github.com/floci-io/floci/pull/1359))
+- **elasticbeanstalk:** add initial Elastic Beanstalk Query API support ([#1362](https://github.com/floci-io/floci/pull/1362))
+- **memorydb:** model authentication via ACLs and users ([#1478](https://github.com/floci-io/floci/pull/1478))
+- **appsync:** add the `$util` runtime library for VTL resolvers ([#1223](https://github.com/floci-io/floci/pull/1223))
+- **pipes:** support Kafka pipe sources (MSK and self-managed via `smk://`) and polling ([#1260](https://github.com/floci-io/floci/pull/1260))
+- **ecs:** mount `efsVolumeConfiguration` task volumes as shared local volumes ([#1569](https://github.com/floci-io/floci/pull/1569))
+- **ses:** implement `PutConfigurationSetDeliveryOptions` for SES v1 ([#1553](https://github.com/floci-io/floci/pull/1553)); publish SNS notifications to identity feedback topics ([#1540](https://github.com/floci-io/floci/pull/1540))
+- **ec2:** add an instance-type metadata catalog ([#1534](https://github.com/floci-io/floci/pull/1534)); add a Java-built Ubuntu AMI guest image ([#1542](https://github.com/floci-io/floci/pull/1542))
+- **s3:** support bucket logging configuration ([#1510](https://github.com/floci-io/floci/pull/1510))
+- **core:** add opt-in Private Network Access for CORS preflights ([#1530](https://github.com/floci-io/floci/pull/1530))
+
+### Fixed
+
+- **cognito:** align `AdminGetUser` lookup with pool sign-in settings ([#1571](https://github.com/floci-io/floci/pull/1571)); align `CUSTOM_AUTH` trigger failures with AWS behavior ([#1484](https://github.com/floci-io/floci/pull/1484)); align sign-up confirmation with AWS behavior ([#1488](https://github.com/floci-io/floci/pull/1488))
+- **lambda:** use the persisted `firstReceiveTimestamp` in the SQS ESM ([#1548](https://github.com/floci-io/floci/pull/1548)); propagate SQS FIFO system attributes to the ESM event ([#1527](https://github.com/floci-io/floci/pull/1527)); populate SQS `messageAttributes` in the Lambda event payload ([#1422](https://github.com/floci-io/floci/pull/1422)); resolve handler paths with a leading `./` against the package ([#1575](https://github.com/floci-io/floci/pull/1575))
+- **iam:** resolve AWS-managed policies from any account context ([#1573](https://github.com/floci-io/floci/pull/1573)); make entity stores thread-safe under concurrent mutation ([#1509](https://github.com/floci-io/floci/pull/1509))
+- **cloudformation:** fail stack delete when a managed resource cannot be deleted ([#1554](https://github.com/floci-io/floci/pull/1554))
+- **codedeploy:** persist applications, deployment groups, configs, on-prem instances, and tags ([#1579](https://github.com/floci-io/floci/pull/1579))
+- **codebuild:** create the build working directory before running phases ([#1577](https://github.com/floci-io/floci/pull/1577)); stabilize compatibility tests ([#1565](https://github.com/floci-io/floci/pull/1565))
+- **rds:** align subnet group placement handling with AWS behavior ([#1295](https://github.com/floci-io/floci/pull/1295)); align create-time parameter group validation with AWS behavior ([#1330](https://github.com/floci-io/floci/pull/1330))
+- **ec2:** persist default egress as a `SecurityGroupRule` and fix `DescribeSecurityGroupRules` filter parsing ([#1525](https://github.com/floci-io/floci/pull/1525))
+- **msk:** advertise an externally reachable broker address ([#1239](https://github.com/floci-io/floci/pull/1239))
+- **eventbridge:** sync tags to the Resource Groups Tagging API ([#1347](https://github.com/floci-io/floci/pull/1347))
+- **s3:** serve a custom error document for missing keys on static websites ([#1334](https://github.com/floci-io/floci/pull/1334))
+- **cloudfront:** honor the configured domain-suffix for generated distribution domains ([#1533](https://github.com/floci-io/floci/pull/1533))
+- **dynamodb:** throw 400 with exact error messages for invalid expressions ([#1545](https://github.com/floci-io/floci/pull/1545))
+- **athena:** serialize timestamps as epoch seconds in `GetWorkGroup` and `GetTableMetadata` ([#1524](https://github.com/floci-io/floci/pull/1524))
+- **elbv2:** omit the terminal SSL policy marker ([#1522](https://github.com/floci-io/floci/pull/1522))
+- **sfn:** make execution data available via the SDK ([#1506](https://github.com/floci-io/floci/pull/1506))
+- **secretsmanager:** register the `AWSPENDING` version before invoking the rotation Lambda ([#1519](https://github.com/floci-io/floci/pull/1519))
+- **floci-ui:** report real sidecar-start failures instead of always blaming the image ([#1544](https://github.com/floci-io/floci/pull/1544))
+- **core:** implement read APIs required by Steampipe resource collection ([#1538](https://github.com/floci-io/floci/pull/1538))
+
+## [1.5.27] - 2026-06-23
+
+### Added
+
+- **memorydb:** add the MemoryDB service with mock mode ([#1420](https://github.com/floci-io/floci/pull/1420))
+- **s3vectors:** add the S3 Vectors service ([#1435](https://github.com/floci-io/floci/pull/1435))
+- **codepipeline:** add AWS CodePipeline emulation ([#1469](https://github.com/floci-io/floci/pull/1469))
+- **ec2:** add Network ACL support ([#1473](https://github.com/floci-io/floci/pull/1473))
+- **secretsmanager:** implement the automatic secret rotation lifecycle ([#1467](https://github.com/floci-io/floci/pull/1467))
+- **ses:** support v2 dedicated IP pools and configuration-set option groups ([#1412](https://github.com/floci-io/floci/pull/1412)); support v1 configuration-set tracking and reputation-metrics options ([#1479](https://github.com/floci-io/floci/pull/1479))
+- **dynamodb:** add `TableId`, `TableClass`, and `OnDemandThroughput` ([#1457](https://github.com/floci-io/floci/pull/1457))
+- **cloudformation:** generate an implicit API Gateway from SAM `Api` events ([#1438](https://github.com/floci-io/floci/pull/1438))
+- **neptune:** support a neo4j backend for openCypher via `NEPTUNE_DB_TYPE` ([#1449](https://github.com/floci-io/floci/pull/1449))
+
+### Fixed
+
+- **ecs:** persist durable resources via `StorageBackedMap` so they survive a restart ([#1514](https://github.com/floci-io/floci/pull/1514))
+- **codebuild:** persist projects, report groups, and source credentials ([#1515](https://github.com/floci-io/floci/pull/1515))
+- **config:** persist config rules, conformance packs, recorders, delivery channels, and tags ([#1516](https://github.com/floci-io/floci/pull/1516))
+- **dynamodb:** validate `ExclusiveStartKey` against the key schema ([#1443](https://github.com/floci-io/floci/pull/1443)); reject redundant parentheses, duplicate `contains()` operands, and non-string `begins_with` ([#1442](https://github.com/floci-io/floci/pull/1442)); cap scanned items with `Limit` and carry the full cursor on index scans ([#1456](https://github.com/floci-io/floci/pull/1456))
+- **cloudformation:** support OAuth and callback configurations in `UserPoolClient` ([#1458](https://github.com/floci-io/floci/pull/1458)); delete EC2 security groups on stack deletion ([#1472](https://github.com/floci-io/floci/pull/1472)); merge SAM `Globals` into resource properties ([#1427](https://github.com/floci-io/floci/pull/1427))
+- **ec2:** omit the empty `stateReason` element in `DescribeInstances` ([#1410](https://github.com/floci-io/floci/pull/1410)); log instance user data ([#1474](https://github.com/floci-io/floci/pull/1474))
+- **rds:** fix the PostgreSQL proxy ignoring the requested database name ([#1480](https://github.com/floci-io/floci/pull/1480))
+- **cognito:** implement token revocation for `AdminUserGlobalSignOut` ([#1407](https://github.com/floci-io/floci/pull/1407))
+- **apigatewayv2:** cascade-delete child resources and return 404 for dangling references ([#1300](https://github.com/floci-io/floci/pull/1300))
+- **athena:** add partition keys to the table metadata response ([#1454](https://github.com/floci-io/floci/pull/1454))
+- **acm:** restore certificates after a restart by ignoring computed getters ([#1440](https://github.com/floci-io/floci/pull/1440))
+- **autoscaling:** reject launch templates without image ids ([#1451](https://github.com/floci-io/floci/pull/1451))
+- **ssm:** reject send-command timeouts below the AWS minimum ([#1511](https://github.com/floci-io/floci/pull/1511))
+- **docdb/neptune:** stop containers and proxies on emulator shutdown ([#1452](https://github.com/floci-io/floci/pull/1452))
+- **ui:** register `StatusResponse` for native-image reflection ([#1441](https://github.com/floci-io/floci/pull/1441)); resolve the readiness probe URL from the container endpoint ([#1471](https://github.com/floci-io/floci/pull/1471))
+
+### Changed
+
+- **kms:** use enums for type-safety and add algorithms to key metadata ([#1430](https://github.com/floci-io/floci/pull/1430))
+
 ## [1.5.26] - 2026-06-19
 
 ### Added
@@ -1009,7 +1082,9 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.26...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.28...HEAD
+[1.5.28]: https://github.com/floci-io/floci/compare/1.5.27...1.5.28
+[1.5.27]: https://github.com/floci-io/floci/compare/1.5.26...1.5.27
 [1.5.26]: https://github.com/floci-io/floci/compare/1.5.25...1.5.26
 [1.5.25]: https://github.com/floci-io/floci/compare/1.5.24...1.5.25
 [1.5.24]: https://github.com/floci-io/floci/compare/1.5.23...1.5.24

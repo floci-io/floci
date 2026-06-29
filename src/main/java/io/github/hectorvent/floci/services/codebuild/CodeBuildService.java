@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.codebuild;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codebuild.model.Build;
 import io.github.hectorvent.floci.services.codebuild.model.BuildPhase;
 import io.github.hectorvent.floci.services.codebuild.model.Project;
@@ -11,6 +14,7 @@ import io.github.hectorvent.floci.services.codebuild.model.ProjectEnvironment;
 import io.github.hectorvent.floci.services.codebuild.model.ProjectSource;
 import io.github.hectorvent.floci.services.codebuild.model.ReportGroup;
 import io.github.hectorvent.floci.services.codebuild.model.SourceCredential;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -28,23 +32,64 @@ import java.util.stream.Collectors;
 public class CodeBuildService {
 
     // key: region -> name -> project
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Project>> projects = new ConcurrentHashMap<>();
+    private Map<String, Map<String, Project>> projects = new ConcurrentHashMap<>();
     // key: region -> arn -> report group
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, ReportGroup>> reportGroups = new ConcurrentHashMap<>();
+    private Map<String, Map<String, ReportGroup>> reportGroups = new ConcurrentHashMap<>();
     // key: region -> arn -> source credential (token is stored but never returned)
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, SourceCredential>> sourceCredentials = new ConcurrentHashMap<>();
-    // key: region -> buildId -> build
+    private Map<String, Map<String, SourceCredential>> sourceCredentials = new ConcurrentHashMap<>();
+    // key: region -> buildId -> build (transient: builds are runtime state)
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Build>> builds = new ConcurrentHashMap<>();
-    // key: region:projectName -> build counter
+    // key: region:projectName -> build counter (transient)
     private final ConcurrentHashMap<String, AtomicLong> buildCounters = new ConcurrentHashMap<>();
 
     private final CodeBuildRunner runner;
     private final EmulatorConfig config;
+    private final StorageFactory storageFactory;
 
     @Inject
-    public CodeBuildService(CodeBuildRunner runner, EmulatorConfig config) {
+    public CodeBuildService(CodeBuildRunner runner, EmulatorConfig config, StorageFactory storageFactory) {
         this.runner = runner;
         this.config = config;
+        this.storageFactory = storageFactory;
+    }
+
+    @PostConstruct
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.projects = storageBacked("codebuild-projects.json",
+                new TypeReference<Map<String, Map<String, Project>>>() {});
+        this.reportGroups = storageBacked("codebuild-report-groups.json",
+                new TypeReference<Map<String, Map<String, ReportGroup>>>() {});
+        this.sourceCredentials = storageBacked("codebuild-source-credentials.json",
+                new TypeReference<Map<String, Map<String, SourceCredential>>>() {});
+        normalizeRegionMaps(projects);
+        normalizeRegionMaps(reportGroups);
+        normalizeRegionMaps(sourceCredentials);
+    }
+
+    private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference) {
+        return new StorageBackedMap<>(storageFactory.create("codebuild", fileName, typeReference));
+    }
+
+    /** After load, re-wrap the persisted inner maps as {@link ConcurrentHashMap} so per-region
+     *  mutation stays thread-safe (Jackson deserializes them as plain LinkedHashMaps). */
+    private <V> void normalizeRegionMaps(Map<String, Map<String, V>> resources) {
+        for (Map.Entry<String, Map<String, V>> entry : new ArrayList<>(resources.entrySet())) {
+            if (!(entry.getValue() instanceof ConcurrentHashMap)) {
+                resources.put(entry.getKey(), new ConcurrentHashMap<>(entry.getValue()));
+            }
+        }
+    }
+
+    /** {@link StorageBackedMap} only flushes on a top-level put, so an in-place mutation of a
+     *  region's inner map must be written back by re-putting the region entry. */
+    private <V> void persistRegion(Map<String, Map<String, V>> resources, String region) {
+        Map<String, V> regionResources = resources.get(region);
+        if (regionResources != null) {
+            resources.put(region, regionResources);
+        }
     }
 
     private Map<String, Project> projectsFor(String region) {
@@ -121,6 +166,7 @@ public class CodeBuildService {
         project.setProjectVisibility("PRIVATE");
 
         store.put(name, project);
+        persistRegion(projects, region);
         return project;
     }
 
@@ -160,6 +206,7 @@ public class CodeBuildService {
         if (concurrentBuildLimit != null) { project.setConcurrentBuildLimit(concurrentBuildLimit); }
         project.setLastModified(Instant.now().toEpochMilli() / 1000.0);
 
+        persistRegion(projects, region);
         return project;
     }
 
@@ -168,6 +215,7 @@ public class CodeBuildService {
         if (store.remove(name) == null) {
             throw new AwsException("ResourceNotFoundException", "Project not found: " + name, 400);
         }
+        persistRegion(projects, region);
     }
 
     public List<Project> batchGetProjects(String region, List<String> names) {
@@ -213,6 +261,7 @@ public class CodeBuildService {
         rg.setStatus("ACTIVE");
 
         store.put(arn, rg);
+        persistRegion(reportGroups, region);
         return rg;
     }
 
@@ -227,6 +276,7 @@ public class CodeBuildService {
         if (exportConfig != null) { rg.setExportConfig(exportConfig); }
         if (tags != null) { rg.setTags(tags); }
         rg.setLastModified(Instant.now().toEpochMilli() / 1000.0);
+        persistRegion(reportGroups, region);
         return rg;
     }
 
@@ -235,6 +285,7 @@ public class CodeBuildService {
         if (store.remove(arn) == null) {
             throw new AwsException("ResourceNotFoundException", "Report group not found: " + arn, 400);
         }
+        persistRegion(reportGroups, region);
     }
 
     public List<ReportGroup> batchGetReportGroups(String region, List<String> arns) {
@@ -277,6 +328,7 @@ public class CodeBuildService {
         cred.setAuthType(authType);
         // Token is accepted but not stored in plaintext in a returned field
         store.put(arn, cred);
+        persistRegion(sourceCredentials, region);
         return cred;
     }
 
@@ -290,6 +342,7 @@ public class CodeBuildService {
             throw new AwsException("ResourceNotFoundException",
                     "Source credentials not found: " + arn, 400);
         }
+        persistRegion(sourceCredentials, region);
     }
 
     // ---- Curated Environment Images ----

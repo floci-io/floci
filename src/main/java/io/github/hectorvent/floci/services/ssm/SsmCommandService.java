@@ -41,6 +41,7 @@ import java.util.concurrent.Executors;
 public class SsmCommandService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
+    private static final int MIN_TIMEOUT_SECONDS = 30;
     private static final int MAX_STDOUT_CHARS = 24000;
     private static final int MAX_STDERR_CHARS = 8000;
 
@@ -135,6 +136,7 @@ public class SsmCommandService implements Resettable {
         Map<String, List<String>> parameters = parseParameters(request.path("Parameters"));
         String comment = request.path("Comment").asText("");
         int timeoutSeconds = request.path("TimeoutSeconds").asInt(3600);
+        validateTimeoutSeconds(timeoutSeconds);
         String documentVersion = request.path("DocumentVersion").asText("$DEFAULT");
         String outputS3Bucket = request.path("OutputS3BucketName").asText("");
         String outputS3Prefix = request.path("OutputS3KeyPrefix").asText("");
@@ -202,6 +204,15 @@ public class SsmCommandService implements Resettable {
                     region);
         }
         return response;
+    }
+
+    private static void validateTimeoutSeconds(int timeoutSeconds) {
+        if (timeoutSeconds < MIN_TIMEOUT_SECONDS) {
+            throw new AwsException(
+                    "ValidationException",
+                    "1 validation error detected: Value '" + timeoutSeconds + "' at 'timeoutSeconds' failed to satisfy constraint: Member must have value greater than or equal to 30",
+                    400);
+        }
     }
 
     public CommandInvocation getCommandInvocation(String commandId, String instanceId, String region) {

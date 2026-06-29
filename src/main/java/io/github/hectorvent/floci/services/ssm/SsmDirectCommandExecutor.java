@@ -140,22 +140,106 @@ public class SsmDirectCommandExecutor {
         String standardOutput = stdout.toString(StandardCharsets.UTF_8);
         String standardError = stderr.toString(StandardCharsets.UTF_8);
         if (isTimeoutExitCode(responseCode)) {
+            logFailureDiagnostics(containerId);
             return ExecutionResult.timedOut(standardOutput, standardError, start);
         }
         if (responseCode == 0) {
             return ExecutionResult.success(standardOutput, standardError, responseCode, start);
         }
+        logFailureDiagnostics(containerId);
         return ExecutionResult.failed(standardOutput, standardError, responseCode, start);
     }
 
-    private static String timeoutWrappedScript(String script, int timeoutSeconds) {
+    static String timeoutWrappedScript(String script, int timeoutSeconds) {
+        return userScriptCommand(script, timeoutSeconds);
+    }
+
+    private static String userScriptCommand(String script, int timeoutSeconds) {
+        String command = "sh -c " + shellSingleQuote(script);
         if (timeoutSeconds < 1) {
-            return script;
+            return command;
         }
         String timeout = timeoutSeconds + "s";
         return "if command -v timeout >/dev/null 2>&1; then "
-                + "timeout --kill-after=1s " + shellSingleQuote(timeout) + " sh -c " + shellSingleQuote(script) + "; "
-                + "else sh -c " + shellSingleQuote(script) + "; fi";
+                + "timeout --kill-after=1s " + shellSingleQuote(timeout) + " " + command + "; "
+                + "else " + command + "; fi";
+    }
+
+    static String diagnosticWrappedScript(String script) {
+        return "sh -c " + shellSingleQuote(script);
+    }
+
+    private void logFailureDiagnostics(String containerId) {
+        try {
+            String diagnostics = collectFailureDiagnostics(containerId);
+            if (!diagnostics.isBlank()) {
+                LOG.warnf("SSM direct command failed; compact service diagnostics:%n%s", diagnostics);
+            }
+        }
+        catch (Exception e) {
+            LOG.debugv(e, "Unable to collect SSM direct command diagnostics for container {0}", containerId);
+        }
+    }
+
+    private String collectFailureDiagnostics(String containerId) throws InterruptedException {
+        var create = dockerClient.execCreateCmd(containerId)
+                .withCmd("sh", "-c", failureDiagnosticsScript())
+                .withAttachStdout(true)
+                .withAttachStderr(true);
+        String execId = create.exec().getId();
+        CountDownLatch latch = new CountDownLatch(1);
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        ResultCallback<Frame> callback = dockerClient.execStartCmd(execId).exec(new ResultCallback.Adapter<Frame>() {
+            @Override
+            public void onNext(Frame frame) {
+                byte[] payload = frame.getPayload();
+                if (payload == null) {
+                    return;
+                }
+                try {
+                    output.write(payload);
+                }
+                catch (IOException ignored) {
+                }
+            }
+
+            @Override
+            public void onComplete() {
+                latch.countDown();
+            }
+
+            @Override
+            public void onError(Throwable throwable) {
+                latch.countDown();
+            }
+        });
+        boolean completed = latch.await(2, TimeUnit.SECONDS);
+        if (!completed) {
+            closeQuietly(callback);
+        }
+        return output.toString(StandardCharsets.UTF_8);
+    }
+
+    static String failureDiagnosticsScript() {
+        return """
+                floci_ssm_redact() {
+                  sed -E \\
+                    -e 's/(Authorization:[[:space:]]*Bearer[[:space:]]*)[^[:space:]]+/\\1[REDACTED]/Ig' \\
+                    -e 's/((password|passwd|secret|token|client[-_ ]?secret)[^=:\\r\\n]{0,80}[=:][[:space:]]*)[^[:space:]]+/\\1[REDACTED]/Ig'
+                }
+                echo "[floci:ssm] listening ports"
+                (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null || true) | head -40 | floci_ssm_redact
+                echo "[floci:ssm] processes"
+                (ps -eo pid,ppid,comm,args 2>/dev/null || ps aux 2>/dev/null || true) | head -40 | floci_ssm_redact || true
+                log_count=0
+                for log in /var/log/*.log /var/log/*/*.log; do
+                  [ -f "$log" ] || continue
+                  log_count=$((log_count + 1))
+                  [ "$log_count" -le 5 ] || break
+                  echo "[floci:ssm] log tail: $log"
+                  tail -40 "$log" 2>/dev/null | floci_ssm_redact || true
+                done
+                """;
     }
 
     private static long hostTimeoutSeconds(int timeoutSeconds) {

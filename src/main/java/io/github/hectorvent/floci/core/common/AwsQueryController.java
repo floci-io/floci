@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.services.docdb.DocDbService;
 import io.github.hectorvent.floci.services.autoscaling.AutoScalingQueryHandler;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.ec2.Ec2QueryHandler;
+import io.github.hectorvent.floci.services.elasticbeanstalk.ElasticBeanstalkQueryHandler;
 import io.github.hectorvent.floci.services.elbv2.ElbV2QueryHandler;
 import io.github.hectorvent.floci.services.cloudwatch.metrics.CloudWatchMetricsQueryHandler;
 import io.github.hectorvent.floci.services.cognito.CognitoJsonHandler;
@@ -147,6 +148,7 @@ public class AwsQueryController {
             "RebootInstances", "DescribeInstanceStatus", "DescribeInstanceAttribute", "ModifyInstanceAttribute",
             "CreateVpc", "DescribeVpcs", "DeleteVpc", "ModifyVpcAttribute", "DescribeVpcAttribute",
             "DescribeVpcEndpointServices", "CreateVpcEndpoint", "DescribeVpcEndpoints", "DeleteVpcEndpoints",
+            "DescribePrefixLists",
             "CreateDefaultVpc", "AssociateVpcCidrBlock", "DisassociateVpcCidrBlock",
             "CreateSubnet", "DescribeSubnets", "DeleteSubnet", "ModifySubnetAttribute",
             "CreateSecurityGroup", "DescribeSecurityGroups", "DeleteSecurityGroup",
@@ -161,6 +163,9 @@ public class AwsQueryController {
             "AttachInternetGateway", "DetachInternetGateway",
             "CreateRouteTable", "DescribeRouteTables", "DeleteRouteTable",
             "AssociateRouteTable", "DisassociateRouteTable", "CreateRoute", "DeleteRoute",
+            "CreateNetworkAcl", "DescribeNetworkAcls", "DeleteNetworkAcl",
+            "CreateNetworkAclEntry", "ReplaceNetworkAclEntry", "DeleteNetworkAclEntry",
+            "ReplaceNetworkAclAssociation",
             "CreateNatGateway", "DescribeNatGateways", "DeleteNatGateway",
             "AllocateAddress", "AssociateAddress", "DisassociateAddress", "ReleaseAddress", "DescribeAddresses",
             "DescribeAddressesAttribute",
@@ -190,6 +195,7 @@ public class AwsQueryController {
     private final Ec2QueryHandler ec2QueryHandler;
     private final ElbV2QueryHandler elbV2QueryHandler;
     private final AutoScalingQueryHandler autoScalingQueryHandler;
+    private final ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler;
     private final ResolvedServiceCatalog catalog;
     private final RegionResolver regionResolver;
 
@@ -209,6 +215,7 @@ public class AwsQueryController {
                               Ec2QueryHandler ec2QueryHandler,
                               ElbV2QueryHandler elbV2QueryHandler,
                               AutoScalingQueryHandler autoScalingQueryHandler,
+                              ElasticBeanstalkQueryHandler elasticBeanstalkQueryHandler,
                               ResolvedServiceCatalog catalog,
                               RegionResolver regionResolver) {
         this.cloudFormationQueryHandler = cloudFormationQueryHandler;
@@ -228,6 +235,7 @@ public class AwsQueryController {
         this.ec2QueryHandler = ec2QueryHandler;
         this.elbV2QueryHandler = elbV2QueryHandler;
         this.autoScalingQueryHandler = autoScalingQueryHandler;
+        this.elasticBeanstalkQueryHandler = elasticBeanstalkQueryHandler;
         this.catalog = catalog;
         this.regionResolver = regionResolver;
     }
@@ -241,6 +249,9 @@ public class AwsQueryController {
             MultivaluedMap<String, String> formParams) {
 
         String action = formParams.getFirst("Action");
+        if (action == null) {
+            action = formParams.getFirst("Operation");
+        }
         if (action == null) {
             return xmlErrorResponse("MissingAction",
                     "The request must contain the parameter Action", 400);
@@ -286,6 +297,7 @@ public class AwsQueryController {
             case "ec2" -> ec2QueryHandler.handle(action, formParams, region);
             case "elasticloadbalancing" -> elbV2QueryHandler.handle(action, formParams, region);
             case "autoscaling" -> autoScalingQueryHandler.handle(action, formParams, region);
+            case "elasticbeanstalk" -> elasticBeanstalkQueryHandler.handle(action, formParams, region);
             default -> xmlErrorResponse("UnknownService",
                     "Unknown or unsupported service: " + service, 400);
         };
@@ -325,6 +337,13 @@ public class AwsQueryController {
             "ListTagsForResource", "TagResource", "UntagResource"
     );
 
+    private static final Set<String> ELASTIC_BEANSTALK_ACTIONS = Set.of(
+            "CreateApplication", "DescribeApplications", "UpdateApplication", "DeleteApplication",
+            "CreateApplicationVersion", "DescribeApplicationVersions", "DeleteApplicationVersion",
+            "CreateEnvironment", "DescribeEnvironments", "UpdateEnvironment", "TerminateEnvironment",
+            "DescribeConfigurationSettings", "CheckDNSAvailability", "ListAvailableSolutionStacks"
+    );
+
     private static final Set<String> RDS_ACTIONS = Set.of(
             "CreateDBInstance", "DescribeDBInstances", "DeleteDBInstance",
             "ModifyDBInstance", "RebootDBInstance",
@@ -362,7 +381,12 @@ public class AwsQueryController {
             "CreateConfigurationSetEventDestination",
             "UpdateConfigurationSetEventDestination",
             "DeleteConfigurationSetEventDestination",
-            "UpdateConfigurationSetSendingEnabled"
+            "UpdateConfigurationSetSendingEnabled",
+            "CreateConfigurationSetTrackingOptions",
+            "UpdateConfigurationSetTrackingOptions",
+            "DeleteConfigurationSetTrackingOptions",
+            "UpdateConfigurationSetReputationMetricsEnabled",
+            "PutConfigurationSetDeliveryOptions"
     );
 
     private static final Set<String> COGNITO_ACTIONS = Set.of(
@@ -428,6 +452,9 @@ public class AwsQueryController {
         }
         if (AUTOSCALING_ACTIONS.contains(action)) {
             return "autoscaling";
+        }
+        if (ELASTIC_BEANSTALK_ACTIONS.contains(action)) {
+            return "elasticbeanstalk";
         }
         // SQS actions are numerous and not enumerated — fall back to sqs only for
         // requests that arrived without an Authorization header (raw/test clients)

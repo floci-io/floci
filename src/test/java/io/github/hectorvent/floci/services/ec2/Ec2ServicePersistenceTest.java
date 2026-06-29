@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InternetGateway;
+import io.github.hectorvent.floci.services.ec2.model.NetworkAcl;
 import io.github.hectorvent.floci.services.ec2.model.KeyPair;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.NatGateway;
@@ -67,7 +68,7 @@ class Ec2ServicePersistenceTest {
     private Ec2Service newService(Path dir) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         when(config.defaultAccountId()).thenReturn("000000000000");
-        return new Ec2Service(config, null, null, null,
+        return new Ec2Service(config, null, null, null, new Ec2InstanceTypeCatalog(),
                 load(dir, "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 load(dir, "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
                 load(dir, "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
@@ -82,6 +83,7 @@ class Ec2ServicePersistenceTest {
                 load(dir, "ec2-vpc-endpoints.json", new TypeReference<Map<String, VpcEndpoint>>() {}),
                 load(dir, "ec2-nat-gateways.json", new TypeReference<Map<String, NatGateway>>() {}),
                 load(dir, "ec2-spot-instance-requests.json", new TypeReference<Map<String, SpotInstanceRequest>>() {}),
+                load(dir, "ec2-network-acls.json", new TypeReference<Map<String, NetworkAcl>>() {}),
                 load(dir, "ec2-tags.json", new TypeReference<Map<String, List<Tag>>>() {}));
     }
 

@@ -645,7 +645,10 @@ class StepFunctionsDynamoDbIntegrationTest {
                     .post("/");
             String status = resp.jsonPath().getString("status");
             if ("SUCCEEDED".equals(status)) {
-                return resp.jsonPath().getString("output");
+                String output = resp.jsonPath().getString("output");
+                if (output != null) {
+                    return output;
+                }
             }
             if ("FAILED".equals(status) || "ABORTED".equals(status)) {
                 fail("Execution " + status + ": " + resp.body().asString());

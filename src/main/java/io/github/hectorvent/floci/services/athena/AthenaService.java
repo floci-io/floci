@@ -369,7 +369,7 @@ public class AthenaService {
             detail.put("Description", workGroup.getDescription());
         }
         if (workGroup.getCreationTime() != null) {
-            detail.put("CreationTime", workGroup.getCreationTime());
+            detail.put("CreationTime", workGroup.getCreationTime().getEpochSecond());
         }
         if (workGroup.getConfiguration() != null) {
             detail.put("Configuration", workGroup.getConfiguration());
@@ -475,8 +475,8 @@ public class AthenaService {
     private Map<String, Object> tableMetadata(String catalog, String database, Table table) {
         Map<String, Object> metadata = new LinkedHashMap<>();
         metadata.put("Name", table.getName());
-        metadata.put("CreateTime", table.getCreateTime() != null ? table.getCreateTime() : Instant.now());
-        metadata.put("LastAccessTime", table.getLastAccessTime() != null ? table.getLastAccessTime() : Instant.now());
+        metadata.put("CreateTime", (table.getCreateTime() != null ? table.getCreateTime() : Instant.now()).getEpochSecond());
+        metadata.put("LastAccessTime", (table.getLastAccessTime() != null ? table.getLastAccessTime() : Instant.now()).getEpochSecond());
         metadata.put("TableType", table.getTableType() != null ? table.getTableType() : "EXTERNAL_TABLE");
         metadata.put("Columns", athenaColumns(table));
         metadata.put("Parameters", table.getParameters() != null ? table.getParameters() : Map.of());

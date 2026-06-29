@@ -14,6 +14,7 @@ public class Bucket {
     private String name;
     private Instant creationDate;
     private String versioningStatus; // null (never enabled), "Enabled", "Suspended"
+    private String loggingConfiguration;
     private Map<String, String> tags;
     private NotificationConfiguration notificationConfiguration;
     private boolean objectLockEnabled;
@@ -48,6 +49,14 @@ public class Bucket {
 
     public String getVersioningStatus() { return versioningStatus; }
     public void setVersioningStatus(String versioningStatus) { this.versioningStatus = versioningStatus; }
+
+    public String getLoggingConfiguration() {
+        return loggingConfiguration;
+    }
+
+    public void setLoggingConfiguration(String loggingConfiguration) {
+        this.loggingConfiguration = loggingConfiguration;
+    }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }

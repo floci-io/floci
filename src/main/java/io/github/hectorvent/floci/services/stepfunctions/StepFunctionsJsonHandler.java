@@ -212,7 +212,10 @@ public class StepFunctionsJsonHandler {
     }
 
     private Response handleGetExecutionHistory(JsonNode request) {
-        List<HistoryEvent> events = service.getExecutionHistory(request.path("executionArn").asText());
+        var arn = request.path("executionArn").asText();
+        var includeExecutionData = request.path("includeExecutionData").asBoolean(true);
+
+        List<HistoryEvent> events = service.getExecutionHistory(arn);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("events");
         for (HistoryEvent e : events) {
@@ -221,11 +224,21 @@ public class StepFunctionsJsonHandler {
             item.put("timestamp", e.getTimestamp());
             item.put("type", e.getType());
             if (e.getPreviousEventId() != null) item.put("previousEventId", e.getPreviousEventId());
-            if (e.getDetails() != null) {
-                item.set(e.getType() + "EventDetails", objectMapper.valueToTree(e.getDetails()));
+            if (includeExecutionData && e.getDetails() != null) {
+                item.set(historyEventDetailsField(e.getType()), objectMapper.valueToTree(e.getDetails()));
             }
         }
         return Response.ok(response).build();
+    }
+
+    static String historyEventDetailsField(String type) {
+        if (type.endsWith("StateEntered")) {
+            return "stateEnteredEventDetails";
+        }
+        if (type.endsWith("StateExited")) {
+            return "stateExitedEventDetails";
+        }
+        return Character.toLowerCase(type.charAt(0)) + type.substring(1) + "EventDetails";
     }
 
     private Response handleSendTaskSuccess(JsonNode request) {

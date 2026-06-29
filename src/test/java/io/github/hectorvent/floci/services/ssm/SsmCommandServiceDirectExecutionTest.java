@@ -102,11 +102,11 @@ class SsmCommandServiceDirectExecutionTest {
     void directTimeoutMarksCommandTimedOut() throws Exception {
         SsmDirectCommandExecutor executor = mock(SsmDirectCommandExecutor.class);
         Instant start = Instant.parse("2026-06-07T00:00:00Z");
-        Instant end = Instant.parse("2026-06-07T00:00:05Z");
+        Instant end = Instant.parse("2026-06-07T00:00:30Z");
         when(executor.supports(eq("i-timeout"), eq("AWS-RunShellScript"))).thenReturn(true);
-        when(executor.executeIfSupported(eq("i-timeout"), eq("AWS-RunShellScript"), any(), eq(5)))
+        when(executor.executeIfSupported(eq("i-timeout"), eq("AWS-RunShellScript"), any(), eq(30)))
                 .thenReturn(Optional.of(new SsmDirectCommandExecutor.ExecutionResult(
-                        "TimedOut", "", "Timed out after 5s", -1, start, end)));
+                        "TimedOut", "", "Timed out after 30s", -1, start, end)));
 
         SsmCommandService service = new SsmCommandService(
                 new InMemoryStorageFactory(),
@@ -121,7 +121,7 @@ class SsmCommandServiceDirectExecutionTest {
                   "Parameters": {
                     "commands": ["sleep 100"]
                   },
-                  "TimeoutSeconds": 5
+                  "TimeoutSeconds": 30
                 }
                 """), "us-west-2");
 
@@ -133,7 +133,7 @@ class SsmCommandServiceDirectExecutionTest {
         assertEquals("TimedOut", invocation.getStatus());
         assertEquals("Execution Timed Out", invocation.getStatusDetails());
         assertEquals(-1, invocation.getResponseCode());
-        assertEquals("Timed out after 5s", invocation.getStandardErrorContent());
+        assertEquals("Timed out after 30s", invocation.getStandardErrorContent());
     }
 
     @Test

@@ -213,6 +213,39 @@ public class S3Service implements Resettable {
         return bucketStore.scan(key -> true);
     }
 
+    public void putBucketLogging(String bucketName, String loggingConfigurationXml) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        if (loggingConfigurationXml == null || loggingConfigurationXml.isBlank()) {
+            bucket.setLoggingConfiguration(null);
+        } else {
+            String targetBucket = XmlParser.extractFirst(loggingConfigurationXml, "TargetBucket", null);
+            if (targetBucket == null) {
+                bucket.setLoggingConfiguration(null);
+            } else {
+                bucket.setLoggingConfiguration(loggingConfigurationXml);
+            }
+        }
+
+        bucketStore.put(bucketName, bucket);
+    }
+
+    public String getBucketLogging(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        if (bucket.getLoggingConfiguration() == null || bucket.getLoggingConfiguration().isBlank()) {
+            return new XmlBuilder()
+                    .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    .start("BucketLoggingStatus", AwsNamespaces.S3)
+                    .end("BucketLoggingStatus")
+                    .build();
+        }
+
+        return bucket.getLoggingConfiguration();
+    }
+
     public S3Object putObject(String bucketName, String key, byte[] data,
                               String contentType, Map<String, String> metadata) {
         return putObject(bucketName, key, data, contentType, metadata, new PutObjectOptions());

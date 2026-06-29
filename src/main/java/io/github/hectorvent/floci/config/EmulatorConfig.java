@@ -126,6 +126,18 @@ public interface EmulatorConfig {
 
         @WithDefault("false")
         boolean disableCorsHeaders();
+
+        /**
+         * Whether to grant Private Network Access preflights (respond with
+         * {@code Access-Control-Allow-Private-Network: true}) when the browser asks.
+         * Only takes effect after the origin already passes the CORS allow-list, so a
+         * page served from a public/secure origin can reach this loopback backend.
+         *
+         * <p>Off by default: it lets a public origin reach the private network, so it
+         * must be opted into explicitly.</p>
+         */
+        @WithDefault("false")
+        boolean corsAllowPrivateNetwork();
     }
 
     interface StorageConfig {
@@ -175,6 +187,13 @@ public interface EmulatorConfig {
         CloudFrontStorageConfig cloudfront();
         AppSyncStorageConfig appsync();
         BatchStorageConfig batch();
+        CodePipelineStorageConfig codepipeline();
+        S3VectorsStorageConfig s3vectors();
+        EcsStorageConfig ecs();
+        CodeBuildStorageConfig codebuild();
+        ConfigStorageConfig config();
+        CodeDeployStorageConfig codedeploy();
+        TranscribeStorageConfig transcribe();
     }
 
     interface SsmStorageConfig {
@@ -313,6 +332,55 @@ public interface EmulatorConfig {
         long flushIntervalMs();
     }
 
+    interface CodePipelineStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface S3VectorsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface EcsStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface CodeBuildStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface ConfigStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface TranscribeStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface CodeDeployStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
     interface WalConfig {
         @WithDefault("30000")
         long compactionIntervalMs();
@@ -376,7 +444,9 @@ public interface EmulatorConfig {
         ElbV2ServiceConfig elbv2();
         CodeBuildServiceConfig codebuild();
         CodeDeployServiceConfig codedeploy();
+        CodePipelineServiceConfig codepipeline();
         AutoScalingServiceConfig autoscaling();
+        ElasticBeanstalkServiceConfig elasticbeanstalk();
         BackupServiceConfig backup();
         NeptuneServiceConfig neptune();
         DocDbServiceConfig docdb();
@@ -395,9 +465,43 @@ public interface EmulatorConfig {
         AppSyncServiceConfig appsync();
         BatchServiceConfig batch();
         UiServiceConfig ui();
+        S3VectorsServiceConfig s3vectors();
+        IotServiceConfig iot();
+        IotDataServiceConfig iotdata();
+    }
+
+    interface IotServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        MqttConfig mqtt();
+    }
+
+    interface MqttConfig {
+        @WithDefault("true")
+        boolean enabled();
+
+        @WithDefault("false")
+        boolean autoStart();
+
+        @WithDefault("0.0.0.0")
+        String host();
+
+        @WithDefault("1883")
+        int port();
+    }
+
+    interface IotDataServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
     }
 
     interface CloudTrailServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface S3VectorsServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -442,6 +546,11 @@ public interface EmulatorConfig {
         boolean enabled();
     }
 
+    interface ElasticBeanstalkServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
     interface CodeBuildServiceConfig {
         @WithDefault("true")
         boolean enabled();
@@ -460,6 +569,11 @@ public interface EmulatorConfig {
     }
 
     interface CodeDeployServiceConfig {
+        @WithDefault("true")
+        boolean enabled();
+    }
+
+    interface CodePipelineServiceConfig {
         @WithDefault("true")
         boolean enabled();
     }
@@ -529,6 +643,12 @@ public interface EmulatorConfig {
 
         @WithDefault("redpandadata/redpanda:latest")
         String defaultImage();
+
+        @WithDefault("9300")
+        int kafkaHostPortBase();
+
+        @WithDefault("9399")
+        int kafkaHostPortMax();
     }
 
     interface ElastiCacheServiceConfig {
