@@ -7,17 +7,24 @@ Floci emulates Amazon Athena with **real SQL execution** powered by a [floci-duc
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `StartQueryExecution` | Submits a SQL query; executed asynchronously via DuckDB |
 | `GetQueryExecution` | Returns query status (`QUEUED`, `RUNNING`, `SUCCEEDED`, `FAILED`) |
 | `GetQueryResults` | Returns the result set for a completed query |
 | `ListQueryExecutions` | Returns a list of past query executions |
 | `StopQueryExecution` | Cancels a running query |
-| `CreateWorkGroup` | Creates a new workgroup |
 | `GetWorkGroup` | Returns information about a workgroup |
-| `DeleteWorkGroup` | Deletes a workgroup |
 | `ListWorkGroups` | Lists all workgroups |
+| `CreateWorkGroup` | Creates a new workgroup |
+| `ListDataCatalogs` | - |
+| `GetDataCatalog` | - |
+| `ListDatabases` | - |
+| `ListTableMetadata` | - |
+| `GetTableMetadata` | - |
+| `DeleteWorkGroup` | Deletes a workgroup |
+<!-- floci:actions:end -->
 
 ## How it works
 

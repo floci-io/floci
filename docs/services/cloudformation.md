@@ -5,26 +5,28 @@
 
 ## Supported Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
+| `DescribeStacks` | Get stack status and outputs |
 | `CreateStack` | Deploy a CloudFormation template |
 | `UpdateStack` | Update an existing stack |
 | `DeleteStack` | Delete a stack and its resources |
-| `DescribeStacks` | Get stack status and outputs |
-| `ListStacks` | List stacks by status |
-| `DescribeStackEvents` | Get stack creation/update event history |
-| `DescribeStackResources` | Get all resources in a stack |
-| `DescribeStackResource` | Get a specific stack resource |
-| `ListStackResources` | List resource summaries |
-| `GetTemplate` | Retrieve the template body |
-| `ValidateTemplate` | Accepted; returns success without validating (stub) |
 | `CreateChangeSet` | Create a change set |
 | `DescribeChangeSet` | Get change set details (no computed diff/preview) |
 | `ExecuteChangeSet` | Apply a change set |
-| `ListChangeSets` | List change sets for a stack |
 | `DeleteChangeSet` | Delete a change set |
+| `ListChangeSets` | List change sets for a stack |
+| `DescribeStackEvents` | Get stack creation/update event history |
+| `DescribeStackResources` | Get all resources in a stack |
+| `ListStackResources` | List resource summaries |
+| `GetTemplate` | Retrieve the template body |
+| `ValidateTemplate` | Accepted; returns success without validating (stub) |
+| `ListStacks` | List stacks by status |
+| `ListExports` | - |
 | `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
 | `GetStackPolicy` | Accepted; returns an empty policy (stub) |
+| `DescribeStackResource` | Get a specific stack resource |
 | `CreateStackSet` | Create a stack set from a template |
 | `DescribeStackSet` | Get stack set details |
 | `ListStackSets` | List stack sets |
@@ -34,6 +36,7 @@
 | `ListStackInstances` | List instances (optionally filtered by account/region) |
 | `DeleteStackInstances` | Remove instances and their resources |
 | `ListStackSetOperations` | List operations performed on a stack set |
+<!-- floci:actions:end -->
 
 ## Supported Resource Types
 

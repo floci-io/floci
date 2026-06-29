@@ -10,8 +10,9 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 
 ## Supported Management Actions
 
+<!-- floci:actions:start -->
 | Action | Description |
-|---|---|
+| --- | --- |
 | `CreateDBInstance` | Start a new database instance |
 | `DescribeDBInstances` | List instances and their connection info |
 | `DeleteDBInstance` | Stop and remove an instance |
@@ -22,9 +23,6 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DescribeDBSubnetGroups` | List DB subnet groups |
 | `ModifyDBSubnetGroup` | Update DB subnet group description and subnet list |
 | `DeleteDBSubnetGroup` | Delete a DB subnet group |
-| `AddTagsToResource` | Add tags to a DB resource |
-| `ListTagsForResource` | List tags for a DB resource |
-| `RemoveTagsFromResource` | Remove tags from a DB resource |
 | `CreateDBCluster` | Create an Aurora-compatible cluster |
 | `DescribeDBClusters` | List clusters |
 | `DeleteDBCluster` | Delete a cluster |
@@ -34,6 +32,15 @@ RDS Data API (`rds-data`) is documented separately because it uses REST JSON rou
 | `DeleteDBParameterGroup` | Delete a parameter group |
 | `ModifyDBParameterGroup` | Update parameter group settings |
 | `DescribeDBParameters` | List parameters in a group |
+| `CreateDBClusterParameterGroup` | - |
+| `DescribeDBClusterParameterGroups` | - |
+| `DeleteDBClusterParameterGroup` | - |
+| `ModifyDBClusterParameterGroup` | - |
+| `DescribeDBClusterParameters` | - |
+| `AddTagsToResource` | Add tags to a DB resource |
+| `ListTagsForResource` | List tags for a DB resource |
+| `RemoveTagsFromResource` | Remove tags from a DB resource |
+<!-- floci:actions:end -->
 
 ## Configuration
 
