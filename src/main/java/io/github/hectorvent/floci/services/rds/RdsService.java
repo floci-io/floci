@@ -1133,7 +1133,7 @@ public class RdsService implements Resettable {
     }
 
     private String volumeName(String volumeId, String fallbackId) {
-        return ContainerStorageHelper.resourceName("rds", volumeId, fallbackId);
+        return ContainerStorageHelper.resourceName(config, "rds", volumeId, fallbackId);
     }
 
     private RdsContainerHandle buildHandle(DbInstance instance) {

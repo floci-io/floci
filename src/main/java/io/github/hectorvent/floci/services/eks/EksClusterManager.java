@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.eks.model.CertificateAuthority;
@@ -72,7 +73,7 @@ public class EksClusterManager {
      */
     public void startCluster(Cluster cluster) {
         String image = config.services().eks().defaultImage();
-        String containerName = "floci-eks-" + cluster.getName();
+        String containerName = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
 
         LOG.infov("Starting k3s container for EKS cluster: {0} using image {1}",
                 cluster.getName(), image);
@@ -96,7 +97,7 @@ public class EksClusterManager {
         // socket (kine.sock) on macOS APFS, which returns EINVAL on chmod — crashing
         // k3s before it can start. Named volumes live in the Docker VM's Linux
         // filesystem, so chmod works correctly and data persists across container restarts.
-        String volumeName = "floci-eks-" + cluster.getName();
+        String volumeName = ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName());
 
         List<String> serverArgs = new ArrayList<>(List.of("server",
                 "--disable=traefik",
@@ -230,7 +231,7 @@ public class EksClusterManager {
             return;
         }
         lifecycleManager.stopAndRemove(cluster.getContainerId(), null);
-        lifecycleManager.removeVolume("floci-eks-" + cluster.getName());
+        lifecycleManager.removeVolume(ContainerStorageHelper.resourceName(config, "eks", null, cluster.getName()));
         LOG.infov("Stopped k3s container for cluster {0}", cluster.getName());
     }
 

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
@@ -160,7 +161,7 @@ public class ContainerLauncher {
 
         // Give the container a human-readable name (needed for log stream name below)
         String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
-        String containerName = "floci-" + fn.getFunctionName() + "-" + shortId;
+        String containerName = ContainerStorageHelper.dockerName(config, "floci-" + fn.getFunctionName() + "-" + shortId);
 
         // CloudWatch log coordinates — computed here so they can be injected as env vars
         String cwLogGroup  = "/aws/lambda/" + fn.getFunctionName();

@@ -135,7 +135,7 @@ public class EcrRegistryManager {
         if (started) {
             return;
         }
-        String name = config.services().ecr().registryContainerName();
+        String name = ContainerStorageHelper.dockerName(config, config.services().ecr().registryContainerName());
 
         // Check for existing container to adopt
         var existing = lifecycleManager.findByName(name);
@@ -194,8 +194,9 @@ public class EcrRegistryManager {
 
     private void addPersistenceMounts(ContainerBuilder.Builder specBuilder, List<String> env) {
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            lifecycleManager.ensureVolume(NAMED_VOLUME);
-            specBuilder.withNamedVolume(NAMED_VOLUME, "/var/lib/registry");
+            String volumeName = ContainerStorageHelper.dockerName(config, NAMED_VOLUME);
+            lifecycleManager.ensureVolume(volumeName);
+            specBuilder.withNamedVolume(volumeName, "/var/lib/registry");
             return;
         }
 

@@ -1448,6 +1448,12 @@ public interface EmulatorConfig {
         String dockerHost();
 
         /**
+         * Optional namespace inserted into Floci-managed child container and volume names.
+         * Useful when multiple Floci processes share one Docker daemon.
+         */
+        Optional<String> resourceNamespace();
+
+        /**
          * Optional registry/repository base for every Docker image Floci launches.
          * When set, images such as {@code postgres:16-alpine} and
          * {@code public.ecr.aws/docker/library/ubuntu:24.04} resolve under this

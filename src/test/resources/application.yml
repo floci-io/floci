@@ -78,6 +78,7 @@ floci:
   docker:
     log-max-size: "10m"
     log-max-file: "3"
+    resource-namespace: ""
 
   services:
     ssm:

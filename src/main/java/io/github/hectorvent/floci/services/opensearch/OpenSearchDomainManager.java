@@ -48,7 +48,7 @@ public class OpenSearchDomainManager {
 
     public void startDomain(Domain domain) {
         String image = resolveImage(domain.getEngineVersion());
-        String containerName = "floci-opensearch-" + domain.getDomainName();
+        String containerName = ContainerStorageHelper.resourceName(config, "opensearch", domain.getVolumeId(), domain.getDomainName());
 
         LOG.infov("Starting OpenSearch container for domain: {0} (version={1}, image={2})",
                 domain.getDomainName(), domain.getEngineVersion(), image);
@@ -69,12 +69,12 @@ public class OpenSearchDomainManager {
         applyEngineEnv(specBuilder, domain.getEngineVersion());
 
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
+            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
                     "opensearch", domain.getVolumeId(), domain.getDomainName(),
                     "/usr/share/opensearch/data");
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
-            Path dataPath = Path.of(config.services().opensearch().dataPath(), domain.getDomainName());
+            Path dataPath = ContainerStorageHelper.hostResourcePath(config, "opensearch", domain.getDomainName());
             ContainerStorageHelper.ensureHostDir(dataPath.toString());
             String dataPathStr = dataPath.toAbsolutePath().normalize().toString();
             String persistentPathStr = Path.of(config.storage().persistentPath()).toAbsolutePath().normalize().toString();
@@ -98,7 +98,7 @@ public class OpenSearchDomainManager {
     }
 
     public boolean isReady(Domain domain) {
-        String containerName = "floci-opensearch-" + domain.getDomainName();
+        String containerName = ContainerStorageHelper.resourceName(config, "opensearch", domain.getVolumeId(), domain.getDomainName());
         String url = "http://" + containerName + ":" + OPENSEARCH_PORT + "/_cluster/health";
         try {
             HttpURLConnection conn = (HttpURLConnection) URI.create(url).toURL().openConnection();
