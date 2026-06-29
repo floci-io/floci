@@ -603,6 +603,7 @@ public class S3Controller {
                               @HeaderParam("If-Modified-Since") String ifModifiedSince,
                               @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
                               @HeaderParam("Range") String rangeHeader,
+                              @HeaderParam("x-amz-checksum-mode") String checksumMode,
                               @Context UriInfo uriInfo,
                               @Context HttpHeaders httpHeaders) {
         try {
@@ -656,7 +657,8 @@ public class S3Controller {
                 return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides);
             }
 
-            return fullObjectResponse(bucket, key, versionId, obj, overrides);
+            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
+            return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
         } catch (AwsException e) {
             if ("NoSuchKey".equals(e.getErrorCode()) && isWebsiteRequest(httpHeaders)) {
                 try {
@@ -671,7 +673,8 @@ public class S3Controller {
     }
 
     private Response fullObjectResponse(String bucket, String key, String versionId,
-                                        S3Object obj, ResponseHeaderOverrides overrides) {
+                                        S3Object obj, ResponseHeaderOverrides overrides,
+                                        boolean includeChecksum) {
         StreamingOutput stream = output -> {
             try (InputStream input = s3Service.openObjectStream(bucket, key, versionId)) {
                 input.transferTo(output);
@@ -686,7 +689,7 @@ public class S3Controller {
         if (obj.getVersionId() != null) {
             resp.header("x-amz-version-id", obj.getVersionId());
         }
-        appendObjectHeaders(resp, obj, overrides);
+        appendObjectHeaders(resp, obj, overrides, includeChecksum);
         return resp.build();
     }
 
@@ -724,7 +727,7 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(bucket, key, versionId, obj, overrides);
+                return fullObjectResponse(bucket, key, versionId, obj, overrides, false);
             }
             return invalidRangeResponse(totalSize);
         }
@@ -797,6 +800,7 @@ public class S3Controller {
                                @HeaderParam("If-None-Match") String ifNoneMatch,
                                @HeaderParam("If-Modified-Since") String ifModifiedSince,
                                @HeaderParam("If-Unmodified-Since") String ifUnmodifiedSince,
+                               @HeaderParam("x-amz-checksum-mode") String checksumMode,
                                @Context UriInfo uriInfo,
                                @Context HttpHeaders httpHeaders) {
         try {
@@ -827,7 +831,8 @@ public class S3Controller {
             if (obj.getVersionId() != null) {
                 resp.header("x-amz-version-id", obj.getVersionId());
             }
-            appendObjectHeaders(resp, obj, overrides);
+            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
+            appendObjectHeaders(resp, obj, overrides, includeChecksum);
             return resp.build();
         } catch (AwsException e) {
             return xmlErrorResponse(e);
