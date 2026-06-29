@@ -16,7 +16,8 @@ import static org.hamcrest.Matchers.startsWith;
 @TestProfile(StsSessionPolicyS3EnforcementIntegrationTest.IamEnforcementProfile.class)
 class StsSessionPolicyS3EnforcementIntegrationTest {
 
-    private static final String ACCOUNT_ID = "000000000000";
+    private static final String CALLER_ACCOUNT_ID = "111122223333";
+    private static final String ROLE_ACCOUNT_ID = "222233334444";
     private static final String REGION = "us-east-1";
 
     @Test
@@ -53,7 +54,7 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
 
     private static void createBucket(String bucket) {
         given()
-                .header("Authorization", auth("test", "s3"))
+                .header("Authorization", auth(ROLE_ACCOUNT_ID, "s3"))
         .when()
                 .put("/" + bucket)
         .then()
@@ -77,7 +78,7 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
                       ]
                     }
                     """)
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(ROLE_ACCOUNT_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -104,7 +105,7 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
                       ]
                     }
                     """.formatted(bucket))
-                .header("Authorization", auth("test", "iam"))
+                .header("Authorization", auth(ROLE_ACCOUNT_ID, "iam"))
         .when()
                 .post("/")
         .then()
@@ -114,7 +115,7 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
     private static String assumeRoleWithS3SessionPolicy(String roleName, String bucket) {
         return given()
                 .formParam("Action", "AssumeRole")
-                .formParam("RoleArn", "arn:aws:iam::" + ACCOUNT_ID + ":role/" + roleName)
+                .formParam("RoleArn", "arn:aws:iam::" + ROLE_ACCOUNT_ID + ":role/" + roleName)
                 .formParam("RoleSessionName", "session-policy-test")
                 .formParam("Policy", """
                     {
@@ -136,7 +137,7 @@ class StsSessionPolicyS3EnforcementIntegrationTest {
                       ]
                     }
                     """.formatted(bucket))
-                .header("Authorization", auth("test", "sts"))
+                .header("Authorization", auth(CALLER_ACCOUNT_ID, "sts"))
         .when()
                 .post("/")
         .then()

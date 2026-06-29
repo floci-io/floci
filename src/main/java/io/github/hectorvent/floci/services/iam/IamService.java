@@ -922,7 +922,7 @@ public class IamService implements SessionAccountLookup {
         if (fromAccessKey.isPresent()) {
             return fromAccessKey;
         }
-        return sessions.get(accessKeyId).map(SessionCredential::getSecretAccessKey);
+        return findSessionAnyAccount(accessKeyId).map(SessionCredential::getSecretAccessKey);
     }
 
     // =========================================================================
@@ -976,9 +976,7 @@ public class IamService implements SessionAccountLookup {
      */
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
-        // STS issues only ASIA-prefixed temporary keys, so anything else cannot be a session.
-        // Short-circuit here to keep the per-request hot path off the session-store scan below.
-        if (accessKeyId == null || !accessKeyId.startsWith("ASIA")) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
             return Optional.empty();
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
@@ -1024,8 +1022,9 @@ public class IamService implements SessionAccountLookup {
             return new CallerContext(identityPolicies, null, boundaryDoc);
         }
 
-        // Check assumed-role sessions
-        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        // Check assumed-role sessions. These can be stored under the account that minted the
+        // session, while request routing for temporary credentials uses the role's account.
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
@@ -1043,6 +1042,17 @@ public class IamService implements SessionAccountLookup {
 
         // Unknown key — bypass
         return null;
+    }
+
+    private Optional<SessionCredential> findSessionForCallerContext(String accessKeyId) {
+        if (accessKeyId == null || accessKeyId.isBlank()) {
+            return Optional.empty();
+        }
+        Optional<SessionCredential> session = sessions.get(accessKeyId);
+        if (session.isPresent()) {
+            return session;
+        }
+        return findSessionAnyAccount(accessKeyId);
     }
 
     /**
@@ -1070,7 +1080,7 @@ public class IamService implements SessionAccountLookup {
             return users.get(userName).map(IamUser::getArn);
         }
 
-        Optional<SessionCredential> sessionOpt = sessions.get(accessKeyId);
+        Optional<SessionCredential> sessionOpt = findSessionForCallerContext(accessKeyId);
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
