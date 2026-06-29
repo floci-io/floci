@@ -261,18 +261,28 @@ public class ApiGatewayExecuteController {
 
         // Find matching resource and method
         List<ApiGatewayResource> resources = apiGatewayService.getResources(region, apiId);
-        ApiGatewayResource matched = matchResource(resources, path);
-        if (matched == null) {
+        List<ApiGatewayResource> matchedResources = matchResources(resources, path);
+        if (matchedResources.isEmpty()) {
             return Response.status(404)
                     .entity(jsonMessage("Not Found"))
                     .type(MediaType.APPLICATION_JSON).build();
         }
 
-        MethodConfig method = matched.getResourceMethods().get(httpMethod.toUpperCase());
-        if (method == null) {
-            method = matched.getResourceMethods().get("ANY");
+        ApiGatewayResource matched = null;
+        MethodConfig method = null;
+        for (ApiGatewayResource r : matchedResources) {
+            MethodConfig m = r.getResourceMethods().get(httpMethod.toUpperCase());
+            if (m == null) {
+                m = r.getResourceMethods().get("ANY");
+            }
+            if (m != null) {
+                matched = r;
+                method = m;
+                break;
+            }
         }
-        if (method == null) {
+
+        if (matched == null) {
             return Response.status(405)
                     .entity(jsonMessage("Method Not Allowed"))
                     .type(MediaType.APPLICATION_JSON).build();
@@ -1849,48 +1859,59 @@ public class ApiGatewayExecuteController {
     // ──────────────────────────── Path matching ────────────────────────────
 
     /**
-     * Finds the best-matching resource for {@code requestPath}.
+     * Finds all matching resources for {@code requestPath}, sorted by specificity.
      * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
      */
-    ApiGatewayResource matchResource(List<ApiGatewayResource> resources, String requestPath) {
+    List<ApiGatewayResource> matchResources(List<ApiGatewayResource> resources, String requestPath) {
+        List<ApiGatewayResource> matches = new java.util.ArrayList<>();
         // 1. Exact match
         for (ApiGatewayResource r : resources) {
             if (requestPath.equals(r.getPath())) {
-                return r;
+                matches.add(r);
             }
         }
         // 2. Template path match — /items/{id} matches /items/anything
         for (ApiGatewayResource r : resources) {
             if (r.getPath() != null && r.getPath().contains("{") && !r.getPath().contains("{proxy+}")) {
                 if (pathMatchesTemplate(r.getPath(), requestPath)) {
-                    return r;
+                    matches.add(r);
                 }
             }
         }
         // 3. Proxy+ wildcard — {proxy+} matches longest parent prefix
         // Requires at least one path segment after the parent prefix (except root /{proxy+})
-        ApiGatewayResource best = null;
-        int bestLen = -1;
+        List<ApiGatewayResource> proxyMatches = new java.util.ArrayList<>();
         for (ApiGatewayResource r : resources) {
             if (r.getPath() == null || !r.getPath().contains("{proxy+}")) continue;
             String parentPrefix = r.getPath().substring(0, r.getPath().indexOf("{proxy+}"));
             // Root /{proxy+} matches everything including /
             if ("/".equals(parentPrefix)) {
-                if (best == null) {
-                    best = r;
-                    bestLen = 0;
-                }
+                proxyMatches.add(r);
                 continue;
             }
             // Non-root proxy+ requires at least one char after the prefix
             if (requestPath.startsWith(parentPrefix)
-                    && requestPath.length() > parentPrefix.length()
-                    && parentPrefix.length() > bestLen) {
-                best = r;
-                bestLen = parentPrefix.length();
+                    && requestPath.length() > parentPrefix.length()) {
+                proxyMatches.add(r);
             }
         }
-        return best;
+        // Sort proxy matches by parentPrefix length descending
+        proxyMatches.sort((r1, r2) -> {
+            String p1 = r1.getPath().substring(0, r1.getPath().indexOf("{proxy+}"));
+            String p2 = r2.getPath().substring(0, r2.getPath().indexOf("{proxy+}"));
+            return Integer.compare(p2.length(), p1.length());
+        });
+        matches.addAll(proxyMatches);
+        return matches;
+    }
+
+    /**
+     * Finds the best-matching resource for {@code requestPath}.
+     * Priority: exact match > template path match (e.g. /items/{id}) > proxy+ wildcard.
+     */
+    ApiGatewayResource matchResource(List<ApiGatewayResource> resources, String requestPath) {
+        List<ApiGatewayResource> matches = matchResources(resources, requestPath);
+        return matches.isEmpty() ? null : matches.get(0);
     }
 
     /**
