@@ -29,6 +29,8 @@ import java.util.UUID;
 import java.util.stream.Stream;
 import java.util.stream.StreamSupport;
 
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -40,14 +42,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoIntegrationTest {
 
-    private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
     private static final Pattern SIX_DIGIT_CODE = Pattern.compile("\\b(\\d{6})\\b");
 
     private static String poolId;
     private static String clientId;
-    private static final String username = "alice+" + UUID.randomUUID() + "@example.com";
-    private static final String password = "Perm1234!";
+    private static final String USERNAME = "alice+" + UUID.randomUUID() + "@example.com";
+    private static final String PASSWORD = "Perm1234!";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -93,7 +94,7 @@ class CognitoIntegrationTest {
                     { "Name": "custom:department", "Value": "engineering" }
                   ]
                 }
-                """.formatted(poolId, username, username))
+                """.formatted(poolId, USERNAME, USERNAME))
                 .then()
                 .statusCode(200);
 
@@ -104,7 +105,7 @@ class CognitoIntegrationTest {
                   "Password": "%s",
                   "Permanent": true
                 }
-                """.formatted(poolId, username, password))
+                """.formatted(poolId, USERNAME, PASSWORD))
                 .then()
                 .statusCode(200);
     }
@@ -121,7 +122,7 @@ class CognitoIntegrationTest {
                     "PASSWORD": "%s"
                   }
                 }
-                """.formatted(clientId, username, password))
+                """.formatted(clientId, USERNAME, PASSWORD))
                 .then()
                 .statusCode(200)
                 .body("AuthenticationResult.AccessToken", org.hamcrest.Matchers.notNullValue())
@@ -141,7 +142,7 @@ class CognitoIntegrationTest {
                     "PASSWORD": "%s"
                   }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
 
         authResponse.then().statusCode(200);
 
@@ -151,7 +152,7 @@ class CognitoIntegrationTest {
         assertEquals("RS256", header.path("alg").asText());
         assertEquals(poolId, header.path("kid").asText());
         assertEquals("http://localhost:4566/" + poolId, payload.path("iss").asText());
-        assertEquals(username, payload.path("username").asText());
+        assertEquals(USERNAME, payload.path("username").asText());
         assertEquals("access", payload.path("token_use").asText());
 
         String jwksResponse = given()
@@ -582,7 +583,7 @@ class CognitoIntegrationTest {
                   "GroupName": "admin",
                   "Username": "%s"
                 }
-                """.formatted(poolId, username))
+                """.formatted(poolId, USERNAME))
                 .then()
                 .statusCode(200);
     }
@@ -595,7 +596,7 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "Username": "%s"
                 }
-                """.formatted(poolId, username));
+                """.formatted(poolId, USERNAME));
         assertEquals(1, resp.path("Groups").size());
         assertEquals("admin", resp.path("Groups").get(0).path("GroupName").asText());
     }
@@ -612,7 +613,7 @@ class CognitoIntegrationTest {
                     "PASSWORD": "%s"
                   }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
 
         authResponse.then().statusCode(200);
 
@@ -634,7 +635,7 @@ class CognitoIntegrationTest {
                   "GroupName": "admin",
                   "Username": "%s"
                 }
-                """.formatted(poolId, username))
+                """.formatted(poolId, USERNAME))
                 .then()
                 .statusCode(200);
     }
@@ -647,7 +648,7 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "Username": "%s"
                 }
-                """.formatted(poolId, username));
+                """.formatted(poolId, USERNAME));
         assertEquals(0, resp.path("Groups").size());
     }
 
@@ -730,7 +731,7 @@ class CognitoIntegrationTest {
                   "GroupName": "editors",
                   "Username": "%s"
                 }
-                """.formatted(poolId, username))
+                """.formatted(poolId, USERNAME))
                 .then().statusCode(200);
 
         // List users in group
@@ -742,7 +743,7 @@ class CognitoIntegrationTest {
                 """.formatted(poolId));
 
         assertEquals(1, resp.path("Users").size());
-        assertEquals(username, resp.path("Users").get(0).path("Username").asText());
+        assertEquals(USERNAME, resp.path("Users").get(0).path("Username").asText());
     }
 
     @Test
@@ -755,7 +756,7 @@ class CognitoIntegrationTest {
                   "GroupName": "editors",
                   "Username": "%s"
                 }
-                """.formatted(poolId, username))
+                """.formatted(poolId, USERNAME))
                 .then().statusCode(200);
 
         JsonNode resp = cognitoJson("ListUsersInGroup", """
@@ -796,7 +797,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         String idToken = auth.path("AuthenticationResult").path("IdToken").asText();
         JsonNode payload = decodeJwtPayload(idToken);
         assertTrue(payload.path("client_id").isMissingNode(),
@@ -814,7 +815,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         String idToken = auth.path("AuthenticationResult").path("IdToken").asText();
         JsonNode payload = decodeJwtPayload(idToken);
         assertEquals(clientId, payload.path("aud").asText(),
@@ -839,7 +840,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         String refreshToken = authResp.path("AuthenticationResult").path("RefreshToken").asText();
 
         JsonNode refreshed = cognitoJson("InitiateAuth", """
@@ -982,7 +983,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
 
         JsonNode payload = decodeJwtPayload(
                 auth.path("AuthenticationResult").path("IdToken").asText());
@@ -1010,7 +1011,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
 
         JsonNode payload = decodeJwtPayload(
                 auth.path("AuthenticationResult").path("AccessToken").asText());
@@ -1032,7 +1033,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         String refreshToken = authResp.path("AuthenticationResult").path("RefreshToken").asText();
 
         JsonNode refreshed = cognitoJson("InitiateAuth", """
@@ -1063,7 +1064,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "WrongPassword!" }
                 }
-                """.formatted(clientId, username))
+                """.formatted(clientId, USERNAME))
                 .then()
                 .statusCode(400);
     }
@@ -1075,7 +1076,7 @@ class CognitoIntegrationTest {
     void adminGetUserBySubUuid() throws Exception {
         JsonNode user = cognitoJson("AdminGetUser", """
                 { "UserPoolId": "%s", "Username": "%s" }
-                """.formatted(poolId, username));
+                """.formatted(poolId, USERNAME));
         String sub = null;
         for (JsonNode attr : user.path("UserAttributes")) {
             if ("sub".equals(attr.path("Name").asText())) {
@@ -1088,7 +1089,7 @@ class CognitoIntegrationTest {
         JsonNode bySubUser = cognitoJson("AdminGetUser", """
                 { "UserPoolId": "%s", "Username": "%s" }
                 """.formatted(poolId, sub));
-        assertEquals(username, bySubUser.path("Username").asText(),
+        assertEquals(USERNAME, bySubUser.path("Username").asText(),
                 "AdminGetUser with sub UUID should return the same user");
     }
 
@@ -1097,8 +1098,8 @@ class CognitoIntegrationTest {
     void adminGetUserByEmailAlias() throws Exception {
         JsonNode byEmail = cognitoJson("AdminGetUser", """
                 { "UserPoolId": "%s", "Username": "%s" }
-                """.formatted(poolId, username));
-        assertEquals(username, byEmail.path("Username").asText());
+                """.formatted(poolId, USERNAME));
+        assertEquals(USERNAME, byEmail.path("Username").asText());
     }
 
     // ── Issue #233: ListUsers Filter ─────────────────────────────────────
@@ -1111,16 +1112,16 @@ class CognitoIntegrationTest {
                   "UserPoolId": "%s",
                   "Filter": "email = \\"%s\\""
                 }
-                """.formatted(poolId, username));
+                """.formatted(poolId, USERNAME));
         assertEquals(1, resp.path("Users").size(),
                 "Filter by email should return exactly one matching user");
-        assertEquals(username, resp.path("Users").get(0).path("Username").asText());
+        assertEquals(USERNAME, resp.path("Users").get(0).path("Username").asText());
     }
 
     @Test
     @Order(61)
     void listUsersFilterByEmailPrefixStartsWith() throws Exception {
-        String prefix = username.substring(0, 5);
+        String prefix = USERNAME.substring(0, 5);
         JsonNode resp = cognitoJson("ListUsers", """
                 {
                   "UserPoolId": "%s",
@@ -1151,7 +1152,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         String refreshToken = authResp.path("AuthenticationResult").path("RefreshToken").asText();
         assertNotNull(refreshToken);
 
@@ -1177,7 +1178,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         String refreshToken = authResp.path("AuthenticationResult").path("RefreshToken").asText();
 
         JsonNode refreshed = cognitoJson("InitiateAuth", """
@@ -1420,14 +1421,14 @@ class CognitoIntegrationTest {
 
     @Test
     @Order(90)
-    void adminResetUserPasswordBlocksAuth() throws Exception {
+    void adminResetUserPasswordBlocksAuth() {
         // 1. Reset the user's password
         cognitoAction("AdminResetUserPassword", """
                 {
                   "UserPoolId": "%s",
                   "Username": "%s"
                 }
-                """.formatted(poolId, username))
+                """.formatted(poolId, USERNAME))
                 .then()
                 .statusCode(200);
 
@@ -1441,7 +1442,7 @@ class CognitoIntegrationTest {
                     "PASSWORD": "%s"
                   }
                 }
-                """.formatted(clientId, username, password))
+                """.formatted(clientId, USERNAME, PASSWORD))
                 .then()
                 .statusCode(400)
                 .body("__type", org.hamcrest.Matchers.containsString("PasswordResetRequiredException"));
@@ -1455,7 +1456,7 @@ class CognitoIntegrationTest {
                   "Password": "%s",
                   "Permanent": true
                 }
-                """.formatted(poolId, username, newPassword))
+                """.formatted(poolId, USERNAME, newPassword))
                 .then()
                 .statusCode(200);
 
@@ -1469,7 +1470,7 @@ class CognitoIntegrationTest {
                     "PASSWORD": "%s"
                   }
                 }
-                """.formatted(clientId, username, newPassword))
+                """.formatted(clientId, USERNAME, newPassword))
                 .then()
                 .statusCode(200);
     }
@@ -1503,7 +1504,7 @@ class CognitoIntegrationTest {
                     { "Name": "email", "Value": "%s" }
                   ]
                 }
-                """.formatted(localClientId, testUser, password, testUser));
+                """.formatted(localClientId, testUser, PASSWORD, testUser));
 
         // Get user details to verify user status is UNCONFIRMED
         JsonNode userResp = cognitoJson("AdminGetUser", """
@@ -2155,23 +2156,7 @@ class CognitoIntegrationTest {
         assertEquals(1200L, refreshedIdPayload.path("exp").asLong() - refreshedIdPayload.path("iat").asLong());
     }
 
-    private static Response cognitoAction(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
-                .contentType(COGNITO_CONTENT_TYPE)
-                .body(body)
-        .when()
-                .post("/");
-    }
 
-    private static JsonNode cognitoJson(String action, String body) throws Exception {
-        String response = cognitoAction(action, body)
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        return OBJECT_MAPPER.readTree(response);
-    }
 
     private static JsonNode decodeJwtPayload(String token) throws Exception {
         return decodeJwtPart(token, 1);
@@ -2209,7 +2194,7 @@ class CognitoIntegrationTest {
                   "AuthFlow": "USER_PASSWORD_AUTH",
                   "AuthParameters": { "USERNAME": "%s", "PASSWORD": "%s" }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         return auth.path("AuthenticationResult").path("AccessToken").asText();
     }
 

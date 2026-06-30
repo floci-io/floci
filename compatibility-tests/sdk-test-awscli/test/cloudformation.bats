@@ -200,3 +200,111 @@ EOF
     [ -n "$lb_arn" ]
     [[ "$lb_arn" == *":loadbalancer/"* ]]
 }
+
+# ── DeleteStack with managed S3 buckets (regression: issue #1539) ──────────────
+#
+# Real AWS CloudFormation does not report a stack as DELETE_COMPLETE while a
+# managed resource still exists. Deleting a stack that owns a NON-EMPTY
+# AWS::S3::Bucket must put the stack into DELETE_FAILED (S3 DeleteBucket refuses
+# a non-empty bucket) and leave the bucket in place — it must NOT silently report
+# success while the bucket and its objects remain.
+# An EMPTY managed bucket must be deleted as part of the stack delete.
+# https://github.com/floci-io/floci/issues/1539
+
+# Poll describe-stacks until the stack reaches the expected status, or report the
+# special value DOES_NOT_EXIST once the stack is gone.
+cfn_wait_status() {
+    local stack="$1" expected="$2" tries="${3:-40}"
+    local i out status
+    for ((i = 0; i < tries; i++)); do
+        # `|| true`: describe-stacks exits non-zero once the stack is gone, which
+        # would otherwise abort this command substitution under bats' errexit.
+        out=$(aws_cmd cloudformation describe-stacks --stack-name "$stack" 2>&1 || true)
+        if [[ "$out" == *"does not exist"* ]]; then
+            status="DOES_NOT_EXIST"
+        else
+            status=$(echo "$out" | jq -r '.Stacks[0].StackStatus' 2>/dev/null)
+        fi
+        if [ "$status" = "$expected" ]; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    echo "timeout waiting for stack '$stack' to reach '$expected' (last status: '$status')" >&2
+    return 1
+}
+
+@test "CloudFormation: delete-stack with non-empty S3 bucket fails and keeps the bucket (issue #1539)" {
+    local bucket="bats-cfn-nonempty-$(unique_name bkt)"
+    cat > "$TEMPLATE_FILE" << EOF
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": { "BucketName": "$bucket" }
+    }
+  }
+}
+EOF
+    run aws_cmd cloudformation create-stack \
+        --stack-name "$STACK_NAME" \
+        --template-body "file://$TEMPLATE_FILE"
+    assert_success
+    cfn_wait_status "$STACK_NAME" "CREATE_COMPLETE"
+
+    # Put an object so the managed bucket is non-empty.
+    local body_file
+    body_file=$(mktemp)
+    echo -n "hello floci 1539" > "$body_file"
+    run aws_cmd s3api put-object --bucket "$bucket" --key "object.txt" --body "$body_file"
+    assert_success
+    rm -f "$body_file"
+
+    run aws_cmd cloudformation delete-stack --stack-name "$STACK_NAME"
+    assert_success
+
+    # AWS leaves the stack in DELETE_FAILED — it must NOT report DELETE_COMPLETE
+    # (i.e. the stack must NOT silently disappear).
+    cfn_wait_status "$STACK_NAME" "DELETE_FAILED"
+
+    # The managed bucket and its object must still exist after the failed delete.
+    run aws_cmd s3api head-bucket --bucket "$bucket"
+    assert_success
+
+    # Cleanup: empty + remove the leftover bucket, then drop the stack.
+    aws_cmd s3 rm "s3://$bucket" --recursive >/dev/null 2>&1 || true
+    aws_cmd s3api delete-bucket --bucket "$bucket" >/dev/null 2>&1 || true
+}
+
+@test "CloudFormation: delete-stack with empty S3 bucket removes the bucket" {
+    local bucket="bats-cfn-empty-$(unique_name bkt)"
+    cat > "$TEMPLATE_FILE" << EOF
+{
+  "AWSTemplateFormatVersion": "2010-09-09",
+  "Resources": {
+    "Bucket": {
+      "Type": "AWS::S3::Bucket",
+      "Properties": { "BucketName": "$bucket" }
+    }
+  }
+}
+EOF
+    run aws_cmd cloudformation create-stack \
+        --stack-name "$STACK_NAME" \
+        --template-body "file://$TEMPLATE_FILE"
+    assert_success
+    cfn_wait_status "$STACK_NAME" "CREATE_COMPLETE"
+
+    run aws_cmd s3api head-bucket --bucket "$bucket"
+    assert_success
+
+    run aws_cmd cloudformation delete-stack --stack-name "$STACK_NAME"
+    assert_success
+    cfn_wait_status "$STACK_NAME" "DOES_NOT_EXIST"
+    STACK_NAME=""  # prevent teardown from trying again
+
+    # The empty managed bucket must be gone.
+    run aws_cmd s3api head-bucket --bucket "$bucket"
+    assert_failure
+}

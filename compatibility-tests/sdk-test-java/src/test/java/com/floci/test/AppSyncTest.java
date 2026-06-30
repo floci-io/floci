@@ -875,6 +875,76 @@ class AppSyncTest {
                 .build());
     }
 
+    // ── SDK Coverage Gaps ─────────────────────────────────────────────
+
+    @Test
+    @Order(116)
+    void getIntrospectionSchema() {
+        GetIntrospectionSchemaResponse resp = client.getIntrospectionSchema(
+                GetIntrospectionSchemaRequest.builder()
+                        .apiId(apiId)
+                        .format("SDL")
+                        .build());
+
+        assertThat(resp.schema()).isNotNull();
+        String schema = resp.schema().asUtf8String();
+        assertThat(schema).contains("type Query");
+    }
+
+    @Test
+    @Order(117)
+    void listDomainNames() {
+        CreateDomainNameResponse created = client.createDomainName(
+                CreateDomainNameRequest.builder()
+                        .domainName("list-test-" + java.util.UUID.randomUUID().toString().substring(0, 8) + ".example.com")
+                        .certificateArn("arn:aws:acm:us-east-1:000000000000:certificate/test")
+                        .build());
+
+        ListDomainNamesResponse resp = client.listDomainNames(
+                ListDomainNamesRequest.builder()
+                        .build());
+
+        assertThat(resp.domainNameConfigs()).isNotEmpty();
+
+        client.deleteDomainName(DeleteDomainNameRequest.builder()
+                .domainName(created.domainNameConfig().domainName())
+                .build());
+    }
+
+    @Test
+    @Order(118)
+    void getFunction() {
+        String fnId = client.listFunctions(ListFunctionsRequest.builder()
+                .apiId(apiId)
+                .build())
+                .functions().get(0).functionId();
+
+        GetFunctionResponse resp = client.getFunction(GetFunctionRequest.builder()
+                .apiId(apiId)
+                .functionId(fnId)
+                .build());
+
+        assertThat(resp.functionConfiguration()).isNotNull();
+        assertThat(resp.functionConfiguration().functionId()).isEqualTo(fnId);
+    }
+
+    @Test
+    @Order(119)
+    void listResolversByFunction() {
+        String fnId = client.listFunctions(ListFunctionsRequest.builder()
+                .apiId(apiId)
+                .build())
+                .functions().get(0).functionId();
+
+        ListResolversByFunctionResponse resp = client.listResolversByFunction(
+                ListResolversByFunctionRequest.builder()
+                        .apiId(apiId)
+                        .functionId(fnId)
+                        .build());
+
+        assertThat(resp).isNotNull();
+    }
+
     // ── Error Handling ─────────────────────────────────────────────────
 
     @Test

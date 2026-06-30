@@ -53,6 +53,12 @@ final class AwsManagedPolicies {
                 "Provides permissions required to use the CloudWatch agent on servers."),
         new ManagedPolicyDef("AWSLambdaFullAccess", "/",
                 "Provides full access to Lambda, S3, DynamoDB, CloudWatch Metrics and Logs."),
+        new ManagedPolicyDef("AWSCloudFormationFullAccess", "/",
+                "Provides full access to AWS CloudFormation."),
+        new ManagedPolicyDef("AWSXRayDaemonWriteAccess", "/",
+                "Allows write permissions to the AWS X-Ray daemon."),
+        new ManagedPolicyDef("AmazonElasticFileSystemClientFullAccess", "/",
+                "Provides root client access to an Amazon EFS file system."),
 
         // Lambda execution role policies
         new ManagedPolicyDef("AWSLambdaBasicExecutionRole", "/service-role/",
@@ -88,6 +94,10 @@ final class AwsManagedPolicies {
                 "This policy allows Amazon EKS worker nodes to connect to Amazon EKS Clusters."),
         new ManagedPolicyDef("AmazonEKS_CNI_Policy", "/",
                 "Provides the Amazon VPC CNI Plugin the permissions it requires to modify the IP address configuration on your EKS worker nodes."),
+
+        // RDS execution role policy
+        new ManagedPolicyDef("AmazonRDSEnhancedMonitoringRole", "/service-role/",
+                "Provides permissions required for Amazon RDS Enhanced Monitoring."),
 
         // S3 Object Lambda execution role policy
         new ManagedPolicyDef("AmazonS3ObjectLambdaExecutionRolePolicy", "/service-role/",

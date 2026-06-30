@@ -19,17 +19,16 @@ import java.security.Signature;
 import java.security.spec.RSAPublicKeySpec;
 import java.util.Base64;
 
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoOAuthTokenIntegrationTest {
 
-    private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private static String poolId;
@@ -480,24 +479,6 @@ class CognitoOAuthTokenIntegrationTest {
                 document.path("token_endpoint").asText());
         assertEquals("client_credentials", document.path("grant_types_supported").get(0).asText());
         assertEquals("client_secret_basic", document.path("token_endpoint_auth_methods_supported").get(0).asText());
-    }
-
-    private static Response cognitoAction(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
-                .contentType(COGNITO_CONTENT_TYPE)
-                .body(body)
-        .when()
-                .post("/");
-    }
-
-    private static JsonNode cognitoJson(String action, String body) throws Exception {
-        String response = cognitoAction(action, body)
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        return OBJECT_MAPPER.readTree(response);
     }
 
     private static String cognitoDescribeClientSecret(String clientId) {

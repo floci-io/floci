@@ -14,6 +14,7 @@ import jakarta.ws.rs.PUT;
 import jakarta.ws.rs.Path;
 import jakarta.ws.rs.PathParam;
 import jakarta.ws.rs.Produces;
+import jakarta.ws.rs.QueryParam;
 import jakarta.ws.rs.core.Context;
 import jakarta.ws.rs.core.HttpHeaders;
 import jakarta.ws.rs.core.MediaType;
@@ -63,8 +64,18 @@ public class SharedTagsController {
     }
 
     @GET
-    @Path("/{arn: .*}")
+    public Response listTagsByQuery(@Context HttpHeaders headers,
+                                    @QueryParam("resourceArn") String arn) {
+        return listTagsForArn(headers, arn);
+    }
+
+    @GET
+    @Path("/{arn: .+}")
     public Response listTags(@Context HttpHeaders headers, @PathParam("arn") String arn) {
+        return listTagsForArn(headers, arn);
+    }
+
+    private Response listTagsForArn(HttpHeaders headers, String arn) {
         TagHandler handler = resolveHandler(arn);
         String region = regionResolver.resolveRegion(headers);
         Map<String, String> tags = handler.listTags(region, arn);
@@ -72,7 +83,15 @@ public class SharedTagsController {
     }
 
     @POST
-    @Path("/{arn: .*}")
+    @Consumes(MediaType.APPLICATION_JSON)
+    public Response tagResourceByBody(@Context HttpHeaders headers, String body) {
+        String arn = readResourceArn(body);
+        TagHandler handler = resolveHandler(arn);
+        return doTagResource(headers, handler, arn, body, Response.ok(objectMapper.createObjectNode()).build());
+    }
+
+    @POST
+    @Path("/{arn: .+}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response tagResourcePost(@Context HttpHeaders headers,
                                     @PathParam("arn") String arn,
@@ -82,11 +101,11 @@ public class SharedTagsController {
             throw new AwsException("MethodNotAllowedException",
                     "POST is not supported for " + handler.serviceKey() + " tag resources; use PUT.", 405);
         }
-        return doTagResource(headers, handler, arn, body);
+        return doTagResource(headers, handler, arn, body, Response.noContent().build());
     }
 
     @PUT
-    @Path("/{arn: .*}")
+    @Path("/{arn: .+}")
     @Consumes(MediaType.APPLICATION_JSON)
     public Response tagResourcePut(@Context HttpHeaders headers,
                                    @PathParam("arn") String arn,
@@ -96,17 +115,17 @@ public class SharedTagsController {
             throw new AwsException("MethodNotAllowedException",
                     "PUT is not supported for " + handler.serviceKey() + " tag resources; use POST.", 405);
         }
-        return doTagResource(headers, handler, arn, body);
+        return doTagResource(headers, handler, arn, body, Response.noContent().build());
     }
 
-    private Response doTagResource(HttpHeaders headers, TagHandler handler, String arn, String body) {
+    private Response doTagResource(HttpHeaders headers, TagHandler handler, String arn, String body, Response successResponse) {
         String region = regionResolver.resolveRegion(headers);
         String effectiveBody = (body == null || body.isBlank()) ? "{}" : body;
         try {
             JsonNode node = objectMapper.readTree(effectiveBody);
             Map<String, String> tags = parseTags(handler, node);
             handler.tagResource(region, arn, tags);
-            return Response.noContent().build();
+            return successResponse;
         } catch (AwsException e) {
             throw e;
         } catch (Exception e) {
@@ -116,15 +135,26 @@ public class SharedTagsController {
     }
 
     @DELETE
-    @Path("/{arn: .*}")
+    public Response untagResourceByQuery(@Context HttpHeaders headers,
+                                         @Context UriInfo uriInfo,
+                                         @QueryParam("resourceArn") String arn) {
+        return untagResourceForArn(headers, uriInfo, arn, Response.ok(objectMapper.createObjectNode()).build());
+    }
+
+    @DELETE
+    @Path("/{arn: .+}")
     public Response untagResource(@Context HttpHeaders headers,
-                                  @Context UriInfo uriInfo,
-                                  @PathParam("arn") String arn) {
+                                   @Context UriInfo uriInfo,
+                                   @PathParam("arn") String arn) {
+        return untagResourceForArn(headers, uriInfo, arn, Response.noContent().build());
+    }
+
+    private Response untagResourceForArn(HttpHeaders headers, UriInfo uriInfo, String arn, Response successResponse) {
         TagHandler handler = resolveHandler(arn);
         String region = regionResolver.resolveRegion(headers);
         List<String> tagKeys = readTagKeys(handler, uriInfo);
         handler.untagResource(region, arn, tagKeys);
-        return Response.noContent().build();
+        return successResponse;
     }
 
     private ObjectNode buildListResponse(TagHandler handler, Map<String, String> tags) {
@@ -200,6 +230,15 @@ public class SharedTagsController {
                     "1 validation error detected: Value null at '" + paramName + "' failed to satisfy constraint: Member must not be null", 400);
         }
         return (values == null) ? List.of() : List.copyOf(values);
+    }
+
+    private String readResourceArn(String body) {
+        try {
+            JsonNode node = objectMapper.readTree((body == null || body.isBlank()) ? "{}" : body);
+            return node.path("resourceArn").asText(null);
+        } catch (Exception e) {
+            throw new AwsException("BadRequestException", e.getMessage(), 400);
+        }
     }
 
     private TagHandler resolveHandler(String arn) {

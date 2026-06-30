@@ -233,6 +233,12 @@ public class EmulatorLifecycle {
     }
 
     void onStop(@Observes ShutdownEvent ignored) {
+        // Flush persisted state to disk FIRST, before the slow proxy/container teardown below.
+        // Stopping Docker sidecars (RDS/ElastiCache/etc.) can block long enough to exhaust the
+        // SIGTERM grace window and trigger SIGKILL; if the flush ran last it would be skipped and
+        // in-memory (hybrid) data would be lost on an otherwise-graceful shutdown. shutdownAll()
+        // still runs at the end to stop the flush schedulers and capture any shutdown-time writes.
+        storageFactory.flushAll();
         if (config.services().ec2().enabled() && !config.services().ec2().mock()) {
             ec2MetadataServer.stop();
         }

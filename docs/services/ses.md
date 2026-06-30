@@ -50,6 +50,7 @@ Floci exposes the classic Amazon SES Query API used by `aws ses ...` commands an
 | `UpdateConfigurationSetTrackingOptions`  | Change the custom tracking redirect domain |
 | `DeleteConfigurationSetTrackingOptions`  | Remove the custom tracking redirect domain |
 | `UpdateConfigurationSetReputationMetricsEnabled` | Enable or disable reputation metrics for a configuration set |
+| `PutConfigurationSetDeliveryOptions` | Set the TLS policy (delivery options) for a configuration set |
 
 ## Configuration
 
