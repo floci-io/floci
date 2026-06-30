@@ -22,6 +22,7 @@ import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyMap;
+import static org.mockito.ArgumentMatchers.nullable;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -79,7 +80,7 @@ class RdsCfnProvisionerTest {
         when(instance.getDbInstanceArn()).thenReturn("arn:aws:rds:us-east-1:000000000000:db:mydb");
         when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), any())).thenReturn(instance);
+                any(), anyMap(), nullable(String.class))).thenReturn(instance);
 
         StackResource r = provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","EngineVersion":"16",
@@ -104,7 +105,7 @@ class RdsCfnProvisionerTest {
         when(instance.getDbInstanceIdentifier()).thenReturn("mydb");
         when(rdsService.createDbInstance(any(), any(), any(), any(), any(), any(), any(),
                 anyInt(), anyBoolean(), any(), any(), any(), any(), anyBoolean(), anyBoolean(),
-                any(), anyMap(), any())).thenReturn(instance);
+                any(), anyMap(), nullable(String.class))).thenReturn(instance);
 
         provision("Db", "AWS::RDS::DBInstance", """
                 {"DBInstanceIdentifier":"mydb","Engine":"postgres","MasterUsername":"admin",

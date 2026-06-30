@@ -102,6 +102,22 @@ class RdsServiceTest {
     }
 
     @Test
+    void createAndModifyDbInstancePersistVpcSecurityGroups() {
+        DbInstance instance = rdsService.createDbInstance("mydb", "postgres", "13",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null, null, false, false, null,
+                Map.of(), List.of("sg-created"));
+
+        assertEquals(List.of("sg-created"), instance.getVpcSecurityGroupIds());
+
+        DbInstance modified = rdsService.modifyDbInstance("mydb", null, null, null,
+                List.of("sg-updated-a", "sg-updated-b"));
+
+        assertEquals(List.of("sg-updated-a", "sg-updated-b"), modified.getVpcSecurityGroupIds());
+        assertEquals(List.of("sg-updated-a", "sg-updated-b"), rdsService.getDbInstance("mydb").getVpcSecurityGroupIds());
+    }
+
+    @Test
     void postgresImageUsesRequestedEngineVersionAndDefaultFlavor() {
         assertEquals("postgres:18.1-alpine",
                 RdsService.imageForRequestedVersion("postgres:16-alpine", "18.1"));
