@@ -723,8 +723,7 @@ public class Ec2Service {
     }
 
     private String architectureFor(String imageId, String instanceType) {
-        Optional<Ec2ImageCatalog.CatalogImage> image = Optional.ofNullable(imageCatalog.findByIdOrAlias(imageId))
-                .orElse(Optional.empty());
+        Optional<Ec2ImageCatalog.CatalogImage> image = imageCatalog.findByIdOrAlias(imageId);
         return image.map(catalogImage -> catalogImage.architecture)
                 .filter(value -> !value.isBlank())
                 .or(() -> instanceTypeCatalog.find(instanceType)

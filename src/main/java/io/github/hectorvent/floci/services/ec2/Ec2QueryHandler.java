@@ -1592,11 +1592,13 @@ public class Ec2QueryHandler {
                     .start("memoryInfo")
                     .elem("sizeInMiB", String.valueOf(t.get("memoryMib")))
                     .end("memoryInfo")
-                    .elem("instanceStorageSupported", String.valueOf(t.get("instanceStorageSupported")))
-                    .start("instanceStorageInfo")
-                    .elem("totalSizeInGB", String.valueOf(t.get("localStorageGiB")))
-                    .end("instanceStorageInfo")
-                    .start("processorInfo")
+                    .elem("instanceStorageSupported", String.valueOf(t.get("instanceStorageSupported")));
+            if (Boolean.TRUE.equals(t.get("instanceStorageSupported"))) {
+                xml.start("instanceStorageInfo")
+                        .elem("totalSizeInGB", String.valueOf(t.get("localStorageGiB")))
+                        .end("instanceStorageInfo");
+            }
+            xml.start("processorInfo")
                     .start("supportedArchitectures");
             for (String arch : (List<String>) t.get("supportedArchitectures")) {
                 xml.elem("item", arch);

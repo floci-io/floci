@@ -273,7 +273,7 @@ class Ec2IntegrationTest {
                     everyItem(equalTo("true")))
             .body("DescribeInstanceTypesResponse.instanceTypeSet.item.instanceStorageInfo.totalSizeInGB",
                     everyItem(equalTo("118")))
-            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.supportedArchitectures.item.item",
+            .body("DescribeInstanceTypesResponse.instanceTypeSet.item.processorInfo.supportedArchitectures.item",
                     everyItem(equalTo("arm64")));
     }
 
