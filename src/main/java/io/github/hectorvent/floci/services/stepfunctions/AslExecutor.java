@@ -704,21 +704,31 @@ public class AslExecutor {
     private static String ecsTaskFailureCause(EcsTask task) {
         boolean ranAContainer = task.getContainers() != null && !task.getContainers().isEmpty();
         Integer nonZeroExit = null;
+        boolean hasNullExitCode = false;
         if (ranAContainer) {
             for (var c : task.getContainers()) {
-                if (c.getExitCode() != null && c.getExitCode() != 0) {
+                if (c.getExitCode() == null) {
+                    // A STOPPED container with no exit code never completed (OOM-killed, failed to
+                    // start, force-stopped) — AWS treats that as a failure, not a clean exit.
+                    hasNullExitCode = true;
+                } else if (c.getExitCode() != 0) {
                     nonZeroExit = c.getExitCode();
                 }
             }
         }
-        if (nonZeroExit == null && ranAContainer) {
+        if (nonZeroExit == null && !hasNullExitCode && ranAContainer) {
             return null;
         }
         if (task.getStoppedReason() != null) {
             return task.getStoppedReason();
         }
-        return nonZeroExit != null ? "Essential container exited with code " + nonZeroExit
-                                   : "Task stopped without running a container";
+        if (nonZeroExit != null) {
+            return "Essential container exited with code " + nonZeroExit;
+        }
+        if (hasNullExitCode) {
+            return "Essential container stopped without an exit code";
+        }
+        return "Task stopped without running a container";
     }
 
     /**
