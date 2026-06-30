@@ -660,39 +660,65 @@ public class AslExecutor {
             return resp;
         }
 
-        // .sync — wait until the task reaches STOPPED, then surface success or failure.
-        String taskArn = launched.get(0).getTaskArn();
+        if (!".sync".equals(mode)) {
+            // Only request-response ("") and ".sync" are valid; reject typos rather than
+            // silently treating an unknown suffix as .sync.
+            throw new FailStateException("States.TaskFailed", "Unsupported ecs:runTask mode: " + mode);
+        }
+
+        // .sync — wait until every launched task reaches STOPPED, then surface success or failure.
+        // All tasks must be polled (not just the first): with Count > 1, a failure in any task must
+        // fail the state, otherwise tasks beyond the first would run unmonitored.
+        List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
         for (int i = 0; i < ECS_SYNC_POLL_ATTEMPTS; i++) {
             Thread.sleep(ECS_SYNC_POLL_INTERVAL_MS);
-            List<EcsTask> described = ecsService.describeTasks(cluster, List.of(taskArn), region);
-            if (described.isEmpty()) {
+            List<EcsTask> described = ecsService.describeTasks(cluster, taskArns, region);
+            boolean allStopped = described.size() == taskArns.size()
+                    && described.stream().allMatch(t -> "STOPPED".equals(t.getLastStatus()));
+            if (!allStopped) {
                 continue;
             }
-            EcsTask task = described.get(0);
-            if (!"STOPPED".equals(task.getLastStatus())) {
-                continue;
-            }
-            // Terminal. Like real Step Functions, fail the state when an essential container
-            // exits non-zero or the task never ran a container (e.g. it failed to start).
-            Integer nonZeroExit = null;
-            boolean ranAContainer = task.getContainers() != null && !task.getContainers().isEmpty();
-            if (ranAContainer) {
-                for (var c : task.getContainers()) {
-                    if (c.getExitCode() != null && c.getExitCode() != 0) {
-                        nonZeroExit = c.getExitCode();
-                    }
+            // All terminal. Like real Step Functions, fail the state if any task's essential
+            // container exited non-zero or a task never ran a container (e.g. it failed to start).
+            for (EcsTask task : described) {
+                String cause = ecsTaskFailureCause(task);
+                if (cause != null) {
+                    throw new FailStateException("States.TaskFailed", cause);
                 }
             }
-            if (nonZeroExit != null || !ranAContainer) {
-                String cause = task.getStoppedReason() != null ? task.getStoppedReason()
-                        : (nonZeroExit != null ? "Essential container exited with code " + nonZeroExit
-                                               : "Task stopped without running a container");
-                throw new FailStateException("States.TaskFailed", cause);
+            // Success: a single task returns its description; multiple tasks return the array.
+            if (described.size() == 1) {
+                return recaseKeys(objectMapper, ecsJsonHandler.taskNode(described.get(0)), true);
             }
-            return recaseKeys(objectMapper, ecsJsonHandler.taskNode(task), true);
+            ArrayNode arr = objectMapper.createArrayNode();
+            for (EcsTask task : described) {
+                arr.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(task), true));
+            }
+            return arr;
         }
         throw new FailStateException("States.Timeout",
-                "ecs:runTask.sync timed out waiting for task to stop: " + taskArn);
+                "ecs:runTask.sync timed out waiting for tasks to stop: " + taskArns);
+    }
+
+    /** A failure cause if the ECS task did not complete cleanly (non-zero exit or no container ran), or null on success. */
+    private static String ecsTaskFailureCause(EcsTask task) {
+        boolean ranAContainer = task.getContainers() != null && !task.getContainers().isEmpty();
+        Integer nonZeroExit = null;
+        if (ranAContainer) {
+            for (var c : task.getContainers()) {
+                if (c.getExitCode() != null && c.getExitCode() != 0) {
+                    nonZeroExit = c.getExitCode();
+                }
+            }
+        }
+        if (nonZeroExit == null && ranAContainer) {
+            return null;
+        }
+        if (task.getStoppedReason() != null) {
+            return task.getStoppedReason();
+        }
+        return nonZeroExit != null ? "Essential container exited with code " + nonZeroExit
+                                   : "Task stopped without running a container";
     }
 
     /**
