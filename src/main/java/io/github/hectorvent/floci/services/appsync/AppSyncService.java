@@ -206,11 +206,13 @@ public class AppSyncService {
 
     public void startSchemaCreation(String apiId, String definition) {
         getGraphqlApi(apiId);
-        assertSchemaNotBusy(apiId);
-        schemaStore.put(apiId, definition);
-        SchemaCreationStatus status = new SchemaCreationStatus();
-        status.setStatus(SchemaCreationStatusType.PROCESSING);
-        schemaStatusStore.put(apiId, status);
+        synchronized (this) {
+            assertSchemaNotBusy(apiId);
+            schemaStore.put(apiId, definition);
+            SchemaCreationStatus status = new SchemaCreationStatus();
+            status.setStatus(SchemaCreationStatusType.PROCESSING);
+            schemaStatusStore.put(apiId, status);
+        }
         schemaRegistry.submitSchemaCreation(apiId, definition);
         LOG.infov("Schema creation submitted for API {0}", apiId);
     }
@@ -698,6 +700,7 @@ public class AppSyncService {
 
     public DomainName updateDomainName(String domainName, Map<String, Object> request) {
         DomainName existing = getDomainName(domainName);
+        associationStore.get(domainName).ifPresent(apiId -> assertSchemaNotBusy(apiId));
         if (request.containsKey("description")) existing.setDescription((String) request.get("description"));
         domainStore.put(domainName, existing);
         return existing;
@@ -705,6 +708,7 @@ public class AppSyncService {
 
     public void deleteDomainName(String domainName) {
         getDomainName(domainName);
+        associationStore.get(domainName).ifPresent(apiId -> assertSchemaNotBusy(apiId));
         associationStore.delete(domainName);
         domainStore.delete(domainName);
     }
@@ -739,6 +743,7 @@ public class AppSyncService {
 
     public void disassociateApi(String domainName) {
         getDomainName(domainName);
+        associationStore.get(domainName).ifPresent(apiId -> assertSchemaNotBusy(apiId));
         associationStore.delete(domainName);
     }
 
@@ -770,6 +775,7 @@ public class AppSyncService {
     }
 
     public ChannelNamespace getChannelNamespace(String apiId, String name) {
+        assertSchemaNotBusy(apiId);
         return channelNamespaceStore.get(apiKey(apiId, name))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Channel namespace not found: " + name, 404));
@@ -913,6 +919,7 @@ public class AppSyncService {
     }
 
     public SourceApiAssociation deleteMergedApiAssociation(String sourceApiIdentifier, String associationId) {
+        assertSchemaNotBusy(sourceApiIdentifier);
         SourceApiAssociation assoc = mergedApiAssociationStore.get(associationId)
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Source API association not found: " + associationId, 404));
