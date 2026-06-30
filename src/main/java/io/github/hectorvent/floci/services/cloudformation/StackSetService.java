@@ -14,6 +14,7 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -113,11 +114,14 @@ public class StackSetService {
         }
         stackSets.put(name, ss);
 
-        // Re-apply the updated definition to every existing instance.
+        // Re-apply the updated definition to every existing instance, refreshing each record.
+        List<StackInstance> deployed = new ArrayList<>();
         for (StackInstance inst : listStackInstances(name, null, null)) {
-            deployInstance(ss, inst.getAccount(), inst.getRegion(), UPDATE_CHANGE_SET, "UPDATE");
+            StackInstance updated = deployInstance(ss, inst.getAccount(), inst.getRegion(), UPDATE_CHANGE_SET, "UPDATE");
+            instances.put(instanceKey(name, updated.getAccount(), updated.getRegion()), updated);
+            deployed.add(updated);
         }
-        return recordOperation(name, "UPDATE");
+        return recordOperation(name, "UPDATE", deriveOperationStatus(deployed));
     }
 
     public void deleteStackSet(String name) {
@@ -138,13 +142,15 @@ public class StackSetService {
             throw new AwsException("ValidationError",
                     "Accounts and Regions must each contain at least one value", 400);
         }
+        List<StackInstance> deployed = new ArrayList<>();
         for (String account : accounts) {
             for (String region : regions) {
                 StackInstance inst = deployInstance(ss, account, region, INSTANCE_CHANGE_SET, "CREATE");
                 instances.put(instanceKey(name, account, region), inst);
+                deployed.add(inst);
             }
         }
-        return recordOperation(name, "CREATE");
+        return recordOperation(name, "CREATE", deriveOperationStatus(deployed));
     }
 
     public List<StackInstance> listStackInstances(String name, String accountFilter, String regionFilter) {
@@ -167,7 +173,8 @@ public class StackSetService {
                         "Stack instance for [" + account + "/" + region + "] not found in stack set " + name, 404));
     }
 
-    public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions) {
+    public StackSetOperation deleteStackInstances(String name, List<String> accounts, List<String> regions,
+                                                  boolean retainStacks) {
         getStackSetOrThrow(name);
         if (accounts == null || accounts.isEmpty() || regions == null || regions.isEmpty()) {
             throw new AwsException("ValidationError",
@@ -177,12 +184,16 @@ public class StackSetService {
             for (String region : regions) {
                 String key = instanceKey(name, account, region);
                 instances.get(key).ifPresent(inst -> {
-                    await(cfnService.deleteStack(inst.getStackName(), region, account));
+                    // RetainStacks=true detaches the instance from the StackSet but leaves the
+                    // underlying CloudFormation stack and its resources in the target account.
+                    if (!retainStacks) {
+                        await(cfnService.deleteStack(inst.getStackName(), region, account));
+                    }
                     instances.delete(key);
                 });
             }
         }
-        return recordOperation(name, "DELETE");
+        return recordOperation(name, "DELETE", "SUCCEEDED");
     }
 
     public List<StackSetOperation> listStackSetOperations(String name) {
@@ -224,11 +235,14 @@ public class StackSetService {
         inst.setStackName(stackName);
         inst.setStackId(resolveStackId(stackName, region, account));
         List<Stack> stacks = cfnService.describeStacks(stackName, region);
-        if (!stacks.isEmpty() && stacks.get(0).getStatus() != null
-                && stacks.get(0).getStatus().endsWith("FAILED")) {
+        String stackStatus = stacks.isEmpty() ? null : stacks.get(0).getStatus();
+        // Only a clean create/update is a success. A failed resource rolls the stack back, so its
+        // terminal status is ROLLBACK_COMPLETE (not *_FAILED) — treat anything that is not COMPLETE
+        // as a failed instance so the operation status reflects it.
+        if (!"CREATE_COMPLETE".equals(stackStatus) && !"UPDATE_COMPLETE".equals(stackStatus)) {
             inst.setStatus("INOPERABLE");
             inst.setDetailedStatus("FAILED");
-            inst.setStatusReason(stacks.get(0).getStatusReason());
+            inst.setStatusReason(stacks.isEmpty() ? null : stacks.get(0).getStatusReason());
         } else {
             inst.setDetailedStatus("SUCCEEDED");
         }
@@ -243,11 +257,23 @@ public class StackSetService {
         return AwsArnUtils.Arn.of("cloudformation", region, account, "stack/" + stackName).toString();
     }
 
-    private StackSetOperation recordOperation(String stackSetName, String action) {
+    private StackSetOperation recordOperation(String stackSetName, String action, String status) {
         StackSetOperation op = new StackSetOperation(UUID.randomUUID().toString(), stackSetName, action);
+        op.setStatus(status);
         op.setEndTimestamp(Instant.now());
         operations.put(stackSetName + ":" + op.getOperationId(), op);
         return op;
+    }
+
+    /**
+     * An operation is FAILED if any of its instances did not deploy cleanly; otherwise SUCCEEDED.
+     * Without this, a failed (INOPERABLE) instance would still report SUCCEEDED to anything polling
+     * {@code DescribeStackSetOperation}.
+     */
+    private static String deriveOperationStatus(List<StackInstance> deployedInstances) {
+        boolean anyFailed = deployedInstances.stream()
+                .anyMatch(i -> "FAILED".equals(i.getDetailedStatus()));
+        return anyFailed ? "FAILED" : "SUCCEEDED";
     }
 
     private StackSet getStackSetOrThrow(String name) {

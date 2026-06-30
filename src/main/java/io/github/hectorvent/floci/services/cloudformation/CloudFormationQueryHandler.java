@@ -750,7 +750,8 @@ public class CloudFormationQueryHandler {
             StackSetOperation op = stackSetService.deleteStackInstances(
                     params.getFirst("StackSetName"),
                     extractList(params, "Accounts.member."),
-                    extractList(params, "Regions.member."));
+                    extractList(params, "Regions.member."),
+                    Boolean.parseBoolean(params.getFirst("RetainStacks")));
             return operationResponse("DeleteStackInstances", op.getOperationId());
         } catch (AwsException e) {
             return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());

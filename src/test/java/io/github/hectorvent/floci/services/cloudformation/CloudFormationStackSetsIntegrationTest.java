@@ -364,4 +364,107 @@ class CloudFormationStackSetsIntegrationTest {
         .then().statusCode(409)
             .body(containsString("StackSetNotEmptyException"));
     }
+
+    @Test
+    void deleteStackInstancesWithRetainStacksKeepsUnderlyingResources() {
+        String setName = "retain-" + UUID.randomUUID().toString().substring(0, 8);
+        String queue = "retain-q-" + UUID.randomUUID().toString().substring(0, 8);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", queueTemplate(queue))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+        assertQueueVisible(ACCOUNT_B, queue);
+
+        // RetainStacks=true (the SDK always sends it) detaches the instance but keeps the stack.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .formParam("RetainStacks", "true")
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<OperationId>"));
+
+        // The instance is no longer part of the StackSet...
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListStackInstances")
+            .formParam("StackSetName", setName)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(not(containsString("<Account>" + ACCOUNT_B + "</Account>")));
+
+        // ...but its underlying resources were retained in the target account.
+        assertQueueVisible(ACCOUNT_B, queue);
+    }
+
+    @Test
+    void operationReportsFailedWhenAnInstanceRollsBack() {
+        String setName = "failset-" + UUID.randomUUID().toString().substring(0, 8);
+        // A nested stack with no TemplateURL fails to provision, rolling the instance stack back.
+        String badTemplate =
+            "{\"Resources\":{\"Nested\":{\"Type\":\"AWS::CloudFormation::Stack\",\"Properties\":{}}}}";
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", setName)
+            .formParam("TemplateBody", badTemplate)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200);
+
+        String operationId = given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackInstances")
+            .formParam("StackSetName", setName)
+            .formParam("Accounts.member.1", ACCOUNT_B)
+            .formParam("Regions.member.1", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .extract().path("CreateStackInstancesResponse.CreateStackInstancesResult.OperationId");
+
+        // The rolled-back instance is INOPERABLE / FAILED...
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackInstance")
+            .formParam("StackSetName", setName)
+            .formParam("StackInstanceAccount", ACCOUNT_B)
+            .formParam("StackInstanceRegion", REGION)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<DetailedStatus>FAILED</DetailedStatus>"));
+
+        // ...so the operation reports FAILED rather than a false SUCCEEDED.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStackSetOperation")
+            .formParam("StackSetName", setName)
+            .formParam("OperationId", operationId)
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<Status>FAILED</Status>"));
+    }
 }

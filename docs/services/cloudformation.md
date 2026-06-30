@@ -124,8 +124,13 @@ each instance's resources into that target account's namespace — so a queue na
 into accounts `222222222222` and `333333333333` exists independently in each. The stack set, its
 instances, and its operation history are recorded in the administration (caller) account.
 
-`DeleteStackInstances` removes instances and their resources; a stack set must be empty before
-`DeleteStackSet`.
+`DeleteStackInstances` removes instances and their resources, unless `RetainStacks=true`, which
+detaches the instances from the stack set but leaves their underlying stacks and resources in place.
+A stack set must be empty before `DeleteStackSet`.
+
+A `CreateStackInstances` / `UpdateStackSet` operation reports `FAILED` if any of its instances fails
+to deploy (the instance is marked `INOPERABLE`), so polling `DescribeStackSetOperation` reflects real
+provisioning outcomes rather than always returning `SUCCEEDED`.
 
 ## Configuration
 
