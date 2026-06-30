@@ -122,7 +122,8 @@ public class StepFunctionsService implements Resettable {
     }
 
     public List<StateMachineVersion> listStateMachineVersions(String stateMachineArn) {
-        return describeStateMachine(stateMachineArn).getVersions();
+        // Defensive copy so callers can't mutate (or trip over concurrent mutation of) the stored list.
+        return List.copyOf(describeStateMachine(stateMachineArn).getVersions());
     }
 
     public void deleteStateMachineVersion(String stateMachineVersionArn) {
