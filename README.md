@@ -380,6 +380,8 @@ AWS_ACCESS_KEY_ID=222222222222 aws sqs create-queue --queue-name orders
 
 Any other key format, such as `test` or `AKIA...`, causes Floci to fall back to `FLOCI_DEFAULT_ACCOUNT_ID`, which defaults to `000000000000`.
 
+STS temporary credentials are routed too: credentials from `AssumeRole` resolve to the assumed role's account, so the cross-account assume-role-then-provision pattern works locally. Resolution precedence is 12-digit AKID → temporary-session lookup → `FLOCI_DEFAULT_ACCOUNT_ID`.
+
 See the [Multi-Account Isolation docs](https://floci.io/floci/configuration/multi-account/).
 
 ## SDK Integration

@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.apigatewayv2.websocket;
 
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.vertx.core.http.ServerWebSocket;
 import jakarta.enterprise.context.ApplicationScoped;
 import org.jboss.logging.Logger;
@@ -12,7 +13,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Tracks connection metadata and live socket references.
  */
 @ApplicationScoped
-public class WebSocketConnectionManager {
+public class WebSocketConnectionManager implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(WebSocketConnectionManager.class);
 
@@ -44,6 +45,17 @@ public class WebSocketConnectionManager {
         sockets.remove(connectionId);
         serverInitiatedCloses.remove(connectionId);
         LOG.debugv("Unregistered WebSocket connection {0}", connectionId);
+    }
+
+    public void clear() {
+        sockets.values().forEach(ws -> {
+            try {
+                ws.close();
+            } catch (Exception ignored) {}
+        });
+        connections.clear();
+        sockets.clear();
+        serverInitiatedCloses.clear();
     }
 
     /**

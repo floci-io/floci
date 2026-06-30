@@ -1,8 +1,10 @@
 package io.github.hectorvent.floci.lifecycle;
 
-import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.JsonNode;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.junit.jupiter.api.Test;
@@ -17,6 +19,11 @@ import static org.junit.jupiter.api.Assertions.*;
 class EmulatorInfoControllerIntegrationTest {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    @BeforeAll
+    static void configureRestAssured() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     // Core services that must always be present and running.
     // New services can be added to Floci without updating this list —
@@ -96,5 +103,72 @@ class EmulatorInfoControllerIntegrationTest {
     @ValueSource(strings = {"/_floci/config", "/_localstack/config"})
     void config_returns200OnBothPaths(String path) {
         given().when().get(path).then().statusCode(200).contentType("application/json");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/_floci/state/reset", "/_localstack/state/reset", "/_floci/state/nuke", "/_localstack/state/nuke"})
+    void stateReset_returnsOkOnAllPaths(String path) {
+        given()
+            .when().post(path)
+            .then()
+                .statusCode(200)
+                .contentType("application/json")
+                .body("status", equalTo("OK"));
+    }
+
+    @Test
+    void stateReset_clearsDatabaseState() {
+        // 1. Put SSM parameter
+        given()
+            .header("X-Amz-Target", "AmazonSSM.PutParameter")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {
+                    "Name": "/test/parameter/to/be/reset",
+                    "Value": "should-be-gone",
+                    "Type": "String"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        // 2. Verify parameter exists
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {
+                    "Name": "/test/parameter/to/be/reset"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("Parameter.Value", equalTo("should-be-gone"));
+
+        // 3. Trigger state reset
+        given()
+            .when().post("/_floci/state/reset")
+            .then()
+                .statusCode(200)
+                .body("status", equalTo("OK"));
+
+        // 4. Verify parameter is deleted and no longer exists
+        given()
+            .header("X-Amz-Target", "AmazonSSM.GetParameter")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {
+                    "Name": "/test/parameter/to/be/reset"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ParameterNotFound"));
     }
 }

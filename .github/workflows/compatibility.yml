@@ -106,6 +106,7 @@ jobs:
             -e FLOCI_BASE_URL=http://floci:4566 \
             -e FLOCI_SERVICES_DOCKER_NETWORK=compat-net \
             -e FLOCI_HOSTNAME=floci \
+            -e FLOCI_SERVICES_IOT_MQTT_ENABLED=true \
             -e FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED=true \
             -e FLOCI_TLS_ENABLED=true \
             -e FLOCI_SERVICES_EC2_MOCK=true \

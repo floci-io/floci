@@ -9,6 +9,8 @@ import io.github.hectorvent.floci.services.bedrockruntime.BedrockRuntimeControll
 import io.github.hectorvent.floci.services.cognito.CognitoOAuthController;
 import io.github.hectorvent.floci.services.cognito.CognitoWellKnownController;
 import io.github.hectorvent.floci.services.eks.EksController;
+import io.github.hectorvent.floci.services.iot.IotController;
+import io.github.hectorvent.floci.services.iot.IotDataController;
 import io.github.hectorvent.floci.services.pipes.PipesController;
 import io.github.hectorvent.floci.services.lambda.LambdaController;
 import io.github.hectorvent.floci.services.opensearch.OpenSearchController;
@@ -262,7 +264,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.REST_JSON),
                         Set.of(), Set.of("batch"), Set.of(), Set.of(BatchController.class)),
                 descriptor("codedeploy", "codedeploy", config.services().codedeploy().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "codedeploy", storageMode(config.storage().services().codedeploy().mode(), config.storage().mode()),
+                        config.storage().services().codedeploy().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("CodeDeploy_20141006."), Set.of("codedeploy"), Set.of(), Set.of()),
                 descriptor("codepipeline", "codepipeline", config.services().codepipeline().enabled(), true,
@@ -317,7 +320,8 @@ public class ResolvedServiceCatalog {
                         protocols(ServiceProtocol.JSON),
                         Set.of("AWSPriceListService."), Set.of("pricing", "api.pricing"), Set.of(), Set.of()),
                 descriptor("transcribe", "transcribe", config.services().transcribe().enabled(), true,
-                        null, null, 5000L, null, ServiceProtocol.JSON,
+                        "transcribe", storageMode(config.storage().services().transcribe().mode(), config.storage().mode()),
+                        config.storage().services().transcribe().flushIntervalMs(), null, ServiceProtocol.JSON,
                         protocols(ServiceProtocol.JSON),
                         Set.of("Transcribe."), Set.of("transcribe"), Set.of(), Set.of()),
                 descriptor("ce", "ce", config.services().ce().enabled(), true,
@@ -346,7 +350,15 @@ public class ResolvedServiceCatalog {
                         "s3vectors", storageMode(config.storage().services().s3vectors().mode(), config.storage().mode()),
                         config.storage().services().s3vectors().flushIntervalMs(), null, ServiceProtocol.REST_JSON,
                         protocols(ServiceProtocol.REST_JSON),
-                        Set.of(), Set.of("s3vectors"), Set.of(), Set.of(S3VectorsController.class))
+                        Set.of(), Set.of("s3vectors"), Set.of(), Set.of(S3VectorsController.class)),
+                descriptor("iot", "iot", config.services().iot().enabled(), true,
+                        "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("iot", "execute-api"), Set.of(), Set.of(IotController.class)),
+                descriptor("iotdata", "iotdata", config.services().iotdata().enabled(), true,
+                        "iot", config.storage().mode(), 5000L, null, ServiceProtocol.REST_JSON,
+                        protocols(ServiceProtocol.REST_JSON),
+                        Set.of(), Set.of("iotdata"), Set.of(), Set.of(IotDataController.class))
         ));
     }
 
