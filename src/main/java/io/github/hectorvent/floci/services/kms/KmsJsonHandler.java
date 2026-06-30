@@ -384,7 +384,8 @@ public class KmsJsonHandler {
     }
 
     private Response handleListAliases(JsonNode request, String region) {
-        List<KmsAlias> aliases = service.listAliases(region);
+        String keyId = request.path("KeyId").isMissingNode() ? null : request.path("KeyId").asText(null);
+        List<KmsAlias> aliases = service.listAliases(keyId, region);
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("Aliases");
         for (KmsAlias a : aliases) {
