@@ -51,6 +51,8 @@ class Ec2IntegrationTest {
     private static String rootVolumeId;
     private static String networkInterfaceId;
     private static String launchTemplateId;
+    private static String launchTemplateUserData;
+    private static String launchTemplateVersionUserData;
     private static String vpcEndpointId;
     private static String natGatewayId;
     private static String registeredImageId;
@@ -914,6 +916,7 @@ class Ec2IntegrationTest {
     @Order(43)
     void createLaunchTemplate()
             throws IOException {
+        launchTemplateUserData = gzipBase64("#!/bin/sh\necho launch-template\n");
         launchTemplateId = given()
             .formParam("Action", "CreateLaunchTemplate")
             .formParam("LaunchTemplateName", "sample-template")
@@ -922,7 +925,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
-            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
+            .formParam("LaunchTemplateData.UserData", launchTemplateUserData)
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:ClusterId")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "sample-template")
@@ -978,7 +981,7 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template\n"))
+                    equalTo(launchTemplateUserData))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.iamInstanceProfile.arn",
                     equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
@@ -993,6 +996,7 @@ class Ec2IntegrationTest {
     @Order(46)
     void createLaunchTemplateVersion()
             throws IOException {
+        launchTemplateVersionUserData = gzipBase64("#!/bin/sh\necho launch-template-version\n");
         given()
             .formParam("Action", "CreateLaunchTemplateVersion")
             .formParam("LaunchTemplateId", launchTemplateId)
@@ -1003,7 +1007,7 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.KeyName", "test-key")
             .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile-v2")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
-            .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
+            .formParam("LaunchTemplateData.UserData", launchTemplateVersionUserData)
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:NodeType")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "SECONDARY")
@@ -1021,7 +1025,7 @@ class Ec2IntegrationTest {
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.instanceType",
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template-version\n"))
+                    equalTo(launchTemplateVersionUserData))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.iamInstanceProfile.arn",
                     equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
@@ -1043,7 +1047,7 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.instanceType",
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
-                    equalTo("#!/bin/sh\necho launch-template\n"))
+                    equalTo(launchTemplateUserData))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
                     equalTo("PRIMARY"));
     }
@@ -1054,7 +1058,7 @@ class Ec2IntegrationTest {
         given()
             .formParam("Action", "ModifyLaunchTemplate")
             .formParam("LaunchTemplateId", launchTemplateId)
-            .formParam("DefaultVersion", "2")
+            .formParam("SetDefaultVersion", "2")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -1065,6 +1069,32 @@ class Ec2IntegrationTest {
             .body("ModifyLaunchTemplateResponse.launchTemplate.defaultVersionNumber",
                     equalTo("2"))
             .body("ModifyLaunchTemplateResponse.launchTemplate.latestVersionNumber",
+                    equalTo("2"));
+
+        given()
+            .formParam("Action", "DescribeLaunchTemplates")
+            .formParam("LaunchTemplateId.1", launchTemplateId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.defaultVersionNumber",
+                    equalTo("2"))
+            .body("DescribeLaunchTemplatesResponse.launchTemplates.item.latestVersionNumber",
+                    equalTo("2"));
+
+        given()
+            .formParam("Action", "ModifyLaunchTemplate")
+            .formParam("LaunchTemplateId", launchTemplateId)
+            .formParam("SetDefaultVersion", "")
+            .formParam("DefaultVersion", "2")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("ModifyLaunchTemplateResponse.launchTemplate.defaultVersionNumber",
                     equalTo("2"));
     }
 

@@ -1623,6 +1623,7 @@ public class Ec2Service {
     public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
                                                String instanceType, String keyName,
                                                List<String> securityGroupIds, String userData,
+                                               String encodedUserData,
                                                String iamInstanceProfileArn,
                                                List<Tag> launchTemplateTags, List<Tag> instanceTags) {
         ensureDefaultResources(region);
@@ -1646,6 +1647,7 @@ public class Ec2Service {
         launchTemplate.setInstanceType(instanceType);
         launchTemplate.setKeyName(keyName);
         launchTemplate.setUserData(userData);
+        launchTemplate.setEncodedUserData(encodedUserData);
         launchTemplate.setIamInstanceProfileArn(iamInstanceProfileArn);
         if (securityGroupIds != null) {
             launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
@@ -1666,6 +1668,7 @@ public class Ec2Service {
                                                       String sourceVersion,
                                                       String imageId, String instanceType, String keyName,
                                                       List<String> securityGroupIds, String userData,
+                                                      String encodedUserData,
                                                       String iamInstanceProfileArn,
                                                       List<Tag> instanceTags) {
         ensureDefaultResources(region);
@@ -1686,6 +1689,7 @@ public class Ec2Service {
         }
         if (userData != null && !userData.isBlank()) {
             data.setUserData(userData);
+            data.setEncodedUserData(encodedUserData);
         }
         if (iamInstanceProfileArn != null && !iamInstanceProfileArn.isBlank()) {
             data.setIamInstanceProfileArn(iamInstanceProfileArn);
@@ -1837,6 +1841,7 @@ public class Ec2Service {
         data.setInstanceType(launchTemplate.getInstanceType());
         data.setKeyName(launchTemplate.getKeyName());
         data.setUserData(launchTemplate.getUserData());
+        data.setEncodedUserData(launchTemplate.getEncodedUserData());
         data.setIamInstanceProfileArn(launchTemplate.getIamInstanceProfileArn());
         data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
         data.setInstanceTags(launchTemplate.getInstanceTags());
@@ -1848,6 +1853,7 @@ public class Ec2Service {
         launchTemplate.setInstanceType(data.getInstanceType());
         launchTemplate.setKeyName(data.getKeyName());
         launchTemplate.setUserData(data.getUserData());
+        launchTemplate.setEncodedUserData(data.getEncodedUserData());
         launchTemplate.setIamInstanceProfileArn(data.getIamInstanceProfileArn());
         launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
         launchTemplate.setInstanceTags(data.getInstanceTags());
