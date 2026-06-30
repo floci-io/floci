@@ -96,4 +96,50 @@ class EcsJsonHandlerVolumesTest {
         assertEquals("/root/.aws", mps.get(1).path("containerPath").asText());
         assertFalse(mps.get(1).path("readOnly").asBoolean(), "aws mount is read-write");
     }
+
+    @Test
+    void registerTaskDefinitionRoundTripsEfsVolumeConfiguration() throws Exception {
+        String requestJson = """
+                {
+                  "family": "efs-family",
+                  "containerDefinitions": [
+                    {
+                      "name": "app",
+                      "image": "alpine:latest",
+                      "mountPoints": [
+                        {"sourceVolume": "customer-data", "containerPath": "/mnt/efs", "readOnly": false}
+                      ]
+                    }
+                  ],
+                  "volumes": [
+                    {
+                      "name": "customer-data",
+                      "efsVolumeConfiguration": {
+                        "fileSystemId": "fs-0123456789abcdef0",
+                        "rootDirectory": "/dps",
+                        "transitEncryption": "ENABLED",
+                        "transitEncryptionPort": 2999,
+                        "authorizationConfig": {"accessPointId": "fsap-0abc", "iam": "ENABLED"}
+                      }
+                    }
+                  ]
+                }
+                """;
+        JsonNode request = objectMapper.readTree(requestJson);
+
+        Response response = handler.handle("RegisterTaskDefinition", request, "us-east-1");
+        JsonNode td = objectMapper.valueToTree(response.getEntity()).path("taskDefinition");
+
+        // The efsVolumeConfiguration round-trips faithfully (no drift on Terraform reads).
+        JsonNode vol = td.path("volumes").get(0);
+        assertEquals("customer-data", vol.path("name").asText());
+        assertTrue(vol.path("host").isMissingNode(), "EFS volume must not carry a host shape");
+        JsonNode efs = vol.path("efsVolumeConfiguration");
+        assertEquals("fs-0123456789abcdef0", efs.path("fileSystemId").asText());
+        assertEquals("/dps", efs.path("rootDirectory").asText());
+        assertEquals("ENABLED", efs.path("transitEncryption").asText());
+        assertEquals(2999, efs.path("transitEncryptionPort").asInt());
+        assertEquals("fsap-0abc", efs.path("authorizationConfig").path("accessPointId").asText());
+        assertEquals("ENABLED", efs.path("authorizationConfig").path("iam").asText());
+    }
 }

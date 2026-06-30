@@ -2,6 +2,7 @@ target/
 data/
 *.class
 *.jar
+!vendor/maven/**/*.jar
 *.war
 .idea/
 *.iml

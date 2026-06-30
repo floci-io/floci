@@ -53,6 +53,7 @@ import org.jboss.logging.Logger;
 @Path("/")
 public class AwsJson11Controller {
 
+    public static final String CONTENT_TYPE_AWS_JSON_1_1 = "application/x-amz-json-1.1";
     private static final Logger LOG = Logger.getLogger(AwsJson11Controller.class);
 
     private final ObjectMapper objectMapper;
@@ -160,8 +161,8 @@ public class AwsJson11Controller {
     }
 
     @POST
-    @Consumes("application/x-amz-json-1.1")
-    @Produces("application/x-amz-json-1.1")
+    @Consumes(CONTENT_TYPE_AWS_JSON_1_1)
+    @Produces(CONTENT_TYPE_AWS_JSON_1_1)
     public Response handle(
             @HeaderParam("X-Amz-Target") String target,
             @Context HttpHeaders httpHeaders,
