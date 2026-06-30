@@ -149,8 +149,10 @@ public class ScheduleInvoker {
         // event-bus targets; honor them. Keep the historical defaults as a fallback for
         // schedules created without those parameters.
         EventBridgeParameters ebp = target.getEventBridgeParameters();
-        String source = ebp != null && ebp.getSource() != null ? ebp.getSource() : "aws.scheduler";
-        String detailType = ebp != null && ebp.getDetailType() != null ? ebp.getDetailType() : "Scheduled Event";
+        String source = ebp != null && ebp.getSource() != null && !ebp.getSource().isBlank()
+                ? ebp.getSource() : "aws.scheduler";
+        String detailType = ebp != null && ebp.getDetailType() != null && !ebp.getDetailType().isBlank()
+                ? ebp.getDetailType() : "Scheduled Event";
 
         Map<String, Object> entry = new HashMap<>();
         entry.put("EventBusName", busName);

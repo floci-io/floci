@@ -406,7 +406,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(21)
+    @Order(30)
     void createScheduleWithEventBridgeParametersRoundTrips() {
         given()
             .contentType("application/json")

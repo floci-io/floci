@@ -419,13 +419,17 @@ public class SchedulerController {
         if (node.has("EventBridgeParameters") && !node.get("EventBridgeParameters").isNull()) {
             JsonNode ebNode = node.get("EventBridgeParameters");
             EventBridgeParameters ebp = new EventBridgeParameters();
-            if (ebNode.has("DetailType") && !ebNode.get("DetailType").isNull()) {
+            if (ebNode.has("DetailType") && !ebNode.get("DetailType").isNull()
+                    && !ebNode.get("DetailType").asText().isBlank()) {
                 ebp.setDetailType(ebNode.get("DetailType").asText());
             }
-            if (ebNode.has("Source") && !ebNode.get("Source").isNull()) {
+            if (ebNode.has("Source") && !ebNode.get("Source").isNull()
+                    && !ebNode.get("Source").asText().isBlank()) {
                 ebp.setSource(ebNode.get("Source").asText());
             }
-            target.setEventBridgeParameters(ebp);
+            if (ebp.getDetailType() != null || ebp.getSource() != null) {
+                target.setEventBridgeParameters(ebp);
+            }
         }
         return target;
     }
