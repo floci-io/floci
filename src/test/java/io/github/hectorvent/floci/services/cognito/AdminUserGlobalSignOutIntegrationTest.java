@@ -4,19 +4,19 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
-import io.restassured.response.Response;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.MethodOrderer;
 import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
-import static io.restassured.RestAssured.given;
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
  * Integration tests for the AdminUserGlobalSignOut API.
- *
+ * <p>
  * Reproduces issue #1395: previously issued tokens must be invalidated
  * after calling AdminUserGlobalSignOut, matching AWS Cognito behavior.
  */
@@ -24,13 +24,11 @@ import static org.junit.jupiter.api.Assertions.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class AdminUserGlobalSignOutIntegrationTest {
 
-    private static final String CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private static String poolId;
     private static String clientId;
     private static String refreshToken;
-    private static String accessToken;
 
     private static final String USERNAME = "alice";
     private static final String PASSWORD  = "Password123!";
@@ -41,20 +39,6 @@ class AdminUserGlobalSignOutIntegrationTest {
     }
 
     // ─── helpers ────────────────────────────────────────────────────────────
-
-    private static Response cognitoAction(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
-                .contentType(CONTENT_TYPE)
-                .body(body)
-                .when()
-                .post("/");
-    }
-
-    private static JsonNode cognitoJson(String action, String body) throws Exception {
-        return MAPPER.readTree(
-                cognitoAction(action, body).then().statusCode(200).extract().asString());
-    }
 
     /** POST without asserting 200 — lets tests inspect the error response. */
     private static JsonNode cognitoJsonAny(String action, String body) throws Exception {
@@ -103,7 +87,7 @@ class AdminUserGlobalSignOutIntegrationTest {
                 """.formatted(clientId, USERNAME, PASSWORD));
 
         refreshToken = auth.path("AuthenticationResult").path("RefreshToken").asText();
-        accessToken  = auth.path("AuthenticationResult").path("AccessToken").asText();
+        String accessToken = auth.path("AuthenticationResult").path("AccessToken").asText();
 
         assertFalse(refreshToken.isBlank(), "RefreshToken must be present after sign-in");
         assertFalse(accessToken.isBlank(),  "AccessToken must be present after sign-in");

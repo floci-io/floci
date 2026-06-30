@@ -238,13 +238,21 @@ public class ContainerBuilder {
         }
 
         /**
-         * Adds a named volume mount.
+         * Adds a read-write named volume mount.
          */
         public Builder withNamedVolume(String volumeName, String containerPath) {
+            return withNamedVolume(volumeName, containerPath, false);
+        }
+
+        /**
+         * Adds a named volume mount, read-only when {@code readOnly} is true.
+         */
+        public Builder withNamedVolume(String volumeName, String containerPath, boolean readOnly) {
             this.mounts.add(new Mount()
                     .withType(MountType.VOLUME)
                     .withSource(volumeName)
-                    .withTarget(containerPath));
+                    .withTarget(containerPath)
+                    .withReadOnly(readOnly));
             return this;
         }
 

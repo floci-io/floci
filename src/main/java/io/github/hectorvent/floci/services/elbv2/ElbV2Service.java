@@ -1,9 +1,11 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.dns.EmbeddedDnsServer;
 import io.github.hectorvent.floci.core.storage.StorageBackedMap;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
@@ -35,6 +37,9 @@ public class ElbV2Service {
 
     @Inject
     StorageFactory storageFactory;
+
+    @Inject
+    EmulatorConfig config;
 
     private static final String CANONICAL_HOSTED_ZONE_ID = "Z35SXDOTRQ7X7K";
 
@@ -157,7 +162,7 @@ public class ElbV2Service {
         String typePrefix = lbTypePrefix(lbType);
         String id = randomHex16();
         String arn = AwsArnUtils.Arn.of("elasticloadbalancing", region, regionResolver.getAccountId(), "loadbalancer/" + typePrefix + "/" + name + "/" + id).toString();
-        String dnsName = name + "-" + id + ".elb.localhost";
+        String dnsName = name + "-" + id + ".elb." + loadBalancerDnsSuffix();
         String vpcId = resolveSubnetVpcId(region, lbType, subnets);
 
         LoadBalancer lb = new LoadBalancer();
@@ -182,6 +187,13 @@ public class ElbV2Service {
             tags.put(arn, new LinkedHashMap<>(initialTags));
         }
         return lb;
+    }
+
+    private String loadBalancerDnsSuffix() {
+        if (config == null) {
+            return EmbeddedDnsServer.DEFAULT_SUFFIX;
+        }
+        return config.hostname().orElse(EmbeddedDnsServer.DEFAULT_SUFFIX);
     }
 
     public List<LoadBalancer> describeLoadBalancers(String region, List<String> arns, List<String> names,

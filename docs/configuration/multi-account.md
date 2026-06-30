@@ -20,6 +20,21 @@ Once the account ID is determined, every storage read and write is transparently
 !!! note "Same convention as LocalStack"
     This 12-digit AKID → account ID rule matches LocalStack's multi-account behavior, so existing multi-account test setups work without changes.
 
+## Temporary Credentials (AssumeRole)
+
+STS temporary credentials are also routed to the correct account. When you call `AssumeRole` (or `AssumeRoleWithWebIdentity`, `AssumeRoleWithSAML`, `GetFederationToken`), Floci issues a temporary `ASIA…` access key and remembers which account it belongs to:
+
+- **`AssumeRole` / web-identity / SAML / federation** → the account in the role (or federated-user) ARN. Assuming `arn:aws:iam::222222222222:role/Deployer` from account `111111111111` yields credentials that resolve to **`222222222222`**, so resources created with them land in account B's namespace.
+- **`GetSessionToken`** → the caller's account (these credentials carry no role), so they stay in the same account.
+
+```
+Account 111111111111 ──AssumeRole arn:aws:iam::222222222222:role/Deployer──▶ ASIA… temp key
+                                                                              │
+ASIA… temp key ──CreateTable orders──▶ stored as 222222222222/...::orders  ◀──┘
+```
+
+This makes the cross-account `AssumeRole`-then-provision pattern (e.g. CloudFormation deploying into a target account) work locally exactly as it does in AWS. Resolution precedence is: **12-digit AKID → temporary-session lookup → `FLOCI_DEFAULT_ACCOUNT_ID`.**
+
 ## Default Behavior (Single Account)
 
 If you use any non-12-digit credentials (e.g. `test`, `AKIA…`), all requests resolve to the default account ID:

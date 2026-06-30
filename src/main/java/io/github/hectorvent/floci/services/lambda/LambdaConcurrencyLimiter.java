@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -33,7 +34,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  * </ul>
  */
 @ApplicationScoped
-public class LambdaConcurrencyLimiter {
+public class LambdaConcurrencyLimiter implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(LambdaConcurrencyLimiter.class);
     /** Tracks malformed ARNs already logged so the warn fires once per unique input. */
@@ -235,6 +236,15 @@ public class LambdaConcurrencyLimiter {
     public void reset(String functionArn) {
         synchronized (reservedLock) {
             writeReserved(functionArn, null);
+        }
+    }
+
+    public void clear() {
+        synchronized (reservedLock) {
+            inflight.clear();
+            reservedByRegion.clear();
+            regionReservedTotal.clear();
+            unreservedByRegion.clear();
         }
     }
 

@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.C
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.EfsVolumeConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.MountPoint;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.Volume;
@@ -105,5 +106,38 @@ class EcsContainerManagerVolumesTest {
 
         // The unresolved "missing-vol" mountPoint contributes no bind beyond the two above.
         verify(builder, never()).withBind("/app/nope", "/app/nope");
+    }
+
+    @Test
+    void efsVolumeMountPointsResolveToSharedNamedVolumesByAccessMode() {
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setMountPoints(List.of(
+                new MountPoint("customer-data", "/mnt/efs", false),    // read-write
+                new MountPoint("shared-ro", "/mnt/shared", true)));    // read-only
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("efs-family");
+        taskDef.setContainerDefinitions(List.of(app));
+        taskDef.setVolumes(List.of(
+                new Volume("customer-data", null,
+                        new EfsVolumeConfiguration("fs-0123456789abcdef0", "/dps", "ENABLED", null, null, null)),
+                new Volume("shared-ro", null,
+                        new EfsVolumeConfiguration("fs-00000000000000001", null, null, null, null, null))));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/efs1");
+
+        manager.startTask(task, taskDef, List.of(), "us-east-1");
+
+        // Each EFS volume -> a shared local Docker named volume keyed by file system id,
+        // read-write or read-only per the mountPoint.
+        verify(builder, times(1)).withNamedVolume("floci-efs-fs-0123456789abcdef0", "/mnt/efs", false);
+        verify(builder, times(1)).withNamedVolume("floci-efs-fs-00000000000000001", "/mnt/shared", true);
+
+        // EFS volumes are never bind-mounted as host paths.
+        verify(builder, never()).withBind(any(), any());
+        verify(builder, never()).withReadOnlyBind(any(), any());
     }
 }

@@ -3,6 +3,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Response;
@@ -17,7 +18,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * @see <a href="https://docs.aws.amazon.com/textract/latest/dg/API_Operations.html">Textract API Reference</a>
  */
 @ApplicationScoped
-public class TextractService {
+public class TextractService implements Resettable {
     static final String MODEL_VERSION = "1.0";
     private final ObjectMapper objectMapper;
     /** In-memory async job store: jobId to jobType ("TEXT_DETECTION" or "DOCUMENT_ANALYSIS"). */
@@ -25,6 +26,9 @@ public class TextractService {
     @Inject
     public TextractService(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
+    }
+    public void clear() {
+        asyncJobs.clear();
     }
     /**
      * DetectDocumentText — returns a stub PAGE + LINE + WORD block hierarchy.

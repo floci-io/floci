@@ -266,6 +266,22 @@ class EmulatorLifecycleTest {
     }
 
     @Test
+    @DisplayName("onStop flushes storage BEFORE the slow container teardown, and shuts it down last")
+    void shouldFlushStorageBeforeContainerTeardown() {
+        emulatorLifecycle.onStop(Mockito.mock(ShutdownEvent.class));
+
+        // The disk flush must run before the blocking Docker container teardown so a graceful
+        // shutdown can't be cut off by the SIGTERM grace window before data is persisted
+        // (regression guard for issue #1521). shutdownAll() still runs last to stop the flush
+        // schedulers and capture any shutdown-time writes.
+        var inOrder = Mockito.inOrder(storageFactory, rdsContainerManager, elastiCacheContainerManager);
+        inOrder.verify(storageFactory).flushAll();
+        inOrder.verify(elastiCacheContainerManager).stopAll();
+        inOrder.verify(rdsContainerManager).stopAll();
+        inOrder.verify(storageFactory).shutdownAll();
+    }
+
+    @Test
     @DisplayName("Should still run full resource cleanup when a pre-shutdown hook fails")
     void shouldRunFullCleanupAfterFailingPreShutdownHook() throws IOException, InterruptedException {
         doThrow(new IOException("hook blew up")).when(initializationHooksRunner).run(InitializationHook.STOP);

@@ -20,6 +20,7 @@ import java.util.Optional;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.argThat;
@@ -83,7 +84,40 @@ class SsmDirectCommandExecutorTest {
                 eq("sh"),
                 eq("-c"),
                 argThat(command -> command.contains("timeout --kill-after=1s '30s' sh -c")
-                        && command.contains("'echo stdout'")));
+                        && !command.contains("floci_ssm_redact")
+                        && command.contains("echo stdout")));
+    }
+
+    @Test
+    void timeoutWrapperLeavesCommandOutputAwsFaithful() {
+        String command = SsmDirectCommandExecutor.timeoutWrappedScript("curl http://127.0.0.1:9999/health", 30);
+
+        assertTrue(command.contains("curl http://127.0.0.1:9999/health"));
+        assertFalse(command.contains("floci_ssm_redact"));
+        assertFalse(command.contains("listening ports"));
+        assertFalse(command.contains("/var/log/*.log"));
+    }
+
+    @Test
+    void failureDiagnosticsAreGenericAndRedacted() {
+        String command = SsmDirectCommandExecutor.failureDiagnosticsScript();
+
+        assertTrue(command.contains("listening ports"));
+        assertTrue(command.contains("processes"));
+        assertTrue(command.contains("/var/log/*.log"));
+        assertTrue(command.contains("REDACTED"));
+        assertFalse(command.contains("airship"));
+        assertFalse(command.contains("iceguard"));
+        assertFalse(command.contains("trino"));
+        assertFalse(command.contains("coordinator"));
+    }
+
+    @Test
+    void timeoutAppliesOnlyToUserScriptBeforeDiagnosticsRun() {
+        String command = SsmDirectCommandExecutor.timeoutWrappedScript("sleep 100", 30);
+
+        assertTrue(command.contains("timeout --kill-after=1s '30s' sh -c 'sleep 100'"));
+        assertFalse(command.contains("floci_ssm_redact"));
     }
 
     @Test

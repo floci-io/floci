@@ -9,6 +9,7 @@ import io.github.hectorvent.floci.services.ses.model.BulkEmailEntryResult;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDestination;
 import io.github.hectorvent.floci.services.ses.model.CloudWatchDimensionConfiguration;
 import io.github.hectorvent.floci.services.ses.model.ConfigurationSet;
+import io.github.hectorvent.floci.services.ses.model.DeliveryOptions;
 import io.github.hectorvent.floci.services.ses.model.EmailTemplate;
 import io.github.hectorvent.floci.services.ses.model.EventDestination;
 import io.github.hectorvent.floci.services.ses.model.Identity;
@@ -25,6 +26,7 @@ import org.jboss.logging.Logger;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * Query-protocol handler for SES actions.
@@ -98,6 +100,8 @@ public class SesQueryHandler {
                         handleDeleteConfigurationSetTrackingOptions(params, region);
                 case "UpdateConfigurationSetReputationMetricsEnabled" ->
                         handleUpdateConfigurationSetReputationMetricsEnabled(params, region);
+                case "PutConfigurationSetDeliveryOptions" ->
+                        handlePutConfigurationSetDeliveryOptions(params, region);
                 default -> AwsQueryResponse.error("UnsupportedOperation",
                         "Operation " + action + " is not supported by SES.", AwsNamespaces.SES, 400);
             };
@@ -751,6 +755,32 @@ public class SesQueryHandler {
         sesService.setConfigurationSetReputationOptions(configSet, enabled, region);
         return Response.ok(AwsQueryResponse.envelopeEmptyResult(
                 "UpdateConfigurationSetReputationMetricsEnabled", AwsNamespaces.SES)).build();
+    }
+
+    private Response handlePutConfigurationSetDeliveryOptions(MultivaluedMap<String, String> params,
+                                                              String region) {
+        String configSet = requireParam(params, "ConfigurationSetName");
+        String tlsPolicy = getParam(params, "DeliveryOptions.TlsPolicy");
+        // The V1 API accepts TlsPolicy Require/Optional (PascalCase, case-sensitive). Validate
+        // here so an invalid enum value yields the v1 ValidationError AWS returns rather than the
+        // shared service's v2-style BadRequestException. Message verified against real AWS.
+        if (tlsPolicy != null && !"Require".equals(tlsPolicy) && !"Optional".equals(tlsPolicy)) {
+            throw new AwsException("ValidationError",
+                    "1 validation error detected: Value at 'deliveryOptions.tlsPolicy' failed to "
+                            + "satisfy constraint: Member must satisfy enum value set: [Optional, Require]",
+                    400);
+        }
+        // Mirror the V2 path: an all-null DeliveryOptions clears the block rather than
+        // persisting an empty object. Normalize the value to the V2 canonical REQUIRE/OPTIONAL
+        // that Floci stores internally.
+        DeliveryOptions options = null;
+        if (tlsPolicy != null) {
+            options = new DeliveryOptions();
+            options.setTlsPolicy(tlsPolicy.toUpperCase(Locale.ROOT));
+        }
+        sesService.setConfigurationSetDeliveryOptions(configSet, options, region);
+        return Response.ok(AwsQueryResponse.envelopeEmptyResult(
+                "PutConfigurationSetDeliveryOptions", AwsNamespaces.SES)).build();
     }
 
     /**
