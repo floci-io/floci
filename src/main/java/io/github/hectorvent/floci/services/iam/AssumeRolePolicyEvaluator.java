@@ -71,13 +71,31 @@ public class AssumeRolePolicyEvaluator {
     private enum Match { ALLOW, DENY, NO_MATCH }
 
     private Match evaluateStatement(JsonNode stmt, String callerArn, String callerAccount) {
-        if (!matchesAssumeRoleAction(stmt.get("Action"))) {
+        if (!actionApplies(stmt)) {
             return Match.NO_MATCH;
         }
         if (!matchesPrincipal(stmt.get("Principal"), callerArn, callerAccount)) {
             return Match.NO_MATCH;
         }
         return "Deny".equalsIgnoreCase(stmt.path("Effect").asText("Allow")) ? Match.DENY : Match.ALLOW;
+    }
+
+    /**
+     * True if the statement's action element applies to {@code sts:AssumeRole}. An {@code Action}
+     * element applies when any of its patterns match; a {@code NotAction} element applies when none
+     * of its patterns match (AWS semantics, mirroring {@link IamPolicyEvaluator}'s action handling).
+     * A statement with neither key expresses no action constraint and does not apply.
+     */
+    private boolean actionApplies(JsonNode stmt) {
+        JsonNode action = stmt.get("Action");
+        if (action != null) {
+            return matchesAssumeRoleAction(action);
+        }
+        JsonNode notAction = stmt.get("NotAction");
+        if (notAction != null) {
+            return !matchesAssumeRoleAction(notAction);
+        }
+        return false;
     }
 
     private boolean matchesAssumeRoleAction(JsonNode actionNode) {

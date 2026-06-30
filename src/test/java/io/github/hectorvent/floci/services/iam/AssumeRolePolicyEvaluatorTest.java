@@ -91,6 +91,38 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void deniesWhenDenyNotActionExcludesAssumeRole() {
+        // Deny applies to every action except sts:TagSession — which includes sts:AssumeRole — so it blocks.
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"},
+              {"Effect":"Deny","Principal":{"AWS":"*"},"NotAction":"sts:TagSession"}]}
+            """;
+        assertFalse(evaluator.allows(doc, CALLER_ARN, CALLER_ACCOUNT));
+    }
+
+    @Test
+    void allowsWhenDenyNotActionIncludesAssumeRole() {
+        // Deny applies to every action except sts:AssumeRole, so it does NOT block the assume.
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"*"},"Action":"sts:AssumeRole"},
+              {"Effect":"Deny","Principal":{"AWS":"*"},"NotAction":"sts:AssumeRole"}]}
+            """;
+        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ACCOUNT));
+    }
+
+    @Test
+    void allowsWhenAllowNotActionDoesNotCoverAssumeRole() {
+        // Allow applies to every action except sts:GetSessionToken, so it grants sts:AssumeRole.
+        String doc = """
+            {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Principal":{"AWS":"111111111111"},"NotAction":"sts:GetSessionToken"}]}
+            """;
+        assertTrue(evaluator.allows(doc, CALLER_ARN, CALLER_ACCOUNT));
+    }
+
+    @Test
     void deniesServiceOnlyPrincipal() {
         assertFalse(evaluator.allows(
                 trust("{\"Service\":\"lambda.amazonaws.com\"}"), CALLER_ARN, CALLER_ACCOUNT));
