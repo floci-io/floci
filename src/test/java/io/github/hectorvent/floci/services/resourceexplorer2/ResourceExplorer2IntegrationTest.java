@@ -206,6 +206,18 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // ACM certificate
+        given()
+            .header("X-Amz-Target", "CertificateManager.RequestCertificate")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {"DomainName": "re2-test.example.com", "ValidationMethod": "DNS"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -376,7 +388,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm"));
         }
     }
 
@@ -537,6 +549,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'pipes' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'pipes:pipe' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class AcmResources {
+        @Test
+        void certificateSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:acm"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'acm' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'acm:certificate' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
