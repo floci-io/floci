@@ -1350,6 +1350,30 @@ public class AslExecutor {
             case "States.UUID" -> {
                 yield objectMapper.getNodeFactory().textNode(java.util.UUID.randomUUID().toString());
             }
+            case "States.JsonMerge" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 3) {
+                    throw new FailStateException("States.Runtime",
+                            "States.JsonMerge requires exactly 3 arguments");
+                }
+                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
+                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
+                boolean deep = resolveIntrinsicArg(parts.get(2).trim(), root).asBoolean();
+                if (deep) {
+                    // AWS Step Functions only supports the shallow merge (third argument false).
+                    throw new FailStateException("States.Runtime",
+                            "States.JsonMerge supports only shallow merge (third argument must be false)");
+                }
+                if (!a.isObject() || !b.isObject()) {
+                    throw new FailStateException("States.Runtime",
+                            "States.JsonMerge requires two JSON objects");
+                }
+                // Shallow merge: second object's top-level fields override the first's.
+                var merged = objectMapper.createObjectNode();
+                a.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
+                b.fields().forEachRemaining(e -> merged.set(e.getKey(), e.getValue()));
+                yield merged;
+            }
             default -> throw new FailStateException("States.Runtime",
                     "Unsupported intrinsic function: " + fnName);
         };
@@ -1369,6 +1393,12 @@ public class AslExecutor {
         }
         if (arg.startsWith("\"") && arg.endsWith("\"")) {
             return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
+        }
+        if ("true".equals(arg) || "false".equals(arg)) {
+            return objectMapper.getNodeFactory().booleanNode(Boolean.parseBoolean(arg));
+        }
+        if ("null".equals(arg)) {
+            return objectMapper.getNodeFactory().nullNode();
         }
         try {
             return objectMapper.getNodeFactory().numberNode(Long.parseLong(arg));
