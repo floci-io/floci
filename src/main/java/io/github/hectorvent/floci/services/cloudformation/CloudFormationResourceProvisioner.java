@@ -412,8 +412,7 @@ public class CloudFormationResourceProvisioner {
             case "AWS::KMS::Key" -> {
             } // KMS keys can't be immediately deleted; skip
             case "AWS::KMS::Alias" -> kmsService.deleteAlias(physicalId, region);
-            case "AWS::SecretsManager::Secret" ->
-                    secretsManagerService.deleteSecret(physicalId, null, true, region);
+            case "AWS::SecretsManager::Secret" -> deleteSecretSafe(physicalId, region);
             case "AWS::Events::Rule" -> deleteEventBridgeRuleSafe(physicalId, region);
             case "AWS::ApiGateway::RestApi" -> apiGatewayService.deleteRestApi(region, physicalId);
             case "AWS::ApiGatewayV2::Api" -> apiGatewayV2Service.deleteApi(region, physicalId);
@@ -3766,6 +3765,18 @@ public class CloudFormationResourceProvisioner {
             iamService.deletePolicy(policyArn);
         } catch (Exception e) {
             LOG.debugv("Could not delete policy {0}: {1}", policyArn, e.getMessage());
+        }
+    }
+
+    private void deleteSecretSafe(String secretId, String region) {
+        try {
+            secretsManagerService.deleteSecret(secretId, null, true, region);
+        } catch (Exception e) {
+            // AWS treats a missing secret as already deleted during stack deletion.
+            // A ResourceNotFoundException here means the secret was removed outside
+            // CloudFormation (e.g. after a persistent-state restore), which is not
+            // an error condition -- the desired end state (secret gone) is already met.
+            LOG.debugv("Could not delete secret {0}: {1}", secretId, e.getMessage());
         }
     }
 
