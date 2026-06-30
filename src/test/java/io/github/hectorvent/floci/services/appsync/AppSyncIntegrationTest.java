@@ -3238,6 +3238,208 @@ class AppSyncIntegrationTest {
         }
     }
 
+    @Test
+    @Order(712)
+    void deleteChannelNamespace_busy_returns409() {
+        String tempApiId = createTempApi("busy-712-chns");
+        // Create the channel namespace BEFORE setting PROCESSING so the
+        // delete path finds it (otherwise we'd get 404 instead of 409).
+        String nsName = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "busy-chns", "description": "temp" }
+                """)
+        .when()
+            .post("/v2/apis/" + tempApiId + "/channelNamespaces")
+        .then()
+            .statusCode(200)
+            .extract().path("channelNamespace.name");
+        setSchemaProcessing(tempApiId);
+        try {
+            given()
+                .header("Authorization", AUTH)
+            .when()
+                .delete("/v2/apis/" + tempApiId + "/channelNamespaces/" + nsName)
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"))
+                .body("message", containsString("Another modification is in progress"));
+        } finally {
+            clearSchemaStatus(tempApiId);
+        }
+    }
+
+    @Test
+    @Order(713)
+    void deleteDomainName_busy_returns409() {
+        String tempApiId = createTempApi("busy-713-domain");
+        String domainName = "busy-713-" + System.nanoTime() + ".example.com";
+        // Create domain name + associate it with the temp API so the
+        // gate can resolve the apiId and return 409.
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "domainName": "%s", "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/123" }
+                """.formatted(domainName))
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200);
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "apiId": "%s" }
+                """.formatted(tempApiId))
+        .when()
+            .post("/v1/domainnames/" + domainName + "/apiassociation")
+        .then()
+            .statusCode(200);
+        setSchemaProcessing(tempApiId);
+        try {
+            given()
+                .header("Authorization", AUTH)
+            .when()
+                .delete("/v1/domainnames/" + domainName)
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"))
+                .body("message", containsString("Another modification is in progress"));
+        } finally {
+            clearSchemaStatus(tempApiId);
+        }
+    }
+
+    @Test
+    @Order(714)
+    void disassociateApi_busy_returns409() {
+        String tempApiId = createTempApi("busy-714-disassoc");
+        String domainName = "busy-714-" + System.nanoTime() + ".example.com";
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "domainName": "%s", "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/123" }
+                """.formatted(domainName))
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200);
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "apiId": "%s" }
+                """.formatted(tempApiId))
+        .when()
+            .post("/v1/domainnames/" + domainName + "/apiassociation")
+        .then()
+            .statusCode(200);
+        setSchemaProcessing(tempApiId);
+        try {
+            given()
+                .header("Authorization", AUTH)
+            .when()
+                .delete("/v1/domainnames/" + domainName + "/apiassociation")
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"))
+                .body("message", containsString("Another modification is in progress"));
+        } finally {
+            clearSchemaStatus(tempApiId);
+        }
+    }
+
+    @Test
+    @Order(715)
+    void disassociateMergedGraphqlApi_busy_returns409() {
+        String tempApiId = createTempApi("busy-715-merged");
+        // Create a source API, associate it as merged, then attempt to
+        // disassociate while the source API schema is PROCESSING.
+        String sourceApiId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "name": "busy-715-source", "authenticationType": "API_KEY" }
+                """)
+        .when()
+            .post("/v1/apis")
+        .then()
+            .statusCode(200)
+            .extract().path("graphqlApi.apiId");
+        String assocId = given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "mergedApiIdentifier": "%s" }
+                """.formatted(tempApiId))
+        .when()
+            .post("/v1/sourceApis/" + sourceApiId + "/mergedApiAssociations")
+        .then()
+            .statusCode(200)
+            .extract().path("sourceApiAssociation.associationId");
+        setSchemaProcessing(sourceApiId);
+        try {
+            given()
+                .header("Authorization", AUTH)
+            .when()
+                .delete("/v1/sourceApis/" + sourceApiId + "/mergedApiAssociations/" + assocId)
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"))
+                .body("message", containsString("Another modification is in progress"));
+        } finally {
+            clearSchemaStatus(sourceApiId);
+            given().header("Authorization", AUTH).delete("/v1/apis/" + sourceApiId).then().statusCode(204);
+        }
+    }
+
+    @Test
+    @Order(716)
+    void updateDomainName_busy_returns409() {
+        String tempApiId = createTempApi("busy-716-upd-domain");
+        String domainName = "busy-716-" + System.nanoTime() + ".example.com";
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "domainName": "%s", "certificateArn": "arn:aws:acm:us-east-1:000000000000:certificate/123" }
+                """.formatted(domainName))
+        .when()
+            .post("/v1/domainnames")
+        .then()
+            .statusCode(200);
+        given()
+            .header("Authorization", AUTH)
+            .contentType("application/json")
+            .body("""
+                { "apiId": "%s" }
+                """.formatted(tempApiId))
+        .when()
+            .post("/v1/domainnames/" + domainName + "/apiassociation")
+        .then()
+            .statusCode(200);
+        setSchemaProcessing(tempApiId);
+        try {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    { "description": "updated" }
+                    """)
+            .when()
+                .post("/v1/domainnames/" + domainName)
+            .then()
+                .statusCode(409)
+                .body("__type", equalTo("ConcurrentModificationException"))
+                .body("message", containsString("Another modification is in progress"));
+        } finally {
+            clearSchemaStatus(tempApiId);
+        }
+    }
+
     // ── Phase 2: Merged APIs ───────────────────────────────────────────────
 
     @Test
