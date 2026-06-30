@@ -1872,7 +1872,7 @@ public class Ec2Service {
     private boolean matchesImageOwners(Image image, List<String> owners) {
         return owners == null || owners.isEmpty()
                 || owners.contains(image.getOwnerId())
-                || owners.contains("self");
+                || (owners.contains("self") && accountId.equals(image.getOwnerId()));
     }
 
     private boolean matchesRegisteredImageFilters(Image image, Map<String, List<String>> filters) {
