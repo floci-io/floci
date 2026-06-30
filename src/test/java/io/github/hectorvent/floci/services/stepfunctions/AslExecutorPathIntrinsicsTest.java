@@ -135,4 +135,26 @@ class AslExecutorPathIntrinsicsTest {
         assertEquals(2, out.path("list").size());
         assertEquals("us-east-1", out.path("list").get(0).asText());
     }
+
+    @Test
+    void rootArrayIndexDotBracketIsResolved() throws Exception {
+        // EventBridge Pipes delivers a batch as a JSON array; an SFN unwraps it via InputPath "$.[0]".
+        JsonNode root = mapper.readTree("[{\"systemId\":\"DFSLOCAL\",\"solutions\":[1,2]}]");
+        JsonNode out = executor.resolvePath("$.[0]", root);
+        assertTrue(out.isObject());
+        assertEquals("DFSLOCAL", out.path("systemId").asText());
+        assertEquals(2, out.path("solutions").size());
+    }
+
+    @Test
+    void rootArrayIndexNoDotIsResolved() throws Exception {
+        JsonNode root = mapper.readTree("[{\"k\":\"v0\"},{\"k\":\"v1\"}]");
+        assertEquals("v1", executor.resolvePath("$[1]", root).path("k").asText());
+    }
+
+    @Test
+    void rootArrayIndexThenFieldIsResolved() throws Exception {
+        JsonNode root = mapper.readTree("[{\"systemId\":\"S1\"}]");
+        assertEquals("S1", executor.resolvePath("$.[0].systemId", root).asText());
+    }
 }

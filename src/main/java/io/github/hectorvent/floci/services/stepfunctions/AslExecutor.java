@@ -1296,6 +1296,7 @@ public class AslExecutor {
     private String[] splitPathSegments(String path) {
         String rest = path.substring(1);                  // drop leading '$'
         rest = rest.replaceAll("\\[(\\*|\\d+)]", ".$1");  // [*] -> .*, [0] -> .0
+        rest = rest.replaceAll("\\.{2,}", ".");           // collapse ".[0]" -> "..0" -> ".0"
         if (rest.startsWith(".")) {
             rest = rest.substring(1);
         }
