@@ -144,12 +144,19 @@ public class AslExecutor {
         if (!alreadyActive) {
             requestContext.activate();
         }
+        // Execution runs on a background worker that normally has no active scope. If it did run
+        // inside an already-active scope, restore its previous account afterwards so we don't leave
+        // the execution's account behind on a reused thread.
+        RequestContext ctx = container.instance(RequestContext.class).get();
+        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
         try {
-            container.instance(RequestContext.class).get().setAccountId(accountId);
+            ctx.setAccountId(accountId);
             body.run();
         } finally {
             if (!alreadyActive) {
                 requestContext.terminate();
+            } else {
+                ctx.setAccountId(previousAccountId);
             }
         }
     }
