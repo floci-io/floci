@@ -164,6 +164,22 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // Step Functions state machine
+        given()
+            .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
+            .contentType("application/x-amz-json-1.0")
+            .body("""
+                {
+                    "name": "re2-test-sm",
+                    "definition": "{\\"StartAt\\":\\"Done\\",\\"States\\":{\\"Done\\":{\\"Type\\":\\"Pass\\",\\"End\\":true}}}",
+                    "roleArn": "arn:aws:iam::000000000000:role/re2-test-role"
+                }
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -334,7 +350,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states"));
         }
     }
 
@@ -435,6 +451,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'ecr' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'ecr:repository' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class StepFunctionsResources {
+        @Test
+        void stateMachineSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:states"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'states' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'states:stateMachine' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 

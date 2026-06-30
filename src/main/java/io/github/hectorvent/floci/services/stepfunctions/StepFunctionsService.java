@@ -1,7 +1,11 @@
 package io.github.hectorvent.floci.services.stepfunctions;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -31,7 +35,7 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 @ApplicationScoped
-public class StepFunctionsService implements Resettable {
+public class StepFunctionsService implements Resettable, ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(StepFunctionsService.class);
 
@@ -74,6 +78,27 @@ public class StepFunctionsService implements Resettable {
         activityQueues.clear();
         pendingTaskTokens.values().forEach(f -> f.completeExceptionally(new RuntimeException("StepFunctionsService cleared")));
         pendingTaskTokens.clear();
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (StateMachine sm : stateMachineStore.scan(k -> true)) {
+            String arn = sm.getStateMachineArn();
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "states:stateMachine", "states",
+                    parsed.region(), parsed.accountId(),
+                    sm.getCreationDate() > 0 ? Instant.ofEpochMilli((long) (sm.getCreationDate() * 1000)) : Instant.now(),
+                    sm.getTags() != null ? sm.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("states:stateMachine", "states", true));
     }
 
     // ──────────────────────────── State Machines ────────────────────────────
