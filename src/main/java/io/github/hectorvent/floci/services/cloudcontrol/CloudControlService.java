@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.cloudcontrol;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Subnet;
@@ -124,7 +125,8 @@ public class CloudControlService {
         try {
             return mapper.writeValueAsString(properties);
         } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Failed to serialize CloudControl resource properties", e);
+            throw new AwsException("InternalFailure",
+                    "Failed to serialize CloudControl resource properties.", 500);
         }
     }
 

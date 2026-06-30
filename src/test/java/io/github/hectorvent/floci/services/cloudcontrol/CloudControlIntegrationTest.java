@@ -103,6 +103,7 @@ class CloudControlIntegrationTest {
                 .statusCode(200)
                 .extract().asString();
 
+        assertThat(body, containsString("\"TypeName\":\"" + typeName + "\""));
         assertThat(body, containsString("\"Identifier\":\"" + identifier + "\""));
         assertThat(body, containsString(propertyName));
     }

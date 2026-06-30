@@ -35,6 +35,7 @@ public class CloudControlJsonHandler {
             throw new AwsException("ValidationException", "TypeName is required.", 400);
         }
         ObjectNode response = mapper.createObjectNode();
+        response.put("TypeName", typeName);
         ArrayNode resources = response.putArray("ResourceDescriptions");
         for (CloudControlService.ResourceDescription resource : service.listResources(region, typeName)) {
             ObjectNode node = mapper.createObjectNode();
