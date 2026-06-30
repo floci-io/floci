@@ -41,6 +41,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -133,11 +134,33 @@ public class AslExecutor {
      * without a CDI container).
      */
     private void runUnderExecutionAccount(StateMachine sm, Runnable body) {
+        try {
+            callUnderExecutionAccount(sm, () -> {
+                body.run();
+                return null;
+            });
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Exception e) {
+            // A Runnable cannot throw a checked exception, so this is unreachable in practice;
+            // wrap defensively to preserve the void signature.
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Callable variant of {@link #runUnderExecutionAccount} that returns the body's result. Used to
+     * run Parallel branches on their own worker threads under the execution's account: the request
+     * scope (and thus {@link RequestContext}) is thread-bound, so a branch submitted to the executor
+     * pool would otherwise run with no active scope and resolve its Task integrations against the
+     * default account instead of the execution's. Each branch thread therefore activates its own
+     * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
+     */
+    private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
         String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
         ArcContainer container = Arc.container();
         if (accountId == null || accountId.isBlank() || container == null || !container.isRunning()) {
-            body.run();
-            return;
+            return body.call();
         }
         ManagedContext requestContext = container.requestContext();
         boolean alreadyActive = requestContext.isActive();
@@ -151,7 +174,7 @@ public class AslExecutor {
         String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
         try {
             ctx.setAccountId(accountId);
-            body.run();
+            return body.call();
         } finally {
             if (!alreadyActive) {
                 requestContext.terminate();
@@ -1008,7 +1031,11 @@ public class AslExecutor {
             JsonNode branchStates = branch.path("States");
             JsonNode capturedInput = input;
 
-            futures.add(executor.submit(() -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context)));
+            // Run each branch on its own worker thread under the execution's account: the request
+            // scope is thread-bound, so without this a branch's Task integrations would resolve to
+            // the default account rather than the execution's.
+            futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
+                    () -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context))));
         }
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
