@@ -223,7 +223,9 @@ public class RdsService implements Resettable {
         }
         validateInstanceParameterGroup(paramGroupName, engineParam, engineVersion);
         boolean mock = config.services().rds().mock();
-        int proxyPort = mock ? config.services().rds().proxyBasePort() : allocateProxyPort();
+        // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
+        // is consistent; mock mode only skips starting the container and auth proxy.
+        int proxyPort = allocateProxyPort();
         if (masterUsername == null || masterUsername.isBlank()) {
             masterUsername = "root";
         }
@@ -498,12 +500,15 @@ public class RdsService implements Resettable {
         instance.setStatus(DbInstanceStatus.DELETING);
         instances.put(id, instance);
 
-        proxyManager.stopProxy(id);
+        boolean mock = config.services().rds().mock();
+        if (!mock) {
+            proxyManager.stopProxy(id);
+        }
 
         String clusterId = instance.getDbClusterIdentifier();
         if (clusterId == null || clusterId.isBlank()) {
             // Standalone — stop its container and clean up its Docker volume (neither exists in mock mode)
-            if (!config.services().rds().mock()) {
+            if (!mock) {
                 if (instance.getContainerId() != null) {
                     containerManager.stop(buildHandle(instance));
                 }
@@ -548,7 +553,9 @@ public class RdsService implements Resettable {
         PlacementResolution placement = resolvePlacement(dbSubnetGroupName, availabilityZone, multiAz);
 
         boolean mock = config.services().rds().mock();
-        int proxyPort = mock ? config.services().rds().proxyBasePort() : allocateProxyPort();
+        // Always reserve a unique port (even in mock) so endpoints stay distinct and usedPorts
+        // is consistent; mock mode only skips starting the container and auth proxy.
+        int proxyPort = allocateProxyPort();
         DbEndpoint endpoint = new DbEndpoint(mock ? "localhost" : proxyEndpointHost(), proxyPort);
         DbCluster cluster = new DbCluster(id, engine, engineVersion, masterUsername, masterPassword,
                 databaseName, DbInstanceStatus.AVAILABLE, endpoint, endpoint,
@@ -625,9 +632,8 @@ public class RdsService implements Resettable {
         cluster.setStatus(DbInstanceStatus.DELETING);
         clusters.put(id, cluster);
 
-        proxyManager.stopProxy(id);
-
         if (!config.services().rds().mock()) {
+            proxyManager.stopProxy(id);
             if (cluster.getContainerId() != null) {
                 containerManager.stop(buildClusterHandle(cluster));
             }
@@ -947,7 +953,7 @@ public class RdsService implements Resettable {
                 continue;
             }
             if (config.services().rds().mock()) {
-                int mockPort = config.services().rds().proxyBasePort();
+                int mockPort = reserveOrAllocateProxyPort(cluster.getProxyPort());
                 cluster.setProxyPort(mockPort);
                 cluster.setEndpoint(new DbEndpoint("localhost", mockPort));
                 cluster.setReaderEndpoint(new DbEndpoint("localhost", mockPort));
@@ -991,7 +997,7 @@ public class RdsService implements Resettable {
                 continue;
             }
             if (config.services().rds().mock()) {
-                int mockPort = config.services().rds().proxyBasePort();
+                int mockPort = reserveOrAllocateProxyPort(instance.getProxyPort());
                 instance.setProxyPort(mockPort);
                 instance.setEndpoint(new DbEndpoint("localhost", mockPort));
                 instance.setStatus(DbInstanceStatus.AVAILABLE);

@@ -401,6 +401,31 @@ class RdsServiceTest {
     }
 
     @Test
+    void mockModeDeleteStandaloneInstanceSkipsDockerCleanup() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        rdsService.deleteDbInstance("standalone");
+
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).removeVolume(any(), any());
+    }
+
+    @Test
+    void mockModeAssignsDistinctEndpointPorts() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster a = rdsService.createDbCluster("cluster-a", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+        DbCluster b = rdsService.createDbCluster("cluster-b", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertNotEquals(a.getEndpoint().port(), b.getEndpoint().port());
+    }
+
+    @Test
     void mockModeRebootSkipsContainerAndProxy() {
         when(config.services().rds().mock()).thenReturn(true);
         rdsService.createDbInstance("standalone", "postgres", "16",
