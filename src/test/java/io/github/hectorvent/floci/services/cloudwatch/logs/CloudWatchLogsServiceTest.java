@@ -10,6 +10,7 @@ import io.github.hectorvent.floci.services.cloudwatch.logs.model.SubscriptionFil
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -182,7 +183,7 @@ class CloudWatchLogsServiceTest {
         service.createLogStream("/app/logs", "stream-1", REGION);
 
         long ts = System.currentTimeMillis();
-        List<Map<String, Object>> events = new java.util.ArrayList<>();
+        List<Map<String, Object>> events = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
             events.add(Map.of("timestamp", ts, "message", "SEQLINE-" + i));
         }
@@ -205,7 +206,7 @@ class CloudWatchLogsServiceTest {
         service.createLogStream("/app/logs", "stream-1", REGION);
 
         long ts = System.currentTimeMillis();
-        List<Map<String, Object>> events = new java.util.ArrayList<>();
+        List<Map<String, Object>> events = new ArrayList<>();
         for (int i = 0; i < 10; i++) {
             events.add(Map.of("timestamp", ts, "message", "SEQLINE-" + i));
         }
@@ -317,7 +318,7 @@ class CloudWatchLogsServiceTest {
     // ──────────────────────────── GetLogEvents pagination (issue #90) ────────────────────────────
 
     private void putEvents(String group, String stream, long baseTs, int count) {
-        List<Map<String, Object>> events = new java.util.ArrayList<>();
+        List<Map<String, Object>> events = new ArrayList<>();
         for (int i = 0; i < count; i++) {
             events.add(Map.of("timestamp", baseTs + i, "message", "msg-" + i));
         }
