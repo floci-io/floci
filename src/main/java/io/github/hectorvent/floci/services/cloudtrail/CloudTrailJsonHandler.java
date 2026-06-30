@@ -35,7 +35,7 @@ public class CloudTrailJsonHandler {
             case "DeleteTrail" -> deleteTrail(request, region);
             case "GetTrailStatus" -> getTrailStatus(request, region);
             case "PutEventSelectors" -> putEventSelectors(request, region);
-            case "LookupEvents" -> lookupEvents();
+            case "LookupEvents" -> lookupEvents(request, region);
             default -> throw new AwsException("UnsupportedOperation",
                     "Operation " + action + " is not supported.", 400);
         };
@@ -103,7 +103,7 @@ public class CloudTrailJsonHandler {
         return Response.ok(mapper.createObjectNode()).build();
     }
 
-    private Response lookupEvents() {
+    private Response lookupEvents(JsonNode request, String region) {
         ObjectNode response = mapper.createObjectNode();
         response.putArray("Events");
         return Response.ok(response).build();
