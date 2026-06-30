@@ -298,6 +298,19 @@ class RdsServiceTest {
     }
 
     @Test
+    void dbSubnetGroupTagsSurviveModify() {
+        rdsService.createDbSubnetGroup(
+                "sample-db-subnets", "test", java.util.List.of("subnet-default-a", "subnet-default-b"));
+        String arn = "arn:aws:rds:us-east-1:123456789012:subgrp:sample-db-subnets";
+        rdsService.addTagsToResource(arn, java.util.Map.of("Name", "sample-db-subnets"));
+
+        rdsService.modifyDbSubnetGroup("sample-db-subnets", java.util.List.of("subnet-default-a"));
+
+        assertEquals(java.util.Map.of("Name", "sample-db-subnets"),
+                rdsService.listTagsForResource(arn));
+    }
+
+    @Test
     void listTagsForMissingSubnetGroupReturnsSubnetGroupNotFound() {
         AwsException exception = assertThrows(AwsException.class, () ->
                 rdsService.listTagsForResource("arn:aws:rds:us-east-1:123456789012:subgrp:missing"));

@@ -772,6 +772,7 @@ public class RdsService implements Resettable {
                     "SubnetIds must contain at least one subnet.", 400);
         }
         DbSubnetGroup group = buildSubnetGroup(name, existing.getDescription(), subnetIds);
+        group.setTags(existing.getTags());
         subnetGroups.put(name, group);
         return group;
     }
