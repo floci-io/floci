@@ -156,17 +156,17 @@ public class KmsService {
     }
 
     private String resolveKeyId(Map<String, String> tags) {
-        String overrideId = ReservedTags.extractOverrideId(tags);
+        String overrideId = ReservedTags.extractOverrideKeyId(tags);
         if (overrideId == null) {
             return UUID.randomUUID().toString();
         }
 
         String normalized = overrideId.trim();
         if (normalized.isEmpty()) {
-            throw new AwsException("ValidationException", "Override resource ID must not be blank.", 400);
+            throw new AwsException("TagException", "Override resource ID must not be blank.", 400);
         }
         if (normalized.length() > 256) {
-            throw new AwsException("ValidationException", "Override resource ID must be 256 characters or fewer.", 400);
+            throw new AwsException("TagException", "Override resource ID must be 256 characters or fewer.", 400);
         }
         return normalized;
     }

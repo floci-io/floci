@@ -120,12 +120,18 @@ public class EcsContainerManager {
                 specBuilder.withMemoryMb(def.getMemory());
             }
 
-            // Add port mappings. Publish to host only in native mode; in Docker
-            // mode ECS consumers reach containers via the docker network IP.
+            // Add port mappings. An explicit hostPort is always published to the
+            // Docker host so the service is reachable at localhost:<hostPort>,
+            // matching AWS bridge mode (mirrors the ECR registry's fixed-port
+            // publishing). When no hostPort is requested, publish a dynamic host
+            // port in native mode; in Docker mode only expose the port, since ECS
+            // consumers reach containers via the docker network IP.
             if (def.getPortMappings() != null) {
                 boolean publishToHost = !containerDetector.isRunningInContainer();
                 for (PortMapping pm : def.getPortMappings()) {
-                    if (publishToHost) {
+                    if (pm.hostPort() > 0) {
+                        specBuilder.withPortBinding(pm.containerPort(), pm.hostPort());
+                    } else if (publishToHost) {
                         specBuilder.withDynamicPort(pm.containerPort());
                     } else {
                         specBuilder.withExposedPort(pm.containerPort());

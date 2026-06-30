@@ -5574,7 +5574,7 @@ class CloudFormationIntegrationTest {
         String albArn = cfnOutputValue(describeXml, "AlbRef");
         assertThat(albArn, startsWith(
                 "arn:aws:elasticloadbalancing:us-east-1:000000000000:loadbalancer/app/cfn-alb/"));
-        assertThat(cfnOutputValue(describeXml, "AlbDns"), containsString(".elb.localhost"));
+        assertThat(cfnOutputValue(describeXml, "AlbDns"), containsString(".elb.localhost.floci.io"));
         assertThat(cfnOutputValue(describeXml, "AlbFullName"), startsWith("app/cfn-alb/"));
         assertThat(cfnOutputValue(describeXml, "AlbCanonical"), notNullValue());
         String tgArn = cfnOutputValue(describeXml, "TgRef");

@@ -425,8 +425,8 @@ public class CloudFormationResourceProvisioner {
             case "AWS::Lambda::LayerVersion" -> deleteLambdaLayerVersion(physicalId, region);
             case "AWS::Cognito::UserPool" -> cognitoService.deleteUserPool(physicalId);
             case "AWS::Cognito::UserPoolClient" -> cognitoService.deleteUserPoolClient(physicalId);
-            case "AWS::ECS::Cluster" -> ecsService.deleteCluster(physicalId, region);
-            case "AWS::ECS::TaskDefinition" -> ecsService.deregisterTaskDefinition(physicalId, region);
+            case "AWS::ECS::Cluster" -> deleteEcsClusterSafe(physicalId, region);
+            case "AWS::ECS::TaskDefinition" -> deleteEcsTaskDefinitionSafe(physicalId, region);
             case "AWS::ECS::Service" -> deleteEcsServiceSafe(physicalId, region);
             case "AWS::ElasticLoadBalancingV2::LoadBalancer" -> elbV2Service.deleteLoadBalancer(region, physicalId);
             case "AWS::ElasticLoadBalancingV2::TargetGroup" -> elbV2Service.deleteTargetGroup(region, physicalId);
@@ -3233,7 +3233,47 @@ public class CloudFormationResourceProvisioner {
         } catch (IllegalArgumentException e) {
             // Not an ARN; treat the value as a bare service name.
         }
-        ecsService.deleteService(clusterRef, serviceName, true, region);
+        try {
+            ecsService.deleteService(clusterRef, serviceName, true, region);
+        } catch (AwsException e) {
+            // Idempotent delete: only an already-gone service (e.g. after a persistent restore that
+            // dropped ECS state) is treated as delete-complete. Any other error must still fail the
+            // stack delete rather than being silently swallowed. See issue #1634.
+            if (!"ServiceNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("ECS service {0} already gone, treating delete as complete: {1}",
+                    serviceArn, e.getMessage());
+        }
+    }
+
+    private void deleteEcsTaskDefinitionSafe(String physicalId, String region) {
+        try {
+            ecsService.deregisterTaskDefinition(physicalId, region);
+        } catch (AwsException e) {
+            // Idempotent delete: only an already-missing task definition (ClientException "Unable to
+            // describe task definition", e.g. after a persistent restore) is delete-complete. Other
+            // errors must still fail the stack delete. See #1634.
+            if (!"ClientException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("ECS task definition {0} already gone, treating delete as complete: {1}",
+                    physicalId, e.getMessage());
+        }
+    }
+
+    private void deleteEcsClusterSafe(String physicalId, String region) {
+        try {
+            ecsService.deleteCluster(physicalId, region);
+        } catch (AwsException e) {
+            // Idempotent delete: only an already-missing cluster is delete-complete. A genuine
+            // failure such as ClusterContainsTasksException must still fail the stack delete. See #1634.
+            if (!"ClusterNotFoundException".equals(e.getErrorCode())) {
+                throw e;
+            }
+            LOG.debugv("ECS cluster {0} already gone, treating delete as complete: {1}",
+                    physicalId, e.getMessage());
+        }
     }
 
     private List<ContainerDefinition> parseContainerDefinitions(JsonNode node, CloudFormationTemplateEngine engine) {

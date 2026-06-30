@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.lambda;
 
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -16,7 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * Wraps the storage backend for Lambda functions with region-aware key logic.
  */
 @ApplicationScoped
-public class LambdaFunctionStore {
+public class LambdaFunctionStore implements Resettable {
 
     private final StorageBackend<String, LambdaFunction> backend;
     private final ConcurrentHashMap<String, LambdaFunction> urlIdIndex = new ConcurrentHashMap<>();
@@ -39,6 +40,10 @@ public class LambdaFunctionStore {
                 ? aware.scanAllAccounts()
                 : backend.scan(key -> true);
         all.forEach(this::indexFunction);
+    }
+
+    public void clear() {
+        urlIdIndex.clear();
     }
 
     private void indexFunction(LambdaFunction fn) {

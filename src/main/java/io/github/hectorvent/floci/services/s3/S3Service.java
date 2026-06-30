@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -40,7 +41,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class S3Service {
+public class S3Service implements Resettable {
     private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
     private static final String ALL_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AllUsers";
@@ -157,6 +158,12 @@ public class S3Service {
                 throw new UncheckedIOException("Failed to create S3 data directory: " + dataRoot, e);
             }
         }
+    }
+
+    public void clear() {
+        memoryDataStore.clear();
+        memoryMultipartStore.clear();
+        multipartUploads.clear();
     }
 
     public Bucket createBucket(String bucketName, String region) {

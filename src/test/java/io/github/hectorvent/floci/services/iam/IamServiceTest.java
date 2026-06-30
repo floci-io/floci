@@ -416,6 +416,58 @@ class IamServiceTest {
     }
 
     // =========================================================================
+    // Session account routing (SessionAccountLookup)
+    // =========================================================================
+
+    @Test
+    void resolveAccountIdUsesRoleArnAccount() {
+        iamService.registerSession(
+                "ASIACROSSACCOUNT",
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().plusSeconds(3600),
+                null,
+                "111122223333"
+        );
+
+        assertEquals("222233334444", iamService.resolveAccountId("ASIACROSSACCOUNT").orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdFallsBackToOriginAccountWhenNoRoleArn() {
+        iamService.registerSession(
+                "ASIASESSIONTOKEN",
+                "temp-secret",
+                null,
+                Instant.now().plusSeconds(3600),
+                null,
+                "111122223333"
+        );
+
+        assertEquals("111122223333", iamService.resolveAccountId("ASIASESSIONTOKEN").orElseThrow());
+    }
+
+    @Test
+    void resolveAccountIdEmptyForUnknownKey() {
+        assertTrue(iamService.resolveAccountId("ASIANOTREGISTERED").isEmpty());
+        assertTrue(iamService.resolveAccountId(null).isEmpty());
+    }
+
+    @Test
+    void resolveAccountIdEmptyForExpiredSession() {
+        iamService.registerSession(
+                "ASIAEXPIRED",
+                "temp-secret",
+                "arn:aws:iam::222233334444:role/CrossAccountAccess",
+                Instant.now().minusSeconds(60),
+                null,
+                "111122223333"
+        );
+
+        assertTrue(iamService.resolveAccountId("ASIAEXPIRED").isEmpty());
+    }
+
+    // =========================================================================
     // Instance Profiles
     // =========================================================================
 
@@ -502,6 +554,11 @@ class IamServiceTest {
         IamPolicy ecrReadOnly = iamService.getPolicy("arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly");
         assertEquals("AmazonEC2ContainerRegistryReadOnly", ecrReadOnly.getPolicyName());
         assertEquals("/", ecrReadOnly.getPath());
+
+        IamPolicy rdsMonitoring = iamService.getPolicy(
+                "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole");
+        assertEquals("AmazonRDSEnhancedMonitoringRole", rdsMonitoring.getPolicyName());
+        assertEquals("/service-role/", rdsMonitoring.getPath());
     }
 
     @Test
@@ -610,6 +667,19 @@ class IamServiceTest {
         iamService.attachRolePolicy("Ec2Exec", policyArn);
 
         List<IamPolicy> attached = iamService.listAttachedRolePolicies("Ec2Exec", null);
+        assertEquals(1, attached.size());
+        assertEquals(policyArn, attached.getFirst().getArn());
+    }
+
+    @Test
+    void attachRdsEnhancedMonitoringRolePolicyToRole() {
+        iamService.seedAwsManagedPolicies();
+        iamService.createRole("RdsMonitor", "/", "{}", null, 0, null);
+
+        String policyArn = "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole";
+        iamService.attachRolePolicy("RdsMonitor", policyArn);
+
+        List<IamPolicy> attached = iamService.listAttachedRolePolicies("RdsMonitor", null);
         assertEquals(1, attached.size());
         assertEquals(policyArn, attached.getFirst().getArn());
     }

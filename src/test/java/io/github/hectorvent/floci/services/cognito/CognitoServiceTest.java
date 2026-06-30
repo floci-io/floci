@@ -13,6 +13,8 @@ import io.github.hectorvent.floci.services.cognito.verification.VerificationCode
 import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -607,7 +609,7 @@ class CognitoServiceTest {
                 )
         );
 
-        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("InvalidParameterException", exception.getErrorCode());
     }
 
     @Test
@@ -620,7 +622,7 @@ class CognitoServiceTest {
                 )
         );
 
-        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("InvalidParameterException", exception.getErrorCode());
     }
 
     @Test
@@ -632,7 +634,7 @@ class CognitoServiceTest {
                         "us-east-1"
                 )
         );
-        assertEquals("ValidationException", questionMarkException.getErrorCode());
+        assertEquals("InvalidParameterException", questionMarkException.getErrorCode());
 
         AwsException hashException = assertThrows(
                 AwsException.class,
@@ -641,7 +643,7 @@ class CognitoServiceTest {
                         "us-east-1"
                 )
         );
-        assertEquals("ValidationException", hashException.getErrorCode());
+        assertEquals("InvalidParameterException", hashException.getErrorCode());
     }
 
     @Test
@@ -1979,5 +1981,69 @@ class CognitoServiceTest {
 
         CognitoUser user = service.adminGetUser(pool.getId(), "carol");
         assertEquals("Carolyn", user.getAttributes().get("given_name"));
+    }
+
+    // =========================================================================
+    // Cognito ClientId And Secret overrides
+    // =========================================================================
+
+    @ParameterizedTest
+    @CsvSource( {
+            "use-name,basic-client",
+            "prepend-to-name:prepended-,prepended-basic-client",
+            "append-to-name:-appended,basic-client-appended",
+    })
+    void createUserPoolWithOverrideForClientIdAndClientSecret(String overrideClientId, String expectedClientId) {
+        UserPool pool = service.createUserPool(
+                Map.of(
+                        "PoolName", "ClientOverridesPool",
+                        "UserPoolTags", Map.of(
+                                "env", "test",
+                                ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, overrideClientId,
+                                ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY, "secret")
+                ),
+                "us-east-1"
+        );
+
+        assertEquals("test",pool.getUserPoolTags().get("env"));
+        assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY));
+        assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY));
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "basic-client",
+                true,
+                true,
+                List.of(),
+                List.of()
+        );
+
+        assertEquals("basic-client", client.getClientName());
+        assertEquals(expectedClientId, client.getClientId());
+        assertEquals("secret", client.getClientSecret());
+    }
+
+    @ParameterizedTest
+    @CsvSource( {
+            "prepend-to-name: prepended- ,secret",
+            "append-to-name: -appended ,secret",
+            "append-to-name:-appended,",
+            "something-else,secret"
+    })
+    void createUserPoolWithInvalidOverrideForClientIdAndClientSecret(String overrideClientId, String secret) {
+        Map<String, Object> createUserPool = new HashMap<>();
+        Map<String,String> userPoolTags = new HashMap<>();
+        userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, overrideClientId);
+        userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY, secret);
+        createUserPool.put("PoolName", "InvalidOverridesPool");
+        createUserPool.put("UserPoolTags", userPoolTags);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createUserPool(
+                        createUserPool,
+                        "us-east-1"
+                ));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+
     }
 }

@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.elbv2.model.TargetDescription;
 import io.github.hectorvent.floci.services.elbv2.model.TargetGroup;
@@ -18,7 +19,7 @@ import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class ElbV2HealthChecker {
+public class ElbV2HealthChecker implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(ElbV2HealthChecker.class);
 
@@ -69,6 +70,12 @@ public class ElbV2HealthChecker {
             vertx.cancelTimer(timerId);
         }
         states.remove(tgArn);
+    }
+
+    public void clear() {
+        timers.values().forEach(vertx::cancelTimer);
+        timers.clear();
+        states.clear();
     }
 
     public void addTargets(String tgArn, List<TargetDescription> targets, TargetGroup tg) {

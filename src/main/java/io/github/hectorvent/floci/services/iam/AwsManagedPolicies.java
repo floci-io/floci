@@ -95,6 +95,10 @@ final class AwsManagedPolicies {
         new ManagedPolicyDef("AmazonEKS_CNI_Policy", "/",
                 "Provides the Amazon VPC CNI Plugin the permissions it requires to modify the IP address configuration on your EKS worker nodes."),
 
+        // RDS execution role policy
+        new ManagedPolicyDef("AmazonRDSEnhancedMonitoringRole", "/service-role/",
+                "Provides permissions required for Amazon RDS Enhanced Monitoring."),
+
         // S3 Object Lambda execution role policy
         new ManagedPolicyDef("AmazonS3ObjectLambdaExecutionRolePolicy", "/service-role/",
                 "Provides write permissions to CloudWatch Logs for S3 Object Lambda access points."),
