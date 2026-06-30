@@ -759,6 +759,11 @@ public class AslExecutor {
             }
             return names;
         } catch (RuntimeException e) {
+            // Tolerated: if the task definition can't be resolved we conservatively treat every
+            // container as essential (empty non-essential set), but log it so the loss of the
+            // essential/non-essential distinction is diagnosable.
+            LOG.warnv("ecs:runTask: could not resolve task definition {0} to classify essential "
+                    + "containers; treating all as essential ({1})", task.getTaskDefinitionArn(), e.getMessage());
             return Set.of();
         }
     }
