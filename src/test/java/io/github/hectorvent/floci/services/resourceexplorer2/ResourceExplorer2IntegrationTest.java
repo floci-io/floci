@@ -103,6 +103,23 @@ class ResourceExplorer2IntegrationTest {
             .statusCode(200)
             .body("TableDescription.TableName", equalTo("re2-test-table"));
 
+        // Lambda function (Resource Explorer 2 provider coverage)
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "FunctionName": "re2-test-fn",
+                    "Runtime": "python3.11",
+                    "Role": "arn:aws:iam::000000000000:role/re2-test-role",
+                    "Handler": "index.handler",
+                    "Tags": {"env": "test"}
+                }
+                """)
+        .when()
+            .post("/2015-03-31/functions")
+        .then()
+            .statusCode(201);
+
         fixturesProvisioned = true;
     }
 
@@ -273,7 +290,27 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda"));
+        }
+    }
+
+    @Nested
+    class LambdaResources {
+        @Test
+        void lambdaFunctionSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:lambda"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'lambda' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'lambda:function' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
