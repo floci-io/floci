@@ -75,7 +75,9 @@ public class OpenSearchDomainManager {
         } else {
             // Legacy host-path mode: host-persistent-path is an absolute path
             Path dataPath = ContainerStorageHelper.hostResourcePath(config, "opensearch", domain.getDomainName());
-            ContainerStorageHelper.ensureHostDir(dataPath.toString());
+            if (!containerDetector.isRunningInContainer()) {
+                ContainerStorageHelper.ensureHostDir(dataPath.toString());
+            }
             String dataPathStr = dataPath.toAbsolutePath().normalize().toString();
             String persistentPathStr = Path.of(config.storage().persistentPath()).toAbsolutePath().normalize().toString();
             String hostDataPath = dataPathStr.replace(persistentPathStr, config.storage().hostPersistentPath());

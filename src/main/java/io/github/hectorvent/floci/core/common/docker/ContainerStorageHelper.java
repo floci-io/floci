@@ -72,6 +72,9 @@ public final class ContainerStorageHelper {
         while (cleaned.endsWith("-")) {
             cleaned = cleaned.substring(0, cleaned.length() - 1);
         }
+        if (cleaned.equals(".") || cleaned.equals("..")) {
+            return "";
+        }
         return cleaned;
     }
 

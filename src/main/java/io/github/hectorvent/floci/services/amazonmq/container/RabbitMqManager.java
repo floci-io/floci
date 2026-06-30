@@ -20,7 +20,6 @@ import org.jboss.logging.Logger;
 import java.io.Closeable;
 import java.net.HttpURLConnection;
 import java.net.URI;
-import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -111,13 +110,15 @@ public class RabbitMqManager {
         }
 
         if (ContainerStorageHelper.isNamedVolumeMode(config)) {
-            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager,
+            ContainerStorageHelper.applyStorage(specBuilder, lifecycleManager, config,
                     "amazonmq", broker.getVolumeId(), broker.getBrokerId(),
                     "/var/lib/rabbitmq");
         } else {
-            String hostDataPath = Path.of(config.storage().hostPersistentPath(), "amazonmq", broker.getBrokerId())
+            String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "amazonmq", broker.getBrokerId())
                     .toAbsolutePath().toString();
-            ContainerStorageHelper.ensureHostDir(hostDataPath);
+            if (!containerDetector.isRunningInContainer()) {
+                ContainerStorageHelper.ensureHostDir(hostDataPath);
+            }
             specBuilder.withBind(hostDataPath, "/var/lib/rabbitmq");
         }
 

@@ -36,6 +36,14 @@ class ContainerStorageHelperTest {
         assertEquals(Path.of("/tmp/floci/run-one/rds/db1"), ContainerStorageHelper.hostResourcePath(config, "rds", "db1"));
     }
 
+    @Test
+    void unsafeNamespaceSegmentsAreIgnored() {
+        EmulatorConfig config = config("..");
+
+        assertEquals(Path.of("/tmp/floci/rds/db1"), ContainerStorageHelper.hostResourcePath(config, "rds", "db1"));
+        assertEquals("floci-rds-db1", ContainerStorageHelper.resourceName(config, "rds", null, "db1"));
+    }
+
     private static EmulatorConfig config(String namespace) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.DockerConfig docker = mock(EmulatorConfig.DockerConfig.class);

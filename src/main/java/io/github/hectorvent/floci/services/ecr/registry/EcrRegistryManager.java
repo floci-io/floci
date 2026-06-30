@@ -112,8 +112,7 @@ public class EcrRegistryManager {
     /** Returns a {@link RegistryHttpClient} bound to the current registry endpoint. */
     public RegistryHttpClient httpClient() {
         if (containerDetector.isRunningInContainer()) {
-            return new RegistryHttpClient("http://" + config.services().ecr().registryContainerName()
-                    + ":" + CONTAINER_INTERNAL_PORT);
+            return new RegistryHttpClient("http://" + registryContainerName() + ":" + CONTAINER_INTERNAL_PORT);
         }
         return new RegistryHttpClient("http://localhost:" + effectivePort());
     }
@@ -135,7 +134,7 @@ public class EcrRegistryManager {
         if (started) {
             return;
         }
-        String name = ContainerStorageHelper.dockerName(config, config.services().ecr().registryContainerName());
+        String name = registryContainerName();
 
         // Check for existing container to adopt
         var existing = lifecycleManager.findByName(name);
@@ -190,6 +189,10 @@ public class EcrRegistryManager {
             throw new RuntimeException("Failed to start ECR backing registry container: " + e.getMessage(), e);
         }
         runReconcileOnce();
+    }
+
+    private String registryContainerName() {
+        return ContainerStorageHelper.dockerName(config, config.services().ecr().registryContainerName());
     }
 
     private void addPersistenceMounts(ContainerBuilder.Builder specBuilder, List<String> env) {

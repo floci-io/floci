@@ -71,7 +71,7 @@ public class RdsContainerManager {
         LOG.infov("Starting RDS backend container for instance: {0} engine={1}", instanceId, engine);
 
         int enginePort = engine.defaultPort();
-        String containerName = ContainerStorageHelper.resourceName(config, "rds", null, instanceId);
+        String containerName = ContainerStorageHelper.resourceName(config, "rds", volumeId, instanceId);
 
         // Remove any stale container with the same name
         lifecycleManager.removeIfExists(containerName);

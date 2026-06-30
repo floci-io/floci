@@ -102,6 +102,60 @@ class RdsContainerManagerTest {
         assertEquals("/var/lib/mysql", bind.getVolume().getPath());
     }
 
+    @Test
+    void childContainerNameUsesVolumeIdWhenAvailable() {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager,
+                logStreamer,
+                containerDetector,
+                config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.start("db1", "volume-a", DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).removeIfExists("floci-rds-volume-a");
+        verify(lifecycleManager).createAndStart(spec.capture());
+        assertEquals("floci-rds-volume-a", spec.getValue().name());
+    }
+
+    @Test
+    void childContainerNameFallsBackToInstanceIdWithoutVolumeId() {
+        EmulatorConfig config = config(tempDir.resolve("host-root"));
+        ContainerDetector containerDetector = mock(ContainerDetector.class);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.createAndStart(any())).thenReturn(new ContainerLifecycleManager.ContainerInfo(
+                "container-id", Map.of(3306, new ContainerLifecycleManager.EndpointInfo("db1", 3306))));
+        ContainerLogStreamer logStreamer = mock(ContainerLogStreamer.class);
+        lenient().when(logStreamer.generateLogStreamName(any())).thenReturn("log-stream");
+
+        RdsContainerManager manager = new RdsContainerManager(
+                new ContainerBuilder(config, mock(DockerHostResolver.class), mock(EmbeddedDnsServer.class)),
+                lifecycleManager,
+                logStreamer,
+                containerDetector,
+                config,
+                new RegionResolver("us-east-1", "000000000000"),
+                mock(ServiceConfigAccess.class));
+
+        manager.start("db1", null, DatabaseEngine.MYSQL, "mysql:8.0", "root", "password", "db");
+
+        var spec = org.mockito.ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager).removeIfExists("floci-rds-db1");
+        verify(lifecycleManager).createAndStart(spec.capture());
+        assertEquals("floci-rds-db1", spec.getValue().name());
+    }
+
     private static EmulatorConfig config(Path hostRoot) {
         EmulatorConfig config = mock(EmulatorConfig.class);
         EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
