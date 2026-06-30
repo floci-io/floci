@@ -66,6 +66,7 @@ class IamEnforcementTest {
 
     private static final String DENY_S3_LIST_SESSION_POLICY = """
             {"Version":"2012-10-17","Statement":[
+              {"Effect":"Allow","Action":"s3:ListAllMyBuckets","Resource":"*"},
               {"Effect":"Deny","Action":"s3:ListAllMyBuckets","Resource":"*"}
             ]}""";
 

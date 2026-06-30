@@ -48,6 +48,7 @@ public class IamService implements SessionAccountLookup {
 
     private static final Logger LOG = Logger.getLogger(IamService.class);
     private static final String CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    private static final String TEMPORARY_ACCESS_KEY_PREFIX = "ASIA";
     private static final String DEFAULT_DEPLOYER_USER = "floci-deployer";
     private static final String DEFAULT_DEPLOYER_ACCESS_KEY_ID = "floci";
     private static final String DEFAULT_DEPLOYER_SECRET_ACCESS_KEY = "floci";
@@ -976,7 +977,7 @@ public class IamService implements SessionAccountLookup {
      */
     @Override
     public Optional<String> resolveAccountId(String accessKeyId) {
-        if (accessKeyId == null || accessKeyId.isBlank()) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
             return Optional.empty();
         }
         Optional<SessionCredential> sessionOpt = findSessionAnyAccount(accessKeyId);
@@ -1000,6 +1001,9 @@ public class IamService implements SessionAccountLookup {
      * across all accounts; the access key's global uniqueness keeps the result unambiguous.
      */
     private Optional<SessionCredential> findSessionAnyAccount(String accessKeyId) {
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
+        }
         if (sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
             return Optional.ofNullable(aware.scanAllAccountsAsMap().get(accessKeyId));
         }
@@ -1028,7 +1032,7 @@ public class IamService implements SessionAccountLookup {
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
-                sessions.delete(accessKeyId);
+                deleteSession(accessKeyId, session);
                 return null; // expired — unknown key → bypass
             }
 
@@ -1051,6 +1055,9 @@ public class IamService implements SessionAccountLookup {
         Optional<SessionCredential> session = sessions.get(accessKeyId);
         if (session.isPresent()) {
             return session;
+        }
+        if (!isTemporaryAccessKey(accessKeyId)) {
+            return Optional.empty();
         }
         return findSessionAnyAccount(accessKeyId);
     }
@@ -1084,7 +1091,7 @@ public class IamService implements SessionAccountLookup {
         if (sessionOpt.isPresent()) {
             SessionCredential session = sessionOpt.get();
             if (session.getExpiration() != null && session.getExpiration().isBefore(java.time.Instant.now())) {
-                sessions.delete(accessKeyId);
+                deleteSession(accessKeyId, session);
                 return Optional.empty();
             }
             String roleArn = session.getRoleArn();
@@ -1094,6 +1101,20 @@ public class IamService implements SessionAccountLookup {
         }
 
         return Optional.empty();
+    }
+
+    private static boolean isTemporaryAccessKey(String accessKeyId) {
+        return accessKeyId != null && accessKeyId.startsWith(TEMPORARY_ACCESS_KEY_PREFIX);
+    }
+
+    private void deleteSession(String accessKeyId, SessionCredential session) {
+        String originAccountId = session.getOriginAccountId();
+        if (originAccountId != null && !originAccountId.isBlank()
+                && sessions instanceof AccountAwareStorageBackend<SessionCredential> aware) {
+            aware.deleteForAccount(originAccountId, accessKeyId);
+            return;
+        }
+        sessions.delete(accessKeyId);
     }
 
     public CallerContext resolvePrincipalContext(String principalArn) {
