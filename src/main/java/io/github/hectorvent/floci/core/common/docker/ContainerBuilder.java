@@ -80,7 +80,7 @@ public class ContainerBuilder {
     }
 
     private static Optional<String> configuredImageRegistryBase(EmulatorConfig config) {
-        if (config == null || config.docker() == null || config.docker().imageRegistryBase() == null) {
+        if (config == null || config.docker() == null) {
             return Optional.empty();
         }
         return normalizeImageRegistryBase(config.docker().imageRegistryBase());
