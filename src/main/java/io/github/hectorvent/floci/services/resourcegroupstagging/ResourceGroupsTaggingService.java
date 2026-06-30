@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.resourcegroupstagging;
 
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
+import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 
 import java.nio.charset.StandardCharsets;
@@ -9,7 +10,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 
 @ApplicationScoped
-public class ResourceGroupsTaggingService {
+public class ResourceGroupsTaggingService implements Resettable {
 
     // region::arn → ResourceTagMapping
     private final Map<String, ResourceTagMapping> store = new ConcurrentHashMap<>();
@@ -42,6 +43,10 @@ public class ResourceGroupsTaggingService {
         for (String arn : resourceArns) {
             store.remove(key(region, arn));
         }
+    }
+
+    public void clear() {
+        store.clear();
     }
 
     // ─── GetResources ──────────────────────────────────────────────────────────

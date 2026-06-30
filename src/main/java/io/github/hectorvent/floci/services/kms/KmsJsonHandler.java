@@ -20,6 +20,8 @@ import jakarta.ws.rs.core.Response;
 
 import java.util.*;
 
+import static io.github.hectorvent.floci.core.common.ReservedTags.rejectUnknownReservedTags;
+
 @ApplicationScoped
 public class KmsJsonHandler {
 
@@ -87,7 +89,7 @@ public class KmsJsonHandler {
         String policy = request.path("Policy").isMissingNode() ? null : request.path("Policy").asText(null);
         Map<String, String> tags = new HashMap<>();
         request.path("Tags").forEach(t -> tags.put(t.path("TagKey").asText(), t.path("TagValue").asText()));
-        
+        rejectUnknownReservedTags(tags,"TagException");
         KmsKey key = service.createKey(description, keyUsage, keySpec, policy, tags, region);
         ObjectNode response = objectMapper.createObjectNode();
         response.set("KeyMetadata", addKeyMetadata(key));

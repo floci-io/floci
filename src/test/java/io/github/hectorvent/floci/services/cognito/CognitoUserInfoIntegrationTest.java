@@ -13,25 +13,23 @@ import org.junit.jupiter.api.TestMethodOrder;
 
 import java.util.UUID;
 
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
+import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
-import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.*;
 
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoUserInfoIntegrationTest {
 
-    private static final String COGNITO_CONTENT_TYPE = "application/x-amz-json-1.1";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private static String poolId;
     private static String clientId;
     private static String accessToken;
-    private static final String username = "carol+" + UUID.randomUUID() + "@example.com";
-    private static final String password = "Perm1234!";
+    private static final String USERNAME = "carol+" + UUID.randomUUID() + "@example.com";
+    private static final String PASSWORD = "Perm1234!";
 
     @BeforeAll
     static void configureRestAssured() {
@@ -71,7 +69,7 @@ class CognitoUserInfoIntegrationTest {
                     { "Name": "custom:tenant_id", "Value": "tenant-42" }
                   ]
                 }
-                """.formatted(poolId, username, username))
+                """.formatted(poolId, USERNAME, USERNAME))
                 .then()
                 .statusCode(200);
 
@@ -82,7 +80,7 @@ class CognitoUserInfoIntegrationTest {
                   "Password": "%s",
                   "Permanent": true
                 }
-                """.formatted(poolId, username, password))
+                """.formatted(poolId, USERNAME, PASSWORD))
                 .then()
                 .statusCode(200);
 
@@ -95,7 +93,7 @@ class CognitoUserInfoIntegrationTest {
                     "PASSWORD": "%s"
                   }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         accessToken = authResp.path("AuthenticationResult").path("AccessToken").asText();
         assertNotNull(accessToken);
         assertFalse(accessToken.isBlank());
@@ -116,9 +114,9 @@ class CognitoUserInfoIntegrationTest {
 
         JsonNode body = OBJECT_MAPPER.readTree(response.asString());
 
-        assertEquals(username, body.path("username").asText());
+        assertEquals(USERNAME, body.path("username").asText());
         assertTrue(body.hasNonNull("sub"));
-        assertEquals(username, body.path("email").asText());
+        assertEquals(USERNAME, body.path("email").asText());
         // email_verified / phone_number_verified must be JSON strings, not booleans.
         assertTrue(body.path("email_verified").isTextual(),
                 "email_verified must be a string per AWS Cognito spec");
@@ -263,7 +261,7 @@ class CognitoUserInfoIntegrationTest {
                     "PASSWORD": "%s"
                   }
                 }
-                """.formatted(clientId, username, password));
+                """.formatted(clientId, USERNAME, PASSWORD));
         String refreshToken = initialAuth.path("AuthenticationResult").path("RefreshToken").asText();
         assertNotNull(refreshToken);
 
@@ -286,7 +284,7 @@ class CognitoUserInfoIntegrationTest {
                 .extract()
                 .asString();
         JsonNode refreshedBody = OBJECT_MAPPER.readTree(refreshedResponse);
-        assertEquals(username, refreshedBody.path("username").asText());
+        assertEquals(USERNAME, refreshedBody.path("username").asText());
         assertEquals("true", refreshedBody.path("email_verified").asText());
         assertEquals("tenant-42", refreshedBody.path("custom:tenant_id").asText());
     }
@@ -336,24 +334,6 @@ class CognitoUserInfoIntegrationTest {
         .then()
                 .statusCode(401)
                 .header("WWW-Authenticate", containsString("invalid_token"));
-    }
-
-    private static Response cognitoAction(String action, String body) {
-        return given()
-                .header("X-Amz-Target", "AWSCognitoIdentityProviderService." + action)
-                .contentType(COGNITO_CONTENT_TYPE)
-                .body(body)
-        .when()
-                .post("/");
-    }
-
-    private static JsonNode cognitoJson(String action, String body) throws Exception {
-        String response = cognitoAction(action, body)
-                .then()
-                .statusCode(200)
-                .extract()
-                .asString();
-        return OBJECT_MAPPER.readTree(response);
     }
 
     private static String base64Url(String raw) {

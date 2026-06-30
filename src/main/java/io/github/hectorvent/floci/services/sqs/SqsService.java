@@ -4,6 +4,7 @@ import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -26,7 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 @ApplicationScoped
-public class SqsService {
+public class SqsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SqsService.class);
     private static final int DEDUP_WINDOW_SECONDS = 300; // 5 minutes
@@ -126,6 +127,17 @@ public class SqsService {
         this.snsService = snsService;
         loadPersistedMessages();
         loadPersistedDedup();
+    }
+
+    public void clear() {
+        messagesByQueue.values().forEach(GuardedMessageQueue::close);
+        messagesByQueue.clear();
+        queueLocks.clear();
+        redrivePolicyCache.clear();
+        deduplicationCache.clear();
+        moveTaskCancellation.values().forEach(flag -> flag.set(true));
+        moveTaskCancellation.clear();
+        moveTasksByHandle.clear();
     }
 
     private void loadPersistedMessages() {

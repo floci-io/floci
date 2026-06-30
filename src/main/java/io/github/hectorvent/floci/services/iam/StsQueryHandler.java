@@ -77,14 +77,16 @@ public class StsQueryHandler {
         String roleName = roleArn != null && roleArn.contains("/")
                 ? roleArn.substring(roleArn.lastIndexOf('/') + 1)
                 : "UnknownRole";
-        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+        String callerAccountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        // Register session so IAM enforcement can resolve the role's policies and so that
-        // RDS/ElastiCache IAM token validation can find the temporary secret key.
+        // Register session so IAM enforcement can resolve the role's policies, RDS/ElastiCache
+        // IAM token validation can find the temporary secret key, and account routing can map
+        // these temporary credentials to the assumed role's account.
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy, callerAccountId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -119,7 +121,8 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String result = credentialsXml(accessKeyId, secretKey, sessionToken, expiration);
-        iamService.registerSession(accessKeyId, secretKey, null, expiration, null);
+        // No role ARN — route these credentials back to the caller's account.
+        iamService.registerSession(accessKeyId, secretKey, null, expiration, null, regionResolver.getAccountId());
         return Response.ok(AwsQueryResponse.envelope("GetSessionToken", AwsNamespaces.STS, result)).build();
     }
 
@@ -139,13 +142,14 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+        String callerAccountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
         String provider = providerId != null && !providerId.isBlank() ? providerId : "accounts.google.com";
 
         String sessionPolicy = getParam(params, "Policy");
-        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, sessionPolicy, callerAccountId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -176,11 +180,12 @@ public class StsQueryHandler {
         Instant expiration = Instant.now().plusSeconds(durationSeconds);
 
         String roleName = roleArn.contains("/") ? roleArn.substring(roleArn.lastIndexOf('/') + 1) : "UnknownRole";
-        String accountId = AwsArnUtils.accountOrDefault(roleArn, regionResolver.getAccountId());
+        String callerAccountId = regionResolver.getAccountId();
+        String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
-        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, null);
+        iamService.registerSession(accessKeyId, secretKey, roleArn, expiration, null, callerAccountId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))
@@ -215,8 +220,9 @@ public class StsQueryHandler {
         String federatedUserArn = AwsArnUtils.Arn.of("sts", "", accountId, "federated-user/" + name).toString();
 
         String sessionPolicy = getParam(params, "Policy");
-        // Register federation token so enforcement can scope its policies via session policy
-        iamService.registerSession(accessKeyId, secretKey, federatedUserArn, expiration, sessionPolicy);
+        // Register federation token so enforcement can scope its policies via session policy.
+        // The federated-user ARN already carries the caller's account, so reuse it as the origin.
+        iamService.registerSession(accessKeyId, secretKey, federatedUserArn, expiration, sessionPolicy, accountId);
 
         String result = new XmlBuilder()
                 .raw(credentialsXml(accessKeyId, secretKey, sessionToken, expiration))

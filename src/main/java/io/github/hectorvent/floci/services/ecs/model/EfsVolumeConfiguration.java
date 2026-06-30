@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.ecs.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * The {@code efsVolumeConfiguration} of an ECS task-definition volume:
  * {@code {"fileSystemId": ..., "rootDirectory": ..., "transitEncryption": ...,
@@ -15,6 +17,7 @@ package io.github.hectorvent.floci.services.ecs.model;
  * {@code authorizationConfig} are modelled for RegisterTaskDefinition/DescribeTaskDefinition
  * round-trip fidelity (so Terraform sees no drift) but have no effect on the local mount.
  */
+@RegisterForReflection
 public record EfsVolumeConfiguration(
         String fileSystemId,
         String rootDirectory,

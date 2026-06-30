@@ -945,7 +945,7 @@ class KmsServiceTest {
                 () -> kmsService.createKey("bad", null, Map.of(ReservedTags.OVERRIDE_ID_KEY, "   "), REGION)
         );
 
-        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("TagException", exception.getErrorCode());
     }
 
     @Test

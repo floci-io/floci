@@ -26,6 +26,7 @@ import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
 import io.github.hectorvent.floci.services.secretsmanager.SecretsManagerService;
 import io.github.hectorvent.floci.services.secretsmanager.model.Secret;
+import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -48,7 +49,7 @@ import java.util.regex.Pattern;
  * Starts DB containers and auth proxies on creation.
  */
 @ApplicationScoped
-public class RdsService {
+public class RdsService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RdsService.class);
     private static final ObjectMapper JSON = new ObjectMapper();
@@ -141,6 +142,10 @@ public class RdsService {
     public void restorePersistedRuntime() {
         restoreClusters();
         restoreInstances();
+    }
+
+    public void clear() {
+        usedPorts.clear();
     }
 
     // ── DB Instances ──────────────────────────────────────────────────────────

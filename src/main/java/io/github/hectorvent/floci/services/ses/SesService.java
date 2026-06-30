@@ -254,6 +254,13 @@ public class SesService {
         String effectiveSource = sourceOmitted && headers != null && !headers.from().isBlank()
                 ? headers.from()
                 : source;
+        if (effectiveSource == null || effectiveSource.isBlank()) {
+            // Shared by the v1 Query and v2 REST surfaces. Throw the v1-native code; the v2
+            // controller's remapV1Exception translates InvalidParameterValue -> BadRequestException.
+            // Verified against real AWS: v1 returns InvalidParameterValue and v2 BadRequestException,
+            // both with this message.
+            throw new AwsException("InvalidParameterValue", "Missing required header 'From'.", 400);
+        }
         List<String> effectiveDestinations = hasExplicitDestinations
                 ? destinations
                 : allRecipients(headers.to(), headers.cc(), headers.bcc());

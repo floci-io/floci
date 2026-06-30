@@ -1,8 +1,11 @@
 package io.github.hectorvent.floci.services.appsync.graphql.util;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.Test;
 
 import java.nio.charset.StandardCharsets;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -12,7 +15,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class AppSyncUtilTest {
 
-    private final AppSyncUtil util = new AppSyncUtil(new com.fasterxml.jackson.databind.ObjectMapper());
+    private final AppSyncUtil util = new AppSyncUtil(new ObjectMapper());
 
     @Test
     void escapeJavaScript_null() {
@@ -210,6 +213,10 @@ class AppSyncUtilTest {
         assertThat(util.quiet("hello"), is(""));
         assertThat(util.quiet(null), is(""));
         assertThat(util.quiet(""), is(""));
+        assertThat(util.quiet(123), is(""));
+        assertThat(util.quiet(true), is(""));
+        assertThat(util.quiet(List.of("a", "b")), is(""));
+        assertThat(util.quiet(Map.of("k", "v")), is(""));
     }
 
     @Test
@@ -217,6 +224,10 @@ class AppSyncUtilTest {
         assertThat(util.qr("hello"), is(""));
         assertThat(util.qr(null), is(""));
         assertThat(util.qr(""), is(""));
+        assertThat(util.qr(123), is(""));
+        assertThat(util.qr(true), is(""));
+        assertThat(util.qr(List.of("a", "b")), is(""));
+        assertThat(util.qr(Map.of("k", "v")), is(""));
     }
 
     @Test
@@ -476,7 +487,7 @@ class AppSyncUtilTest {
     void validate_false() {
         VtlErrorSignal ex = assertThrows(VtlErrorSignal.class, () -> util.validate(false, "msg"));
         assertThat(ex.getMessage(), is("msg"));
-        assertThat(ex.getErrorType(), is("Unknown"));
+        assertThat(ex.getErrorType(), is("CustomTemplateException"));
     }
 
     @Test
@@ -498,5 +509,46 @@ class AppSyncUtilTest {
         assertDoesNotThrow(() -> util.appendError("msg", "Type"));
         assertDoesNotThrow(() -> util.appendError("msg", "Type", Map.of()));
         assertDoesNotThrow(() -> util.appendError("msg", "Type", Map.of(), Map.of()));
+    }
+
+    @Test
+    void getTransform_returnsInstance() {
+        assertNotNull(util.getTransform());
+    }
+
+    @Test
+    void escapeJavaScript_controlCharDefault() {
+        assertThat(util.escapeJavaScript("a\u0001b"), is("a\\u0001b"));
+    }
+
+    @Test
+    void toJson_mapWithFieldNameOnlyDoesNotFilter() {
+        Map<String, Object> info = Map.of("fieldName", "getPost", "selectionSetList", List.of("id"));
+        String json = util.toJson(info);
+        assertThat(json, containsString("selectionSetList"));
+        assertThat(json, containsString("fieldName"));
+    }
+
+    @Test
+    void toJson_serializationFailureReturnsNull() {
+        ObjectMapper failingMapper = new ObjectMapper() {
+            @Override
+            public String writeValueAsString(Object value) throws JsonProcessingException {
+                throw new JsonProcessingException("test") {};
+            }
+        };
+        AppSyncUtil failingUtil = new AppSyncUtil(failingMapper);
+        assertThat(failingUtil.toJson("test"), is("null"));
+    }
+
+    @Test
+    void appendError_withErrorInfo() {
+        List<Map<String, Object>> errorList = new java.util.ArrayList<>();
+        util.setErrorList(errorList);
+        Object data = Map.of("k", "v");
+        Object info = Map.of("info", "detail");
+        util.appendError("msg", "Type", data, info);
+        assertThat(errorList.size(), is(1));
+        assertThat(errorList.get(0).get("errorInfo"), is(info));
     }
 }
