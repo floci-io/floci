@@ -1153,6 +1153,10 @@ public class AslExecutor {
      * AWS bracket forms reduce to the same walk as the dot forms:
      * {@code $.Regions[*].RegionName} and {@code $.Regions.*.RegionName} both yield
      * {@code [Regions, *, RegionName]}, and {@code $[*][*]} yields {@code [*, *]}.
+     *
+     * <p>Limitation: every literal dot is treated as a segment separator, so a field name that
+     * itself contains a dot is mis-split. AWS's bracket-quoted escape hatch ({@code $.a['b.c']})
+     * is not supported; this matches the prior behavior and is rare in ASL reference paths.
      */
     private String[] splitPathSegments(String path) {
         String rest = path.substring(1);                  // drop leading '$'
@@ -1190,7 +1194,9 @@ public class AslExecutor {
                 ArrayNode projected = objectMapper.createArrayNode();
                 for (JsonNode element : current) {
                     JsonNode value = walkPath(parts, i + 1, element);
-                    if (value == null || value.isMissingNode() || value.isNull()) {
+                    // Only absent matches are skipped; an explicit null is a real value and is kept,
+                    // so $[*].field over [{"field":null},{"field":"x"}] yields [null,"x"].
+                    if (value == null || value.isMissingNode()) {
                         continue;
                     }
                     if (flattenSub && value.isArray()) {
@@ -1309,13 +1315,16 @@ public class AslExecutor {
                 }
                 JsonNode array = resolveIntrinsicArg(parts.get(0).trim(), root);
                 JsonNode value = resolveIntrinsicArg(parts.get(1).trim(), root);
+                if (!array.isArray()) {
+                    // AWS throws rather than silently returning false, matching States.ArrayLength.
+                    throw new FailStateException("States.Runtime",
+                            "States.ArrayContains: first argument must be an array");
+                }
                 boolean contains = false;
-                if (array.isArray()) {
-                    for (JsonNode element : array) {
-                        if (element.equals(value)) {
-                            contains = true;
-                            break;
-                        }
+                for (JsonNode element : array) {
+                    if (element.equals(value)) {
+                        contains = true;
+                        break;
                     }
                 }
                 yield objectMapper.getNodeFactory().booleanNode(contains);

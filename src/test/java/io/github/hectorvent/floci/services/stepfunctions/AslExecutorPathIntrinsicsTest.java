@@ -13,6 +13,7 @@ import org.junit.jupiter.api.Test;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
@@ -100,6 +101,25 @@ class AslExecutorPathIntrinsicsTest {
         JsonNode root = mapper.readTree("{\"list\":[\"a\",\"b\",\"c\"],\"hit\":\"b\",\"miss\":\"z\"}");
         assertTrue(executor.resolvePath("States.ArrayContains($.list, $.hit)", root).asBoolean());
         assertFalse(executor.resolvePath("States.ArrayContains($.list, $.miss)", root).asBoolean());
+    }
+
+    @Test
+    void arrayContainsThrowsWhenFirstArgIsNotAnArray() throws Exception {
+        JsonNode root = mapper.readTree("{\"notList\":\"oops\",\"hit\":\"b\"}");
+        // AWS raises States.Runtime instead of silently returning false on a non-array argument.
+        assertThrows(AslExecutor.FailStateException.class,
+                () -> executor.resolvePath("States.ArrayContains($.notList, $.hit)", root));
+    }
+
+    @Test
+    void wildcardProjectionKeepsExplicitNullsButOmitsMissing() throws Exception {
+        JsonNode root = mapper.readTree("[{\"field\":null},{\"field\":\"x\"},{\"other\":1}]");
+        JsonNode result = executor.resolvePath("$[*].field", root);
+        assertTrue(result.isArray());
+        // The explicit null is kept; the element missing "field" is omitted.
+        assertEquals(2, result.size());
+        assertTrue(result.get(0).isNull());
+        assertEquals("x", result.get(1).asText());
     }
 
     @Test
