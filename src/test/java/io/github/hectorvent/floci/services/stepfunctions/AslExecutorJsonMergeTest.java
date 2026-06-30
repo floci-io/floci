@@ -78,4 +78,12 @@ class AslExecutorJsonMergeTest {
         assertThrows(RuntimeException.class,
                 () -> executor.resolvePath("States.JsonMerge($.a, $.b)", root));
     }
+
+    @Test
+    void nonBooleanThirdArgumentRejected() throws Exception {
+        // A non-boolean third argument must be rejected, not silently coerced to false (shallow).
+        JsonNode root = mapper.readTree("{\"a\":{\"x\":1},\"b\":{\"y\":2},\"n\":3}");
+        assertThrows(RuntimeException.class,
+                () -> executor.resolvePath("States.JsonMerge($.a, $.b, $.n)", root));
+    }
 }

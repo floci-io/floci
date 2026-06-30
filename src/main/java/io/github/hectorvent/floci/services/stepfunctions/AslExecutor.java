@@ -1358,7 +1358,13 @@ public class AslExecutor {
                 }
                 JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
                 JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
-                boolean deep = resolveIntrinsicArg(parts.get(2).trim(), root).asBoolean();
+                JsonNode deepArg = resolveIntrinsicArg(parts.get(2).trim(), root);
+                if (!deepArg.isBoolean()) {
+                    // AWS rejects a non-boolean third argument rather than coercing it to false.
+                    throw new FailStateException("States.Runtime",
+                            "States.JsonMerge third argument must be a boolean");
+                }
+                boolean deep = deepArg.asBoolean();
                 if (deep) {
                     // AWS Step Functions only supports the shallow merge (third argument false).
                     throw new FailStateException("States.Runtime",
