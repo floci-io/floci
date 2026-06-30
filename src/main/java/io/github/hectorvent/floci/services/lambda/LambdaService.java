@@ -1135,7 +1135,10 @@ public class LambdaService {
     }
 
     private void extractZipCode(LambdaFunction fn, String zipFileBase64) {
-        byte[] zipBytes = Base64.getDecoder().decode(zipFileBase64);
+        extractZipCodeBytes(fn, Base64.getDecoder().decode(zipFileBase64));
+    }
+
+    private void extractZipCodeBytes(LambdaFunction fn, byte[] zipBytes) {
         Path codePath = codeStore.getCodePath(fn.getFunctionName());
         try {
             zipExtractor.extractTo(zipBytes, codePath);
@@ -1191,7 +1194,7 @@ public class LambdaService {
             throw new AwsException("InvalidParameterValueException",
                     "Unable to fetch code from s3://" + s3Bucket + "/" + s3Key + ": " + e.getMessage(), 400);
         }
-        extractZipCode(fn, Base64.getEncoder().encodeToString(obj.getData()));
+        extractZipCodeBytes(fn, obj.getData());
     }
 
     private String resolveHandlerFilePath(LambdaFunction fn) {
@@ -1482,7 +1485,7 @@ public class LambdaService {
                         fn.getFunctionName(), event.bucketName(), event.key());
                 try {
                     S3Object obj = s3Service.getObject(event.bucketName(), event.key());
-                    extractZipCode(fn, Base64.getEncoder().encodeToString(obj.getData()));
+                    extractZipCodeBytes(fn, obj.getData());
                     fn.setLastModified(Instant.now().toEpochMilli());
                     fn.setRevisionId(UUID.randomUUID().toString());
                     functionStore.save(region, fn);
