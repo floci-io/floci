@@ -52,34 +52,34 @@ class StepFunctionsListStateMachineVersionsIntegrationTest {
                 .then()
                 .statusCode(200)
                 .body("stateMachineVersions", notNullValue())
-                .body("stateMachineVersions[0].stateMachineVersionArn", equalTo(stateMachineArn))
+                .body("stateMachineVersions[0].stateMachineVersionArn", equalTo(stateMachineArn + ":1"))
                 .body("stateMachineVersions[0].creationDate", notNullValue());
     }
 
     @Test
     @Order(3)
-    void listVersions_nonExistentArn_returns200WithEmptyArray() {
+    void listVersions_nonExistentArn_returnsStateMachineDoesNotExist() {
         given()
                 .header("X-Amz-Target", TARGET)
                 .contentType(CT)
                 .body("{\"stateMachineArn\":\"arn:aws:states:us-east-1:000000000000:stateMachine:does-not-exist\"}")
                 .when().post("/")
                 .then()
-                .statusCode(200)
-                .body("stateMachineVersions", hasSize(0));
+                .statusCode(400)
+                .body("__type", containsString("StateMachineDoesNotExist"));
     }
 
     @Test
     @Order(4)
-    void listVersions_missingArn_returns200WithEmptyArray() {
+    void listVersions_missingArn_returnsStateMachineDoesNotExist() {
         given()
                 .header("X-Amz-Target", TARGET)
                 .contentType(CT)
                 .body("{}")
                 .when().post("/")
                 .then()
-                .statusCode(200)
-                .body("stateMachineVersions", hasSize(0));
+                .statusCode(400)
+                .body("__type", containsString("StateMachineDoesNotExist"));
     }
 
     @Test

@@ -37,7 +37,7 @@ public class StepFunctionsJsonHandler {
             case "CreateStateMachine" -> handleCreateStateMachine(request, region);
             case "DescribeStateMachine" -> handleDescribeStateMachine(request);
             case "ListStateMachines" -> handleListStateMachines(request, region);
-            case "ListStateMachineVersions" -> handleListStateMachineVersions(request, region);
+            case "ListStateMachineVersions" -> handleListStateMachineVersions(request);
             case "DeleteStateMachine" -> handleDeleteStateMachine(request);
             case "ValidateStateMachineDefinition" -> handleValidateStateMachineDefinition(request);
             case "StartExecution" -> handleStartExecution(request, region);
@@ -63,16 +63,14 @@ public class StepFunctionsJsonHandler {
         };
     }
 
-    private Response handleListStateMachineVersions(JsonNode request, String region) {
+    private Response handleListStateMachineVersions(JsonNode request) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("stateMachineVersions");
-        List<StateMachine> stateMachines = service.listStateMachines(region);
-        for (StateMachine sm : stateMachines) {
-            if (Objects.equals(sm.getStateMachineArn(), request.path("stateMachineArn").asText())) {
-                ObjectNode item = array.addObject();
-                item.put("creationDate", sm.getCreationDate());
-                item.put("stateMachineVersionArn", sm.getStateMachineArn());
-            }
+        StateMachine sm = service.describeStateMachine(request.path("stateMachineArn").asText());
+        if (sm != null) {
+            ObjectNode item = array.addObject();
+            item.put("creationDate", sm.getCreationDate());
+            item.put("stateMachineVersionArn", String.format("%s:1", sm.getStateMachineArn()));
         }
         return Response.ok(response).build();
     }
