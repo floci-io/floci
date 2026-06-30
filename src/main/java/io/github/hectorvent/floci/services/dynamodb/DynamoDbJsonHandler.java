@@ -1338,7 +1338,9 @@ public class DynamoDbJsonHandler {
             for (TransactionCanceledException.CancellationReason reason : e.getCancellationReasons()) {
                 ObjectNode r = objectMapper.createObjectNode();
                 r.put("Code", reason.code().isEmpty() ? "None" : reason.code());
-                r.put("Message", reason.code().isEmpty() ? null : "The conditional request failed");
+                if (!reason.code().isEmpty()) {
+                    r.put("Message", "The conditional request failed");
+                }
                 if (reason.item() != null) {
                     r.set("Item", reason.item());
                 }

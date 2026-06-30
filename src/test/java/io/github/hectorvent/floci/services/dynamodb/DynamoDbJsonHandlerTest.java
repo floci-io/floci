@@ -331,6 +331,6 @@ class DynamoDbJsonHandlerTest {
         assertEquals(2, reasons.size());
 
         assertEquals("None", reasons.get(0).get("Code").asText());
-        assertTrue(reasons.get(0).get("Message").isNull(), "non failed item must not have a non-null Message field");
+        assertNull(reasons.get(0).get("Message"), "non failed item must not have a Message field");
     }
 }
