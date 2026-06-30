@@ -10,8 +10,10 @@ import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
 import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
 import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
@@ -38,9 +40,11 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
@@ -681,7 +685,7 @@ public class AslExecutor {
             // All terminal. Like real Step Functions, fail the state if any task's essential
             // container exited non-zero or a task never ran a container (e.g. it failed to start).
             for (EcsTask task : described) {
-                String cause = ecsTaskFailureCause(task);
+                String cause = ecsTaskFailureCause(task, nonEssentialContainerNames(task, region));
                 if (cause != null) {
                     throw new FailStateException("States.TaskFailed", cause);
                 }
@@ -701,12 +705,18 @@ public class AslExecutor {
     }
 
     /** A failure cause if the ECS task did not complete cleanly (non-zero exit or no container ran), or null on success. */
-    private static String ecsTaskFailureCause(EcsTask task) {
+    private static String ecsTaskFailureCause(EcsTask task, Set<String> nonEssentialNames) {
         boolean ranAContainer = task.getContainers() != null && !task.getContainers().isEmpty();
         Integer nonZeroExit = null;
         boolean hasNullExitCode = false;
         if (ranAContainer) {
             for (var c : task.getContainers()) {
+                // Only essential containers decide the task outcome, like real Step Functions; a
+                // non-essential sidecar (log shipper, metrics agent) exiting non-zero is ignored.
+                // Anything not explicitly marked non-essential defaults to essential.
+                if (nonEssentialNames.contains(c.getName())) {
+                    continue;
+                }
                 if (c.getExitCode() == null) {
                     // A STOPPED container with no exit code never completed (OOM-killed, failed to
                     // start, force-stopped) — AWS treats that as a failure, not a clean exit.
@@ -729,6 +739,28 @@ public class AslExecutor {
             return "Essential container stopped without an exit code";
         }
         return "Task stopped without running a container";
+    }
+
+    /**
+     * Names of the task's containers that are explicitly {@code essential: false} in its task
+     * definition. Their exit status does not fail the state. Falls back to an empty set (treat all
+     * as essential) when the task definition can't be resolved, preserving the conservative default.
+     */
+    private Set<String> nonEssentialContainerNames(EcsTask task, String region) {
+        try {
+            TaskDefinition td = ecsService.describeTaskDefinition(task.getTaskDefinitionArn(), region);
+            Set<String> names = new HashSet<>();
+            if (td.getContainerDefinitions() != null) {
+                for (ContainerDefinition cd : td.getContainerDefinitions()) {
+                    if (!cd.isEssential()) {
+                        names.add(cd.getName());
+                    }
+                }
+            }
+            return names;
+        } catch (RuntimeException e) {
+            return Set.of();
+        }
     }
 
     /**
