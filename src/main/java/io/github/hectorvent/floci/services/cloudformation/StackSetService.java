@@ -180,20 +180,33 @@ public class StackSetService {
             throw new AwsException("ValidationError",
                     "Accounts and Regions must each contain at least one value", 400);
         }
+        List<StackInstance> results = new ArrayList<>();
         for (String account : accounts) {
             for (String region : regions) {
                 String key = instanceKey(name, account, region);
-                instances.get(key).ifPresent(inst -> {
-                    // RetainStacks=true detaches the instance from the StackSet but leaves the
-                    // underlying CloudFormation stack and its resources in the target account.
-                    if (!retainStacks) {
-                        await(cfnService.deleteStack(inst.getStackName(), region, account));
-                    }
-                    instances.delete(key);
-                });
+                StackInstance inst = instances.get(key).orElse(null);
+                if (inst == null) {
+                    continue;
+                }
+                // RetainStacks=true detaches the instance from the StackSet but leaves the
+                // underlying CloudFormation stack and its resources in the target account.
+                if (!retainStacks && !await(cfnService.deleteStack(inst.getStackName(), region, account))) {
+                    // The underlying stack delete failed. Match AWS: retain the instance record
+                    // (now INOPERABLE) and report the operation as FAILED, rather than silently
+                    // dropping the instance and claiming success.
+                    inst.setStatus("INOPERABLE");
+                    inst.setDetailedStatus("FAILED");
+                    inst.setStatusReason("Stack instance deletion failed");
+                    instances.put(key, inst);
+                    results.add(inst);
+                    continue;
+                }
+                inst.setDetailedStatus("SUCCEEDED");
+                instances.delete(key);
+                results.add(inst);
             }
         }
-        return recordOperation(name, "DELETE", "SUCCEEDED");
+        return recordOperation(name, "DELETE", deriveOperationStatus(results));
     }
 
     public List<StackSetOperation> listStackSetOperations(String name) {
@@ -290,11 +303,19 @@ public class StackSetService {
         return stackSetName + ":" + account + ":" + region;
     }
 
-    private void await(Future<?> future) {
+    /**
+     * Waits for an instance operation to complete. Returns {@code true} if it finished cleanly and
+     * {@code false} if it failed (the failure is logged). Callers that must react to a failure —
+     * {@link #deleteStackInstances} cannot drop an instance whose underlying stack delete failed —
+     * inspect the result; fire-and-forget callers can ignore it.
+     */
+    private boolean await(Future<?> future) {
         try {
             future.get();
+            return true;
         } catch (Exception e) {
             LOG.warnv("StackSet instance execution failed: {0}", e.getMessage());
+            return false;
         }
     }
 }
