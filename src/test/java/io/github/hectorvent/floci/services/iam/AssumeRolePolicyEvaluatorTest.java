@@ -123,6 +123,35 @@ class AssumeRolePolicyEvaluatorTest {
     }
 
     @Test
+    void allowsAssumedRoleCallerAgainstRolePrincipalArn() {
+        // The caller used assumed-role temp creds (callerArn is the STS assumed-role ARN), but the
+        // trust policy names the underlying IAM role ARN — the canonical trust-policy form. It must
+        // match, since AWS resolves the session back to its role for trust evaluation.
+        String assumedRoleArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
+        assertTrue(evaluator.allows(
+                trust("{\"AWS\":\"arn:aws:iam::111111111111:role/AppRole\"}"),
+                assumedRoleArn, CALLER_ACCOUNT));
+    }
+
+    @Test
+    void deniesAssumedRoleCallerWhenRolePrincipalDiffers() {
+        // A trust policy naming a different role must not be satisfied by this session.
+        String assumedRoleArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
+        assertFalse(evaluator.allows(
+                trust("{\"AWS\":\"arn:aws:iam::111111111111:role/OtherRole\"}"),
+                assumedRoleArn, CALLER_ACCOUNT));
+    }
+
+    @Test
+    void allowsAssumedRoleCallerAgainstExactSessionArn() {
+        // A trust policy that names the exact assumed-role session ARN still matches directly.
+        String assumedRoleArn = "arn:aws:sts::111111111111:assumed-role/AppRole/session-abc";
+        assertTrue(evaluator.allows(
+                trust("{\"AWS\":\"arn:aws:sts::111111111111:assumed-role/AppRole/session-abc\"}"),
+                assumedRoleArn, CALLER_ACCOUNT));
+    }
+
+    @Test
     void deniesServiceOnlyPrincipal() {
         assertFalse(evaluator.allows(
                 trust("{\"Service\":\"lambda.amazonaws.com\"}"), CALLER_ARN, CALLER_ACCOUNT));

@@ -19,7 +19,9 @@ import java.util.regex.Pattern;
  *
  * <p>Only AWS principals are modeled (account-root, bare account id, exact principal ARN, and
  * {@code "*"}); {@code Service} and {@code Federated} principals never match a SigV4 caller and are
- * ignored.
+ * ignored. A caller using assumed-role temporary credentials (whose ARN is an STS
+ * {@code assumed-role} ARN) also matches a trust policy that names the underlying IAM role ARN, as
+ * AWS resolves the session back to its role for trust-policy evaluation.
  */
 @ApplicationScoped
 public class AssumeRolePolicyEvaluator {
@@ -27,6 +29,8 @@ public class AssumeRolePolicyEvaluator {
     private static final Logger LOG = Logger.getLogger(AssumeRolePolicyEvaluator.class);
     private static final String ASSUME_ROLE_ACTION = "sts:AssumeRole";
     private static final Pattern ACCOUNT_ROOT_ARN = Pattern.compile("^arn:aws:iam::(\\d{12}):root$");
+    private static final Pattern ASSUMED_ROLE_ARN =
+            Pattern.compile("^arn:aws:sts::(\\d{12}):assumed-role/([^/]+)/.*$");
 
     private final ObjectMapper objectMapper;
 
@@ -160,6 +164,27 @@ public class AssumeRolePolicyEvaluator {
             return rootMatcher.group(1).equals(callerAccount);
         }
         // Otherwise an exact (glob-capable) principal ARN.
-        return callerArn != null && IamPolicyEvaluator.globMatches(principal, callerArn);
+        if (callerArn == null) {
+            return false;
+        }
+        if (IamPolicyEvaluator.globMatches(principal, callerArn)) {
+            return true;
+        }
+        // When the caller used assumed-role temporary credentials, callerArn is the STS
+        // assumed-role ARN (arn:aws:sts::ACCT:assumed-role/Role/session). A role's trust policy is
+        // written with the role's *IAM* principal ARN (arn:aws:iam::ACCT:role/Role) — AWS resolves
+        // the session back to the role for trust matching — so also match that canonical form.
+        String roleArn = assumedRoleToRoleArn(callerArn);
+        return roleArn != null && IamPolicyEvaluator.globMatches(principal, roleArn);
+    }
+
+    /**
+     * Maps an STS assumed-role ARN ({@code arn:aws:sts::ACCT:assumed-role/Role/session}) to the
+     * underlying IAM role ARN ({@code arn:aws:iam::ACCT:role/Role}), or {@code null} if {@code arn}
+     * is not an assumed-role ARN.
+     */
+    private static String assumedRoleToRoleArn(String arn) {
+        var m = ASSUMED_ROLE_ARN.matcher(arn);
+        return m.matches() ? "arn:aws:iam::" + m.group(1) + ":role/" + m.group(2) : null;
     }
 }
