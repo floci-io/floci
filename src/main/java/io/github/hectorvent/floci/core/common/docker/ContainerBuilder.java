@@ -83,7 +83,7 @@ public class ContainerBuilder {
         if (config == null || config.docker() == null) {
             return Optional.empty();
         }
-        return normalizeImageRegistryBase(config.docker().imageRegistryBase());
+        return config.docker().imageRegistryBase();
     }
 
     private static Optional<String> normalizeImageRegistryBase(Optional<String> imageRegistryBase) {
