@@ -745,7 +745,7 @@ class AutoScalingIntegrationTest {
                 .statusCode(200)
                 .body(containsString("UpdateAutoScalingGroupResponse"));
 
-        given()
+        String describeBody = given()
                 .formParam("Action", "DescribeAutoScalingGroups")
                 .formParam("AutoScalingGroupNames.member.1", "my-mixed-asg")
                 .header("Authorization", AUTH)
@@ -755,10 +755,17 @@ class AutoScalingIntegrationTest {
                 .statusCode(200)
                 .body(containsString("<Version>5</Version>"))
                 .body(containsString("<InstanceType>r7g.large</InstanceType>"))
-                .body(not(containsString("<InstanceType>t4g.medium</InstanceType>")))
                 .body(containsString("<OnDemandBaseCapacity>2</OnDemandBaseCapacity>"))
                 .body(containsString("<OnDemandPercentageAboveBaseCapacity>50</OnDemandPercentageAboveBaseCapacity>"))
-                .body(containsString("<SpotAllocationStrategy>price-capacity-optimized</SpotAllocationStrategy>"));
+                .body(containsString("<SpotAllocationStrategy>price-capacity-optimized</SpotAllocationStrategy>"))
+                .extract().asString();
+
+        // Scope the negative check to the policy overrides: a previously launched
+        // instance keeps its original instance type after a policy update (matching
+        // AWS), so t4g.medium may still appear under <Instances>.
+        String overrides = describeBody.substring(
+                describeBody.indexOf("<Overrides>"), describeBody.indexOf("</Overrides>"));
+        assertThat(overrides, not(containsString("<InstanceType>t4g.medium</InstanceType>")));
     }
 
     @Test

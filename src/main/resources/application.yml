@@ -105,6 +105,10 @@ floci:
         flush-interval-ms: 5000
       config:
         flush-interval-ms: 5000
+      transcribe:
+        flush-interval-ms: 5000
+      codedeploy:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
@@ -201,6 +205,8 @@ floci:
       enabled: true
       mock: false
       default-image: "redpandadata/redpanda:latest"
+      kafka-host-port-base: 9300
+      kafka-host-port-max: 9399
     elasticache:
       enabled: true
       proxy-base-port: 6379
@@ -378,4 +384,13 @@ floci:
     appsync:
       enabled: true
     s3vectors:
+      enabled: true
+    iot:
+      enabled: true
+      mqtt:
+        enabled: true
+        auto-start: false
+        host: 0.0.0.0
+        port: 1883
+    iotdata:
       enabled: true

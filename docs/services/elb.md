@@ -7,25 +7,76 @@ Floci supports Application Load Balancers (ALB) and Network Load Balancers (NLB)
 ## Supported Actions
 
 ### Load Balancers
-`CreateLoadBalancer` · `DescribeLoadBalancers` · `DeleteLoadBalancer` · `ModifyLoadBalancerAttributes` · `DescribeLoadBalancerAttributes` · `DescribeCapacityReservation` · `SetSecurityGroups` · `SetSubnets` · `SetIpAddressType`
+
+| Action | Description |
+|--------|-------------|
+| CreateLoadBalancer | - |
+| DescribeLoadBalancers | - |
+| DeleteLoadBalancer | - |
+| ModifyLoadBalancerAttributes | - |
+| DescribeLoadBalancerAttributes | - |
+| DescribeCapacityReservation | - |
+| SetSecurityGroups | - |
+| SetSubnets | - |
+| SetIpAddressType | - |
 
 ### Target Groups
-`CreateTargetGroup` · `DescribeTargetGroups` · `ModifyTargetGroup` · `DeleteTargetGroup` · `ModifyTargetGroupAttributes` · `DescribeTargetGroupAttributes`
+
+| Action | Description |
+|--------|-------------|
+| CreateTargetGroup | - |
+| DescribeTargetGroups | - |
+| ModifyTargetGroup | - |
+| DeleteTargetGroup | - |
+| ModifyTargetGroupAttributes | - |
+| DescribeTargetGroupAttributes | - |
 
 ### Targets
-`RegisterTargets` · `DeregisterTargets` · `DescribeTargetHealth`
+
+| Action | Description |
+|--------|-------------|
+| RegisterTargets | - |
+| DeregisterTargets | - |
+| DescribeTargetHealth | - |
 
 ### Listeners
-`CreateListener` · `DescribeListeners` · `ModifyListener` · `ModifyListenerAttributes` · `DescribeListenerAttributes` · `DeleteListener` · `AddListenerCertificates` · `RemoveListenerCertificates` · `DescribeListenerCertificates`
+
+| Action | Description |
+|--------|-------------|
+| CreateListener | - |
+| DescribeListeners | - |
+| ModifyListener | - |
+| ModifyListenerAttributes | - |
+| DescribeListenerAttributes | - |
+| DeleteListener | - |
+| AddListenerCertificates | - |
+| RemoveListenerCertificates | - |
+| DescribeListenerCertificates | - |
 
 ### Rules
-`CreateRule` · `DescribeRules` · `ModifyRule` · `DeleteRule` · `SetRulePriorities`
+
+| Action | Description |
+|--------|-------------|
+| CreateRule | - |
+| DescribeRules | - |
+| ModifyRule | - |
+| DeleteRule | - |
+| SetRulePriorities | - |
 
 ### Tags
-`AddTags` · `RemoveTags` · `DescribeTags`
+
+| Action | Description |
+|--------|-------------|
+| AddTags | - |
+| RemoveTags | - |
+| DescribeTags | - |
 
 ### Metadata
-`DescribeSSLPolicies` · `DescribeAccountLimits`
+
+| Action | Description |
+|--------|-------------|
+| DescribeSSLPolicies | - |
+| DescribeAccountLimits | - |
 
 ## Behavior Notes
 

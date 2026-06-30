@@ -54,19 +54,19 @@ class ReservedTagsTest {
     }
 
     @Test
-    void extractOverrideIdReturnsNullForNullInput() {
-        assertNull(ReservedTags.extractOverrideId(null));
+    void extractOverrideUserPoolIdReturnsNullForNullInput() {
+        assertNull(ReservedTags.extractOverrideUserPoolId(null));
     }
 
     @Test
-    void extractOverrideIdReturnsReservedOverrideOnly() {
+    void extractOverrideIdReturnsReservedOverrideUserPoolOnly() {
         Map<String, String> tags = Map.of(
                 ReservedTags.OVERRIDE_ID_KEY, "my-id",
                 "floci:internal", "hidden",
                 "env", "test"
         );
 
-        assertEquals("my-id", ReservedTags.extractOverrideId(tags));
+        assertEquals("my-id", ReservedTags.extractOverrideUserPoolId(tags));
     }
 
     @Test
@@ -82,5 +82,25 @@ class ReservedTagsTest {
         );
 
         assertEquals("ValidationException", exception.getErrorCode());
+    }
+
+    @Test
+    void rejectUnknownReservedTagsRejectsReservedTagsWithUserPoolTaggingException() {
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> ReservedTags.rejectUnknownReservedTags(Map.of(ReservedTags.RESERVED_PREFIX + "unknown-override", "something"), "UserPoolTaggingException")
+        );
+
+        assertEquals("UserPoolTaggingException", exception.getErrorCode());
+    }
+
+    @Test
+    void rejectUnknownReservedTagsRejectsReservedTagsWithTagException() {
+        AwsException exception = assertThrows(
+                AwsException.class,
+                () -> ReservedTags.rejectUnknownReservedTags(Map.of(ReservedTags.RESERVED_PREFIX + "unknown-override", "something"), "TagException")
+        );
+
+        assertEquals("TagException", exception.getErrorCode());
     }
 }

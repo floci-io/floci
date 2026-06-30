@@ -140,63 +140,190 @@ Floci seeds the following resources on first use in each region so Terraform, th
 ## Supported Actions
 
 ### Instances
-`RunInstances` · `DescribeInstances` · `TerminateInstances` · `StartInstances` · `StopInstances` · `RebootInstances` · `DescribeInstanceStatus` · `DescribeInstanceAttribute` · `ModifyInstanceAttribute`
+
+| Action | Description |
+|--------|-------------|
+| RunInstances | - |
+| DescribeInstances | - |
+| TerminateInstances | - |
+| StartInstances | - |
+| StopInstances | - |
+| RebootInstances | - |
+| DescribeInstanceStatus | - |
+| DescribeInstanceAttribute | - |
+| ModifyInstanceAttribute | - |
 
 ### VPCs
-`CreateVpc` · `DescribeVpcs` · `DeleteVpc` · `ModifyVpcAttribute` · `DescribeVpcAttribute` · `DescribeVpcEndpointServices` · `CreateVpcEndpoint` · `DescribeVpcEndpoints` · `DeleteVpcEndpoints` · `CreateDefaultVpc` · `AssociateVpcCidrBlock` · `DisassociateVpcCidrBlock`
+
+| Action | Description |
+|--------|-------------|
+| CreateVpc | - |
+| DescribeVpcs | - |
+| DeleteVpc | - |
+| ModifyVpcAttribute | - |
+| DescribeVpcAttribute | - |
+| DescribeVpcEndpointServices | - |
+| CreateVpcEndpoint | - |
+| DescribeVpcEndpoints | - |
+| DeleteVpcEndpoints | - |
+| CreateDefaultVpc | - |
+| AssociateVpcCidrBlock | - |
+| DisassociateVpcCidrBlock | - |
 
 ### Subnets
-`CreateSubnet` · `DescribeSubnets` · `DeleteSubnet` · `ModifySubnetAttribute`
+
+| Action | Description |
+|--------|-------------|
+| CreateSubnet | - |
+| DescribeSubnets | - |
+| DeleteSubnet | - |
+| ModifySubnetAttribute | - |
 
 ### Security Groups
-`CreateSecurityGroup` · `DescribeSecurityGroups` · `DeleteSecurityGroup` · `AuthorizeSecurityGroupIngress` · `AuthorizeSecurityGroupEgress` · `RevokeSecurityGroupIngress` · `RevokeSecurityGroupEgress` · `DescribeSecurityGroupRules` · `ModifySecurityGroupRules` · `UpdateSecurityGroupRuleDescriptionsIngress` · `UpdateSecurityGroupRuleDescriptionsEgress`
+
+| Action | Description |
+|--------|-------------|
+| CreateSecurityGroup | - |
+| DescribeSecurityGroups | - |
+| DeleteSecurityGroup | - |
+| AuthorizeSecurityGroupIngress | - |
+| AuthorizeSecurityGroupEgress | - |
+| RevokeSecurityGroupIngress | - |
+| RevokeSecurityGroupEgress | - |
+| DescribeSecurityGroupRules | - |
+| ModifySecurityGroupRules | - |
+| UpdateSecurityGroupRuleDescriptionsIngress | - |
+| UpdateSecurityGroupRuleDescriptionsEgress | - |
 
 ### Key Pairs
-`CreateKeyPair` · `DescribeKeyPairs` · `DeleteKeyPair` · `ImportKeyPair`
+
+| Action | Description |
+|--------|-------------|
+| CreateKeyPair | - |
+| DescribeKeyPairs | - |
+| DeleteKeyPair | - |
+| ImportKeyPair | - |
 
 ### AMIs
-`DescribeImages`
+
+| Action | Description |
+|--------|-------------|
+| DescribeImages | - |
 
 ### Tags
-`CreateTags` · `DeleteTags` · `DescribeTags`
+
+| Action | Description |
+|--------|-------------|
+| CreateTags | - |
+| DeleteTags | - |
+| DescribeTags | - |
 
 ### Internet Gateways
-`CreateInternetGateway` · `DescribeInternetGateways` · `DeleteInternetGateway` · `AttachInternetGateway` · `DetachInternetGateway`
+
+| Action | Description |
+|--------|-------------|
+| CreateInternetGateway | - |
+| DescribeInternetGateways | - |
+| DeleteInternetGateway | - |
+| AttachInternetGateway | - |
+| DetachInternetGateway | - |
 
 ### Route Tables
-`CreateRouteTable` · `DescribeRouteTables` · `DeleteRouteTable` · `AssociateRouteTable` · `DisassociateRouteTable` · `CreateRoute` · `DeleteRoute`
+
+| Action | Description |
+|--------|-------------|
+| CreateRouteTable | - |
+| DescribeRouteTables | - |
+| DeleteRouteTable | - |
+| AssociateRouteTable | - |
+| DisassociateRouteTable | - |
+| CreateRoute | - |
+| DeleteRoute | - |
 
 ### Network ACLs
-`CreateNetworkAcl` · `DescribeNetworkAcls` · `DeleteNetworkAcl` · `CreateNetworkAclEntry` · `ReplaceNetworkAclEntry` · `DeleteNetworkAclEntry` · `ReplaceNetworkAclAssociation`
+
+| Action | Description |
+|--------|-------------|
+| CreateNetworkAcl | - |
+| DescribeNetworkAcls | - |
+| DeleteNetworkAcl | - |
+| CreateNetworkAclEntry | - |
+| ReplaceNetworkAclEntry | - |
+| DeleteNetworkAclEntry | - |
+| ReplaceNetworkAclAssociation | - |
 
 ### Prefix Lists
-`DescribePrefixLists`
+
+| Action | Description |
+|--------|-------------|
+| DescribePrefixLists | - |
 
 ### NAT Gateways
-`CreateNatGateway` · `DescribeNatGateways` · `DeleteNatGateway`
+
+| Action | Description |
+|--------|-------------|
+| CreateNatGateway | - |
+| DescribeNatGateways | - |
+| DeleteNatGateway | - |
 
 ### Elastic IPs
-`AllocateAddress` · `DescribeAddresses` · `DescribeAddressesAttribute` · `AssociateAddress` · `DisassociateAddress` · `ReleaseAddress`
+
+| Action | Description |
+|--------|-------------|
+| AllocateAddress | - |
+| DescribeAddresses | - |
+| DescribeAddressesAttribute | - |
+| AssociateAddress | - |
+| DisassociateAddress | - |
+| ReleaseAddress | - |
 
 ### Availability Zones & Regions
-`DescribeAvailabilityZones` · `DescribeRegions` · `DescribeAccountAttributes`
+
+| Action | Description |
+|--------|-------------|
+| DescribeAvailabilityZones | - |
+| DescribeRegions | - |
+| DescribeAccountAttributes | - |
 
 ### Instance Types
-`DescribeInstanceTypes` · `DescribeInstanceTypeOfferings`
+
+| Action | Description |
+|--------|-------------|
+| DescribeInstanceTypes | - |
+| DescribeInstanceTypeOfferings | - |
 
 ### Launch Templates
-`CreateLaunchTemplate` · `CreateLaunchTemplateVersion` · `DescribeLaunchTemplates` · `DescribeLaunchTemplateVersions` · `ModifyLaunchTemplate` · `DeleteLaunchTemplate`
+
+| Action | Description |
+|--------|-------------|
+| CreateLaunchTemplate | - |
+| CreateLaunchTemplateVersion | - |
+| DescribeLaunchTemplates | - |
+| DescribeLaunchTemplateVersions | - |
+| ModifyLaunchTemplate | - |
+| DeleteLaunchTemplate | - |
 
 Launch templates store versioned launch data. New template versions can be created from an existing source version, and `ModifyLaunchTemplate` updates the default version used by later launches.
 
 ### IAM Instance Profiles
-`DescribeIamInstanceProfileAssociations`
+
+| Action | Description |
+|--------|-------------|
+| DescribeIamInstanceProfileAssociations | - |
 
 ### Network Interfaces
-`DescribeNetworkInterfaces`
+
+| Action | Description |
+|--------|-------------|
+| DescribeNetworkInterfaces | - |
 
 ### Volumes
-`CreateVolume` · `DescribeVolumes` · `DeleteVolume`
+
+| Action | Description |
+|--------|-------------|
+| CreateVolume | - |
+| DescribeVolumes | - |
+| DeleteVolume | - |
 
 ## Configuration
 

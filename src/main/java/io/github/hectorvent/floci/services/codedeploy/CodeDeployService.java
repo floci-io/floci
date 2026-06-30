@@ -1,11 +1,14 @@
 package io.github.hectorvent.floci.services.codedeploy;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.codedeploy.model.Application;
 import io.github.hectorvent.floci.services.codedeploy.model.Deployment;
 import io.github.hectorvent.floci.services.codedeploy.model.DeploymentConfig;
@@ -20,6 +23,7 @@ import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.ssm.SsmCommandService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -49,11 +53,13 @@ public class CodeDeployService {
     private final ObjectMapper mapper;
     private final ObjectMapper yamlMapper;
     private final RegionResolver regionResolver;
+    private final StorageFactory storageFactory;
 
     @Inject
     public CodeDeployService(LambdaService lambdaService, EcsService ecsService,
                              ElbV2Service elbV2Service, SsmCommandService ssmCommandService,
-                             Ec2Service ec2Service, ObjectMapper mapper, RegionResolver regionResolver) {
+                             Ec2Service ec2Service, ObjectMapper mapper, RegionResolver regionResolver,
+                             StorageFactory storageFactory) {
         this.lambdaService = lambdaService;
         this.ecsService = ecsService;
         this.elbV2Service = elbV2Service;
@@ -62,26 +68,110 @@ public class CodeDeployService {
         this.mapper = mapper;
         this.yamlMapper = new ObjectMapper(new YAMLFactory());
         this.regionResolver = regionResolver;
+        this.storageFactory = storageFactory;
     }
 
+    // ---- Durable (persisted) ----
     // key: region -> name -> application
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, Application>> applications = new ConcurrentHashMap<>();
+    private Map<String, Map<String, Application>> applications = new ConcurrentHashMap<>();
     // key: region -> appName -> groupName -> group
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<String, DeploymentGroup>>> deploymentGroups = new ConcurrentHashMap<>();
+    private Map<String, Map<String, Map<String, DeploymentGroup>>> deploymentGroups = new ConcurrentHashMap<>();
     // key: region -> configName -> config (pre-seeded with built-ins)
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, DeploymentConfig>> deploymentConfigs = new ConcurrentHashMap<>();
+    private Map<String, Map<String, DeploymentConfig>> deploymentConfigs = new ConcurrentHashMap<>();
     // key: resourceArn -> tags
-    private final ConcurrentHashMap<String, Map<String, String>> tags = new ConcurrentHashMap<>();
+    private Map<String, Map<String, String>> tags = new ConcurrentHashMap<>();
+    // key: region -> instanceName -> OnPremisesInstance
+    private Map<String, Map<String, OnPremisesInstance>> onPremisesInstances = new ConcurrentHashMap<>();
+
+    // ---- Transient runtime state (in memory only) ----
     // key: region -> deploymentId -> Deployment
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, Deployment>> deployments = new ConcurrentHashMap<>();
     // key: region -> deploymentId -> targetId -> DeploymentTarget wrapper
     private final ConcurrentHashMap<String, ConcurrentHashMap<String, ConcurrentHashMap<String, Map<String, Object>>>> deploymentTargets = new ConcurrentHashMap<>();
-    // key: region -> instanceName -> OnPremisesInstance
-    private final ConcurrentHashMap<String, ConcurrentHashMap<String, OnPremisesInstance>> onPremisesInstances = new ConcurrentHashMap<>();
     // key: lifecycleEventHookExecutionId -> CompletableFuture<status>
     private final ConcurrentHashMap<String, CompletableFuture<String>> hookFutures = new ConcurrentHashMap<>();
     // key: deploymentId -> stop flag
     private final ConcurrentHashMap<String, AtomicBoolean> stopFlags = new ConcurrentHashMap<>();
+
+    @PostConstruct
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.applications = storageBacked("codedeploy-applications.json",
+                new TypeReference<Map<String, Map<String, Application>>>() {});
+        this.deploymentGroups = storageBacked("codedeploy-deployment-groups.json",
+                new TypeReference<Map<String, Map<String, Map<String, DeploymentGroup>>>>() {});
+        this.deploymentConfigs = storageBacked("codedeploy-deployment-configs.json",
+                new TypeReference<Map<String, Map<String, DeploymentConfig>>>() {});
+        this.tags = storageBacked("codedeploy-tags.json",
+                new TypeReference<Map<String, Map<String, String>>>() {});
+        this.onPremisesInstances = storageBacked("codedeploy-on-premises-instances.json",
+                new TypeReference<Map<String, Map<String, OnPremisesInstance>>>() {});
+        normalizeRegionMaps(applications);
+        normalizeDeploymentGroups();
+        normalizeRegionMaps(deploymentConfigs);
+        normalizeRegionMaps(tags);
+        normalizeRegionMaps(onPremisesInstances);
+        reconcileBuiltInConfigs();
+    }
+
+    private <V> Map<String, V> storageBacked(String fileName, TypeReference<Map<String, V>> typeReference) {
+        return new StorageBackedMap<>(storageFactory.create("codedeploy", fileName, typeReference));
+    }
+
+    /** After load, re-wrap persisted inner maps as {@link ConcurrentHashMap} (Jackson reads them as
+     *  plain maps) so per-key mutation stays thread-safe. For two-level region maps. */
+    private <V> void normalizeRegionMaps(Map<String, Map<String, V>> resources) {
+        for (Map.Entry<String, Map<String, V>> entry : new ArrayList<>(resources.entrySet())) {
+            if (!(entry.getValue() instanceof ConcurrentHashMap)) {
+                resources.put(entry.getKey(), new ConcurrentHashMap<>(entry.getValue()));
+            }
+        }
+    }
+
+    /** Three-level normalization for deploymentGroups (region -> app -> group). */
+    private void normalizeDeploymentGroups() {
+        for (Map.Entry<String, Map<String, Map<String, DeploymentGroup>>> regionEntry
+                : new ArrayList<>(deploymentGroups.entrySet())) {
+            Map<String, Map<String, DeploymentGroup>> appMap = new ConcurrentHashMap<>();
+            for (Map.Entry<String, Map<String, DeploymentGroup>> appEntry : regionEntry.getValue().entrySet()) {
+                appMap.put(appEntry.getKey(), new ConcurrentHashMap<>(appEntry.getValue()));
+            }
+            deploymentGroups.put(regionEntry.getKey(), appMap);
+        }
+    }
+
+    /** Top up any built-in deployment configs missing from already-loaded regions (forward-compat
+     *  if the built-in list grows between Floci versions). Built-ins themselves are persisted. */
+    private void reconcileBuiltInConfigs() {
+        for (String region : new ArrayList<>(deploymentConfigs.keySet())) {
+            Map<String, DeploymentConfig> store = deploymentConfigs.get(region);
+            if (store == null) {
+                continue;
+            }
+            double now = Instant.now().toEpochMilli() / 1000.0;
+            boolean changed = false;
+            for (String name : BUILT_IN_CONFIG_NAMES) {
+                if (!store.containsKey(name)) {
+                    store.put(name, buildBuiltInConfig(name, now));
+                    changed = true;
+                }
+            }
+            if (changed) {
+                deploymentConfigs.put(region, store);
+            }
+        }
+    }
+
+    /** {@link StorageBackedMap} only flushes on a top-level put, so an in-place mutation of an
+     *  inner map must be written back by re-putting the region entry. */
+    private <V> void persistRegion(Map<String, Map<String, V>> resources, String region) {
+        Map<String, V> regionResources = resources.get(region);
+        if (regionResources != null) {
+            resources.put(region, regionResources);
+        }
+    }
 
     private static final class AppSpecInfo {
         String functionName;
@@ -143,7 +233,7 @@ public class CodeDeployService {
         return applications.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
-    private Map<String, ConcurrentHashMap<String, DeploymentGroup>> deploymentGroupsFor(String region) {
+    private Map<String, Map<String, DeploymentGroup>> deploymentGroupsFor(String region) {
         return deploymentGroups.computeIfAbsent(region, r -> new ConcurrentHashMap<>());
     }
 
@@ -229,6 +319,7 @@ public class CodeDeployService {
         app.setLinkedToGitHub(false);
         app.setComputePlatform(computePlatform != null ? computePlatform : "Server");
         store.put(name, app);
+        persistRegion(applications, region);
 
         if (tags != null && !tags.isEmpty()) {
             String arn = applicationArn(region, name);
@@ -261,6 +352,7 @@ public class CodeDeployService {
             store.remove(currentName);
             app.setApplicationName(newName);
             store.put(newName, app);
+            persistRegion(applications, region);
         }
     }
 
@@ -269,6 +361,7 @@ public class CodeDeployService {
             throw new AwsException("ApplicationDoesNotExistException",
                     "Application does not exist: " + name, 400);
         }
+        persistRegion(applications, region);
     }
 
     public List<String> listApplications(String region) {
@@ -295,8 +388,8 @@ public class CodeDeployService {
                                                   String deploymentConfigName, String serviceRoleArn,
                                                   Map<String, Object> fields) {
         getApplication(region, appName);
-        Map<String, ConcurrentHashMap<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
-        ConcurrentHashMap<String, DeploymentGroup> groupStore = appGroups.computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
+        Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
+        Map<String, DeploymentGroup> groupStore = appGroups.computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
         if (groupStore.containsKey(groupName)) {
             throw new AwsException("DeploymentGroupAlreadyExistsException",
                     "Deployment group already exists: " + groupName, 400);
@@ -310,13 +403,14 @@ public class CodeDeployService {
         group.setServiceRoleArn(serviceRoleArn);
         applyGroupFields(group, fields);
         groupStore.put(groupName, group);
+        persistRegion(deploymentGroups, region);
         return group;
     }
 
     public DeploymentGroup getDeploymentGroup(String region, String appName, String groupName) {
         getApplication(region, appName);
-        Map<String, ConcurrentHashMap<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
-        ConcurrentHashMap<String, DeploymentGroup> groupStore = appGroups.get(appName);
+        Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
+        Map<String, DeploymentGroup> groupStore = appGroups.get(appName);
         DeploymentGroup group = groupStore != null ? groupStore.get(groupName) : null;
         if (group == null) {
             throw new AwsException("DeploymentGroupDoesNotExistException",
@@ -330,7 +424,7 @@ public class CodeDeployService {
                                                   String deploymentConfigName, String serviceRoleArn,
                                                   Map<String, Object> fields) {
         DeploymentGroup group = getDeploymentGroup(region, appName, currentGroupName);
-        ConcurrentHashMap<String, DeploymentGroup> groupStore = deploymentGroupsFor(region)
+        Map<String, DeploymentGroup> groupStore = deploymentGroupsFor(region)
                 .computeIfAbsent(appName, a -> new ConcurrentHashMap<>());
 
         if (deploymentConfigName != null) { group.setDeploymentConfigName(deploymentConfigName); }
@@ -342,30 +436,32 @@ public class CodeDeployService {
             group.setDeploymentGroupName(newGroupName);
             groupStore.put(newGroupName, group);
         }
+        persistRegion(deploymentGroups, region);
         return group;
     }
 
     public void deleteDeploymentGroup(String region, String appName, String groupName) {
         getApplication(region, appName);
-        Map<String, ConcurrentHashMap<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
-        ConcurrentHashMap<String, DeploymentGroup> groupStore = appGroups.get(appName);
+        Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
+        Map<String, DeploymentGroup> groupStore = appGroups.get(appName);
         if (groupStore == null || groupStore.remove(groupName) == null) {
             throw new AwsException("DeploymentGroupDoesNotExistException",
                     "Deployment group does not exist: " + groupName, 400);
         }
+        persistRegion(deploymentGroups, region);
     }
 
     public List<String> listDeploymentGroups(String region, String appName) {
         getApplication(region, appName);
-        Map<String, ConcurrentHashMap<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
-        ConcurrentHashMap<String, DeploymentGroup> groupStore = appGroups.get(appName);
+        Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
+        Map<String, DeploymentGroup> groupStore = appGroups.get(appName);
         return groupStore != null ? new ArrayList<>(groupStore.keySet()) : List.of();
     }
 
     public List<DeploymentGroup> batchGetDeploymentGroups(String region, String appName, List<String> names) {
         getApplication(region, appName);
-        Map<String, ConcurrentHashMap<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
-        ConcurrentHashMap<String, DeploymentGroup> groupStore = appGroups.get(appName);
+        Map<String, Map<String, DeploymentGroup>> appGroups = deploymentGroupsFor(region);
+        Map<String, DeploymentGroup> groupStore = appGroups.get(appName);
         if (groupStore == null) {
             return List.of();
         }
@@ -400,6 +496,7 @@ public class CodeDeployService {
         cfg.setTrafficRoutingConfig(trafficRoutingConfig);
         cfg.setZonalConfig(zonalConfig);
         store.put(name, cfg);
+        persistRegion(deploymentConfigs, region);
         return cfg;
     }
 
@@ -421,6 +518,7 @@ public class CodeDeployService {
             throw new AwsException("DeploymentConfigDoesNotExistException",
                     "Deployment configuration does not exist: " + name, 400);
         }
+        persistRegion(deploymentConfigs, region);
     }
 
     public List<String> listDeploymentConfigs(String region) {
@@ -599,6 +697,7 @@ public class CodeDeployService {
         inst.setRegisterTime(Instant.now().toEpochMilli() / 1000.0);
         inst.setRegistrationStatus("Registered");
         store.put(instanceName, inst);
+        persistRegion(onPremisesInstances, region);
         return inst;
     }
 
@@ -606,6 +705,7 @@ public class CodeDeployService {
         OnPremisesInstance inst = requireOnPremisesInstance(region, instanceName);
         inst.setDeregisterTime(Instant.now().toEpochMilli() / 1000.0);
         inst.setRegistrationStatus("Deregistered");
+        persistRegion(onPremisesInstances, region);
     }
 
     public OnPremisesInstance getOnPremisesInstance(String region, String instanceName) {
@@ -633,6 +733,7 @@ public class CodeDeployService {
                 inst.getTags().add(t);
             }
         }
+        persistRegion(onPremisesInstances, region);
     }
 
     public void removeTagsFromOnPremisesInstances(String region, List<String> instanceNames, List<Map<String, String>> tagsToRemove) {
@@ -642,6 +743,7 @@ public class CodeDeployService {
                 inst.getTags().removeIf(e -> e.get("Key").equals(t.get("Key")));
             }
         }
+        persistRegion(onPremisesInstances, region);
     }
 
     private OnPremisesInstance requireOnPremisesInstance(String region, String instanceName) {
@@ -1624,12 +1726,14 @@ public class CodeDeployService {
         for (Map<String, String> t : tagList) {
             tagMap.put(t.get("Key"), t.get("Value"));
         }
+        tags.put(arn, tagMap); // write back the in-place inner-map mutation
     }
 
     public void untagResource(String arn, List<String> tagKeys) {
         Map<String, String> tagMap = tags.get(arn);
         if (tagMap != null) {
             tagKeys.forEach(tagMap::remove);
+            tags.put(arn, tagMap); // write back the in-place inner-map mutation
         }
     }
 
@@ -1705,5 +1809,6 @@ public class CodeDeployService {
             String value = t.containsKey("Value") ? t.get("Value") : t.get("value");
             if (key != null) { tagMap.put(key, value != null ? value : ""); }
         }
+        tags.put(arn, tagMap); // write back the in-place inner-map mutation
     }
 }
