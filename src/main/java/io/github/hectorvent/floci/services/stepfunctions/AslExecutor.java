@@ -302,19 +302,43 @@ public class AslExecutor {
         }
     }
 
+    /**
+     * Extracts the Lambda function name from a reference that may be a bare name, a name with a
+     * version/alias qualifier (e.g. "name:$LATEST"), or a full/partial function ARN
+     * (e.g. "arn:aws:lambda:region:acct:function:name[:qualifier]"). The qualifier is dropped
+     * because the function store is keyed by name. Taking the last ':'-segment is wrong for a
+     * qualified ARN — it yields the qualifier (e.g. "$LATEST") instead of the function name.
+     */
+    static String extractLambdaFunctionName(String ref) {
+        if (ref == null) {
+            return null;
+        }
+        String fn = ref;
+        int fi = ref.indexOf(":function:");
+        if (fi >= 0) {
+            fn = ref.substring(fi + ":function:".length());
+        }
+        // Drop an optional trailing version/alias qualifier (e.g. ":$LATEST", ":1", ":prod").
+        int colon = fn.indexOf(':');
+        if (colon >= 0) {
+            fn = fn.substring(0, colon);
+        }
+        return fn;
+    }
+
     private JsonNode invokeResource(String resource, JsonNode input, StateMachine sm, String taskToken) throws Exception {
         // Support Lambda resources: direct ARN or optimized integration
         String functionName = null;
         JsonNode lambdaPayload = input;
 
         if (resource.contains(":lambda:") && resource.contains(":function:")) {
-            // Direct Lambda ARN: arn:aws:lambda:region:account:function:name
-            functionName = resource.substring(resource.lastIndexOf(':') + 1);
+            // Direct Lambda ARN: arn:aws:lambda:region:account:function:name[:qualifier]
+            functionName = extractLambdaFunctionName(resource);
         } else if (resource.equals("arn:aws:states:::lambda:invoke")) {
             // Optimized Lambda integration — function name and payload come from resolved input
             String fnRef = input.path("FunctionName").asText(null);
             if (fnRef != null) {
-                functionName = fnRef.contains(":") ? fnRef.substring(fnRef.lastIndexOf(':') + 1) : fnRef;
+                functionName = extractLambdaFunctionName(fnRef);
             }
             JsonNode payload = input.path("Payload");
             if (!payload.isMissingNode()) {
