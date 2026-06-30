@@ -14,6 +14,12 @@
 | `GetFederationToken` | Get temporary credentials for a federated user |
 | `DecodeAuthorizationMessage` | Decode an encoded authorization failure message |
 
+## Configuration
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_SERVICES_STS_ENABLED` | `true` | Enable or disable the service |
+
 ## Trust Policy Enforcement
 
 By default `AssumeRole` succeeds for any caller. When `FLOCI_SERVICES_IAM_ENFORCEMENT_ENABLED=true`,
@@ -30,6 +36,9 @@ roles created through IAM with a real trust policy.
   `ExternalId`, and the `ExternalId` request parameter is ignored. This matches moto/LocalStack.
 - **Only the trust policy is checked.** Cross-account `AssumeRole` in AWS also requires the caller's
   own identity policy to allow `sts:AssumeRole`; that side is not enforced.
+- **`NotAction` is not evaluated.** Statements are matched on the `Action` key only, so a statement
+  that uses `NotAction` is treated as not matching `sts:AssumeRole` (no effect). In particular a
+  `Deny` with `NotAction` will not block the assume.
 
 ## Examples
 
