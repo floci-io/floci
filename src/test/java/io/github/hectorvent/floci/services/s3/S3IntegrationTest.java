@@ -92,18 +92,6 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(5)
-    void getObjectWithChecksumModeReturnsChecksum() {
-        given()
-            .header("x-amz-checksum-mode", "ENABLED")
-        .when()
-            .get("/test-bucket/greeting.txt")
-        .then()
-            .statusCode(200)
-            .header("x-amz-checksum-crc64nvme", notNullValue());
-    }
-
-    @Test
     @Order(6)
     void getObjectAttributes() {
         given()
@@ -131,18 +119,6 @@ class S3IntegrationTest {
             .header("x-amz-meta-owner", equalTo("team-a"))
             .header("x-amz-storage-class", equalTo("STANDARD_IA"))
             .header("x-amz-checksum-crc64nvme", nullValue());
-    }
-
-    @Test
-    @Order(7)
-    void headObjectWithChecksumModeReturnsChecksum() {
-        given()
-            .header("x-amz-checksum-mode", "ENABLED")
-        .when()
-            .head("/test-bucket/greeting.txt")
-        .then()
-            .statusCode(200)
-            .header("x-amz-checksum-crc64nvme", notNullValue());
     }
 
     @Test
@@ -554,6 +530,30 @@ class S3IntegrationTest {
 
         given().delete("/large-object-bucket/large-file.bin");
         given().delete("/large-object-bucket");
+    }
+
+    @Test
+    @Order(118)
+    void getObjectWithChecksumModeReturnsChecksum() {
+        given()
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .get("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+    }
+
+    @Test
+    @Order(119)
+    void headObjectWithChecksumModeReturnsChecksum() {
+        given()
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .head("/test-bucket/greeting.txt")
+        .then()
+            .statusCode(200)
+            .header("x-amz-checksum-crc64nvme", notNullValue());
     }
 
     @Test

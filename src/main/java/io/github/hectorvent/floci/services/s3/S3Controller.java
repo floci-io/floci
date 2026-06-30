@@ -1643,8 +1643,6 @@ public class S3Controller {
             String cacheControl,
             String contentDisposition,
             String contentEncoding) {
-        static final ResponseHeaderOverrides NONE = new ResponseHeaderOverrides(null, null, null, null, null, null);
-
         boolean hasAny() {
             return contentType != null || contentLanguage != null || expires != null
                     || cacheControl != null || contentDisposition != null || contentEncoding != null;
@@ -1665,10 +1663,6 @@ public class S3Controller {
         }
     }
 
-    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj) {
-        appendObjectHeaders(resp, obj, ResponseHeaderOverrides.NONE);
-    }
-
     // PutObject's response body is empty — body-describing headers and x-amz-meta-*
     // must not be emitted, or SDK clients will try to decompress and fail.
     private void appendPutObjectResponseHeaders(Response.ResponseBuilder resp, S3Object obj) {
@@ -1681,10 +1675,6 @@ public class S3Controller {
         appendSseCustomerHeaders(resp, obj);
         appendChecksumHeaders(resp, obj.getChecksum());
         appendLockHeaders(resp, obj);
-    }
-
-    private void appendObjectHeaders(Response.ResponseBuilder resp, S3Object obj, ResponseHeaderOverrides overrides) {
-        appendObjectHeaders(resp, obj, overrides, true);
     }
 
     // includeChecksum must be false for partial (206) responses: obj.getChecksum() is the
