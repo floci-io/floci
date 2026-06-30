@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.rds.model.DbClusterParameterGroup;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerHandle;
 import io.github.hectorvent.floci.services.rds.container.RdsContainerManager;
 import io.github.hectorvent.floci.services.rds.model.DbInstance;
+import io.github.hectorvent.floci.services.rds.model.DbInstanceStatus;
 import io.github.hectorvent.floci.services.rds.model.DbParameterGroup;
 import io.github.hectorvent.floci.services.rds.model.DbSubnetGroup;
 import io.github.hectorvent.floci.services.rds.proxy.RdsProxyManager;
@@ -339,6 +340,64 @@ class RdsServiceTest {
 
         assertEquals("InvalidDBClusterStateFault", exception.getErrorCode());
         assertTrue(exception.getMessage().contains("still has DB instances"));
+    }
+
+    @Test
+    void mockModeCreatesClusterAvailableWithoutContainerOrProxy() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbCluster cluster = rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, cluster.getStatus());
+        assertEquals("localhost", cluster.getEndpoint().address());
+        assertTrue(cluster.getEndpoint().port() > 0);
+        assertNull(cluster.getContainerId());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+        verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void mockModeCreatesClusterInstanceAvailableWithoutContainer() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        DbInstance instance = rdsService.createDbInstance("inst1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", "db.serverless",
+                0, false, null, null, "cluster1");
+
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertEquals("localhost", instance.getEndpoint().address());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+        verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any());
+    }
+
+    @Test
+    void mockModeCreatesStandaloneInstanceAvailableWithoutContainer() {
+        when(config.services().rds().mock()).thenReturn(true);
+
+        DbInstance instance = rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        assertEquals(DbInstanceStatus.AVAILABLE, instance.getStatus());
+        assertNull(instance.getContainerId());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    @Test
+    void mockModeDeleteClusterSkipsDockerCleanup() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
+                "admin", "password", "dbname", false, null);
+
+        rdsService.deleteDbCluster("cluster1");
+
+        verify(containerManager, never()).stop(any());
+        verify(containerManager, never()).removeVolume(any(), any());
     }
 
     @Test

@@ -695,6 +695,12 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        /** When true, DB clusters and instances are created instantly without a real Docker
+         *  container or auth proxy (API/metadata only). Useful for CI and environments without
+         *  access to the Docker socket. */
+        @WithDefault("false")
+        boolean mock();
+
         @WithDefault("7000")
         int proxyBasePort();
 

@@ -120,6 +120,7 @@ floci:
       default-image: "valkey/valkey:8"
     rds:
       enabled: true
+      mock: false
       proxy-base-port: 7001
       proxy-max-port: 7099
       default-postgres-image: "postgres:16-alpine"

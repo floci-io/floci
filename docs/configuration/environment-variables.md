@@ -319,6 +319,7 @@ These services spawn Docker containers. They require access to the Docker socket
 | Variable | Default | Description |
 |---|---|---|
 | `FLOCI_SERVICES_RDS_ENABLED` | `true` | Enable the RDS service |
+| `FLOCI_SERVICES_RDS_MOCK` | `false` | When `true`, DB clusters and instances are created instantly without a real container or auth proxy (API only) |
 | `FLOCI_SERVICES_RDS_PROXY_BASE_PORT` | `7001` | First port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_PROXY_MAX_PORT` | `7099` | Last port in the RDS proxy range |
 | `FLOCI_SERVICES_RDS_DEFAULT_POSTGRES_IMAGE` | `postgres:16-alpine` | Default PostgreSQL Docker image |
