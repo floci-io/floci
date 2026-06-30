@@ -51,6 +51,11 @@ public class ContainerLauncher {
     private static final String TASK_DIR = "/var/task";
     private static final String RUNTIME_DIR = "/var/runtime";
 
+    // Pipe buffer for streaming the code tar into the container. The JDK default is 1 KB, which
+    // forces a producer/consumer monitor handoff roughly every kilobyte; for a tens-of-MB
+    // node_modules tar that is the dominant cold-start cost. 256 KB cuts the handoffs ~250x.
+    private static final int TAR_PIPE_BUFFER_BYTES = 256 * 1024;
+
     private static final DateTimeFormatter LOG_STREAM_DATE_FMT = DateTimeFormatter.ofPattern("yyyy/MM/dd");
 
     private final ContainerBuilder containerBuilder;
@@ -322,7 +327,7 @@ public class ContainerLauncher {
     private void copyDirToContainer(DockerClient dockerClient, String containerId,
                                     Path sourceDir, String remotePath, String functionName) {
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos)) {
+             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
             new Thread(() -> {
                 try (pos) {
@@ -345,7 +350,7 @@ public class ContainerLauncher {
     private void copyFileToContainer(DockerClient dockerClient, String containerId,
                                      Path sourceFile, String remotePath, String entryName, String functionName) {
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos)) {
+             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
             new Thread(() -> {
                 try (TarArchiveOutputStream tar = newTarStream(pos)) {
