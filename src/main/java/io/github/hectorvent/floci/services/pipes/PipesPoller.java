@@ -542,7 +542,7 @@ public class PipesPoller implements Resettable {
         try {
             String enriched = targetInvoker.applyEnrichment(pipe, eventsArray, region);
             if (enriched != null) {
-                targetInvoker.invoke(pipe, enriched, region);
+                targetInvoker.invoke(pipe, asEventArray(objectMapper, enriched), region);
             }
             delivered = true;
         } catch (Exception e) {
@@ -568,6 +568,25 @@ public class PipesPoller implements Resettable {
         var arr = objectMapper.createArrayNode();
         records.forEach(arr::add);
         return arr.toString();
+    }
+
+    /**
+     * EventBridge Pipes delivers events to a target as a batch (JSON array). An enrichment that
+     * returns a single (non-array) JSON value represents one event, so it is wrapped in a
+     * one-element array; an array response is already a batch and is forwarded unchanged.
+     */
+    static String asEventArray(ObjectMapper objectMapper, String payload) {
+        try {
+            JsonNode node = objectMapper.readTree(payload);
+            if (node.isArray()) {
+                return payload;
+            }
+            return objectMapper.createArrayNode().add(node).toString();
+        } catch (Exception e) {
+            LOG.debugv("Pipe enrichment response was not JSON, wrapping as a single string event: {0}",
+                    e.getMessage());
+            return objectMapper.createArrayNode().add(payload).toString();
+        }
     }
 
     private boolean sendToDeadLetterQueue(Pipe pipe, String payload, String region) {

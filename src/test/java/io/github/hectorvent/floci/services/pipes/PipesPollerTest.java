@@ -58,6 +58,35 @@ class PipesPollerTest {
     }
 
     @Test
+    void asEventArrayWrapsSingleObjectInBatchArray() throws Exception {
+        // Pipes delivers events to a target as a batch array; a single-object enrichment response
+        // must become a one-element array so a target like "InputPath": "$.[0]" can unwrap it.
+        String wrapped = PipesPoller.asEventArray(MAPPER, "{\"systemId\":\"S1\",\"solutions\":[1]}");
+        JsonNode node = MAPPER.readTree(wrapped);
+        assertTrue(node.isArray());
+        assertEquals(1, node.size());
+        assertEquals("S1", node.get(0).path("systemId").asText());
+    }
+
+    @Test
+    void asEventArrayLeavesArrayResponseUnchanged() throws Exception {
+        String out = PipesPoller.asEventArray(MAPPER, "[{\"a\":1},{\"a\":2}]");
+        JsonNode node = MAPPER.readTree(out);
+        assertTrue(node.isArray());
+        assertEquals(2, node.size());
+        assertEquals(2, node.get(1).path("a").asInt());
+    }
+
+    @Test
+    void asEventArrayWrapsNonJsonAsSingleStringEvent() throws Exception {
+        String out = PipesPoller.asEventArray(MAPPER, "not-json");
+        JsonNode node = MAPPER.readTree(out);
+        assertTrue(node.isArray());
+        assertEquals(1, node.size());
+        assertEquals("not-json", node.get(0).asText());
+    }
+
+    @Test
     void pollKafka_filtersUsingDecodedPayloadButDeliversOriginalRecord() throws Exception {
         Pipe pipe = selfManagedKafkaPipe();
         byte[] key = "customer-123".getBytes(StandardCharsets.UTF_8);
