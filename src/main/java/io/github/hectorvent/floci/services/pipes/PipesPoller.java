@@ -196,6 +196,14 @@ public class PipesPoller implements Resettable {
             return;
         }
 
+        // AWS EventBridge Pipes: source → filter → ENRICHMENT → target. When an enrichment is
+        // configured it is invoked once with the filtered events (as a bare JSON array, matching the
+        // Lambda's SQSRecord[] input) and its response is forwarded to the target.
+        if (hasEnrichment(pipe)) {
+            deliverEnrichedBatch(pipe, filtered, messages, matchedMessageIds, queueUrl, region);
+            return;
+        }
+
         if (isLambdaTarget(pipe)) {
             String eventJson = wrapRecords(filtered);
             boolean delivered = invokeWithDlq(pipe, eventJson, region);
@@ -515,6 +523,51 @@ public class PipesPoller implements Resettable {
                     pipe.getName(), e.getMessage(), e.getClass().getSimpleName());
             return sendToDeadLetterQueue(pipe, eventJson, region);
         }
+    }
+
+    private static boolean hasEnrichment(Pipe pipe) {
+        return pipe.getEnrichment() != null && !pipe.getEnrichment().isBlank();
+    }
+
+    /**
+     * Runs the pipe enrichment once over the filtered SQS batch and forwards its response to the
+     * target, then deletes the consumed source messages. The enrichment Lambda receives the events
+     * as a bare JSON array (SQSRecord[]); a null/empty enrichment response skips the target (AWS
+     * behavior) while still consuming the source messages.
+     */
+    private void deliverEnrichedBatch(Pipe pipe, List<JsonNode> filtered, List<Message> messages,
+                                      Set<String> matchedMessageIds, String queueUrl, String region) {
+        String eventsArray = bareArray(filtered);
+        boolean delivered;
+        try {
+            String enriched = targetInvoker.applyEnrichment(pipe, eventsArray, region);
+            if (enriched != null) {
+                targetInvoker.invoke(pipe, enriched, region);
+            }
+            delivered = true;
+        } catch (Exception e) {
+            LOG.warnv("Pipe {0}: enriched delivery failed: {1} ({2})",
+                    pipe.getName(), e.getMessage(), e.getClass().getSimpleName());
+            delivered = sendToDeadLetterQueue(pipe, eventsArray, region);
+        }
+        if (delivered) {
+            for (Message msg : messages) {
+                if (matchedMessageIds.contains(msg.getMessageId())) {
+                    try {
+                        sqsService.deleteMessage(queueUrl, msg.getReceiptHandle(), region);
+                    } catch (Exception e) {
+                        LOG.warnv("Pipe {0}: failed to delete SQS message {1}: {2}",
+                                pipe.getName(), msg.getMessageId(), e.getMessage());
+                    }
+                }
+            }
+        }
+    }
+
+    private String bareArray(List<JsonNode> records) {
+        var arr = objectMapper.createArrayNode();
+        records.forEach(arr::add);
+        return arr.toString();
     }
 
     private boolean sendToDeadLetterQueue(Pipe pipe, String payload, String region) {

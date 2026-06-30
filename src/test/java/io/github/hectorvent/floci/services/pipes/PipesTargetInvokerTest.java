@@ -248,4 +248,67 @@ class PipesTargetInvokerTest {
                 "{\"message\": \"user registered\", \"messageType\": \"REGISTRATION\"}",
                 captor.getValue());
     }
+
+    // --- Enrichment: AWS Pipes invokes the enrichment Lambda with the events and forwards its response ---
+
+    private Pipe enrichmentPipe(String region, String enrichmentArn) {
+        Pipe pipe = createPipe("arn:aws:states:" + region + ":000000000000:stateMachine:target", null);
+        pipe.setEnrichment(enrichmentArn);
+        return pipe;
+    }
+
+    @Test
+    void applyEnrichment_invokesLambdaAndReturnsResponse() {
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
+        byte[] resp = "{\"systemId\":\"S1\"}".getBytes(java.nio.charset.StandardCharsets.UTF_8);
+        when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, resp, null, "req"));
+
+        String out = invoker.applyEnrichment(pipe, "[{\"body\":\"{}\"}]", region);
+
+        assertEquals("{\"systemId\":\"S1\"}", out);
+        ArgumentCaptor<byte[]> payloadCaptor = ArgumentCaptor.forClass(byte[].class);
+        verify(lambdaService).invoke(eq(region), eq("enrich-fn"), payloadCaptor.capture(), eq(InvocationType.RequestResponse));
+        assertEquals("[{\"body\":\"{}\"}]",
+                new String(payloadCaptor.getValue(), java.nio.charset.StandardCharsets.UTF_8));
+    }
+
+    @Test
+    void applyEnrichment_qualifiedArnResolvesFunctionName() {
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn:$LATEST");
+        when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, "{}".getBytes(), null, "req"));
+
+        invoker.applyEnrichment(pipe, "[]", region);
+
+        verify(lambdaService).invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse));
+    }
+
+    @Test
+    void applyEnrichment_noEnrichmentReturnsPayloadUnchanged() {
+        Pipe pipe = createPipe("arn:aws:states:us-east-1:000000000000:stateMachine:target", null);
+        String out = invoker.applyEnrichment(pipe, "[{\"x\":1}]", "us-east-1");
+        assertEquals("[{\"x\":1}]", out);
+        verifyNoInteractions(lambdaService);
+    }
+
+    @Test
+    void applyEnrichment_emptyResponseReturnsNull() {
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
+        when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, null, new byte[0], null, "req"));
+        assertNull(invoker.applyEnrichment(pipe, "[]", region));
+    }
+
+    @Test
+    void applyEnrichment_lambdaFunctionErrorThrows() {
+        String region = "us-east-1";
+        Pipe pipe = enrichmentPipe(region, "arn:aws:lambda:" + region + ":000000000000:function:enrich-fn");
+        when(lambdaService.invoke(eq(region), eq("enrich-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
+        assertThrows(RuntimeException.class, () -> invoker.applyEnrichment(pipe, "[]", region));
+    }
 }

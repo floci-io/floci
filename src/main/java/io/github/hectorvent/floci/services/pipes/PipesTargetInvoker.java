@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
+import io.github.hectorvent.floci.services.lambda.model.InvokeResult;
 import io.github.hectorvent.floci.services.pipes.model.Pipe;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
@@ -15,6 +16,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -77,11 +79,70 @@ public class PipesTargetInvoker {
         }
     }
 
+    /**
+     * Applies a Pipe's enrichment step (AWS EventBridge Pipes: source → filter → ENRICHMENT → target).
+     * The enrichment is invoked with the filtered events and its response becomes the target input.
+     * Only Lambda enrichments are supported (DPS uses one). Returns the response payload to forward,
+     * or {@code null} when the enrichment returns an empty response — AWS skips the target in that case.
+     * Returns {@code payload} unchanged when no enrichment is configured.
+     */
+    public String applyEnrichment(Pipe pipe, String payload, String region) {
+        String enrichment = pipe.getEnrichment();
+        if (enrichment == null || enrichment.isBlank()) {
+            return payload;
+        }
+        JsonNode ep = pipe.getEnrichmentParameters();
+        if (ep != null && ep.path("InputTemplate").isTextual()) {
+            payload = applyInputTemplate(ep.get("InputTemplate").asText(), payload);
+        }
+        if (enrichment.contains(":lambda:") || enrichment.contains(":function:")) {
+            String fnName = lambdaFunctionName(enrichment);
+            String fnRegion = extractRegionFromArn(enrichment, region);
+            InvokeResult result = lambdaService.invoke(
+                    fnRegion, fnName, payload.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+            if (result.getFunctionError() != null) {
+                throw new RuntimeException("Pipe enrichment Lambda " + fnName + " failed: " + result.getFunctionError());
+            }
+            byte[] out = result.getPayload();
+            String resp = out == null ? "" : new String(out, StandardCharsets.UTF_8).trim();
+            if (resp.isEmpty() || "null".equals(resp)) {
+                return null;
+            }
+            LOG.debugv("Pipe {0}: enrichment {1} produced target payload", pipe.getName(), enrichment);
+            return resp;
+        }
+        LOG.warnv("Pipe {0}: unsupported enrichment ARN type (only Lambda supported): {1}",
+                pipe.getName(), enrichment);
+        return payload;
+    }
+
     private void invokeLambda(String arn, String payload, String region) {
-        String fnName = arn.substring(arn.lastIndexOf(':') + 1);
+        String fnName = lambdaFunctionName(arn);
         String fnRegion = extractRegionFromArn(arn, region);
-        lambdaService.invoke(fnRegion, fnName, payload.getBytes(), InvocationType.RequestResponse);
+        lambdaService.invoke(fnRegion, fnName, payload.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
         LOG.debugv("Pipe delivered to Lambda: {0}", arn);
+    }
+
+    /**
+     * Extracts a Lambda function name from a bare name, a name with a version/alias qualifier
+     * (e.g. "name:$LATEST"), or a full/partial function ARN
+     * ("arn:aws:lambda:region:acct:function:NAME[:qualifier]"). Taking the last ':'-segment is
+     * wrong for a qualified ARN — it yields the qualifier instead of the name.
+     */
+    static String lambdaFunctionName(String ref) {
+        if (ref == null) {
+            return null;
+        }
+        String fn = ref;
+        int fi = ref.indexOf(":function:");
+        if (fi >= 0) {
+            fn = ref.substring(fi + ":function:".length());
+        }
+        int colon = fn.indexOf(':');
+        if (colon >= 0) {
+            fn = fn.substring(0, colon);
+        }
+        return fn;
     }
 
     private void invokeSqs(String arn, String payload, String region) {
