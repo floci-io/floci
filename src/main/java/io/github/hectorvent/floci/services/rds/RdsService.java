@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerStorageHelper;
@@ -309,37 +310,79 @@ public class RdsService implements Resettable {
     }
 
     public Map<String, String> listTagsForResource(String resourceName) {
-        DbInstance instance = getDbInstance(dbInstanceIdentifierFromResourceName(resourceName));
-        return Map.copyOf(instance.getTags());
+        return Map.copyOf(resolveTagHandle(resourceName).tags());
     }
 
     public void addTagsToResource(String resourceName, Map<String, String> tags) {
-        String id = dbInstanceIdentifierFromResourceName(resourceName);
-        DbInstance instance = getDbInstance(id);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(instance.getTags());
+        TagHandle handle = resolveTagHandle(resourceName);
+        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
         updated.putAll(tags);
-        instance.setTags(updated);
-        instances.put(id, instance);
+        handle.save().accept(updated);
     }
 
     public void removeTagsFromResource(String resourceName, Collection<String> tagKeys) {
-        String id = dbInstanceIdentifierFromResourceName(resourceName);
-        DbInstance instance = getDbInstance(id);
-        Map<String, String> updated = new java.util.LinkedHashMap<>(instance.getTags());
+        TagHandle handle = resolveTagHandle(resourceName);
+        Map<String, String> updated = new java.util.LinkedHashMap<>(handle.tags());
         tagKeys.forEach(updated::remove);
-        instance.setTags(updated);
-        instances.put(id, instance);
+        handle.save().accept(updated);
     }
 
-    private static String dbInstanceIdentifierFromResourceName(String resourceName) {
+    /** A resolved tag target: its current tags plus a sink that persists an updated map. */
+    private record TagHandle(Map<String, String> tags, java.util.function.Consumer<Map<String, String>> save) {}
+
+    /**
+     * Resolves a tagging ResourceName to its backing resource.
+     *
+     * RDS tags can be attached to many resource types (DB instances, clusters, subnet groups, ...),
+     * each identified by an ARN of the form {@code arn:aws:rds:<region>:<account>:<type>:<id>}.
+     * A bare resource name (no ARN) is treated as a DB instance identifier for backwards compatibility.
+     */
+    private TagHandle resolveTagHandle(String resourceName) {
         if (resourceName == null || resourceName.isBlank()) {
             throw new AwsException("InvalidParameterValue", "ResourceName is required.", 400);
         }
-        int marker = resourceName.lastIndexOf(":db:");
-        if (marker >= 0) {
-            return resourceName.substring(marker + 4);
+
+        String type = "db";
+        String id = resourceName;
+        try {
+            String resource = AwsArnUtils.parse(resourceName).resource();
+            int sep = resource.indexOf(':');
+            if (sep >= 0) {
+                type = resource.substring(0, sep);
+                id = resource.substring(sep + 1);
+            } else {
+                id = resource;
+            }
+        } catch (IllegalArgumentException notAnArn) {
+            // Not an ARN — fall back to treating the value as a DB instance identifier.
         }
-        return resourceName;
+
+        String resourceId = id;
+        return switch (type) {
+            case "db" -> {
+                DbInstance instance = getDbInstance(resourceId);
+                yield new TagHandle(instance.getTags(), updated -> {
+                    instance.setTags(updated);
+                    instances.put(resourceId, instance);
+                });
+            }
+            case "cluster" -> {
+                DbCluster cluster = getDbCluster(resourceId);
+                yield new TagHandle(cluster.getTags(), updated -> {
+                    cluster.setTags(updated);
+                    clusters.put(resourceId, cluster);
+                });
+            }
+            case "subgrp" -> {
+                DbSubnetGroup group = getDbSubnetGroup(resourceId);
+                yield new TagHandle(group.getTags(), updated -> {
+                    group.setTags(updated);
+                    subnetGroups.put(resourceId, group);
+                });
+            }
+            default -> throw new AwsException("InvalidParameterValue",
+                    "Tagging is not supported for resource: " + resourceName, 400);
+        };
     }
 
     private void attachManagedMasterUserSecret(DbInstance instance, String region, String kmsKeyId) {
