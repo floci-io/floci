@@ -180,6 +180,17 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // MSK cluster
+        given()
+            .contentType("application/json")
+            .body("""
+                {"clusterName": "re2-test-cluster", "kafkaVersion": "3.6.0"}
+                """)
+        .when()
+            .post("/v1/clusters")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -350,7 +361,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka"));
         }
     }
 
@@ -471,6 +482,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'states' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'states:stateMachine' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class MskResources {
+        @Test
+        void mskClusterSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:kafka"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'kafka' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'kafka:cluster' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
