@@ -23,6 +23,14 @@ account id, an account-root ARN (`arn:aws:iam::<acct>:root`), and exact principa
 explicit `Deny` always wins. Roles that Floci has no record of stay permissive, so this only affects
 roles created through IAM with a real trust policy.
 
+### Known limitations
+
+- **`Condition` blocks are not evaluated.** A trust policy that requires `sts:ExternalId` (the
+  confused-deputy guard) is matched on its principal alone, so the role is assumable without passing
+  `ExternalId`, and the `ExternalId` request parameter is ignored. This matches moto/LocalStack.
+- **Only the trust policy is checked.** Cross-account `AssumeRole` in AWS also requires the caller's
+  own identity policy to allow `sts:AssumeRole`; that side is not enforced.
+
 ## Examples
 
 ```bash

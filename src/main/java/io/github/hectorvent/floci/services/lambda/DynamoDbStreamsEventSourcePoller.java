@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbStreamService;
 import io.github.hectorvent.floci.services.dynamodb.model.DynamoDbStreamRecord;
 import io.github.hectorvent.floci.services.lambda.model.EventSourceMapping;
@@ -23,7 +24,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 @ApplicationScoped
-public class DynamoDbStreamsEventSourcePoller {
+public class DynamoDbStreamsEventSourcePoller implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(DynamoDbStreamsEventSourcePoller.class);
 
@@ -72,6 +73,12 @@ public class DynamoDbStreamsEventSourcePoller {
         pollExecutor.shutdownNow();
         timerIds.values().forEach(vertx::cancelTimer);
         timerIds.clear();
+    }
+
+    public void clear() {
+        timerIds.values().forEach(vertx::cancelTimer);
+        timerIds.clear();
+        activePolls.clear();
     }
 
     public void startPolling(EventSourceMapping esm) {

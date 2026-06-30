@@ -852,7 +852,73 @@ class SesV2IntegrationTest {
             .post("/v2/email/outbound-emails")
         .then()
             .statusCode(400)
-            .body("__type", equalTo("BadRequestException"));
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Missing required header 'From'."));
+    }
+
+    // FromEmailAddress is optional in the AWS v2 contract; the per-content-type behavior
+    // below is verified against real AWS (Raw takes its From from the MIME message; Simple
+    // returns a null message; Templated returns "Source cannot be empty").
+
+    @Test
+    @Order(67)
+    void sendEmail_raw_noFromAddress_usesMimeFrom() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "Destination": {"ToAddresses": ["r@example.com"]},
+                    "Content": {"Raw": {"Data": "From: raw-from@floci.test\\r\\nTo: r@example.com\\r\\nSubject: s\\r\\n\\r\\nbody"}}
+                }
+                """)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(200)
+            .body("MessageId", notNullValue());
+    }
+
+    @Test
+    @Order(68)
+    void sendEmail_simple_missingFrom() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "Destination": {"ToAddresses": ["r@example.com"]},
+                    "Content": {"Simple": {"Subject": {"Data": "s"}, "Body": {"Text": {"Data": "hi"}}}}
+                }
+                """)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            // AWS returns the message key present with a JSON null value.
+            .body("$", hasKey("message"))
+            .body("message", nullValue());
+    }
+
+    @Test
+    @Order(69)
+    void sendEmail_template_missingFrom() {
+        given()
+            .contentType("application/json")
+            .header("Authorization", AUTH_HEADER)
+            .body("""
+                {
+                    "Destination": {"ToAddresses": ["r@example.com"]},
+                    "Content": {"Template": {"TemplateName": "any-tpl", "TemplateData": "{}"}}
+                }
+                """)
+        .when()
+            .post("/v2/email/outbound-emails")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("BadRequestException"))
+            .body("message", equalTo("Source cannot be empty"));
     }
 
     // ──────────────── Inspection endpoint (/_aws/ses) ────────────────

@@ -5,31 +5,113 @@
 
 Floci serves pool-specific discovery and JWKS endpoints, plus a relaxed OAuth token endpoint, so local clients can mint and validate Cognito-like access tokens against RS256 signing keys.
 
-`CreateUserPool` accepts a reserved user-pool tag, `floci:override-id`, to pin the resulting `UserPool.Id` at creation time. Floci strips reserved `floci:*` tags from stored and returned `UserPoolTags` on both create and update paths, so the tag namespace acts as an input-only control channel and is never persisted as user-visible metadata.
+`CreateUserPool` supports overiding several values using user-pool tags **only** at creation time:
+* `floci:override-id`, to pin the resulting `UserPool.Id`. 
+* `floci:override-cognito-client-id`
+  * set to `use-name` to use the client name as client ID.
+  * set to `append-to-name:-somestring` to append a string to the client name to be used as client ID.
+  * set to `prepend-to-name:somestring-` to prepend a string to the client name to be used as client ID.
+* `floci:override-cognito-client-secret`, to set the secret for all clients created in this userpool.  
+
+Floci strips reserved `floci:*` tags from stored and returned `UserPoolTags` on both create and update paths, so the tag namespace acts as an input-only control channel and is never persisted as user-visible metadata.
 
 Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` and `UntagResource` operate on the persisted user-pool tag map.
 
 ## Supported Actions
 
-| Category | Actions |
-|---|---|
-| **User Pools** | CreateUserPool, DescribeUserPool, ListUserPools, UpdateUserPool, DeleteUserPool |
-| **User Pool Tags** | TagResource, UntagResource, ListTagsForResource |
-| **User Pool Clients** | CreateUserPoolClient, DescribeUserPoolClient, ListUserPoolClients, DeleteUserPoolClient |
-| **Resource Servers** | CreateResourceServer, DescribeResourceServer, ListResourceServers, DeleteResourceServer |
-| **Admin User Management** | AdminCreateUser (including `MessageAction=RESEND`), AdminGetUser, AdminDeleteUser, AdminSetUserPassword, AdminUpdateUserAttributes |
-| **User Operations** | SignUp, ConfirmSignUp, GetUser, UpdateUserAttributes, ChangePassword, ForgotPassword, ConfirmForgotPassword |
-| **Authentication** | InitiateAuth, AdminInitiateAuth, RespondToAuthChallenge (supports USER_PASSWORD_AUTH, USER_SRP_AUTH, ADMIN_USER_SRP_AUTH) |
-| **User Listing** | ListUsers |
-| **Groups** | CreateGroup, GetGroup, UpdateGroup, ListGroups, ListUsersInGroup, DeleteGroup, AdminAddUserToGroup, AdminRemoveUserFromGroup, AdminListGroupsForUser |
+### User Pools
+
+| Action | Description |
+|--------|-------------|
+| CreateUserPool | - |
+| DescribeUserPool | - |
+| ListUserPools | - |
+| UpdateUserPool | - |
+| DeleteUserPool | - |
+
+### User Pool Tags
+
+| Action | Description |
+|--------|-------------|
+| TagResource | - |
+| UntagResource | - |
+| ListTagsForResource | - |
+
+### User Pool Clients
+
+| Action | Description |
+|--------|-------------|
+| CreateUserPoolClient | - |
+| DescribeUserPoolClient | - |
+| ListUserPoolClients | - |
+| DeleteUserPoolClient | - |
+
+### Resource Servers
+
+| Action | Description |
+|--------|-------------|
+| CreateResourceServer | - |
+| DescribeResourceServer | - |
+| ListResourceServers | - |
+| DeleteResourceServer | - |
+
+### Admin User Management
+
+| Action | Description |
+|--------|-------------|
+| AdminCreateUser | - |
+| AdminGetUser | - |
+| AdminDeleteUser | - |
+| AdminSetUserPassword | - |
+| AdminUpdateUserAttributes | - |
+
+### User Operations
+
+| Action | Description |
+|--------|-------------|
+| SignUp | - |
+| ConfirmSignUp | - |
+| GetUser | - |
+| UpdateUserAttributes | - |
+| ChangePassword | - |
+| ForgotPassword | - |
+| ConfirmForgotPassword | - |
+
+### Authentication
+
+| Action | Description |
+|--------|-------------|
+| InitiateAuth | - |
+| AdminInitiateAuth | - |
+| RespondToAuthChallenge | - |
+
+### User Listing
+
+| Action | Description |
+|--------|-------------|
+| ListUsers | - |
+
+### Groups
+
+| Action | Description |
+|--------|-------------|
+| CreateGroup | - |
+| GetGroup | - |
+| UpdateGroup | - |
+| ListGroups | - |
+| ListUsersInGroup | - |
+| DeleteGroup | - |
+| AdminAddUserToGroup | - |
+| AdminRemoveUserFromGroup | - |
+| AdminListGroupsForUser | - |
 
 ## Well-Known And OAuth Endpoints
 
-| Endpoint | Description |
-|---|---|
-| `GET /{userPoolId}/.well-known/openid-configuration` | OpenID discovery document |
-| `GET /{userPoolId}/.well-known/jwks.json` | JSON Web Key Set for JWT validation |
-| `POST /cognito-idp/oauth2/token` | Relaxed OAuth token endpoint for `grant_type=client_credentials` |
+| Endpoint                                             | Description                                                      |
+|------------------------------------------------------|------------------------------------------------------------------|
+| `GET /{userPoolId}/.well-known/openid-configuration` | OpenID discovery document                                        |
+| `GET /{userPoolId}/.well-known/jwks.json`            | JSON Web Key Set for JWT validation                              |
+| `POST /cognito-idp/oauth2/token`                     | Relaxed OAuth token endpoint for `grant_type=client_credentials` |
 
 `POST /cognito-idp/oauth2/token` is intentionally emulator-friendly rather than full Cognito parity:
 
@@ -44,9 +126,9 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 
 ## Configuration
 
-| Variable | Default | Description |
-|---|---|---|
-| `FLOCI_SERVICES_COGNITO_ENABLED` | `true` | Enable or disable the service |
+| Variable                         | Default | Description                   |
+|----------------------------------|---------|-------------------------------|
+| `FLOCI_SERVICES_COGNITO_ENABLED` | `true`  | Enable or disable the service |
 
 ## Examples
 

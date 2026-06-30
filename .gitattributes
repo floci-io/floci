@@ -19,6 +19,7 @@ mvnw.cmd text eol=crlf
 *.fla binary
 *.swf binary
 *.gz binary
+*.jar binary
 *.zip binary
 *.7z binary
 *.ttf binary

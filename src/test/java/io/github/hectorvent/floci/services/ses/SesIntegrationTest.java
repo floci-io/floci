@@ -221,6 +221,27 @@ class SesIntegrationTest {
     }
 
     @Test
+    @Order(30)
+    void sendRawEmail_withoutSource_andNoMimeFrom_returnsInvalidParameterValue() {
+        // Complements sendRawEmail_withoutSource_acceptedWhenMimeFromPresent: with neither a
+        // Source parameter nor a MIME From header there is no sender, so the send is rejected.
+        // Verified against real AWS: v1 returns InvalidParameterValue "Missing required header 'From'." (400).
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .header("Authorization", "AWS4-HMAC-SHA256 Credential=AKID/20260101/us-east-1/email/aws4_request")
+            .formParam("Action", "SendRawEmail")
+            .formParam("Destinations.member.1", "recipient@example.com")
+            .formParam("RawMessage.Data", "Subject: hello\r\n\r\nbody\r\n")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body(containsString("<Code>InvalidParameterValue</Code>"))
+            // The apostrophes are XML-escaped on the Query (XML) wire, matching AWS.
+            .body(containsString("Missing required header &apos;From&apos;."));
+    }
+
+    @Test
     @Order(12)
     void getSendQuota() {
         given()

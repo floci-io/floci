@@ -81,7 +81,11 @@ class AssumeRoleTrustPolicyIntegrationTest {
             .header("Authorization", auth(ACCOUNT_C, "sts"))
         .when().post("/")
         .then().statusCode(403)
-            .body(containsString("AccessDenied"));
+            .body(containsString("AccessDenied"))
+            // AWS prefixes the denial with the caller and names the action and resource.
+            .body(containsString("User: "))
+            .body(containsString("is not authorized to perform: sts:AssumeRole on resource: "
+                    + "arn:aws:iam::" + ACCOUNT_B + ":role/" + role));
     }
 
     @Test

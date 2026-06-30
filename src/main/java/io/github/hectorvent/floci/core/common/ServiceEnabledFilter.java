@@ -54,6 +54,12 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
                     .orElse(null);
         }
 
+        var resourceMatch = catalog.byResourceClass(resourceClass());
+        if (resourceMatch.isPresent()) {
+            ServiceDescriptor descriptor = resourceMatch.get();
+            return new ResolvedRequest(descriptor.externalKey(), descriptor.defaultProtocol());
+        }
+
         String auth = ctx.getHeaderString("Authorization");
         if (auth != null) {
             Matcher m = AUTH_SERVICE_PATTERN.matcher(auth);
@@ -66,9 +72,7 @@ public class ServiceEnabledFilter implements ContainerRequestFilter {
             }
         }
 
-        return catalog.byResourceClass(resourceClass())
-                .map(descriptor -> new ResolvedRequest(descriptor.externalKey(), descriptor.defaultProtocol()))
-                .orElse(null);
+        return null;
     }
 
     private Class<?> resourceClass() {

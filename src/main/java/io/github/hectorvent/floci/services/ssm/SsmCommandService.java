@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ssm.model.Command;
@@ -37,7 +38,7 @@ import java.util.concurrent.Executors;
  * - GetMessages / AcknowledgeMessage / SendReply / FailMessage / DeleteMessage (ec2messages, agent side)
  */
 @ApplicationScoped
-public class SsmCommandService {
+public class SsmCommandService implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(SsmCommandService.class);
     private static final int MIN_TIMEOUT_SECONDS = 30;
@@ -74,6 +75,11 @@ public class SsmCommandService {
             thread.setDaemon(true);
             return thread;
         });
+    }
+
+    public void clear() {
+        messageQueues.clear();
+        messageIndex.clear();
     }
 
     // ── Agent registration ──────────────────────────────────────────────────
