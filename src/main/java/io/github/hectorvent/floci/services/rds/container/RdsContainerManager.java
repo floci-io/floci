@@ -160,7 +160,9 @@ public class RdsContainerManager {
 
         // Legacy host-path mode: host-persistent-path is an absolute path
         String hostDataPath = ContainerStorageHelper.hostResourcePath(config, "rds", instanceId).toString();
-        ContainerStorageHelper.ensureHostDir(hostDataPath);
+        if (!containerDetector.isRunningInContainer()) {
+            ContainerStorageHelper.ensureHostDir(hostDataPath);
+        }
         specBuilder.withBind(hostDataPath, engineDefaultDataPath(engine, image));
     }
 
