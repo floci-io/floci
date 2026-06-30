@@ -191,6 +191,21 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // EventBridge Pipes pipe
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "Source": "arn:aws:sqs:us-east-1:000000000000:re2-test-queue",
+                    "Target": "arn:aws:lambda:us-east-1:000000000000:function:re2-test-fn",
+                    "RoleArn": "arn:aws:iam::000000000000:role/re2-test-role"
+                }
+                """)
+        .when()
+            .post("/v1/pipes/re2-test-pipe")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -361,7 +376,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes"));
         }
     }
 
@@ -502,6 +517,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'kafka' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'kafka:cluster' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class PipesResources {
+        @Test
+        void pipeSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:pipes"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'pipes' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'pipes:pipe' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
