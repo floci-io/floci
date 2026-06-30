@@ -218,6 +218,18 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // Cognito user pool
+        given()
+            .header("X-Amz-Target", "AWSCognitoIdentityProviderService.CreateUserPool")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {"PoolName": "re2-test-pool"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -388,7 +400,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm", "cognito-idp"));
         }
     }
 
@@ -569,6 +581,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'acm' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'acm:certificate' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class CognitoResources {
+        @Test
+        void userPoolSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:cognito-idp"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'cognito-idp' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'cognito-idp:userpool' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
