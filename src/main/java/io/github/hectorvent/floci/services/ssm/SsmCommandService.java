@@ -310,8 +310,7 @@ public class SsmCommandService {
             String[] meta = entry.getValue();
             return meta.length == 3
                     && instanceIds.contains(meta[1])
-                    && region.equals(meta[2])
-                    && commandIds.contains(meta[0]);
+                    && region.equals(meta[2]);
         });
         commandIds.forEach(commandId -> updateCommandStatus(commandId, region));
         return failed;
