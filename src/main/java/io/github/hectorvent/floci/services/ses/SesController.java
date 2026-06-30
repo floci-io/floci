@@ -258,6 +258,43 @@ public class SesController {
         }
     }
 
+    // ──────────────── Identity Configuration Set ────────────────────
+
+    @PUT
+    @Path("/identities/{emailIdentity}/configuration-set")
+    public Response putEmailIdentityConfigurationSetAttributes(@Context HttpHeaders headers,
+                                                               @PathParam("emailIdentity") String emailIdentity,
+                                                               String body) {
+        String region = regionResolver.resolveRegion(headers);
+        try {
+            String configurationSetName = null;
+            if (body != null && !body.isEmpty()) {
+                // Only a truly empty body is "no body" (clears). A non-empty body must be a JSON
+                // object; a whitespace-only or otherwise unparseable body is a serialization error.
+                // Verified against real AWS: a whitespace-only body returns SerializationException
+                // (and does not clear), while only an empty body / {} clears.
+                JsonNode request = objectMapper.readTree(body);
+                if (request == null || !request.isObject()) {
+                    throw new AwsException("SerializationException", null, 400);
+                }
+                JsonNode node = request.path("ConfigurationSetName");
+                if (!node.isMissingNode() && !node.isNull()) {
+                    if (!node.isTextual()) {
+                        throw new AwsException("BadRequestException",
+                                "ConfigurationSetName must be a JSON string.", 400);
+                    }
+                    configurationSetName = node.asText();
+                }
+            }
+            sesService.setEmailIdentityConfigurationSet(emailIdentity, configurationSetName, region);
+            return Response.ok(objectMapper.createObjectNode()).build();
+        } catch (AwsException e) {
+            throw remapV1Exception(e);
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new AwsException("SerializationException", null, 400);
+        }
+    }
+
     // ──────────────────────────── Send Email ────────────────────────────
 
     @POST
@@ -1551,6 +1588,10 @@ public class SesController {
         if (mailFromDomain != null && !mailFromDomain.isEmpty()) {
             mailFromAttributes.put("MailFromDomain", mailFromDomain);
             mailFromAttributes.put("MailFromDomainStatus", toV2Status(identity.getMailFromDomainStatus()));
+        }
+
+        if (identity.getConfigurationSetName() != null && !identity.getConfigurationSetName().isEmpty()) {
+            result.put("ConfigurationSetName", identity.getConfigurationSetName());
         }
 
         result.putObject("Policies");

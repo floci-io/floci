@@ -176,6 +176,7 @@ Alongside the classic Query API, Floci implements a subset of the SES v2 REST JS
 | `PUT` | `/v2/email/identities/{emailIdentity}/dkim` | `PutEmailIdentityDkimAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/feedback` | `PutEmailIdentityFeedbackAttributes` |
 | `PUT` | `/v2/email/identities/{emailIdentity}/mail-from` | `PutEmailIdentityMailFromAttributes` |
+| `PUT` | `/v2/email/identities/{emailIdentity}/configuration-set` | `PutEmailIdentityConfigurationSetAttributes` |
 | `POST` | `/v2/email/outbound-emails` | `SendEmail` (simple / raw / templated) |
 | `POST` | `/v2/email/outbound-bulk-emails` | `SendBulkEmail` (templated, multiple destinations) |
 | `GET` | `/v2/email/account` | `GetAccount` |
