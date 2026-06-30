@@ -53,6 +53,10 @@ floci:
       codedeploy:
         flush-interval-ms: 60000
       cloudfront:
+      appsync:
+        flush-interval-ms: 60000
+        schema-worker-threads: 4
+        schema-worker-shutdown-timeout-seconds: 30
 
   auth:
     validate-signatures: false

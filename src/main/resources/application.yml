@@ -116,6 +116,10 @@ floci:
         # Override storage mode for EC2 (defaults to the global storage mode). EC2 networking and
         # instance metadata persist so CloudFormation-created VPC/subnet ids survive a restart (#1297).
         # mode: memory
+      appsync:
+        flush-interval-ms: 5000
+        schema-worker-threads: 4
+        schema-worker-shutdown-timeout-seconds: 30
 
   dns:
     # Extra hostname suffixes resolved to Floci's container IP by the embedded DNS server.
