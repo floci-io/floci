@@ -311,4 +311,15 @@ class PipesTargetInvokerTest {
                 .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
         assertThrows(RuntimeException.class, () -> invoker.applyEnrichment(pipe, "[]", region));
     }
+
+    @Test
+    void invoke_lambdaTargetFunctionErrorThrows() {
+        // A target Lambda that returns a FunctionError is a failed delivery — invoke must throw so the
+        // poller routes the source record to the DLQ instead of silently deleting it.
+        String region = "us-east-1";
+        Pipe pipe = createPipe("arn:aws:lambda:" + region + ":000000000000:function:my-fn", null);
+        when(lambdaService.invoke(eq(region), eq("my-fn"), any(byte[].class), eq(InvocationType.RequestResponse)))
+                .thenReturn(new io.github.hectorvent.floci.services.lambda.model.InvokeResult(200, "Unhandled", "boom".getBytes(), null, "req"));
+        assertThrows(RuntimeException.class, () -> invoker.invoke(pipe, "{}", region));
+    }
 }

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.eventbridge.EventBridgeService;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -101,7 +102,8 @@ public class PipesTargetInvoker {
             InvokeResult result = lambdaService.invoke(
                     fnRegion, fnName, payload.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
             if (result.getFunctionError() != null) {
-                throw new RuntimeException("Pipe enrichment Lambda " + fnName + " failed: " + result.getFunctionError());
+                throw new AwsException("InternalException",
+                        "Pipe enrichment Lambda " + fnName + " failed: " + result.getFunctionError(), 500);
             }
             byte[] out = result.getPayload();
             String resp = out == null ? "" : new String(out, StandardCharsets.UTF_8).trim();
@@ -119,7 +121,14 @@ public class PipesTargetInvoker {
     private void invokeLambda(String arn, String payload, String region) {
         String fnName = lambdaFunctionName(arn);
         String fnRegion = extractRegionFromArn(arn, region);
-        lambdaService.invoke(fnRegion, fnName, payload.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+        InvokeResult result = lambdaService.invoke(
+                fnRegion, fnName, payload.getBytes(StandardCharsets.UTF_8), InvocationType.RequestResponse);
+        // A target Lambda that returns a FunctionError is a failed delivery, not a success — surface it
+        // so the caller routes the source record to the DLQ instead of silently consuming it.
+        if (result.getFunctionError() != null) {
+            throw new AwsException("InternalException",
+                    "Pipe target Lambda " + fnName + " returned an error: " + result.getFunctionError(), 500);
+        }
         LOG.debugv("Pipe delivered to Lambda: {0}", arn);
     }
 
