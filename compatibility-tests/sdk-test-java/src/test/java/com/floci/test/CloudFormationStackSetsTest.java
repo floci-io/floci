@@ -42,11 +42,13 @@ class CloudFormationStackSetsTest {
         try {
             cfn.deleteStackInstances(r -> r.stackSetName(stackSetName)
                     .accounts(ACCOUNT_B, ACCOUNT_C).regions(REGION).retainStacks(false));
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            System.err.println("teardown: deleteStackInstances for " + stackSetName + " failed: " + e.getMessage());
         }
         try {
             cfn.deleteStackSet(r -> r.stackSetName(stackSetName));
-        } catch (Exception ignored) {
+        } catch (Exception e) {
+            System.err.println("teardown: deleteStackSet for " + stackSetName + " failed: " + e.getMessage());
         }
         cfn.close();
     }

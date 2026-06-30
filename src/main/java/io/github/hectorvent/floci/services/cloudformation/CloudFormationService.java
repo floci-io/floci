@@ -236,14 +236,21 @@ public class CloudFormationService {
         if (!alreadyActive) {
             requestContext.activate();
         }
+        // Background workers normally have no active scope, so a fresh one is activated and
+        // terminated below. But if we ran inside an already-active scope, restore its previous
+        // account afterwards so we never leave the overridden account ID behind on a reused thread.
+        RequestContext ctx = Arc.container().instance(RequestContext.class).get();
+        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
         try {
             if (accountId != null) {
-                Arc.container().instance(RequestContext.class).get().setAccountId(accountId);
+                ctx.setAccountId(accountId);
             }
             body.run();
         } finally {
             if (!alreadyActive) {
                 requestContext.terminate();
+            } else {
+                ctx.setAccountId(previousAccountId);
             }
         }
     }
