@@ -448,34 +448,39 @@ public class RdsService implements Resettable {
         instance.setStatus(DbInstanceStatus.REBOOTING);
         instances.put(id, instance);
 
-        // Stop proxy during reboot
-        proxyManager.stopProxy(id);
+        boolean mock = config.services().rds().mock();
+        if (!mock) {
+            // Stop proxy during reboot
+            proxyManager.stopProxy(id);
 
-        // Restart container if it's a standalone instance
-        if (instance.getDbClusterIdentifier() == null && instance.getContainerId() != null) {
-            try {
-                containerManager.stop(buildHandle(instance));
-            } catch (Exception e) {
-                LOG.warnv("Error stopping container during reboot of {0}: {1}", id, e.getMessage());
+            // Restart container if it's a standalone instance
+            if (instance.getDbClusterIdentifier() == null && instance.getContainerId() != null) {
+                try {
+                    containerManager.stop(buildHandle(instance));
+                } catch (Exception e) {
+                    LOG.warnv("Error stopping container during reboot of {0}: {1}", id, e.getMessage());
+                }
+                String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
+                RdsContainerHandle handle = containerManager.start(id, instance.getVolumeId(), instance.getEngine(), image,
+                        instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
+                instance.setContainerId(handle.getContainerId());
+                instance.setContainerHost(handle.getHost());
+                instance.setContainerPort(handle.getPort());
             }
-            String image = imageForEngine(instance.getEngine(), instance.getEngineVersion());
-            RdsContainerHandle handle = containerManager.start(id, instance.getVolumeId(), instance.getEngine(), image,
-                    instance.getMasterUsername(), instance.getMasterPassword(), instance.getDbName());
-            instance.setContainerId(handle.getContainerId());
-            instance.setContainerHost(handle.getHost());
-            instance.setContainerPort(handle.getPort());
         }
 
         instance.setStatus(DbInstanceStatus.AVAILABLE);
         instances.put(id, instance);
 
-        String effectiveMasterUser = instance.getMasterUsername() != null
-                ? instance.getMasterUsername() : "root";
-        proxyManager.startProxy(id, instance.getEngine(),
-                instance.isIamDatabaseAuthenticationEnabled(),
-                instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
-                effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
-                (user, pw) -> validateDbPassword(id, user, pw));
+        if (!mock) {
+            String effectiveMasterUser = instance.getMasterUsername() != null
+                    ? instance.getMasterUsername() : "root";
+            proxyManager.startProxy(id, instance.getEngine(),
+                    instance.isIamDatabaseAuthenticationEnabled(),
+                    instance.getProxyPort(), instance.getContainerHost(), instance.getContainerPort(),
+                    effectiveMasterUser, instance.getMasterPassword(), instance.getDbName(),
+                    (user, pw) -> validateDbPassword(id, user, pw));
+        }
 
         LOG.infov("DB instance {0} rebooted", id);
         return instance;

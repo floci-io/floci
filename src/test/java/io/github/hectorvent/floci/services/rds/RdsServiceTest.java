@@ -401,6 +401,22 @@ class RdsServiceTest {
     }
 
     @Test
+    void mockModeRebootSkipsContainerAndProxy() {
+        when(config.services().rds().mock()).thenReturn(true);
+        rdsService.createDbInstance("standalone", "postgres", "16",
+                "admin", "password", "dbname", "db.t3.micro",
+                20, false, null, null, null);
+
+        DbInstance rebooted = rdsService.rebootDbInstance("standalone");
+
+        assertEquals(DbInstanceStatus.AVAILABLE, rebooted.getStatus());
+        verify(containerManager, never()).start(any(), any(), any(), any(), any(), any(), any());
+        verify(containerManager, never()).stop(any());
+        verify(proxyManager, never()).startProxy(any(), any(), anyBoolean(), anyInt(), any(), anyInt(),
+                any(), any(), any(), any());
+    }
+
+    @Test
     void createDbClusterRejectsUnknownClusterParameterGroup() {
         AwsException exception = assertThrows(AwsException.class, () -> rdsService.createDbCluster("cluster1", "aurora-postgresql", "16.3",
                 "admin", "password", "dbname", false, "does-not-exist"));
