@@ -142,6 +142,16 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // SQS queue
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateQueue")
+            .formParam("QueueName", "re2-test-queue")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -312,7 +322,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs"));
         }
     }
 
@@ -373,6 +383,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'kms' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'kms:key' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class SqsResources {
+        @Test
+        void sqsQueueSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:sqs"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'sqs' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'sqs:queue' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
