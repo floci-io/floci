@@ -120,6 +120,16 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(201);
 
+        // SNS topic
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "re2-test-topic")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -290,7 +300,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns"));
         }
     }
 
@@ -311,6 +321,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'lambda' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'lambda:function' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class SnsResources {
+        @Test
+        void snsTopicSurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:sns"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'sns' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'sns:topic' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
