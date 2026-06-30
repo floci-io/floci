@@ -130,6 +130,18 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // KMS key
+        given()
+            .header("X-Amz-Target", "TrentService.CreateKey")
+            .contentType("application/x-amz-json-1.1")
+            .body("""
+                {"Description": "re2-test-key", "KeyUsage": "ENCRYPT_DECRYPT", "KeySpec": "SYMMETRIC_DEFAULT"}
+                """)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -300,7 +312,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms"));
         }
     }
 
@@ -341,6 +353,26 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'sns' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'sns:topic' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class KmsResources {
+        @Test
+        void kmsKeySurfacesViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:kms"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'kms' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'kms:key' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 

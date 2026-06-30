@@ -1,9 +1,13 @@
 package io.github.hectorvent.floci.services.kms;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.ReservedTags;
+import io.github.hectorvent.floci.core.resource.ExplorerResource;
+import io.github.hectorvent.floci.core.resource.ResourceProvider;
+import io.github.hectorvent.floci.core.resource.SupportedResourceType;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.kms.model.KmsAlias;
@@ -58,7 +62,7 @@ import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.DIGES
 import static io.github.hectorvent.floci.services.kms.model.KmsMessageType.RAW;
 
 @ApplicationScoped
-public class KmsService {
+public class KmsService implements ResourceProvider {
 
     private static final Logger LOG = Logger.getLogger(KmsService.class);
 
@@ -1069,5 +1073,26 @@ public class KmsService {
         // Key id
         return keyStore.get(region + "::" + id)
                 .orElseThrow(() -> new AwsException("NotFoundException", "Key not found: " + keyIdOrArn, 404));
+    }
+
+    @Override
+    public List<ExplorerResource> getResources() {
+        List<ExplorerResource> resources = new ArrayList<>();
+        for (KmsKey key : keyStore.scan(k -> true)) {
+            String arn = key.getArn();
+            if (arn == null) continue;
+            AwsArnUtils.Arn parsed = AwsArnUtils.parse(arn);
+            resources.add(new ExplorerResource(
+                    arn, "kms:key", "kms",
+                    parsed.region(), parsed.accountId(),
+                    key.getCreationDate() > 0 ? Instant.ofEpochSecond(key.getCreationDate()) : Instant.now(),
+                    key.getTags() != null ? key.getTags() : Map.of()));
+        }
+        return resources;
+    }
+
+    @Override
+    public Set<SupportedResourceType> getSupportedResourceTypes() {
+        return Set.of(new SupportedResourceType("kms:key", "kms", true));
     }
 }
