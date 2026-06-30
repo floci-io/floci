@@ -230,6 +230,26 @@ class ResourceExplorer2IntegrationTest {
         .then()
             .statusCode(200);
 
+        // IAM user + role
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateUser")
+            .formParam("UserName", "re2-test-user")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateRole")
+            .formParam("RoleName", "re2-test-role-iam")
+            .formParam("AssumeRolePolicyDocument", "{\"Version\":\"2012-10-17\",\"Statement\":[]}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
         fixturesProvisioned = true;
     }
 
@@ -400,7 +420,7 @@ class ResourceExplorer2IntegrationTest {
                 .statusCode(200)
                 .body("ResourceTypes", notNullValue())
                 .body("ResourceTypes.size()", greaterThan(0))
-                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm", "cognito-idp"));
+                .body("ResourceTypes.Service", hasItems("s3", "rds", "dynamodb", "elasticache", "es", "lambda", "sns", "kms", "sqs", "ecr", "states", "kafka", "pipes", "acm", "cognito-idp", "iam"));
         }
     }
 
@@ -601,6 +621,29 @@ class ResourceExplorer2IntegrationTest {
                 .body("Resources.size()", greaterThan(0))
                 .body("Resources.findAll { it.Service != 'cognito-idp' }.size()", equalTo(0))
                 .body("Resources.findAll { it.ResourceType == 'cognito-idp:userpool' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+        }
+    }
+
+    @Nested
+    class IamResources {
+        @Test
+        void iamResourcesSurfaceViaListResources() {
+            given()
+                .header("Authorization", AUTH)
+                .contentType("application/json")
+                .body("""
+                    {"Filters": {"FilterString": "service:iam"}}
+                    """)
+            .when()
+                .post("/ListResources")
+            .then()
+                .statusCode(200)
+                .body("Resources.size()", greaterThan(0))
+                .body("Resources.findAll { it.Service != 'iam' }.size()", equalTo(0))
+                // IAM is global: Resource Explorer reports these with Region "global", never empty/null.
+                .body("Resources.findAll { it.Region != 'global' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == 'iam:user' && it.Region == 'global' }.size()", greaterThan(0))
+                .body("Resources.findAll { it.ResourceType == 'iam:role' && it.Region == 'global' }.size()", greaterThan(0));
         }
     }
 
