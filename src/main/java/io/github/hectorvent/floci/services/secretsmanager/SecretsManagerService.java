@@ -166,13 +166,19 @@ public class SecretsManagerService {
 
         if (clientRequestToken != null && secret.getVersions() != null && secret.getVersions().containsKey(clientRequestToken)) {
             SecretVersion existingVersion = secret.getVersions().get(clientRequestToken);
-            if (!Objects.equals(existingVersion.getSecretString(), secretString) ||
-                !Objects.equals(existingVersion.getSecretBinary(), secretBinary)) {
-                throw new AwsException("ResourceExistsException",
-                    "You can't use ClientRequestToken " + clientRequestToken
-                        + " because that value is already in use for a version of secret " + secret.getArn(), 400);
+            boolean isPendingPlaceholder = existingVersion.getSecretString() == null
+                    && existingVersion.getSecretBinary() == null
+                    && existingVersion.getVersionStages() != null
+                    && existingVersion.getVersionStages().contains("AWSPENDING");
+            if (!isPendingPlaceholder) {
+                if (!Objects.equals(existingVersion.getSecretString(), secretString) ||
+                    !Objects.equals(existingVersion.getSecretBinary(), secretBinary)) {
+                    throw new AwsException("ResourceExistsException",
+                        "You can't use ClientRequestToken " + clientRequestToken
+                            + " because that value is already in use for a version of secret " + secret.getArn(), 400);
+                }
+                return existingVersion;
             }
-            return existingVersion;
         }
 
         Instant now = Instant.now();
@@ -412,6 +418,24 @@ public class SecretsManagerService {
         }
 
         try {
+            if (!isExistingVersion) {
+                synchronized (lockFor(secretArn)) {
+                    Secret secret = resolveSecret(secretArn, region);
+                    if (secret.getVersions() != null && secret.getVersions().containsKey(clientRequestToken)) {
+                        isExistingVersion = true;
+                    } else {
+                        SecretVersion pendingVersion = new SecretVersion();
+                        pendingVersion.setVersionId(clientRequestToken);
+                        pendingVersion.setVersionStages(List.of("AWSPENDING"));
+                        pendingVersion.setCreatedDate(Instant.now());
+                        if (secret.getVersions() == null) {
+                            secret.setVersions(new java.util.HashMap<>());
+                        }
+                        secret.getVersions().put(clientRequestToken, pendingVersion);
+                        store.put(regionKey(region, secret.getName()), secret);
+                    }
+                }
+            }
             if (!isExistingVersion) {
                 invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "createSecret", region);
                 invokeRotationLambda(secretArn, clientRequestToken, lambdaArn, "setSecret", region);

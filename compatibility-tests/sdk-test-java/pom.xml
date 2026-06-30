@@ -148,6 +148,10 @@
             <artifactId>elasticache</artifactId>
         </dependency>
         <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>elasticbeanstalk</artifactId>
+        </dependency>
+        <dependency>
             <groupId>io.lettuce</groupId>
             <artifactId>lettuce-core</artifactId>
             <version>6.3.2.RELEASE</version>
@@ -240,6 +244,19 @@
         <dependency>
             <groupId>software.amazon.awssdk</groupId>
             <artifactId>pipes</artifactId>
+        </dependency>
+        <!-- AWS IoT client -->
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iot</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iotdataplane</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>software.amazon.awssdk</groupId>
+            <artifactId>iotjobsdataplane</artifactId>
         </dependency>
         <!-- EKS client -->
         <dependency>

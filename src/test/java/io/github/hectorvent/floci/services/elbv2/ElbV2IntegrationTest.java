@@ -57,7 +57,7 @@ class ElbV2IntegrationTest {
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
                         hasItems("subnet-default-a", "subnet-default-b"))
                 .body("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.DNSName",
-                        containsString(".elb.localhost"))
+                        containsString(".elb.localhost.floci.io"))
                 .extract()
                 .path("CreateLoadBalancerResponse.CreateLoadBalancerResult.LoadBalancers.member.LoadBalancerArn");
     }
@@ -935,7 +935,8 @@ class ElbV2IntegrationTest {
                 .body("DescribeSSLPoliciesResponse.DescribeSSLPoliciesResult.SslPolicies.member.size()",
                         greaterThanOrEqualTo(7))
                 .body("DescribeSSLPoliciesResponse.DescribeSSLPoliciesResult.SslPolicies.member.Name",
-                        hasItem("ELBSecurityPolicy-2016-08"));
+                        hasItem("ELBSecurityPolicy-2016-08"))
+                .body(not(containsString("NextMarker")));
     }
 
     @Test

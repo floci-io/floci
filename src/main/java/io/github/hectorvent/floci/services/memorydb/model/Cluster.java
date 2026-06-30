@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.memorydb.model;
 
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
@@ -7,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 @RegisterForReflection
+@JsonIgnoreProperties(ignoreUnknown = true)
 public class Cluster {
 
     private String name;
@@ -18,12 +20,10 @@ public class Cluster {
     private String engineVersion;
     private String aclName;
     private boolean tlsEnabled;
-    private AuthMode authMode;
     private Endpoint clusterEndpoint;
     private String arn;
     private Instant createdAt;
     private int proxyPort;
-    private String authToken; // stored plain-text for PASSWORD auth validation in the proxy
     private Map<String, String> tags = new LinkedHashMap<>();
 
     // Transient fields — not persisted, restored on container restart
@@ -60,9 +60,6 @@ public class Cluster {
     public boolean isTlsEnabled() { return tlsEnabled; }
     public void setTlsEnabled(boolean tlsEnabled) { this.tlsEnabled = tlsEnabled; }
 
-    public AuthMode getAuthMode() { return authMode; }
-    public void setAuthMode(AuthMode authMode) { this.authMode = authMode; }
-
     public Endpoint getClusterEndpoint() { return clusterEndpoint; }
     public void setClusterEndpoint(Endpoint clusterEndpoint) { this.clusterEndpoint = clusterEndpoint; }
 
@@ -74,9 +71,6 @@ public class Cluster {
 
     public int getProxyPort() { return proxyPort; }
     public void setProxyPort(int proxyPort) { this.proxyPort = proxyPort; }
-
-    public String getAuthToken() { return authToken; }
-    public void setAuthToken(String authToken) { this.authToken = authToken; }
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) {

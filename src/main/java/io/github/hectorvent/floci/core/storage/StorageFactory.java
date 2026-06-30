@@ -100,6 +100,14 @@ public class StorageFactory {
         }
     }
 
+    /** Clear all storage backends. */
+    public void clearAll() {
+        for (StorageBackend<?, ?> backend : allBackends) {
+            backend.clear();
+        }
+        flushAll();
+    }
+
     /** Shutdown all managed backends (stop schedulers, close connections). */
     public void shutdownAll() {
         for (HybridStorage<?, ?> hybrid : hybridBackends) {

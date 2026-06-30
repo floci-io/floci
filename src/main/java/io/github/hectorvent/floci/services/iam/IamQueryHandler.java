@@ -56,6 +56,7 @@ public class IamQueryHandler {
             case "TagUser" -> handleTagUser(params);
             case "UntagUser" -> handleUntagUser(params);
             case "ListUserTags" -> handleListUserTags(params);
+            case "ListMFADevices" -> handleListMFADevices(params);
 
             // Groups
             case "CreateGroup" -> handleCreateGroup(params);
@@ -221,6 +222,17 @@ public class IamQueryHandler {
         String result = new XmlBuilder().start("Tags").raw(tagsXml(tags)).end("Tags")
                 .elem("IsTruncated", false).build();
         return Response.ok(AwsQueryResponse.envelope("ListUserTags", AwsNamespaces.IAM, result)).build();
+    }
+
+    private Response handleListMFADevices(MultivaluedMap<String, String> params) {
+        // MFA device state is not modeled; return the wire-accurate empty result
+        // (MFADevices list + IsTruncated=false). Real AWS returns NoSuchEntity
+        // (HTTP 404) for an unknown user — Floci returns an empty list regardless.
+        String result = new XmlBuilder()
+                .start("MFADevices").end("MFADevices")
+                .elem("IsTruncated", false)
+                .build();
+        return Response.ok(AwsQueryResponse.envelope("ListMFADevices", AwsNamespaces.IAM, result)).build();
     }
 
     // =========================================================================

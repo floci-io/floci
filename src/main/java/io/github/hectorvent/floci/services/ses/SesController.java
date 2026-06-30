@@ -270,11 +270,10 @@ public class SesController {
             JsonNode request = objectMapper.readTree(body);
             requireJsonObject(request);
 
+            // FromEmailAddress is optional per the AWS v2 contract. Each content type below
+            // enforces the sender requirement the way AWS does: Raw can take its From from the
+            // MIME message, while Simple and Templated require FromEmailAddress.
             String fromEmailAddress = request.path("FromEmailAddress").asText(null);
-            if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
-                throw new AwsException("BadRequestException",
-                        "FromEmailAddress is required.", 400);
-            }
 
             JsonNode destination = requireObjectOrAbsent(request, "Destination");
             List<String> toAddresses = jsonArrayToList(destination.path("ToAddresses"));
@@ -301,6 +300,10 @@ public class SesController {
                 messageId = sesService.sendRawEmail(fromEmailAddress, allDestinations, rawData,
                         configurationSetName, emailTags, region);
             } else if (content.has("Simple")) {
+                if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
+                    // AWS returns BadRequestException with a null message body here.
+                    throw new AwsException("BadRequestException", null, 400);
+                }
                 JsonNode simple = content.path("Simple");
                 String subject = simple.path("Subject").path("Data").asText("");
                 String bodyText = simple.path("Body").path("Text").path("Data").asText(null);
@@ -310,6 +313,9 @@ public class SesController {
                         bccAddresses, replyToAddresses, subject, bodyText, bodyHtml,
                         configurationSetName, emailTags, additionalHeaders, region);
             } else if (content.has("Template")) {
+                if (fromEmailAddress == null || fromEmailAddress.isBlank()) {
+                    throw new AwsException("BadRequestException", "Source cannot be empty", 400);
+                }
                 JsonNode template = content.path("Template");
                 String templateName = template.path("TemplateName").asText(null);
                 String templateArn = template.path("TemplateArn").asText(null);

@@ -115,6 +115,7 @@ nav:
     - Bedrock Runtime: services/bedrock-runtime.md
     - ELB v2: services/elb.md
     - Auto Scaling: services/autoscaling.md
+    - Elastic Beanstalk: services/elastic-beanstalk.md
     - CodeBuild: services/codebuild.md
     - AWS Batch: services/batch.md
     - CodeDeploy: services/codedeploy.md
@@ -123,6 +124,7 @@ nav:
     - CloudFront: services/cloudfront.md
     - Route53: services/route53.md
     - AWS Cloud Map: services/cloudmap.md
+    - AWS IoT Core: services/iot.md
     - AppSync: services/appsync.md
     - Transfer Family: services/transfer.md
     - AWS Config: services/config.md

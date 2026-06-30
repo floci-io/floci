@@ -8,8 +8,13 @@ import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.UserPool;
 import io.github.hectorvent.floci.services.cognito.model.UserPoolClient;
+import io.github.hectorvent.floci.services.cognito.verification.CognitoMessageDispatcher;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCode;
+import io.github.hectorvent.floci.services.cognito.verification.VerificationCodeService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
@@ -20,22 +25,30 @@ import java.util.Map;
 import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class CognitoServiceTest {
 
     private CognitoService service;
+    private InMemoryStorage<String, CognitoUser> userStore;
     private InMemoryStorage<String, CognitoGroup> groupStore;
     private RegionResolver regionResolver;
 
     @BeforeEach
     void setUp() {
+        userStore = new InMemoryStorage<>();
         groupStore = new InMemoryStorage<>();
         regionResolver = new RegionResolver("us-east-1", "000000000000");
         service = new CognitoService(
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
                 new InMemoryStorage<>(),
-                new InMemoryStorage<>(),
+                userStore,
                 groupStore,
                 new InMemoryStorage<>(), // revokedTokenStore
                 "http://localhost:4566",
@@ -596,7 +609,7 @@ class CognitoServiceTest {
                 )
         );
 
-        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("InvalidParameterException", exception.getErrorCode());
     }
 
     @Test
@@ -609,7 +622,7 @@ class CognitoServiceTest {
                 )
         );
 
-        assertEquals("ValidationException", exception.getErrorCode());
+        assertEquals("InvalidParameterException", exception.getErrorCode());
     }
 
     @Test
@@ -621,7 +634,7 @@ class CognitoServiceTest {
                         "us-east-1"
                 )
         );
-        assertEquals("ValidationException", questionMarkException.getErrorCode());
+        assertEquals("InvalidParameterException", questionMarkException.getErrorCode());
 
         AwsException hashException = assertThrows(
                 AwsException.class,
@@ -630,7 +643,7 @@ class CognitoServiceTest {
                         "us-east-1"
                 )
         );
-        assertEquals("ValidationException", hashException.getErrorCode());
+        assertEquals("InvalidParameterException", hashException.getErrorCode());
     }
 
     @Test
@@ -1049,6 +1062,96 @@ class CognitoServiceTest {
     }
 
     @Test
+    void signUpWithoutDeliveryTargetFailsBeforePersistingUser() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                verificationCodeService,
+                messageDispatcher
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        pool.setAutoVerifiedAttributes(List.of("email"));
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "test-client",
+                false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!", Map.of()));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+
+        AwsException lookupEx = assertThrows(AwsException.class, () ->
+                serviceWithVerification.adminGetUser(pool.getId(), "carol"));
+        assertEquals("UserNotFoundException", lookupEx.getErrorCode());
+    }
+
+    @Test
+    void signUpRollsBackUserWhenDispatchFails() {
+        VerificationCodeService verificationCodeService = mock(VerificationCodeService.class);
+        CognitoMessageDispatcher messageDispatcher = mock(CognitoMessageDispatcher.class);
+        when(verificationCodeService.issue(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), any()))
+                .thenReturn("123456");
+        doThrow(new RuntimeException("SES unavailable")).when(messageDispatcher)
+                .dispatch(any(), any(), eq(VerificationCode.Purpose.SIGNUP_CONFIRMATION), eq("123456"), any());
+
+        CognitoService serviceWithVerification = new CognitoService(
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                new InMemoryStorage<>(),
+                "http://localhost:4566",
+                regionResolver,
+                null,
+                verificationCodeService,
+                messageDispatcher
+        );
+
+        UserPool pool = serviceWithVerification.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        pool.setAutoVerifiedAttributes(List.of("email"));
+        UserPoolClient client = serviceWithVerification.createUserPoolClient(pool.getId(), "test-client",
+                false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                serviceWithVerification.signUp(client.getClientId(), "carol", "Pass1234!",
+                        Map.of("email", "carol@example.com")));
+        assertEquals("CodeDeliveryFailureException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+        assertEquals("Failed to deliver the message.", ex.getMessage());
+
+        AwsException lookupEx = assertThrows(AwsException.class, () ->
+                serviceWithVerification.adminGetUser(pool.getId(), "carol"));
+        assertEquals("UserNotFoundException", lookupEx.getErrorCode());
+        verify(verificationCodeService).invalidatePrevious(pool.getId(), "carol",
+                VerificationCode.Purpose.SIGNUP_CONFIRMATION);
+    }
+
+    @Test
+    void signUpReturnsResourceNotFoundAsBadRequestWhenClientMissing() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.signUp("missing-client", "carol", "Pass1234!", Map.of("email", "carol@example.com")));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void confirmSignUpReturnsResourceNotFoundAsBadRequestWhenClientMissing() {
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.confirmSignUp("missing-client", "carol", "123456"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
     @SuppressWarnings("unchecked")
     void jwtSubMatchesStoredSubAttribute() {
         UserPool pool = createPoolAndUser();
@@ -1254,7 +1357,7 @@ class CognitoServiceTest {
     }
 
     // =========================================================================
-    // Issue #220 — adminGetUser resolves sub UUID and email aliases
+    // AdminGetUser resolves configured identifiers
     // =========================================================================
 
     @Test
@@ -1271,11 +1374,130 @@ class CognitoServiceTest {
 
     @Test
     void adminGetUserByEmailAlias() {
-        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
+                "us-east-1"
+        );
+        service.adminCreateUser(pool.getId(), "bob",
+                Map.of("email", "bob@example.com", "email_verified", "true"), null);
+
+        CognitoUser found = service.adminGetUser(pool.getId(), "bob@example.com");
+        assertEquals("bob", found.getUsername());
+    }
+
+    @Test
+    void adminGetUserByPhoneNumberAlias() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "AliasAttributes", List.of("phone_number")),
+                "us-east-1"
+        );
+        service.adminCreateUser(pool.getId(), "bob",
+                Map.of("phone_number", "+15551234567", "phone_number_verified", "true"), null);
+
+        CognitoUser found = service.adminGetUser(pool.getId(), "+15551234567");
+        assertEquals("bob", found.getUsername());
+    }
+
+    @Test
+    void adminGetUserByPreferredUsernameAlias() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "AliasAttributes", List.of("preferred_username")),
+                "us-east-1"
+        );
+        service.adminCreateUser(pool.getId(), "bob", Map.of("preferred_username", "bobby"), null);
+
+        CognitoUser found = service.adminGetUser(pool.getId(), "bobby");
+        assertEquals("bob", found.getUsername());
+    }
+
+    @Test
+    void adminGetUserByEmailUsernameAttribute() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "UsernameAttributes", List.of("email")),
+                "us-east-1"
+        );
         service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
 
         CognitoUser found = service.adminGetUser(pool.getId(), "bob@example.com");
         assertEquals("bob", found.getUsername());
+    }
+
+    @Test
+    void adminGetUserByPhoneNumberUsernameAttribute() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "UsernameAttributes", List.of("phone_number")),
+                "us-east-1"
+        );
+        service.adminCreateUser(pool.getId(), "bob", Map.of("phone_number", "+15551234567"), null);
+
+        CognitoUser found = service.adminGetUser(pool.getId(), "+15551234567");
+        assertEquals("bob", found.getUsername());
+    }
+
+    @Test
+    void adminGetUserRejectsEmailWithoutConfiguredAlias() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "TestPool"), "us-east-1");
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminGetUser(pool.getId(), "bob@example.com"));
+        assertEquals("UserNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void adminGetUserRejectsUnverifiedEmailAlias() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
+                "us-east-1"
+        );
+        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminGetUser(pool.getId(), "bob@example.com"));
+        assertEquals("UserNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void adminGetUserRejectsUnknownPoolWithResourceNotFound() {
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminGetUser("us-east-1_missing", "bob"));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void adminGetUserRejectsAmbiguousLookupValueCreatedViaAdminCreateUser() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
+                "us-east-1"
+        );
+        service.adminCreateUser(pool.getId(), "shared-lookup", Map.of("email", "owner@example.com"), null);
+        service.adminCreateUser(pool.getId(), "alice",
+                Map.of("email", "shared-lookup", "email_verified", "true"), null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminGetUser(pool.getId(), "shared-lookup"));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
+    }
+
+    @Test
+    void adminGetUserRejectsAmbiguousLookupValueCreatedViaAdminUpdateUserAttributes() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "TestPool", "AliasAttributes", List.of("email")),
+                "us-east-1"
+        );
+        service.adminCreateUser(pool.getId(), "shared-lookup", Map.of("email", "owner@example.com"), null);
+        service.adminCreateUser(pool.getId(), "alice", Map.of("email", "alice@example.com"), null);
+        service.adminUpdateUserAttributes(pool.getId(), "alice",
+                Map.of("email", "shared-lookup", "email_verified", "true"));
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminGetUser(pool.getId(), "shared-lookup"));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+        assertEquals(400, ex.getHttpStatus());
     }
 
     // =========================================================================
@@ -1543,91 +1765,31 @@ class CognitoServiceTest {
     }
 
     // =========================================================================
-    // CUSTOM_AUTH flow (no Lambda triggers — falls back to deterministic stub)
+    // CUSTOM_AUTH flow (requires Lambda triggers)
     // =========================================================================
 
     @Test
-    @SuppressWarnings("unchecked")
-    void customAuthInitiateReturnsCustomChallenge() {
+    void customAuthInitiateFailsWhenDefineTriggerIsMissing() {
         UserPool pool = createPoolAndUser();
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "c", false, false, List.of(), List.of());
-
-        Map<String, Object> result = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A"));
-
-        assertEquals("CUSTOM_CHALLENGE", result.get("ChallengeName"));
-        assertNotNull(result.get("Session"));
-        Map<String, String> params = (Map<String, String>) result.get("ChallengeParameters");
-        assertEquals("alice", params.get("USERNAME"));
-        assertEquals("SRP_A", params.get("CHALLENGE_NAME"),
-                "InitiateAuth-supplied metadata should pass through to ChallengeParameters");
-    }
-
-    @Test
-    @SuppressWarnings("unchecked")
-    void customAuthAcceptsAnyAnswerWhenNoExpectedAttribute() {
-        UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
-
-        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice"));
-        String session = (String) initResult.get("Session");
-
-        Map<String, Object> tokenResult = service.respondToAuthChallenge(
-                client.getClientId(), "CUSTOM_CHALLENGE", session,
-                Map.of("USERNAME", "alice", "ANSWER", "any-non-empty-answer"));
-
-        Map<String, Object> auth = (Map<String, Object>) tokenResult.get("AuthenticationResult");
-        assertNotNull(auth, "AuthenticationResult should be present after correct answer");
-        assertNotNull(auth.get("AccessToken"));
-        assertNotNull(auth.get("RefreshToken"));
-    }
-
-    @Test
-    void customAuthRejectsWhenAnswerDoesNotMatchExpectedAttribute() {
-        UserPool pool = createPoolAndUser();
-        // Stamp an expected answer attribute on the user
-        service.adminUpdateUserAttributes(pool.getId(), "alice",
-                Map.of("custom:expectedAuthAnswer", "secret-otp"));
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
-
-        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice"));
-        String session = (String) initResult.get("Session");
-
-        // First wrong attempt — flow should request another challenge, not fail outright
-        Map<String, Object> retryResult = service.respondToAuthChallenge(
-                client.getClientId(), "CUSTOM_CHALLENGE", session,
-                Map.of("USERNAME", "alice", "ANSWER", "wrong"));
-        assertEquals("CUSTOM_CHALLENGE", retryResult.get("ChallengeName"));
-        String session2 = (String) retryResult.get("Session");
-
-        // Eventually correct answer issues tokens
-        Map<String, Object> tokenResult = service.respondToAuthChallenge(
-                client.getClientId(), "CUSTOM_CHALLENGE", session2,
-                Map.of("USERNAME", "alice", "ANSWER", "secret-otp"));
-        @SuppressWarnings("unchecked")
-        Map<String, Object> auth = (Map<String, Object>) tokenResult.get("AuthenticationResult");
-        assertNotNull(auth);
-        assertNotNull(auth.get("AccessToken"));
-    }
-
-    @Test
-    void customAuthRequiresNonEmptyAnswer() {
-        UserPool pool = createPoolAndUser();
-        UserPoolClient client = service.createUserPoolClient(
-                pool.getId(), "c", false, false, List.of(), List.of());
-        Map<String, Object> initResult = service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
-                Map.of("USERNAME", "alice"));
-        String session = (String) initResult.get("Session");
 
         AwsException ex = assertThrows(AwsException.class, () ->
-                service.respondToAuthChallenge(client.getClientId(), "CUSTOM_CHALLENGE", session,
-                        Map.of("USERNAME", "alice", "ANSWER", "")));
-        assertEquals("InvalidParameterException", ex.getErrorCode());
+                service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                        Map.of("USERNAME", "alice", "CHALLENGE_NAME", "SRP_A")));
+        assertEquals("InvalidUserPoolConfigurationException", ex.getErrorCode());
+    }
+
+    @Test
+    void customAuthRejectsWhenNoLambdaTriggersAreConfigured() {
+        UserPool pool = createPoolAndUser();
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.initiateAuth(client.getClientId(), "CUSTOM_AUTH",
+                        Map.of("USERNAME", "alice")));
+        assertEquals("InvalidUserPoolConfigurationException", ex.getErrorCode());
     }
 
     @Test
@@ -1819,5 +1981,69 @@ class CognitoServiceTest {
 
         CognitoUser user = service.adminGetUser(pool.getId(), "carol");
         assertEquals("Carolyn", user.getAttributes().get("given_name"));
+    }
+
+    // =========================================================================
+    // Cognito ClientId And Secret overrides
+    // =========================================================================
+
+    @ParameterizedTest
+    @CsvSource( {
+            "use-name,basic-client",
+            "prepend-to-name:prepended-,prepended-basic-client",
+            "append-to-name:-appended,basic-client-appended",
+    })
+    void createUserPoolWithOverrideForClientIdAndClientSecret(String overrideClientId, String expectedClientId) {
+        UserPool pool = service.createUserPool(
+                Map.of(
+                        "PoolName", "ClientOverridesPool",
+                        "UserPoolTags", Map.of(
+                                "env", "test",
+                                ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, overrideClientId,
+                                ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY, "secret")
+                ),
+                "us-east-1"
+        );
+
+        assertEquals("test",pool.getUserPoolTags().get("env"));
+        assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY));
+        assertFalse(pool.getUserPoolTags().containsKey(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY));
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "basic-client",
+                true,
+                true,
+                List.of(),
+                List.of()
+        );
+
+        assertEquals("basic-client", client.getClientName());
+        assertEquals(expectedClientId, client.getClientId());
+        assertEquals("secret", client.getClientSecret());
+    }
+
+    @ParameterizedTest
+    @CsvSource( {
+            "prepend-to-name: prepended- ,secret",
+            "append-to-name: -appended ,secret",
+            "append-to-name:-appended,",
+            "something-else,secret"
+    })
+    void createUserPoolWithInvalidOverrideForClientIdAndClientSecret(String overrideClientId, String secret) {
+        Map<String, Object> createUserPool = new HashMap<>();
+        Map<String,String> userPoolTags = new HashMap<>();
+        userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_ID_KEY, overrideClientId);
+        userPoolTags.put(ReservedTags.OVERRIDE_COGNITO_CLIENT_SECRET_KEY, secret);
+        createUserPool.put("PoolName", "InvalidOverridesPool");
+        createUserPool.put("UserPoolTags", userPoolTags);
+
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.createUserPool(
+                        createUserPool,
+                        "us-east-1"
+                ));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+
     }
 }

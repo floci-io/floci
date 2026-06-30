@@ -21,6 +21,8 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import com.github.dockerjava.api.exception.DockerClientException;
+import com.github.dockerjava.api.exception.NotFoundException;
 import com.github.dockerjava.api.model.Container;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -141,9 +143,7 @@ public class FlociUiManager {
             LOG.infov("Started floci-ui sidecar {0} on host port {1}", name, String.valueOf(hostPort));
             attachLogStream();
         } catch (Exception e) {
-            this.lastError = "Could not start the Floci UI from image '" + image + "': " + e.getMessage()
-                    + ". Ensure the image is available (docker pull " + image
-                    + ", or build it from the floci-ui repo).";
+            this.lastError = describeStartFailure(image, e);
             LOG.errorv(e, "Failed to start floci-ui sidecar from image {0}", image);
         }
     }
@@ -308,5 +308,63 @@ public class FlociUiManager {
         String logStreamName = logStreamer.generateLogStreamName(shortId);
         String region = regionResolver.getDefaultRegion();
         this.logStream = logStreamer.attach(containerId, logGroup, logStreamName, region, "floci:ui");
+    }
+
+    /**
+     * Builds the user-facing message for a failed sidecar start. Only a genuinely
+     * unavailable image gets the {@code docker pull} guidance — every other failure
+     * (an unreachable container runtime, a port clash, a daemon error) is reported
+     * as itself, so users are not sent to pull an image that is already present.
+     *
+     * <p>The previous behaviour blamed a missing image for <em>every</em> failure,
+     * which is especially misleading on Podman/SELinux hosts where the real cause is
+     * usually the bind-mounted Docker socket being unreachable.
+     */
+    static String describeStartFailure(String image, Throwable e) {
+        String detail = messageOf(e);
+        if (isImageUnavailable(e)) {
+            return "Could not start the Floci UI: image '" + image + "' is unavailable (" + detail
+                    + "). Pull it with 'docker pull " + image + "', or build it from the floci-ui repo.";
+        }
+        if (isRuntimeUnreachable(e)) {
+            return "Could not start the Floci UI: Floci could not reach the container runtime (" + detail
+                    + "). Check that the Docker/Podman socket is mounted into the Floci container and "
+                    + "accessible — on SELinux hosts the socket bind-mount may need relabeling "
+                    + "(e.g. ':z') or '--security-opt label=disable'.";
+        }
+        return "Could not start the Floci UI from image '" + image + "': " + detail + ".";
+    }
+
+    /** True when the failure chain indicates the image itself is missing locally and in the registry. */
+    private static boolean isImageUnavailable(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            if (t instanceof NotFoundException) {
+                return true;
+            }
+            String msg = t.getMessage();
+            // docker-java's pull callback rewraps a daemon pull failure (missing image, auth)
+            // as DockerClientException("Could not pull image: ...").
+            if (t instanceof DockerClientException && msg != null && msg.startsWith("Could not pull image: ")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** True when the failure chain indicates Floci could not reach the container runtime socket. */
+    private static boolean isRuntimeUnreachable(Throwable e) {
+        for (Throwable t = e; t != null; t = t.getCause()) {
+            // BindException and ConnectException both extend SocketException; the docker-java
+            // Apache transport surfaces a refused/denied Unix-socket connect this way.
+            if (t instanceof java.net.SocketException || t instanceof java.net.UnknownHostException) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String messageOf(Throwable e) {
+        String msg = e.getMessage();
+        return (msg == null || msg.isBlank()) ? e.getClass().getSimpleName() : msg;
     }
 }

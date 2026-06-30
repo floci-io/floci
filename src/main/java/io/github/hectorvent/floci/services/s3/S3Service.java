@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
@@ -40,7 +41,7 @@ import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 @ApplicationScoped
-public class S3Service {
+public class S3Service implements Resettable {
     private String ownerId() { return regionResolver != null ? regionResolver.getAccountId() : "000000000000"; }
     private static final String DEFAULT_OWNER_DISPLAY_NAME = "floci";
     private static final String ALL_USERS_GROUP_URI = "http://acs.amazonaws.com/groups/global/AllUsers";
@@ -159,6 +160,12 @@ public class S3Service {
         }
     }
 
+    public void clear() {
+        memoryDataStore.clear();
+        memoryMultipartStore.clear();
+        multipartUploads.clear();
+    }
+
     public Bucket createBucket(String bucketName, String region) {
         var existing = bucketStore.get(bucketName);
         if (existing.isPresent()) {
@@ -204,6 +211,39 @@ public class S3Service {
 
     public List<Bucket> listBuckets() {
         return bucketStore.scan(key -> true);
+    }
+
+    public void putBucketLogging(String bucketName, String loggingConfigurationXml) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        if (loggingConfigurationXml == null || loggingConfigurationXml.isBlank()) {
+            bucket.setLoggingConfiguration(null);
+        } else {
+            String targetBucket = XmlParser.extractFirst(loggingConfigurationXml, "TargetBucket", null);
+            if (targetBucket == null) {
+                bucket.setLoggingConfiguration(null);
+            } else {
+                bucket.setLoggingConfiguration(loggingConfigurationXml);
+            }
+        }
+
+        bucketStore.put(bucketName, bucket);
+    }
+
+    public String getBucketLogging(String bucketName) {
+        Bucket bucket = bucketStore.get(bucketName)
+                .orElseThrow(() -> new AwsException("NoSuchBucket", "The specified bucket does not exist.", 404));
+
+        if (bucket.getLoggingConfiguration() == null || bucket.getLoggingConfiguration().isBlank()) {
+            return new XmlBuilder()
+                    .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+                    .start("BucketLoggingStatus", AwsNamespaces.S3)
+                    .end("BucketLoggingStatus")
+                    .build();
+        }
+
+        return bucket.getLoggingConfiguration();
     }
 
     public S3Object putObject(String bucketName, String key, byte[] data,

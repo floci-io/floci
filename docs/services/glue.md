@@ -9,21 +9,85 @@ Floci emulates the AWS Glue Data Catalog and Glue Schema Registry, allowing you 
 
 ### Data Catalog
 
-| Area | Actions |
-|---|---|
-| Databases | `CreateDatabase` · `GetDatabase` · `GetDatabases` · `DeleteDatabase` |
-| Tables | `CreateTable` · `GetTable` · `GetTables` · `DeleteTable` |
-| Partitions | `CreatePartition` · `GetPartitions` |
-| User-defined functions | `CreateUserDefinedFunction` · `GetUserDefinedFunction` · `GetUserDefinedFunctions` · `UpdateUserDefinedFunction` · `DeleteUserDefinedFunction` |
+#### Databases
+
+| Action | Description |
+|--------|-------------|
+| CreateDatabase | - |
+| GetDatabase | - |
+| GetDatabases | - |
+| DeleteDatabase | - |
+
+#### Tables
+
+| Action | Description |
+|--------|-------------|
+| CreateTable | - |
+| GetTable | - |
+| GetTables | - |
+| DeleteTable | - |
+
+#### Partitions
+
+| Action | Description |
+|--------|-------------|
+| CreatePartition | - |
+| GetPartitions | - |
+
+#### User-defined Functions
+
+| Action | Description |
+|--------|-------------|
+| CreateUserDefinedFunction | - |
+| GetUserDefinedFunction | - |
+| GetUserDefinedFunctions | - |
+| UpdateUserDefinedFunction | - |
+| DeleteUserDefinedFunction | - |
 
 ### Schema Registry
 
-| Area | Actions |
-|---|---|
-| Registries | `CreateRegistry` · `GetRegistry` · `ListRegistries` · `UpdateRegistry` · `DeleteRegistry` |
-| Schemas | `CreateSchema` · `GetSchema` · `ListSchemas` · `UpdateSchema` · `DeleteSchema` |
-| Versions | `RegisterSchemaVersion` · `GetSchemaByDefinition` · `GetSchemaVersion` · `ListSchemaVersions` · `DeleteSchemaVersions` · `GetSchemaVersionsDiff` · `CheckSchemaVersionValidity` |
-| Metadata and tags | `PutSchemaVersionMetadata` · `RemoveSchemaVersionMetadata` · `QuerySchemaVersionMetadata` · `TagResource` · `UntagResource` · `GetTags` |
+#### Registries
+
+| Action | Description |
+|--------|-------------|
+| CreateRegistry | - |
+| GetRegistry | - |
+| ListRegistries | - |
+| UpdateRegistry | - |
+| DeleteRegistry | - |
+
+#### Schemas
+
+| Action | Description |
+|--------|-------------|
+| CreateSchema | - |
+| GetSchema | - |
+| ListSchemas | - |
+| UpdateSchema | - |
+| DeleteSchema | - |
+
+#### Versions
+
+| Action | Description |
+|--------|-------------|
+| RegisterSchemaVersion | - |
+| GetSchemaByDefinition | - |
+| GetSchemaVersion | - |
+| ListSchemaVersions | - |
+| DeleteSchemaVersions | - |
+| GetSchemaVersionsDiff | - |
+| CheckSchemaVersionValidity | - |
+
+#### Metadata and Tags
+
+| Action | Description |
+|--------|-------------|
+| PutSchemaVersionMetadata | - |
+| RemoveSchemaVersionMetadata | - |
+| QuerySchemaVersionMetadata | - |
+| TagResource | - |
+| UntagResource | - |
+| GetTags | - |
 
 Supported schema formats are `AVRO`, `JSON`, and `PROTOBUF`. Compatibility modes are `NONE`, `DISABLED`, `BACKWARD`, `BACKWARD_ALL`, `FORWARD`, `FORWARD_ALL`, `FULL`, and `FULL_ALL`.
 

@@ -236,6 +236,25 @@ class IamIntegrationTest {
     }
 
     @Test
+    @Order(17)
+    void getRdsEnhancedMonitoringPolicy() {
+        given()
+            .formParam("Action", "GetPolicy")
+            .formParam("PolicyArn",
+                    "arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("GetPolicyResponse.GetPolicyResult.Policy.PolicyName",
+                    equalTo("AmazonRDSEnhancedMonitoringRole"))
+            .body("GetPolicyResponse.GetPolicyResult.Policy.Arn",
+                    equalTo("arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole"));
+    }
+
+    @Test
     @Order(9)
     void stsGetCallerIdentityFallsBackForUnseededFlociAccessKey() {
         given()
@@ -368,6 +387,22 @@ class IamIntegrationTest {
     // =========================================================================
     // Users
     // =========================================================================
+
+    @Test
+    @Order(50)
+    void listMfaDevicesReturnsEmptyList() {
+        given()
+            .formParam("Action", "ListMFADevices")
+            .formParam("UserName", "any-user")
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260227/us-east-1/iam/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml")
+            .body("ListMFADevicesResponse.ListMFADevicesResult.IsTruncated", equalTo("false"));
+    }
 
     @Test
     @Order(10)

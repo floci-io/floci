@@ -178,7 +178,7 @@ LocalStack's community edition [sunset in March 2026](https://blog.localstack.cl
 | CodeBuild | Real Docker execution | No |
 | Native binary | ~40 MB | No |
 
-**64 AWS services. Broad coverage. Free forever.**
+**65 AWS services. Broad coverage. Free forever.**
 
 ## Architecture Overview
 
@@ -190,7 +190,7 @@ flowchart LR
         Router["HTTP Router\nJAX-RS / Vert.x"]
 
         subgraph Stateless ["Stateless Services"]
-            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nCodeDeploy · CodePipeline · Backup · Bedrock Runtime · Route53 · Transfer"]
+            A["SSM · SQS · SNS\nIAM · STS · KMS\nSecrets Manager · SES\nCognito · Kinesis\nEventBridge · Scheduler · AppConfig\nCloudWatch · Step Functions\nCloudFormation · ACM · Config\nAPI Gateway · AppSync · ELB v2 · Auto Scaling\nElastic Beanstalk · CodeDeploy · CodePipeline · Backup · Bedrock Runtime · Route53 · Transfer"]
         end
 
         subgraph Stateful ["Stateful Services"]
@@ -222,7 +222,7 @@ Floci supports local emulation for application services, data services, eventing
 | Core app services | S3, SQS, SNS, DynamoDB, Lambda, IAM, KMS, Secrets Manager, SSM |
 | Events and workflows | EventBridge, EventBridge Pipes, EventBridge Scheduler, Step Functions, CloudWatch Logs, CloudWatch Metrics |
 | API and identity | API Gateway REST, API Gateway v2, AppSync, Cognito, ACM, Route53, Cloud Map |
-| Containers and compute | ECS, EC2, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, ELB v2 |
+| Containers and compute | ECS, EC2, EKS, ECR, CodeBuild, CodeDeploy, CodePipeline, AWS Batch, Auto Scaling, Elastic Beanstalk, ELB v2 |
 | Data, analytics, and AI | Athena, Glue, EMR, Firehose, OpenSearch, S3 Vectors, Textract, Transcribe, Bedrock Runtime |
 | Databases and caching | RDS, RDS Data API, Neptune, DocumentDB, MemoryDB, ElastiCache |
 | Messaging and transfer | SES, Kinesis, MSK, Transfer Family |
@@ -287,6 +287,7 @@ For operation-level compatibility, see the [Services Overview](https://floci.io/
 | CodePipeline | In-process orchestration | Pipelines, executions, S3 artifacts, approvals, local providers, custom workers |
 | AWS Batch | In-process | Compute environments, job queues, job definitions, job submission and lifecycle |
 | Auto Scaling | In-process with reconciler | Launch configs, ASGs, desired capacity reconciliation, lifecycle hooks |
+| Elastic Beanstalk | In-process | Applications, application versions, environments, configuration templates, platform and solution stack metadata |
 | AWS Backup | In-process | Vaults, backup plans, selections, simulated job lifecycle, recovery points |
 | AWS Config | In-process | Config rules, configuration recorders, delivery channels, conformance packs, tagging |
 | CloudTrail | In-process | Trail lifecycle, event selectors, logging status; management API only |
@@ -378,6 +379,8 @@ AWS_ACCESS_KEY_ID=222222222222 aws sqs create-queue --queue-name orders
 ```
 
 Any other key format, such as `test` or `AKIA...`, causes Floci to fall back to `FLOCI_DEFAULT_ACCOUNT_ID`, which defaults to `000000000000`.
+
+STS temporary credentials are routed too: credentials from `AssumeRole` resolve to the assumed role's account, so the cross-account assume-role-then-provision pattern works locally. Resolution precedence is 12-digit AKID → temporary-session lookup → `FLOCI_DEFAULT_ACCOUNT_ID`.
 
 See the [Multi-Account Isolation docs](https://floci.io/floci/configuration/multi-account/).
 

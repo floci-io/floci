@@ -33,6 +33,7 @@ Floci is configured exclusively through environment variables. Every option belo
 | `FLOCI_SECURITY_EXTRA_CORS_ALLOWED_HEADERS` | _(none)_ | Additional header names to include in `Access-Control-Allow-Headers`. Alias: `EXTRA_CORS_ALLOWED_HEADERS` |
 | `FLOCI_SECURITY_EXTRA_CORS_EXPOSE_HEADERS` | _(none)_ | Additional header names to include in `Access-Control-Expose-Headers`. Alias: `EXTRA_CORS_EXPOSE_HEADERS` |
 | `FLOCI_SECURITY_DISABLE_CORS_HEADERS` | `false` | Disable Floci's global CORS response headers. Alias: `DISABLE_CORS_HEADERS` |
+| `FLOCI_SECURITY_CORS_ALLOW_PRIVATE_NETWORK` | `false` | Answer Private Network Access preflights with `Access-Control-Allow-Private-Network: true`, letting a page on a public/secure origin reach this loopback backend. Only applies after the origin passes the allow-list above. |
 
 ---
 
