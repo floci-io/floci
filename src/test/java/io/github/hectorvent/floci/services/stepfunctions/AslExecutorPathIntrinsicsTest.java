@@ -58,6 +58,44 @@ class AslExecutorPathIntrinsicsTest {
     }
 
     @Test
+    void bracketWildcardProjectionMatchesDotForm() throws Exception {
+        JsonNode root = mapper.readTree(
+                "{\"Regions\":[{\"RegionName\":\"us-east-1\"},{\"RegionName\":\"eu-west-1\"}]}");
+        // The AWS bracket form must behave exactly like the dot form.
+        JsonNode result = executor.resolvePath("$.Regions[*].RegionName", root);
+        assertTrue(result.isArray());
+        assertEquals(2, result.size());
+        assertEquals("us-east-1", result.get(0).asText());
+        assertEquals("eu-west-1", result.get(1).asText());
+    }
+
+    @Test
+    void rootBracketDoubleWildcardFlattensArrayOfArrays() throws Exception {
+        JsonNode root = mapper.readTree("[[1,2],[3,4]]");
+        JsonNode result = executor.resolvePath("$[*][*]", root);
+        assertTrue(result.isArray());
+        assertEquals(4, result.size());
+        assertEquals(1, result.get(0).asInt());
+        assertEquals(4, result.get(3).asInt());
+    }
+
+    @Test
+    void numericBracketSegmentIndexesIntoArray() throws Exception {
+        JsonNode root = mapper.readTree("{\"items\":[\"a\",\"b\",\"c\"]}");
+        assertEquals("b", executor.resolvePath("$.items[1]", root).asText());
+    }
+
+    @Test
+    void resolvePathNodeDistinguishesExplicitNullFromMissing() throws Exception {
+        JsonNode root = mapper.readTree("{\"x\":null}");
+        // An explicit null exists, so it is present (not a MissingNode)...
+        assertFalse(executor.resolvePathNode("$.x", root).isMissingNode());
+        assertTrue(executor.resolvePathNode("$.x", root).isNull());
+        // ...while an absent field resolves to a MissingNode.
+        assertTrue(executor.resolvePathNode("$.y", root).isMissingNode());
+    }
+
+    @Test
     void arrayContainsTrueAndFalse() throws Exception {
         JsonNode root = mapper.readTree("{\"list\":[\"a\",\"b\",\"c\"],\"hit\":\"b\",\"miss\":\"z\"}");
         assertTrue(executor.resolvePath("States.ArrayContains($.list, $.hit)", root).asBoolean());

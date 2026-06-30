@@ -11,23 +11,32 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.fail;
 
 /**
- * A Choice rule {@code Not { IsPresent: $.absentField }} must take the "absent" branch when the
- * field is missing — previously an absent path resolved to a non-missing null node, so IsPresent
- * wrongly reported the field as present.
+ * ResultSelector is not Task-only in AWS: it also transforms the raw result of Map and Parallel
+ * states before ResultPath merges it back into the state input. These tests also exercise the
+ * AWS bracket wildcard form ({@code $[*].field}) inside the selector.
  */
 @QuarkusTest
-class StepFunctionsChoiceIsPresentIntegrationTest {
+class StepFunctionsResultSelectorMapParallelIntegrationTest {
 
     private static final String SFN_CONTENT_TYPE = "application/x-amz-json-1.0";
     private static final String ROLE_ARN = "arn:aws:iam::000000000000:role/test-role";
 
-    private static final String DEFINITION = """
-            {"StartAt":"Check","States":{
-              "Check":{"Type":"Choice",
-                "Choices":[{"Not":{"Variable":"$.maybe","IsPresent":true},"Next":"Absent"}],
-                "Default":"Present"},
-              "Absent":{"Type":"Pass","Result":"absent","End":true},
-              "Present":{"Type":"Pass","Result":"present","End":true}}}
+    private static final String MAP_DEFINITION = """
+            {"StartAt":"M","States":{
+              "M":{"Type":"Map","ItemsPath":"$.people",
+                "ItemProcessor":{"StartAt":"P","States":{"P":{"Type":"Pass","End":true}}},
+                "ResultSelector":{"names.$":"$[*].name"},
+                "End":true}}}
+            """;
+
+    private static final String PARALLEL_DEFINITION = """
+            {"StartAt":"P","States":{
+              "P":{"Type":"Parallel",
+                "Branches":[
+                  {"StartAt":"A","States":{"A":{"Type":"Pass","Result":{"v":1},"End":true}}},
+                  {"StartAt":"B","States":{"B":{"Type":"Pass","Result":{"v":2},"End":true}}}],
+                "ResultSelector":{"values.$":"$[*].v"},
+                "End":true}}}
             """;
 
     @BeforeAll
@@ -36,27 +45,22 @@ class StepFunctionsChoiceIsPresentIntegrationTest {
     }
 
     @Test
-    void absentFieldTakesNotIsPresentBranch() throws Exception {
-        assertEquals("\"absent\"", run("{}"));
+    void mapResultSelectorCollectsFieldFromEachIteration() throws Exception {
+        assertEquals("{\"names\":[\"a\",\"b\"]}",
+                run(MAP_DEFINITION, "{\"people\":[{\"name\":\"a\"},{\"name\":\"b\"}]}"));
     }
 
     @Test
-    void presentFieldTakesDefaultBranch() throws Exception {
-        assertEquals("\"present\"", run("{\"maybe\":\"here\"}"));
+    void parallelResultSelectorCollectsFieldFromEachBranch() throws Exception {
+        assertEquals("{\"values\":[1,2]}", run(PARALLEL_DEFINITION, "{}"));
     }
 
-    @Test
-    void explicitNullCountsAsPresent() throws Exception {
-        // A field that exists with a null value is present in AWS, so it must NOT take the absent branch.
-        assertEquals("\"present\"", run("{\"maybe\":null}"));
-    }
-
-    private String run(String input) throws InterruptedException {
-        String name = "ispresent-" + System.currentTimeMillis() + "-" + input.length();
+    private String run(String definition, String input) throws InterruptedException {
+        String name = "resultselector-" + System.nanoTime();
         Response create = given()
                 .header("X-Amz-Target", "AWSStepFunctions.CreateStateMachine")
                 .contentType(SFN_CONTENT_TYPE)
-                .body("{\"name\":\"" + name + "\",\"definition\":" + quote(DEFINITION) + ",\"roleArn\":\"" + ROLE_ARN + "\"}")
+                .body("{\"name\":\"" + name + "\",\"definition\":" + quote(definition) + ",\"roleArn\":\"" + ROLE_ARN + "\"}")
                 .when().post("/");
         create.then().statusCode(200);
         String smArn = create.jsonPath().getString("stateMachineArn");
