@@ -272,6 +272,33 @@ class AutoScalingServiceTest {
     }
 
     @Test
+    void updateAutoScalingGroupRejectsVersionWithoutLaunchTemplateIdentifier() {
+        AwsException error = assertThrows(AwsException.class, () -> service.updateAutoScalingGroup(
+                REGION,
+                "test-asg",
+                null,
+                null,
+                null,
+                "2",
+                null,
+                null,
+                5,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                null));
+
+        assertEquals("ValidationError", error.getErrorCode());
+        assertEquals("LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", error.getMessage());
+        var group = service.describeAutoScalingGroups(REGION, List.of("test-asg")).getFirst();
+        assertEquals("1", group.getLaunchTemplateVersion());
+        assertEquals(3, group.getMaxSize());
+    }
+
+    @Test
     void updateAutoScalingGroupRejectsDesiredConfigurationChangeDuringActiveInstanceRefresh() {
         AutoScalingGroupFixture.addInstance(service, REGION, "test-asg", "i-original", "InService", "lt-original", "1");
         InstanceRefresh request = new InstanceRefresh();

@@ -222,6 +222,10 @@ public class AutoScalingService {
                                         List<String> terminationPolicies) {
         AutoScalingGroup asg = requireGroup(region, name);
         validateLaunchSource(launchConfigName, launchTemplateId, launchTemplateName, mixedInstancesPolicy);
+        if (launchTemplateVersion != null && launchTemplateId == null && launchTemplateName == null) {
+            throw new AwsException("ValidationError",
+                    "LaunchTemplateVersion requires a LaunchTemplateId or LaunchTemplateName.", 400);
+        }
         rejectDesiredConfigurationUpdateDuringActiveRefresh(region, name,
                 launchConfigName, launchTemplateId, launchTemplateName, launchTemplateVersion, mixedInstancesPolicy);
         LaunchIdentity effectiveIdentity = effectiveLaunchIdentity(asg, launchConfigName,
