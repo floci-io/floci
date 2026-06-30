@@ -18,7 +18,6 @@ import jakarta.ws.rs.core.Response;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Objects;
 
 @ApplicationScoped
 public class StepFunctionsJsonHandler {
@@ -66,7 +65,12 @@ public class StepFunctionsJsonHandler {
     private Response handleListStateMachineVersions(JsonNode request) {
         ObjectNode response = objectMapper.createObjectNode();
         ArrayNode array = response.putArray("stateMachineVersions");
-        StateMachine sm = service.describeStateMachine(request.path("stateMachineArn").asText());
+        StateMachine sm;
+        try{
+            sm = service.describeStateMachine(request.path("stateMachineArn").asText());
+        }catch (AwsException e){
+            return Response.ok(response).build();
+        }
         if (sm != null) {
             ObjectNode item = array.addObject();
             item.put("creationDate", sm.getCreationDate());

@@ -58,28 +58,28 @@ class StepFunctionsListStateMachineVersionsIntegrationTest {
 
     @Test
     @Order(3)
-    void listVersions_nonExistentArn_returnsStateMachineDoesNotExist() {
+    void listVersions_nonExistentArn_returns200WithEmptyArray() {
         given()
                 .header("X-Amz-Target", TARGET)
                 .contentType(CT)
                 .body("{\"stateMachineArn\":\"arn:aws:states:us-east-1:000000000000:stateMachine:does-not-exist\"}")
                 .when().post("/")
                 .then()
-                .statusCode(400)
-                .body("__type", containsString("StateMachineDoesNotExist"));
+                .statusCode(200)
+                .body("stateMachineVersions", hasSize(0));
     }
 
     @Test
     @Order(4)
-    void listVersions_missingArn_returnsStateMachineDoesNotExist() {
+    void listVersions_missingArn_returns200WithEmptyArray() {
         given()
                 .header("X-Amz-Target", TARGET)
                 .contentType(CT)
                 .body("{}")
                 .when().post("/")
                 .then()
-                .statusCode(400)
-                .body("__type", containsString("StateMachineDoesNotExist"));
+                .statusCode(200)
+                .body("stateMachineVersions", hasSize(0));
     }
 
     @Test
