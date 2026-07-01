@@ -684,6 +684,55 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithListObjectsV2ItemReader_failsWithNotImplementedItemReaderError() throws Exception {
+        createBucket("map-inputs-list-objects");
+        putObject("map-inputs-list-objects", "workers/a.json", "[]");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:listObjectsV2",
+                                "ReaderConfig": {
+                                    "InputType": "JSON"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-list-objects",
+                                    "Prefix": "workers/"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-list-objects-v2-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("not yet implemented by the emulator"));
+    }
+
+    @Test
     void distributedMapWithUnsupportedItemReaderInputType_rejectedAtCreateStateMachine() {
         String definition = """
                 {

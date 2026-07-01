@@ -940,6 +940,10 @@ public class AslExecutor {
     private JsonNode resolveItemReaderItems(JsonNode itemReader, JsonNode input,
                                             JsonNode context) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
+        if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader resource arn:aws:states:::s3:listObjectsV2 is not yet implemented by the emulator");
+        }
         if (!"arn:aws:states:::s3:getObject".equals(resource)) {
             throw new FailStateException("States.Runtime", "Unsupported ItemReader resource: " + resource);
         }
