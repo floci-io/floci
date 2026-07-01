@@ -205,17 +205,26 @@ public class ContainerLauncher {
 
         specBuilder.withEmbeddedDns();
 
+        // Whether /var/task is served from a shared read-only volume (large code) or copied
+        // directly into this container (small code). Decided once here so both the spec (below)
+        // and the create->start copy block agree.
+        boolean useCodeVolume = false;
         if (fn.isHotReload()) {
             specBuilder.withBind(fn.getHotReloadHostPath(), TASK_DIR);
         } else if (fn.getCodeLocalPath() != null) {
-            // Mount /var/task from a read-only volume that is populated ONCE per code version,
-            // instead of tar-copying its code (e.g. ~34k node_modules files) into every container.
-            // That copy cost ~95s per cold start on Docker Desktop (small-file overlay I/O) and,
-            // run many-at-once, saturated the daemon so even `docker create` ballooned to ~80s.
-            // A pre-populated volume mounts in ~0.2s and is shared read-only by all containers of
-            // the function — matching AWS, where /var/task is read-only.
-            String codeVolume = ensureCodeVolume(fn, image);
-            specBuilder.withNamedVolume(codeVolume, TASK_DIR, true);
+            useCodeVolume = shouldUseCodeVolume(Path.of(fn.getCodeLocalPath()));
+            if (useCodeVolume) {
+                // Large code: mount /var/task from a read-only volume that is populated ONCE per
+                // code version, instead of tar-copying its code (e.g. ~34k node_modules files) into
+                // every container. That copy cost ~95s per cold start on Docker Desktop (small-file
+                // overlay I/O) and, run many-at-once, saturated the daemon so even `docker create`
+                // ballooned to ~80s. A pre-populated volume mounts in ~0.2s and is shared read-only
+                // by all containers of the function — matching AWS, where /var/task is read-only.
+                String codeVolume = ensureCodeVolume(fn, image);
+                specBuilder.withNamedVolume(codeVolume, TASK_DIR, true);
+            }
+            // Small code takes the original per-container direct copy below (no volume): it's fast
+            // enough that a shared volume's helper round-trip would only add cold-start latency.
         }
 
         // For Image package type use ImageConfig.Command/EntryPoint/WorkingDirectory if set, otherwise fall back to Handler (Zip-style)
@@ -247,9 +256,6 @@ public class ContainerLauncher {
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
         String containerId = null;
-        // Gate the whole cold start so concurrent launches don't thrash the Docker daemon
-        // (which left half-built "Created" containers piling up). Released in finally below.
-        acquireLaunchPermit(fn.getFunctionName());
         try {
         containerId = lifecycleManager.create(spec);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
@@ -260,9 +266,13 @@ public class ContainerLauncher {
         if (!fn.isHotReload() && fn.getCodeLocalPath() != null) {
             Path codePath = Path.of(fn.getCodeLocalPath());
 
-            // Code at /var/task is supplied by the read-only named volume mounted on the spec above
-            // (populated once per code version) — no per-container copy. Only the small artifacts
-            // that live OUTSIDE /var/task are still copied per container below.
+            // Large code (useCodeVolume): /var/task is supplied by the read-only named volume
+            // mounted on the spec above (populated once per code version) — no per-container copy.
+            // Small code: copy it directly into /var/task on this container (the original fast path,
+            // cheap enough that a shared volume's helper round-trip would only add cold-start latency).
+            if (!useCodeVolume) {
+                copyDirToContainer(dockerClient, containerId, codePath, TASK_DIR, fn.getFunctionName());
+            }
 
             // For provided runtimes, also copy the 'bootstrap' file to /var/runtime (RUNTIME_DIR)
             if (isProvidedRuntime(fn.getRuntime())) {
@@ -307,8 +317,6 @@ public class ContainerLauncher {
             }
             try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
             throw e;
-        } finally {
-            LAUNCH_SEMAPHORE.release();
         }
 
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
@@ -348,31 +356,31 @@ public class ContainerLauncher {
         return lifecycleManager.isContainerRunning(handle.getContainerId());
     }
 
-    // Cap concurrent cold starts. Each cold start creates a container and streams ~90MB of
-    // node_modules into it; running many at once (e.g. a UI page-load firing 6-8 parallel API
-    // calls against a cold pool) overwhelmed the Docker daemon, so copies hung/failed and left
-    // half-built "Created" containers that were never started, never reused, and never reaped.
-    // Gating the WHOLE create->copy->start (not just the copy) keeps the daemon healthy so every
-    // launch completes and the container actually reaches the warm pool.
-    private static final java.util.concurrent.Semaphore LAUNCH_SEMAPHORE =
+    // Cap concurrent code-volume POPULATES. Populating a large function's volume creates a helper
+    // container and streams ~90MB of node_modules into it; a burst of first-time populates run at
+    // once (e.g. a UI page-load firing 6-8 parallel API calls against never-before-seen functions)
+    // overwhelmed the Docker daemon, so copies hung/failed and left half-built "Created" containers.
+    // This gates ONLY the heavy populate — not every launch — so ordinary cold starts (volume mounts
+    // for already-populated large code, or the small-code direct copy) are never serialized.
+    private static final java.util.concurrent.Semaphore POPULATE_SEMAPHORE =
             new java.util.concurrent.Semaphore(Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
 
-    private static void acquireLaunchPermit(String functionName) {
+    private static void acquirePopulatePermit(String functionName) {
         try {
-            LAUNCH_SEMAPHORE.acquire();
+            POPULATE_SEMAPHORE.acquire();
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            throw new RuntimeException("Interrupted while waiting to launch container for " + functionName, ie);
+            throw new RuntimeException("Interrupted while waiting to populate code volume for " + functionName, ie);
         }
     }
 
     // Per-function-version code volumes: populated once, then mounted read-only into every
     // container so cold starts skip the ~95s node_modules copy. Tracks which volumes are already
-    // populated, a per-volume lock so a concurrent cold-start storm populates only once, and the
-    // current volume per function so a redeploy (new code version) can drop the stale one.
+    // populated and a per-volume lock so a concurrent cold-start storm populates only once. The
+    // lock entry is dropped after a successful populate so this map only ever holds in-flight
+    // populates (see ensureCodeVolume) rather than growing across redeploys.
     private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.concurrent.ConcurrentHashMap<String, String> codeVolumeByFunction = new java.util.concurrent.ConcurrentHashMap<>();
 
     /**
      * Returns the name of a read-only Docker volume holding this function's {@code /var/task} code,
@@ -395,15 +403,19 @@ public class ContainerLauncher {
                     volName, fn.getFunctionName());
             populateCodeVolume(volName, fn, image);
             populatedCodeVolumes.add(volName);
+            // Bound codeVolumeLocks: drop the lock now that the volume is populated, so the map only
+            // ever holds in-flight populates rather than growing across redeploys. Safe under the
+            // lock: a late thread that computeIfAbsent's a fresh lock object will still hit the
+            // populatedCodeVolumes.contains check inside its synchronized block and return without
+            // re-populating.
+            codeVolumeLocks.remove(volName);
             LOG.infov("Populated code volume {0} in {1}ms; future cold starts mount it instead of copying",
                     volName, System.currentTimeMillis() - t0);
-            // Drop the previous code version's volume for this function so old code doesn't pile up.
-            String prev = codeVolumeByFunction.put(fn.getFunctionName(), volName);
-            if (prev != null && !prev.equals(volName)) {
-                populatedCodeVolumes.remove(prev);
-                lifecycleManager.removeVolume(prev);
-            }
         }
+        // We do NOT eagerly delete a function's previous code-version volume here: a concurrent
+        // in-flight launch may have already resolved that name and be about to mount it, so deleting
+        // it would give that container an empty /var/task. Stale volumes are labeled floci=true (see
+        // ContainerLifecycleManager.ensureVolume) and reclaimed by `docker volume prune --filter label=floci`.
         return volName;
     }
 
@@ -419,6 +431,9 @@ public class ContainerLauncher {
                 .withCmd(java.util.List.of("3600"))
                 .withNamedVolume(volName, TASK_DIR, false)
                 .build();
+        // Gate the heavy work (helper create + ~90MB tar copy) so a burst of first-time populates
+        // doesn't thrash the Docker daemon. Only populates are serialized — plain cold starts aren't.
+        acquirePopulatePermit(fn.getFunctionName());
         String helperId = null;
         try {
             helperId = lifecycleManager.create(helperSpec);
@@ -429,7 +444,44 @@ public class ContainerLauncher {
             if (helperId != null) {
                 try { lifecycleManager.stopAndRemove(helperId, null); } catch (Exception ignore) { /* best effort */ }
             }
+            POPULATE_SEMAPHORE.release();
         }
+    }
+
+    /**
+     * Total code size (bytes) at or above which a function's {@code /var/task} is served from a
+     * shared read-only volume rather than copied into every container. This is roughly the point
+     * where per-container small-file overlay copies get slow enough (many-file node_modules trees)
+     * that populating a volume once and mounting it read-only wins overall. Below it, the direct
+     * per-container copy is faster than the volume's populate-helper round-trip, so we keep it —
+     * which is what tiny handlers (e.g. WebSocket-route Lambdas) need to avoid cold-start latency.
+     * Non-final and package-private so tests can override it (restore it in a finally).
+     */
+    static long CODE_VOLUME_MIN_BYTES = 32L * 1024 * 1024;
+
+    /**
+     * Returns true iff the total size of files under {@code codeDir} meets or exceeds
+     * {@link #CODE_VOLUME_MIN_BYTES}. Walks the tree short-circuiting as soon as the running total
+     * crosses the threshold (so huge trees aren't fully summed). Any IO error returns false so the
+     * caller falls back to the direct per-container copy.
+     */
+    static boolean shouldUseCodeVolume(Path codeDir) {
+        final long threshold = CODE_VOLUME_MIN_BYTES;
+        final long[] total = {0L};
+        try (var stream = Files.walk(codeDir)) {
+            for (Path path : (Iterable<Path>) stream::iterator) {
+                if (Files.isRegularFile(path)) {
+                    total[0] += Files.size(path);
+                    if (total[0] >= threshold) {
+                        return true;
+                    }
+                }
+            }
+        } catch (IOException | RuntimeException e) {
+            LOG.debugv("Could not size code dir {0} ({1}); using direct copy", codeDir, e.getMessage());
+            return false;
+        }
+        return false;
     }
 
     /**
@@ -463,8 +515,9 @@ public class ContainerLauncher {
 
     private void copyDirToContainer(DockerClient dockerClient, String containerId,
                                     Path sourceDir, String remotePath, String functionName) {
-        // No per-copy gating here: launch() already holds a LAUNCH_SEMAPHORE permit for the whole
-        // cold start, so concurrent heavy copies are already capped at the launch level.
+        // No per-copy gating here: the heavy /var/task populate for large code already holds a
+        // POPULATE_SEMAPHORE permit; small-code direct copies and layer copies are light enough
+        // to run unthrottled.
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
              java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 

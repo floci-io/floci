@@ -2,10 +2,14 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.services.lambda.model.LambdaFunction;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.regex.Pattern;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -94,5 +98,36 @@ class ContainerLauncherVolumeNamingTest {
         newer.setLastModified(1700000009999L);
         assertNotEquals(nullName, ContainerLauncher.codeVolumeName(newer),
                 "a later lastModified must produce a different volume name");
+    }
+
+    @TempDir
+    Path tempDir;
+
+    @Test
+    void shouldUseCodeVolume_falseForSmallDir_trueWhenOverThreshold() throws Exception {
+        Path smallDir = Files.createDirectory(tempDir.resolve("small"));
+        Files.write(smallDir.resolve("a.txt"), new byte[1024]);   // 1 KiB
+
+        Path bigDir = Files.createDirectory(tempDir.resolve("big"));
+        Files.write(bigDir.resolve("a.bin"), new byte[8 * 1024]); // 8 KiB
+
+        long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            // Override the threshold small so we don't have to write huge files.
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024; // 4 KiB
+            assertFalse(ContainerLauncher.shouldUseCodeVolume(smallDir),
+                    "1 KiB dir is below the 4 KiB threshold");
+            assertTrue(ContainerLauncher.shouldUseCodeVolume(bigDir),
+                    "8 KiB dir exceeds the 4 KiB threshold");
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = original;
+        }
+    }
+
+    @Test
+    void shouldUseCodeVolume_falseWhenDirMissing() {
+        // IO errors (e.g. a non-existent dir) fall back to the direct copy.
+        assertFalse(ContainerLauncher.shouldUseCodeVolume(tempDir.resolve("does-not-exist")),
+                "a missing code dir should fall back to direct copy (false)");
     }
 }
