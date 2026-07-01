@@ -15,8 +15,8 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
-        <quarkus.platform.version>3.36.0</quarkus.platform.version>
-        <apicurio.version>2.6.9.Final</apicurio.version>
+        <quarkus.platform.version>3.37.0</quarkus.platform.version>
+        <apicurio.version>2.6.13.Final</apicurio.version>
     </properties>
 
     <dependencyManagement>
@@ -31,22 +31,22 @@
             <dependency>
                 <groupId>com.google.protobuf</groupId>
                 <artifactId>protobuf-java</artifactId>
-                <version>3.25.5</version>
+                <version>3.25.9</version>
             </dependency>
             <dependency>
                 <groupId>com.google.protobuf</groupId>
                 <artifactId>protobuf-java-util</artifactId>
-                <version>3.25.5</version>
+                <version>3.25.9</version>
             </dependency>
             <dependency>
                 <groupId>com.google.api.grpc</groupId>
                 <artifactId>proto-google-common-protos</artifactId>
-                <version>2.49.0</version>
+                <version>2.72.0</version>
             </dependency>
             <dependency>
                 <groupId>com.h2database</groupId>
                 <artifactId>h2-mvstore</artifactId>
-                <version>2.3.232</version>
+                <version>2.4.240</version>
             </dependency>
         </dependencies>
     </dependencyManagement>
@@ -113,7 +113,7 @@
         <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>
-            <version>4.3.0</version>
+            <version>4.3.1</version>
         </dependency>
 
 
@@ -196,7 +196,7 @@
         <dependency>
             <groupId>io.swagger.parser.v3</groupId>
             <artifactId>swagger-parser</artifactId>
-            <version>2.1.43</version>
+            <version>2.1.45</version>
         </dependency>
 
         <!-- Glue Schema Registry: Apicurio format utilities (parsing, canonicalization, compatibility) -->
@@ -264,7 +264,7 @@
         <dependency>
             <groupId>com.h2database</groupId>
             <artifactId>h2</artifactId>
-            <version>2.3.232</version>
+            <version>2.4.240</version>
             <scope>test</scope>
         </dependency>
         <!-- openCypher/Bolt client for the Neptune neo4j db-type integration test -->
