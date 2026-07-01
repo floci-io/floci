@@ -15,6 +15,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
+import java.time.Clock;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -41,7 +42,8 @@ class SesServiceSmtpTest {
                 new InMemoryStorage<String, AccountSuppressionAttributes>(),
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 smtpRelay,
-                new ObjectMapper());
+                new ObjectMapper(),
+                Clock.systemUTC());
     }
 
     @Test

@@ -37,6 +37,8 @@ import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
 import java.security.SecureRandom;
+import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
@@ -54,6 +56,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -66,6 +69,7 @@ public class SesService {
 
     private static final int MAX_BULK_DESTINATIONS = 50;
     private static final int MAX_RECIPIENTS_PER_DESTINATION = 50;
+    private static final Duration DKIM_LOOKUP_CACHE_TTL = Duration.ofSeconds(5);
 
     private static final SecureRandom BOUNDARY_RANDOM = new SecureRandom();
 
@@ -82,10 +86,13 @@ public class SesService {
     private final SesEventPublisher eventPublisher;
     private final String defaultAccountId;
     private final Route53Service route53Service;
+    private final Clock clock;
+    private final ConcurrentHashMap<String, DkimLookupCacheEntry> dkimLookupCache = new ConcurrentHashMap<>();
 
     @Inject
     public SesService(StorageFactory storageFactory, SmtpRelay smtpRelay, ObjectMapper objectMapper,
-                       SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service) {
+                       SesEventPublisher eventPublisher, EmulatorConfig config, Route53Service route53Service,
+                       Clock clock) {
         this.identityStore = storageFactory.create("ses", "ses-identities.json",
                 new TypeReference<Map<String, Identity>>() {});
         this.emailStore = storageFactory.create("ses", "ses-emails.json",
@@ -107,6 +114,7 @@ public class SesService {
         this.eventPublisher = eventPublisher;
         this.defaultAccountId = config.defaultAccountId();
         this.route53Service = route53Service;
+        this.clock = clock;
     }
 
     SesService(StorageBackend<String, Identity> identityStore,
@@ -118,7 +126,24 @@ public class SesService {
                StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
                StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
                SmtpRelay smtpRelay,
-               ObjectMapper objectMapper) {
+               ObjectMapper objectMapper,
+               Clock clock) {
+        this(identityStore, emailStore, accountSettingsStore, templateStore, configSetStore, suppressionStore,
+                accountSuppressionStore, dedicatedIpPoolStore, smtpRelay, objectMapper, null, clock);
+    }
+
+    SesService(StorageBackend<String, Identity> identityStore,
+               StorageBackend<String, SentEmail> emailStore,
+               StorageBackend<String, Boolean> accountSettingsStore,
+               StorageBackend<String, EmailTemplate> templateStore,
+               StorageBackend<String, ConfigurationSet> configSetStore,
+               StorageBackend<String, SuppressedDestination> suppressionStore,
+               StorageBackend<String, AccountSuppressionAttributes> accountSuppressionStore,
+               StorageBackend<String, DedicatedIpPool> dedicatedIpPoolStore,
+               SmtpRelay smtpRelay,
+               ObjectMapper objectMapper,
+               Route53Service route53Service,
+               Clock clock) {
         this.identityStore = identityStore;
         this.emailStore = emailStore;
         this.accountSettingsStore = accountSettingsStore;
@@ -131,7 +156,8 @@ public class SesService {
         this.objectMapper = objectMapper;
         this.eventPublisher = null;
         this.defaultAccountId = "000000000000";
-        this.route53Service = null;
+        this.route53Service = route53Service;
+        this.clock = clock;
     }
 
     public Identity verifyEmailIdentity(String emailAddress, String region) {
@@ -174,6 +200,7 @@ public class SesService {
         }
         String key = identityKey(region, identityValue);
         identityStore.delete(key);
+        invalidateDkimLookupCache(region, identityValue);
 
         String prefix = "identity::" + region + "::";
         List<String> keys = new ArrayList<>(identityStore.keys().stream()
@@ -571,13 +598,17 @@ public class SesService {
         if ("Domain".equals(identity.getIdentityType()) && hasDkimTokens(identity)) {
             changed |= normalizePendingDomainState(identity);
             if (!"Success".equals(identity.getVerificationStatus())
-                    && hasAllExpectedDkimRecords(identity)) {
+                    && hasAllExpectedDkimRecords(identity, region)) {
                 identity.setVerificationStatus("Success");
                 if (identity.isDkimEnabled()) {
                     identity.setDkimVerificationStatus("Success");
                 }
                 changed = true;
             }
+        }
+
+        if ("Success".equals(identity.getVerificationStatus())) {
+            invalidateDkimLookupCache(region, identity.getIdentity());
         }
 
         if (changed) {
@@ -606,16 +637,29 @@ public class SesService {
         return changed;
     }
 
-    private boolean hasAllExpectedDkimRecords(Identity identity) {
+    private boolean hasAllExpectedDkimRecords(Identity identity, String region) {
         if (route53Service == null) {
             return false;
         }
+        Instant now = Instant.now(clock);
+        String cacheKey = dkimLookupCacheKey(region, identity);
+        DkimLookupCacheEntry cached = dkimLookupCache.get(cacheKey);
+        if (cached != null) {
+            if (now.isBefore(cached.expiresAt())) {
+                return cached.present();
+            }
+            dkimLookupCache.remove(cacheKey, cached);
+        }
+
+        boolean present = true;
         for (String token : identity.getDkimTokens()) {
             if (!hasExpectedDkimRecord(identity.getIdentity(), token)) {
-                return false;
+                present = false;
+                break;
             }
         }
-        return true;
+        dkimLookupCache.put(cacheKey, new DkimLookupCacheEntry(present, now.plus(DKIM_LOOKUP_CACHE_TTL)));
+        return present;
     }
 
     private boolean hasExpectedDkimRecord(String domain, String token) {
@@ -654,6 +698,24 @@ public class SesService {
         }
         return normalized;
     }
+
+    private void invalidateDkimLookupCache(String region, String identityValue) {
+        if (identityValue == null || identityValue.isBlank()) {
+            return;
+        }
+        String cachePrefix = region + "::" + normalizeDnsName(identityValue) + "::";
+        dkimLookupCache.keySet().removeIf(key -> key.startsWith(cachePrefix));
+    }
+
+    private String dkimLookupCacheKey(String region, Identity identity) {
+        List<String> normalizedTokens = identity.getDkimTokens().stream()
+                .map(this::normalizeDnsName)
+                .sorted()
+                .toList();
+        return region + "::" + normalizeDnsName(identity.getIdentity()) + "::" + String.join(",", normalizedTokens);
+    }
+
+    private record DkimLookupCacheEntry(boolean present, Instant expiresAt) {}
 
     public void setFeedbackForwardingEnabled(String identityValue, boolean enabled, String region) {
         String key = identityKey(region, identityValue);

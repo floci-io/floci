@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.ses.model.SuppressedDestination;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.time.Clock;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -42,7 +43,8 @@ class SesServiceLegacyDkimTokensTest {
                 new InMemoryStorage<String, AccountSuppressionAttributes>(),
                 new InMemoryStorage<String, DedicatedIpPool>(),
                 mock(SmtpRelay.class),
-                new ObjectMapper());
+                new ObjectMapper(),
+                Clock.systemUTC());
     }
 
     @Test
