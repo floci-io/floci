@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.5.29] - 2026-06-30
+
+### Added
+
+- **stepfunctions:** add `aws-sdk` CloudFormation/EC2 and S3 `PutObject` service integrations ([#1556](https://github.com/floci-io/floci/pull/1556))
+- **appsync:** add the Phase 4 VTL engine for resolver mapping templates ([#1288](https://github.com/floci-io/floci/pull/1288))
+- **iam:** add the `AmazonRDSEnhancedMonitoringRole` managed policy ([#1559](https://github.com/floci-io/floci/pull/1559)); route assumed-role credentials to the target account ([#1549](https://github.com/floci-io/floci/pull/1549))
+- **cognito:** add overrides for client id and client secret ([#1486](https://github.com/floci-io/floci/pull/1486))
+- **core:** add state reset and nuke endpoints ([#1482](https://github.com/floci-io/floci/pull/1482))
+
+### Fixed
+
+- **cloudformation:** treat an already-missing ECS task definition, cluster, or service as delete-complete during stack deletion ([#1645](https://github.com/floci-io/floci/pull/1645))
+- **ecs:** honor task `portMappings` hostPort when launching containers ([#1610](https://github.com/floci-io/floci/pull/1610)); register persisted model records for native-image reflection ([#1606](https://github.com/floci-io/floci/pull/1606))
+- **ses:** make `FromEmailAddress` optional for v2 `SendEmail` ([#1561](https://github.com/floci-io/floci/pull/1561))
+- **elbv2:** publish resolvable local ALB DNS names ([#1492](https://github.com/floci-io/floci/pull/1492))
+- **transcribe:** persist vocabularies across restart ([#1608](https://github.com/floci-io/floci/pull/1608))
+- **ssm:** retain local service diagnostics on command failure ([#1529](https://github.com/floci-io/floci/pull/1529))
+- **storage:** flush persisted state before container teardown on shutdown ([#1607](https://github.com/floci-io/floci/pull/1607))
+
 ## [1.5.28] - 2026-06-26
 
 ### Added
@@ -1082,7 +1102,8 @@ Initial public release of Floci — a fast, free, open-source local AWS emulator
 
 ---
 
-[Unreleased]: https://github.com/floci-io/floci/compare/1.5.28...HEAD
+[Unreleased]: https://github.com/floci-io/floci/compare/1.5.29...HEAD
+[1.5.29]: https://github.com/floci-io/floci/compare/1.5.28...1.5.29
 [1.5.28]: https://github.com/floci-io/floci/compare/1.5.27...1.5.28
 [1.5.27]: https://github.com/floci-io/floci/compare/1.5.26...1.5.27
 [1.5.26]: https://github.com/floci-io/floci/compare/1.5.25...1.5.26

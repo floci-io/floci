@@ -3,8 +3,13 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.RequestContext;
+import io.github.hectorvent.floci.core.common.XmlParser;
+import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
+import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
@@ -21,16 +26,24 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ArcContainer;
+import io.quarkus.arc.ManagedContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
+import jakarta.ws.rs.core.MultivaluedHashMap;
+import jakarta.ws.rs.core.MultivaluedMap;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -52,8 +65,10 @@ public class AslExecutor {
     private final LambdaFunctionStore functionStore;
     private final DynamoDbService dynamoDbService;
     private final DynamoDbJsonHandler dynamoDbJsonHandler;
-    private final S3Service s3Service;
     private final SqsJsonHandler sqsJsonHandler;
+    private final CloudFormationQueryHandler cloudFormationHandler;
+    private final Ec2Service ec2Service;
+    private final S3Service s3Service;
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
@@ -66,16 +81,18 @@ public class AslExecutor {
     @Inject
     public AslExecutor(LambdaExecutorService lambdaExecutor, LambdaFunctionStore functionStore,
                        DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
-                       S3Service s3Service,
-                       SqsJsonHandler sqsJsonHandler,
+                       SqsJsonHandler sqsJsonHandler, CloudFormationQueryHandler cloudFormationHandler,
+                       Ec2Service ec2Service, S3Service s3Service,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService) {
         this.lambdaExecutor = lambdaExecutor;
         this.functionStore = functionStore;
         this.dynamoDbService = dynamoDbService;
         this.dynamoDbJsonHandler = dynamoDbJsonHandler;
-        this.s3Service = s3Service;
         this.sqsJsonHandler = sqsJsonHandler;
+        this.cloudFormationHandler = cloudFormationHandler;
+        this.ec2Service = ec2Service;
+        this.s3Service = s3Service;
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
@@ -86,7 +103,7 @@ public class AslExecutor {
      */
     public void executeAsync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                              BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
-        executor.submit(() -> doExecute(sm, exec, history, onUpdate));
+        executor.submit(() -> runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
     }
 
     /**
@@ -95,7 +112,8 @@ public class AslExecutor {
     public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
         try {
-            Future<?> f = executor.submit(() -> doExecute(sm, exec, history, onUpdate));
+            Future<?> f = executor.submit(() ->
+                    runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
             f.get(300, TimeUnit.SECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
             exec.setStatus("TIMED_OUT");
@@ -103,6 +121,68 @@ public class AslExecutor {
             onUpdate.accept(exec, history);
         } catch (Exception e) {
             LOG.warnv("Sync execution wait failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
+        }
+    }
+
+    /**
+     * Runs {@code body} on this worker thread under a CDI request scope whose account is
+     * the one encoded in the state machine ARN, so service integrations (Lambda, DynamoDB,
+     * SQS, ECS, …) and the execution-store writes resolve to the execution's account rather
+     * than the configured default. Without this, an execution started under account B would
+     * have its integrations run against account A's resources.
+     *
+     * <p>Mirrors {@code CurEmissionScheduler#runUnderAccount}. Falls back to running the body
+     * directly when Arc is not running (e.g. plain unit tests that construct AslExecutor
+     * without a CDI container).
+     */
+    private void runUnderExecutionAccount(StateMachine sm, Runnable body) {
+        try {
+            callUnderExecutionAccount(sm, () -> {
+                body.run();
+                return null;
+            });
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Exception e) {
+            // A Runnable cannot throw a checked exception, so this is unreachable in practice;
+            // wrap defensively to preserve the void signature.
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Callable variant of {@link #runUnderExecutionAccount} that returns the body's result. Used to
+     * run Parallel branches on their own worker threads under the execution's account: the request
+     * scope (and thus {@link RequestContext}) is thread-bound, so a branch submitted to the executor
+     * pool would otherwise run with no active scope and resolve its Task integrations against the
+     * default account instead of the execution's. Each branch thread therefore activates its own
+     * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
+     */
+    private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
+        String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
+        ArcContainer container = Arc.container();
+        if (accountId == null || accountId.isBlank() || container == null || !container.isRunning()) {
+            return body.call();
+        }
+        ManagedContext requestContext = container.requestContext();
+        boolean alreadyActive = requestContext.isActive();
+        if (!alreadyActive) {
+            requestContext.activate();
+        }
+        // Execution runs on a background worker that normally has no active scope. If it did run
+        // inside an already-active scope, restore its previous account afterwards so we don't leave
+        // the execution's account behind on a reused thread.
+        RequestContext ctx = container.instance(RequestContext.class).get();
+        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
+        try {
+            ctx.setAccountId(accountId);
+            return body.call();
+        } finally {
+            if (!alreadyActive) {
+                requestContext.terminate();
+            } else {
+                ctx.setAccountId(previousAccountId);
+            }
         }
     }
 
@@ -364,6 +444,24 @@ public class AslExecutor {
             return invokeAwsSdkSqsSendMessage(input, region);
         }
 
+        // AWS SDK service integration: CloudFormation (query protocol → JSON)
+        if (resource.startsWith("arn:aws:states:::aws-sdk:cloudformation:")) {
+            String action = resource.substring("arn:aws:states:::aws-sdk:cloudformation:".length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeAwsSdkCloudFormation(action, input, region);
+        }
+
+        // AWS SDK service integration: EC2 DescribeRegions
+        if (resource.equals("arn:aws:states:::aws-sdk:ec2:describeRegions")) {
+            return invokeAwsSdkEc2DescribeRegions();
+        }
+
+        // S3 PutObject — optimized and aws-sdk integrations
+        if (resource.equals("arn:aws:states:::s3:putObject")
+                || resource.equals("arn:aws:states:::aws-sdk:s3:putObject")) {
+            return invokeS3PutObject(input);
+        }
+
         // Nested state machine integration
         if (resource.startsWith("arn:aws:states:::states:startExecution")) {
             String mode = resource.substring("arn:aws:states:::states:startExecution".length());
@@ -384,6 +482,108 @@ public class AslExecutor {
 
         throw new FailStateException("States.TaskFailed",
                 "Unsupported resource: " + resource);
+    }
+
+    /**
+     * AWS SDK integration for CloudFormation (a Query-protocol service): flattens the task input to
+     * Query parameters, dispatches to the CloudFormation handler, and converts the XML response back
+     * to the JSON shape the {@code aws-sdk:*} integration returns.
+     */
+    private JsonNode invokeAwsSdkCloudFormation(String camelAction, JsonNode input, String region) {
+        String pascalAction = capitalizeFirst(camelAction);
+        MultivaluedMap<String, String> params = new MultivaluedHashMap<>();
+        flattenQueryParams(input, "", params);
+
+        jakarta.ws.rs.core.Response response;
+        try {
+            response = cloudFormationHandler.handle(pascalAction, params, region);
+        } catch (AwsException e) {
+            throw new FailStateException("CloudFormation." + e.getErrorCode(), e.getMessage());
+        } catch (Exception e) {
+            throw new FailStateException("CloudFormation.InternalFailure",
+                    e.getMessage() != null ? e.getMessage() : "CloudFormation error");
+        }
+
+        String xml = response.getEntity() == null ? "" : response.getEntity().toString();
+        if (response.getStatus() >= 400) {
+            String code = XmlParser.extractFirst(xml, "Code", "ServiceException");
+            String message = XmlParser.extractFirst(xml, "Message", "CloudFormation request failed");
+            throw new FailStateException("CloudFormation." + code, message);
+        }
+        try {
+            return QueryXmlToJson.convert(xml, pascalAction + "Result", objectMapper);
+        } catch (Exception e) {
+            throw new FailStateException("CloudFormation.InternalFailure",
+                    "Failed to parse CloudFormation response: " + e.getMessage());
+        }
+    }
+
+    private JsonNode invokeAwsSdkEc2DescribeRegions() {
+        ObjectNode result = objectMapper.createObjectNode();
+        ArrayNode regions = objectMapper.createArrayNode();
+        for (String name : ec2Service.describeRegions()) {
+            ObjectNode region = objectMapper.createObjectNode();
+            region.put("RegionName", name);
+            region.put("Endpoint", "ec2." + name + ".amazonaws.com");
+            region.put("OptInStatus", "opt-in-not-required");
+            regions.add(region);
+        }
+        result.set("Regions", regions);
+        return result;
+    }
+
+    private JsonNode invokeS3PutObject(JsonNode input) {
+        String bucket = input.path("Bucket").asText(null);
+        String key = input.path("Key").asText(null);
+        if (bucket == null || key == null) {
+            throw new FailStateException("S3.InvalidRequest", "Bucket and Key are required");
+        }
+        JsonNode body = input.path("Body");
+        byte[] data;
+        if (body.isMissingNode() || body.isNull()) {
+            data = new byte[0];
+        } else if (body.isValueNode()) {
+            data = body.asText().getBytes(StandardCharsets.UTF_8);
+        } else {
+            data = body.toString().getBytes(StandardCharsets.UTF_8);
+        }
+        try {
+            var stored = s3Service.putObject(bucket, key, data, "application/octet-stream", new HashMap<>());
+            ObjectNode result = objectMapper.createObjectNode();
+            if (stored != null && stored.getETag() != null) {
+                result.put("ETag", stored.getETag());
+            }
+            return result;
+        } catch (AwsException e) {
+            throw new FailStateException("S3." + e.getErrorCode(), e.getMessage());
+        }
+    }
+
+    /** Flattens a JSON object into AWS Query parameters (lists → {@code key.member.N}). */
+    private void flattenQueryParams(JsonNode node, String prefix, MultivaluedMap<String, String> out) {
+        if (node == null || node.isNull() || node.isMissingNode()) {
+            return;
+        }
+        if (node.isObject()) {
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> entry = fields.next();
+                String key = prefix.isEmpty() ? entry.getKey() : prefix + "." + entry.getKey();
+                flattenQueryParams(entry.getValue(), key, out);
+            }
+        } else if (node.isArray()) {
+            int i = 1;
+            for (JsonNode item : node) {
+                flattenQueryParams(item, prefix + ".member." + i, out);
+                i++;
+            }
+        } else {
+            out.add(prefix, node.asText());
+        }
+    }
+
+    private static String capitalizeFirst(String s) {
+        return s.isEmpty() ? s : Character.toUpperCase(s.charAt(0)) + s.substring(1);
     }
 
     private JsonNode invokeNestedStateMachine(String mode, JsonNode input, String region) throws Exception {
@@ -833,7 +1033,11 @@ public class AslExecutor {
             JsonNode branchStates = branch.path("States");
             JsonNode capturedInput = input;
 
-            futures.add(executor.submit(() -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context)));
+            // Run each branch on its own worker thread under the execution's account: the request
+            // scope is thread-bound, so without this a branch's Task integrations would resolve to
+            // the default account rather than the execution's.
+            futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
+                    () -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context))));
         }
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);

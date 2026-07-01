@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.elbv2;
 
 import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
@@ -24,6 +25,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,6 +40,7 @@ import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
 class ElbV2ServiceTest {
@@ -118,6 +121,19 @@ class ElbV2ServiceTest {
         verify(dataPlane).restartListener(any(Listener.class), eq(REGION), anyList());
         verify(dataPlane, never()).stopListener(anyString());
         verify(dataPlane, never()).startListener(any(Listener.class), anyString(), anyList());
+    }
+
+    @Test
+    void createLoadBalancerUsesConfiguredHostnameForDnsSuffix() {
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        when(config.hostname()).thenReturn(Optional.of("floci"));
+        service.config = config;
+
+        String dnsName = service.createLoadBalancer(
+                REGION, "sample-lb", "internal", "application", "ipv4",
+                ALB_SUBNETS, List.of("sg-a"), Map.of()).getDnsName();
+
+        assertTrue(dnsName.endsWith(".elb.floci"));
     }
 
     @Test

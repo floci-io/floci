@@ -105,6 +105,8 @@ floci:
         flush-interval-ms: 5000
       config:
         flush-interval-ms: 5000
+      transcribe:
+        flush-interval-ms: 5000
       codedeploy:
         flush-interval-ms: 5000
       rds:

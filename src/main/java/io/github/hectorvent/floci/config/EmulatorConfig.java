@@ -193,6 +193,7 @@ public interface EmulatorConfig {
         CodeBuildStorageConfig codebuild();
         ConfigStorageConfig config();
         CodeDeployStorageConfig codedeploy();
+        TranscribeStorageConfig transcribe();
     }
 
     interface SsmStorageConfig {
@@ -360,6 +361,13 @@ public interface EmulatorConfig {
     }
 
     interface ConfigStorageConfig {
+        Optional<String> mode();
+
+        @WithDefault("5000")
+        long flushIntervalMs();
+    }
+
+    interface TranscribeStorageConfig {
         Optional<String> mode();
 
         @WithDefault("5000")
