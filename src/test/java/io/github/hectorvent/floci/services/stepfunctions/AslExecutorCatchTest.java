@@ -74,11 +74,10 @@ class AslExecutorCatchTest {
                 functionStore,
                 mock(DynamoDbService.class),
                 mock(DynamoDbJsonHandler.class),
-                mock(S3Service.class),
                 mock(SqsJsonHandler.class),
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
                 mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
-                mock(io.github.hectorvent.floci.services.s3.S3Service.class),
+                mock(S3Service.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
                 mock(Instance.class));
