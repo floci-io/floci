@@ -366,6 +366,52 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithS3JsonItemReader_nonArrayJsonFailsWithItemReaderError() throws Exception {
+        createBucket("map-inputs-object");
+        putObject("map-inputs-object", "workers.json", """
+                {"workerId":"w1"}
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-object",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-non-array-json-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_missingKeyFailsWithItemReaderError() throws Exception {
         createBucket("map-inputs-missing-key");
 

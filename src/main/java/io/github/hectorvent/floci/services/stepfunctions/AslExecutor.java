@@ -959,9 +959,15 @@ public class AslExecutor {
 
         try {
             S3Object object = s3Service.getObject(bucket, key);
-            return objectMapper.readTree(object.getData());
+            JsonNode items = objectMapper.readTree(object.getData());
+            if (!items.isArray()) {
+                throw new FailStateException("States.ItemReaderFailed", "ItemReader JSON input must be an array");
+            }
+            return items;
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
+        } catch (FailStateException e) {
+            throw e;
         } catch (Exception e) {
             throw new FailStateException("States.ItemReaderFailed",
                     e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
