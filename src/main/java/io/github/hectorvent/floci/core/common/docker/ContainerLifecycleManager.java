@@ -293,8 +293,13 @@ public class ContainerLifecycleManager {
         } catch (NotFoundException e) {
             return false;
         } catch (Exception e) {
-            LOG.warnv("Liveness check failed for container {0}: {1}", containerId, e.getMessage());
-            return true;
+            // Treat an inspect failure/timeout as NOT running. Under Docker-daemon overload,
+            // returning true here caused the warm pool to "reuse" dead/hung containers, so the
+            // invocation blocked until the function timeout (~20-30s) every time. A false
+            // negative merely triggers a clean cold-start, which is far cheaper than a hang.
+            LOG.warnv("Liveness check failed for container {0}; treating as not running: {1}",
+                    containerId, e.getMessage());
+            return false;
         }
     }
 

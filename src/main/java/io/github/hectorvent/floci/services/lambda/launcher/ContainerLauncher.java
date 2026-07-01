@@ -207,6 +207,15 @@ public class ContainerLauncher {
 
         if (fn.isHotReload()) {
             specBuilder.withBind(fn.getHotReloadHostPath(), TASK_DIR);
+        } else if (fn.getCodeLocalPath() != null) {
+            // Mount /var/task from a read-only volume that is populated ONCE per code version,
+            // instead of tar-copying its code (e.g. ~34k node_modules files) into every container.
+            // That copy cost ~95s per cold start on Docker Desktop (small-file overlay I/O) and,
+            // run many-at-once, saturated the daemon so even `docker create` ballooned to ~80s.
+            // A pre-populated volume mounts in ~0.2s and is shared read-only by all containers of
+            // the function — matching AWS, where /var/task is read-only.
+            String codeVolume = ensureCodeVolume(fn, image);
+            specBuilder.withNamedVolume(codeVolume, TASK_DIR, true);
         }
 
         // For Image package type use ImageConfig.Command/EntryPoint/WorkingDirectory if set, otherwise fall back to Handler (Zip-style)
@@ -237,7 +246,12 @@ public class ContainerLauncher {
 
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
-        String containerId = lifecycleManager.create(spec);
+        String containerId = null;
+        // Gate the whole cold start so concurrent launches don't thrash the Docker daemon
+        // (which left half-built "Created" containers piling up). Released in finally below.
+        acquireLaunchPermit(fn.getFunctionName());
+        try {
+        containerId = lifecycleManager.create(spec);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
 
         // Copy code into container via Docker API tar stream (works inside Docker too).
@@ -246,10 +260,11 @@ public class ContainerLauncher {
         if (!fn.isHotReload() && fn.getCodeLocalPath() != null) {
             Path codePath = Path.of(fn.getCodeLocalPath());
 
-            // 1. Always copy all code to /var/task (TASK_DIR)
-            copyDirToContainer(dockerClient, containerId, codePath, TASK_DIR, fn.getFunctionName());
+            // Code at /var/task is supplied by the read-only named volume mounted on the spec above
+            // (populated once per code version) — no per-container copy. Only the small artifacts
+            // that live OUTSIDE /var/task are still copied per container below.
 
-            // 2. For provided runtimes, also copy the 'bootstrap' file to /var/runtime (RUNTIME_DIR)
+            // For provided runtimes, also copy the 'bootstrap' file to /var/runtime (RUNTIME_DIR)
             if (isProvidedRuntime(fn.getRuntime())) {
                 Path bootstrapPath = codePath.resolve("bootstrap");
                 if (Files.exists(bootstrapPath)) {
@@ -281,6 +296,20 @@ public class ContainerLauncher {
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
+        } catch (RuntimeException e) {
+            // Launch failed (e.g. a code/layer tar copy failed under Docker load). Reap the
+            // half-built container and free the runtime-api port so neither leaks — leaked
+            // "Created" containers were bogging the daemon and starving reuse.
+            LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
+                    fn.getFunctionName(), e.getMessage());
+            if (containerId != null) {
+                try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
+            }
+            try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
+            throw e;
+        } finally {
+            LAUNCH_SEMAPHORE.release();
+        }
 
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
@@ -319,10 +348,125 @@ public class ContainerLauncher {
         return lifecycleManager.isContainerRunning(handle.getContainerId());
     }
 
+    // Cap concurrent cold starts. Each cold start creates a container and streams ~90MB of
+    // node_modules into it; running many at once (e.g. a UI page-load firing 6-8 parallel API
+    // calls against a cold pool) overwhelmed the Docker daemon, so copies hung/failed and left
+    // half-built "Created" containers that were never started, never reused, and never reaped.
+    // Gating the WHOLE create->copy->start (not just the copy) keeps the daemon healthy so every
+    // launch completes and the container actually reaches the warm pool.
+    private static final java.util.concurrent.Semaphore LAUNCH_SEMAPHORE =
+            new java.util.concurrent.Semaphore(Math.max(2, Runtime.getRuntime().availableProcessors() / 2));
+
+    private static void acquireLaunchPermit(String functionName) {
+        try {
+            LAUNCH_SEMAPHORE.acquire();
+        } catch (InterruptedException ie) {
+            Thread.currentThread().interrupt();
+            throw new RuntimeException("Interrupted while waiting to launch container for " + functionName, ie);
+        }
+    }
+
+    // Per-function-version code volumes: populated once, then mounted read-only into every
+    // container so cold starts skip the ~95s node_modules copy. Tracks which volumes are already
+    // populated, a per-volume lock so a concurrent cold-start storm populates only once, and the
+    // current volume per function so a redeploy (new code version) can drop the stale one.
+    private final java.util.Set<String> populatedCodeVolumes = java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private final java.util.concurrent.ConcurrentHashMap<String, Object> codeVolumeLocks = new java.util.concurrent.ConcurrentHashMap<>();
+    private final java.util.concurrent.ConcurrentHashMap<String, String> codeVolumeByFunction = new java.util.concurrent.ConcurrentHashMap<>();
+
+    /**
+     * Returns the name of a read-only Docker volume holding this function's {@code /var/task} code,
+     * populating it once (per code version) on first use. Populating streams the code into a
+     * throwaway helper container that has the volume mounted read-write; every real container then
+     * just mounts the volume read-only, turning a ~95s per-container copy into a ~0.2s mount.
+     */
+    private String ensureCodeVolume(LambdaFunction fn, String image) {
+        String volName = codeVolumeName(fn);
+        if (populatedCodeVolumes.contains(volName)) {
+            return volName;
+        }
+        Object lock = codeVolumeLocks.computeIfAbsent(volName, k -> new Object());
+        synchronized (lock) {
+            if (populatedCodeVolumes.contains(volName)) {
+                return volName;
+            }
+            long t0 = System.currentTimeMillis();
+            LOG.infov("Populating code volume {0} for function {1} (one-time per code version)",
+                    volName, fn.getFunctionName());
+            populateCodeVolume(volName, fn, image);
+            populatedCodeVolumes.add(volName);
+            LOG.infov("Populated code volume {0} in {1}ms; future cold starts mount it instead of copying",
+                    volName, System.currentTimeMillis() - t0);
+            // Drop the previous code version's volume for this function so old code doesn't pile up.
+            String prev = codeVolumeByFunction.put(fn.getFunctionName(), volName);
+            if (prev != null && !prev.equals(volName)) {
+                populatedCodeVolumes.remove(prev);
+                lifecycleManager.removeVolume(prev);
+            }
+        }
+        return volName;
+    }
+
+    private void populateCodeVolume(String volName, LambdaFunction fn, String image) {
+        lifecycleManager.ensureVolume(volName);
+        String shortId = java.util.UUID.randomUUID().toString().replace("-", "").substring(0, 8);
+        // A minimal helper container (sleep) with the volume mounted read-write at /var/task; we
+        // tar-copy the code into it, then discard it — the data persists in the volume.
+        ContainerSpec helperSpec = containerBuilder.newContainer(image)
+                .withName("floci-codevol-" + fn.getFunctionName() + "-" + shortId)
+                .withEnv(java.util.List.of())
+                .withEntrypoint(java.util.List.of("sleep"))
+                .withCmd(java.util.List.of("3600"))
+                .withNamedVolume(volName, TASK_DIR, false)
+                .build();
+        String helperId = null;
+        try {
+            helperId = lifecycleManager.create(helperSpec);
+            lifecycleManager.startCreated(helperId, helperSpec);
+            copyDirToContainer(lifecycleManager.getDockerClient(), helperId,
+                    Path.of(fn.getCodeLocalPath()), TASK_DIR, fn.getFunctionName());
+        } finally {
+            if (helperId != null) {
+                try { lifecycleManager.stopAndRemove(helperId, null); } catch (Exception ignore) { /* best effort */ }
+            }
+        }
+    }
+
+    /**
+     * Docker-volume-safe name keyed by function + code version, so a redeploy yields a new volume.
+     * Prefers the code SHA-256; falls back to last-modified when the SHA is unavailable.
+     */
+    static String codeVolumeName(LambdaFunction fn) {
+        String key = fn.getCodeSha256();
+        if (key == null || key.isBlank()) {
+            key = Long.toString(fn.getLastModified());
+        }
+        String h = key.replaceAll("[^a-zA-Z0-9]", "");
+        if (h.length() > 20) {
+            h = h.substring(0, 20);
+        }
+        if (h.isEmpty()) {
+            h = "0";
+        }
+        String fname = fn.getFunctionName().replaceAll("[^a-zA-Z0-9_.-]", "-");
+        return "floci-code-" + fname + "-" + h;
+    }
+
+    /**
+     * Buffer for the tar-streaming pipe. The default {@link java.io.PipedInputStream} buffer is
+     * only 1KB, which forces a writer/reader thread hand-off (wait/notify) every 1KB. Streaming a
+     * ~90MB node_modules through that ran at ~0.5MB/s (≈3 min per cold start) — pure synchronization
+     * thrash, not I/O. A large buffer lets the tar writer stream ahead so throughput is bound by the
+     * Docker daemon, not the pipe.
+     */
+    private static final int TAR_PIPE_BUFFER_BYTES = 16 * 1024 * 1024;
+
     private void copyDirToContainer(DockerClient dockerClient, String containerId,
                                     Path sourceDir, String remotePath, String functionName) {
+        // No per-copy gating here: launch() already holds a LAUNCH_SEMAPHORE permit for the whole
+        // cold start, so concurrent heavy copies are already capped at the launch level.
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos)) {
+             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
             new Thread(() -> {
                 try (pos) {
@@ -338,7 +482,9 @@ public class ContainerLauncher {
                     .exec();
             LOG.debugv("Copied directory {0} into container {1} at {2}", sourceDir, containerId, remotePath);
         } catch (Exception e) {
-            LOG.warnv("Failed to copy directory {0} into container {1}: {2}", sourceDir, containerId, e.getMessage());
+            // Fail loudly so launch() cleans up the half-built container instead of leaking it.
+            throw new RuntimeException("Failed to copy directory " + sourceDir + " into container "
+                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
         }
     }
 
@@ -368,7 +514,8 @@ public class ContainerLauncher {
                     .exec();
             LOG.debugv("Copied file {0} as {1} into container {2} at {3}", sourceFile, entryName, containerId, remotePath);
         } catch (Exception e) {
-            LOG.warnv("Failed to copy file {0} into container {1}: {2}", sourceFile, containerId, e.getMessage());
+            throw new RuntimeException("Failed to copy file " + sourceFile + " into container "
+                    + containerId + " for function " + functionName + ": " + e.getMessage(), e);
         }
     }
 

@@ -14,6 +14,8 @@ import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServer;
 import io.github.hectorvent.floci.services.lambda.runtime.RuntimeApiServerFactory;
 import com.github.dockerjava.api.DockerClient;
 import com.github.dockerjava.api.command.CopyArchiveToContainerCmd;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -30,6 +32,7 @@ import java.util.Map;
 import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -120,6 +123,40 @@ class ContainerLauncherTest {
         });
     }
 
+    /**
+     * Captures every {@link ContainerSpec} passed to {@code lifecycleManager.create(...)} and
+     * returns the REAL Lambda container's spec.
+     *
+     * <p>Code is now served from a read-only named volume that is populated once per code version.
+     * Populating spins up a throwaway helper container (also via {@code create}), so on a
+     * first-populate launch {@code create} is called twice: the helper first, then the real
+     * container. The real container is the one that mounts {@code /var/task} read-only from the
+     * volume, so we identify it by that mount rather than by call order.
+     */
+    private ContainerSpec captureRealContainerSpec() {
+        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
+        verify(lifecycleManager, atLeastOnce()).create(specCaptor.capture());
+        List<ContainerSpec> specs = specCaptor.getAllValues();
+        // The real container mounts /var/task read-only; the helper mounts it read-write.
+        return specs.stream()
+                .filter(s -> s.mounts() != null && s.mounts().stream()
+                        .anyMatch(m -> "/var/task".equals(m.getTarget()) && Boolean.TRUE.equals(m.getReadOnly())))
+                .reduce((first, second) -> second)   // last match, defensively
+                // Fall back to the last create() (the real container) for functions with no code volume.
+                .orElseGet(() -> specs.get(specs.size() - 1));
+    }
+
+    /** Returns the read-only {@code /var/task} volume mount on the spec, or null if absent. */
+    private static Mount varTaskVolumeMount(ContainerSpec spec) {
+        if (spec.mounts() == null) {
+            return null;
+        }
+        return spec.mounts().stream()
+                .filter(m -> m.getType() == MountType.VOLUME && "/var/task".equals(m.getTarget()))
+                .findFirst()
+                .orElse(null);
+    }
+
     @Test
     void launchFunction_createsWithoutBindMounts() throws Exception {
         Path codePath = Files.createDirectory(tempDir.resolve("code"));
@@ -132,11 +169,14 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        ContainerSpec spec = specCaptor.getValue();
+        ContainerSpec spec = captureRealContainerSpec();
+        // Code is no longer bind-mounted; the real container still has NO binds...
         assertTrue(spec.binds().isEmpty(), "Function should NOT have bind mounts");
+        // ...but it DOES mount /var/task read-only from the code volume.
+        Mount codeMount = varTaskVolumeMount(spec);
+        assertNotNull(codeMount, "/var/task should be a named-volume mount");
+        assertEquals(MountType.VOLUME, codeMount.getType(), "/var/task should be a volume mount");
+        assertTrue(Boolean.TRUE.equals(codeMount.getReadOnly()), "/var/task volume should be read-only");
     }
 
     @Test
@@ -151,12 +191,24 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        // Verify ordering: create → getDockerClient → Docker copy (to /var/task) → startCreated
+        // The code volume is populated by a helper container BEFORE the real container is created:
+        // create(helper) -> start(helper) -> copy code to /var/task (helper) -> stopAndRemove(helper)
+        // -> create(real) -> start(real). No per-container /var/task copy on the real container.
         InOrder inOrder = inOrder(lifecycleManager, dockerClient);
+        // Helper container: created, started, code tar-copied to /var/task, then discarded.
         inOrder.verify(lifecycleManager).create(any());
-        inOrder.verify(lifecycleManager).getDockerClient();
-        inOrder.verify(dockerClient).copyArchiveToContainerCmd("container-123");
         inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
+        inOrder.verify(dockerClient).copyArchiveToContainerCmd("container-123");
+        inOrder.verify(lifecycleManager).stopAndRemove(eq("container-123"), any());
+        // Real container: created, then started (no /var/task copy — it mounts the volume).
+        inOrder.verify(lifecycleManager).create(any());
+        inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
+
+        // The only tar-copy in this launch is the one-time /var/task populate into the helper.
+        assertTrue(capturedRemotePaths.contains("/var/task"),
+                "code should be tar-copied to /var/task while populating the code volume");
+        assertEquals(1, capturedRemotePaths.stream().filter("/var/task"::equals).count(),
+                "/var/task should be copied exactly once (the one-time volume populate)");
 
         // createAndStart must NOT be called — Lambda uses the split path
         verify(lifecycleManager, never()).createAndStart(any());
@@ -174,10 +226,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        List<String> env = specCaptor.getValue().env();
+        List<String> env = captureRealContainerSpec().env();
         assertTrue(env.stream().anyMatch(e -> e.startsWith("AWS_ACCESS_KEY_ID=")),
                 "AWS_ACCESS_KEY_ID should be injected when awsConfigPath is absent");
         assertTrue(env.stream().anyMatch(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")),
@@ -201,10 +250,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        List<String> env = specCaptor.getValue().env();
+        List<String> env = captureRealContainerSpec().env();
         String accessKey = env.stream().filter(e -> e.startsWith("AWS_ACCESS_KEY_ID=")).findFirst().orElse("");
         String secretKey = env.stream().filter(e -> e.startsWith("AWS_SECRET_ACCESS_KEY=")).findFirst().orElse("");
         String sessionToken = env.stream().filter(e -> e.startsWith("AWS_SESSION_TOKEN=")).findFirst().orElse("");
@@ -232,10 +278,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        List<String> env = specCaptor.getValue().env();
+        List<String> env = captureRealContainerSpec().env();
         assertTrue(env.contains("AWS_DEFAULT_REGION=eu-central-1"));
         assertTrue(env.contains("AWS_REGION=eu-central-1"));
     }
@@ -253,10 +296,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        List<String> env = specCaptor.getValue().env();
+        List<String> env = captureRealContainerSpec().env();
         assertTrue(env.contains("AWS_DEFAULT_REGION=eu-west-2"));
         assertTrue(env.contains("AWS_REGION=eu-west-2"));
         verify(logStreamer).attach(
@@ -278,10 +318,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        List<String> env = specCaptor.getValue().env();
+        List<String> env = captureRealContainerSpec().env();
         // Docker honours the last occurrence of a duplicate Env entry, so user
         // overrides must appear after the Floci defaults.
         int defaultKeyIdx = -1;
@@ -322,12 +359,11 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
+        ContainerSpec spec = captureRealContainerSpec();
         verify(ecrRegistryManager).ensureStarted();
         verify(ecrRegistryManager).getRepositoryUri("123456789012", "us-east-1", "backend-user:1");
         assertEquals("123456789012.dkr.ecr.us-east-1.localhost:5100/backend-user:1",
-                specCaptor.getValue().image());
+                spec.image());
     }
 
     @Test
@@ -342,12 +378,11 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
+        ContainerSpec spec = captureRealContainerSpec();
         verify(ecrRegistryManager).ensureStarted();
         verify(ecrRegistryManager).getRepositoryUri("123456789012", "us-east-1", "backend-user:1");
         assertEquals("localhost:5100/123456789012/us-east-1/backend-user:1",
-                specCaptor.getValue().image());
+                spec.image());
     }
 
     @Test
@@ -363,20 +398,30 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        // The critical invariant: create must happen before any Docker copy,
-        // and start must happen after. This is the exact regression from #466.
+        // The critical invariant preserved from #466: the REAL container must be created
+        // before its bootstrap is copied, and started only after. The /var/task code copy now
+        // happens once during the volume populate (into a helper) rather than per container.
+        //
+        // Ordering:
+        //   helper: create -> start -> copy /var/task -> stopAndRemove
+        //   real:   create -> copy bootstrap to /var/runtime -> start
         InOrder inOrder = inOrder(lifecycleManager, dockerClient);
+        // Helper populate: code copied to /var/task, then helper discarded.
         inOrder.verify(lifecycleManager).create(any());
-        inOrder.verify(lifecycleManager).getDockerClient();
-        // Two copies: code to /var/task + bootstrap to /var/runtime
-        inOrder.verify(dockerClient, times(2)).copyArchiveToContainerCmd("container-123");
+        inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
+        inOrder.verify(dockerClient).copyArchiveToContainerCmd("container-123");
+        inOrder.verify(lifecycleManager).stopAndRemove(eq("container-123"), any());
+        // Real container: created, bootstrap copied to /var/runtime, then started.
+        inOrder.verify(lifecycleManager).create(any());
+        inOrder.verify(dockerClient).copyArchiveToContainerCmd("container-123");
         inOrder.verify(lifecycleManager).startCreated(eq("container-123"), any());
 
-        // Verify both /var/task and /var/runtime were targeted
+        // /var/task is populated once (into the helper); bootstrap is copied to /var/runtime
+        // on the real container.
         assertTrue(capturedRemotePaths.contains("/var/task"),
-                "code should be copied to /var/task");
+                "code should be tar-copied to /var/task while populating the code volume");
         assertTrue(capturedRemotePaths.contains("/var/runtime"),
-                "bootstrap should be copied to /var/runtime");
+                "bootstrap should be copied to /var/runtime on the real container");
 
         verify(lifecycleManager, never()).createAndStart(any());
     }
@@ -396,10 +441,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        ContainerSpec spec = specCaptor.getValue();
+        ContainerSpec spec = captureRealContainerSpec();
 
         // Should bind-mount to /opt/aws-config (read-only)
         assertTrue(spec.binds().stream()
@@ -436,10 +478,7 @@ class ContainerLauncherTest {
 
         launcher.launch(fn);
 
-        ArgumentCaptor<ContainerSpec> specCaptor = ArgumentCaptor.forClass(ContainerSpec.class);
-        verify(lifecycleManager).create(specCaptor.capture());
-
-        assertTrue(specCaptor.getValue().binds().stream()
+        assertTrue(captureRealContainerSpec().binds().stream()
                         .noneMatch(b -> b.getVolume().getPath().equals("/opt/aws-config")),
                 "no .aws bind mount when awsConfigPath is absent");
     }
