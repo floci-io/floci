@@ -870,7 +870,7 @@ public class AslExecutor {
 
     private StateResult executeMapState(String name, JsonNode stateDef, JsonNode input, StateMachine sm,
                                          boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
-        JsonNode items = resolveMapItems(stateDef, input, sm, jsonata, context);
+        JsonNode items = resolveMapItems(stateDef, input, jsonata, context);
 
         if (!items.isArray()) {
             throw new FailStateException("States.Runtime", "Items must reference an array");
@@ -918,7 +918,7 @@ public class AslExecutor {
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
-    private JsonNode resolveMapItems(JsonNode stateDef, JsonNode input, StateMachine sm,
+    private JsonNode resolveMapItems(JsonNode stateDef, JsonNode input,
                                      boolean jsonata, JsonNode context) throws Exception {
         if (jsonata && stateDef.has("Items")) {
             JsonNode itemsNode = stateDef.get("Items");
