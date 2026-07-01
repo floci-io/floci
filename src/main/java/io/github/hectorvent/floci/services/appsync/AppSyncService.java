@@ -775,7 +775,6 @@ public class AppSyncService {
     }
 
     public ChannelNamespace getChannelNamespace(String apiId, String name) {
-        assertSchemaNotBusy(apiId);
         return channelNamespaceStore.get(apiKey(apiId, name))
                 .orElseThrow(() -> new AwsException("NotFoundException",
                         "Channel namespace not found: " + name, 404));
@@ -792,6 +791,7 @@ public class AppSyncService {
     }
 
     public void deleteChannelNamespace(String apiId, String name) {
+        assertSchemaNotBusy(apiId);
         getChannelNamespace(apiId, name);
         channelNamespaceStore.delete(apiKey(apiId, name));
     }
