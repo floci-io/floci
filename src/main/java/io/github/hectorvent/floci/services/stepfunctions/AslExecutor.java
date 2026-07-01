@@ -950,7 +950,8 @@ public class AslExecutor {
 
         String inputType = itemReader.path("ReaderConfig").path("InputType").asText(null);
         if (!"JSON".equals(inputType)) {
-            throw new FailStateException("States.Runtime", "Unsupported ItemReader InputType: " + inputType);
+            throw new FailStateException("States.ItemReaderFailed",
+                    "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
 
         JsonNode parameters = itemReader.path("Parameters");

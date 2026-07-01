@@ -753,6 +753,55 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithCsvItemReader_failsWithNotImplementedItemReaderError() throws Exception {
+        createBucket("map-inputs-csv");
+        putObject("map-inputs-csv", "workers.csv", "workerId\nw1\n");
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "CSV"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-csv",
+                                    "Key": "workers.csv"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-csv-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertTrue(failure.jsonPath().getString("cause").contains("InputType CSV is not yet implemented by the emulator"));
+    }
+
+    @Test
     void distributedMapWithUnsupportedItemReaderInputType_rejectedAtCreateStateMachine() {
         String definition = """
                 {
