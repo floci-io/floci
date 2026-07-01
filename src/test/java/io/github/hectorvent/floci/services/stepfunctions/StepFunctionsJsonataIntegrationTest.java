@@ -292,6 +292,10 @@ class StepFunctionsJsonataIntegrationTest {
                                 }
                             },
                             "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
                                 "StartAt": "ProjectContext",
                                 "States": {
                                     "ProjectContext": {
@@ -343,6 +347,10 @@ class StepFunctionsJsonataIntegrationTest {
                                 }
                             },
                             "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
                                 "StartAt": "PassItem",
                                 "States": {
                                     "PassItem": {
@@ -389,6 +397,10 @@ class StepFunctionsJsonataIntegrationTest {
                                 }
                             },
                             "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
                                 "StartAt": "PassItem",
                                 "States": {
                                     "PassItem": {
@@ -432,6 +444,10 @@ class StepFunctionsJsonataIntegrationTest {
                                 }
                             },
                             "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
                                 "StartAt": "PassItem",
                                 "States": {
                                     "PassItem": {
@@ -473,6 +489,10 @@ class StepFunctionsJsonataIntegrationTest {
                                 }
                             },
                             "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
                                 "StartAt": "PassItem",
                                 "States": {
                                     "PassItem": {

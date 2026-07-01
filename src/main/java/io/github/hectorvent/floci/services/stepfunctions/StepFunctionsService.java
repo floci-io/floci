@@ -509,11 +509,12 @@ public class StepFunctionsService {
         }
 
         if ("Map".equals(stateDef.path("Type").asText()) && stateDef.has("ItemReader")) {
-            validateItemReader(stateName, stateDef.get("ItemReader"), errors);
+            validateItemReader(stateName, stateDef, errors);
         }
     }
 
-    private void validateItemReader(String stateName, JsonNode itemReader, List<String> errors) {
+    private void validateItemReader(String stateName, JsonNode stateDef, List<String> errors) {
+        JsonNode itemReader = stateDef.get("ItemReader");
         String resource = itemReader.path("Resource").asText(null);
         if (resource != null && !ITEM_READER_RESOURCES.contains(resource)) {
             errors.add("The field 'Resource' does not match any of the allowed values. Examples: "
@@ -526,6 +527,12 @@ public class StepFunctionsService {
             errors.add("The field 'InputType' should have one of these values: "
                     + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
                     + " at /States/" + stateName + "/ItemReader/ReaderConfig/InputType");
+        }
+
+        String mode = stateDef.path("ItemProcessor").path("ProcessorConfig").path("Mode").asText(null);
+        if (!"DISTRIBUTED".equals(mode)) {
+            errors.add("The field 'Mode' should have value 'DISTRIBUTED' when ItemReader is specified"
+                    + " at /States/" + stateName + "/ItemProcessor/ProcessorConfig/Mode");
         }
     }
 }

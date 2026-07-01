@@ -70,6 +70,20 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                     + "},"
                     + "\\\"End\\\":true"
                     + "}}}";
+    private static final String MAP_WITH_ITEM_READER_WITHOUT_DISTRIBUTED_MODE =
+            "{\\\"StartAt\\\":\\\"ProcessItems\\\",\\\"States\\\":{\\\"ProcessItems\\\":{"
+                    + "\\\"Type\\\":\\\"Map\\\","
+                    + "\\\"ItemReader\\\":{"
+                    + "\\\"Resource\\\":\\\"arn:aws:states:::s3:getObject\\\","
+                    + "\\\"ReaderConfig\\\":{\\\"InputType\\\":\\\"JSON\\\"},"
+                    + "\\\"Parameters\\\":{\\\"Bucket\\\":\\\"map-inputs\\\",\\\"Key\\\":\\\"workers.json\\\"}"
+                    + "},"
+                    + "\\\"ItemProcessor\\\":{"
+                    + "\\\"StartAt\\\":\\\"PassItem\\\","
+                    + "\\\"States\\\":{\\\"PassItem\\\":{\\\"Type\\\":\\\"Pass\\\",\\\"End\\\":true}}"
+                    + "},"
+                    + "\\\"End\\\":true"
+                    + "}}}";
 
     @BeforeAll
     static void configure() {
@@ -142,6 +156,20 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
                 .body("diagnostics[0].severity", equalTo("ERROR"))
                 .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
                 .body("diagnostics[0].location", equalTo("/States/ProcessItems/ItemReader/ReaderConfig/InputType"));
+    }
+
+    @Test
+    void itemReaderWithoutDistributedMode_returnsFailWithSchemaError() {
+        given().contentType(CT).header("X-Amz-Target", TARGET)
+                .body("{\"definition\":\"" + MAP_WITH_ITEM_READER_WITHOUT_DISTRIBUTED_MODE + "\"}")
+                .when().post("/")
+                .then().statusCode(200)
+                .body("result", equalTo("FAIL"))
+                .body("diagnostics", hasSize(1))
+                .body("diagnostics[0].severity", equalTo("ERROR"))
+                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
+                .body("diagnostics[0].location",
+                        equalTo("/States/ProcessItems/ItemProcessor/ProcessorConfig/Mode"));
     }
 
     @Test
