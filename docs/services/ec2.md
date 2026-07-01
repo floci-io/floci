@@ -76,6 +76,22 @@ If `KeyName` is specified at launch, Floci looks up the stored key pair's public
 
 Key pairs created with `CreateKeyPair` contain dummy private key material. Import a real key pair with `ImportKeyPair` to enable working SSH access.
 
+## Security Group Port Publishing
+
+When an instance's security groups open a TCP port to a CIDR source, Floci publishes that port on the host so you can reach the app from `localhost`. For each opened port Floci starts a small `alpine/socat` sidecar container that binds an allocated host port (default range 30000–30999) and forwards it to the instance container's IP. This works both for rules present at launch and for rules added later with `authorize-security-group-ingress`; revoking the rule removes the forward. The mapping (`app port -> host port`) is written to the logs:
+
+```
+Published EC2 instance i-0abc... app port 80 on host port 30000 (socat -> 172.17.0.3:80)
+```
+
+Notes and limitations:
+
+- The app inside the instance must listen on `0.0.0.0` (not `127.0.0.1`) for the forward to reach it.
+- Only CIDR-sourced TCP rules are published. A port opened only to a referenced security group (or via a prefix list) is not published, matching AWS: those grant reachability from the referenced group's private IPs, not from the host. The source CIDR value itself is not enforced, so a CIDR-sourced port is reachable whether the rule is `0.0.0.0/0` or narrower.
+- Ports are aggregated across all of the instance's security groups, SSH (22) is never re-forwarded, and any single rule whose port span exceeds `max-published-ports-per-instance` (default 20) is skipped so an allow-all range cannot spawn thousands of sidecars. The total published per instance is capped at the same limit.
+- Stopping an instance tears down its forwards; starting it again does not automatically restore them (re-run `authorize-security-group-ingress`, or recreate the instance).
+- Set `publish-security-group-ports: false` (`FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS=false`) to keep security groups as metadata only.
+
 ## UserData
 
 `UserData` must be base64-encoded in the request (matching the AWS wire format). Floci decodes it, copies the script into `/tmp/user-data.sh` inside the container, and executes the script directly after SSH key injection so the script shebang selects the interpreter. Output is captured and logged.
@@ -332,6 +348,11 @@ Launch templates store versioned launch data. New template versions can be creat
 | `FLOCI_SERVICES_EC2_IMDS_PORT` | `9169` | Host port for the IMDS server |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_START` | `2200` | Start of SSH host port range |
 | `FLOCI_SERVICES_EC2_SSH_PORT_RANGE_END` | `2299` | End of SSH host port range |
+| `FLOCI_SERVICES_EC2_PUBLISH_SECURITY_GROUP_PORTS` | `true` | Publish security-group TCP ingress ports on the host via socat sidecars |
+| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_START` | `30000` | Start of the host-port range for published app ports |
+| `FLOCI_SERVICES_EC2_APP_PORT_RANGE_END` | `30999` | End of the host-port range for published app ports |
+| `FLOCI_SERVICES_EC2_MAX_PUBLISHED_PORTS_PER_INSTANCE` | `20` | Max published ports per instance; also the widest single-rule span published |
+| `FLOCI_SERVICES_EC2_SOCAT_IMAGE` | `alpine/socat` | Image used for the port-forwarding sidecar |
 | `FLOCI_SERVICES_EC2_MOCK` | `false` | Skip Docker; instances jump directly to final state (useful for tests) |
 
 ## Requirements
@@ -425,5 +446,5 @@ aws ec2 associate-address \
 
 - `DescribeImages` returns AMIs from the EC2 image catalog, including common AMIs and Floci-native AMI IDs.
 - Key material returned by `CreateKeyPair` is a dummy RSA PEM — not usable for real SSH. Use `ImportKeyPair` for working SSH access.
-- Security group rules are stored and returned correctly but are not enforced at the network level — Docker bridge networking handles routing.
+- Security group rules are not enforced as a firewall (Docker bridge networking handles routing), but TCP ingress rules opened to a CIDR source are published on the host via socat sidecars so the instance's app is reachable from `localhost` — see [Security Group Port Publishing](#security-group-port-publishing).
 - The IMDS server identifies which instance is calling via IMDSv2 tokens (mapped at token issuance time) or by the container's bridge IP for IMDSv1.

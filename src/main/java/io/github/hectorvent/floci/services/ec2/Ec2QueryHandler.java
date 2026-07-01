@@ -580,6 +580,18 @@ public class Ec2QueryHandler {
                 break;
             }
         }
+        // Security group reassignment: --groups maps to GroupId.1, GroupId.2, ...
+        List<String> groupIds = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String groupId = p.getFirst("GroupId." + i);
+            if (groupId == null) {
+                break;
+            }
+            groupIds.add(groupId);
+        }
+        if (!groupIds.isEmpty()) {
+            service.modifyInstanceGroups(region, instanceId, groupIds);
+        }
         return booleanResponse("ModifyInstanceAttribute");
     }
 

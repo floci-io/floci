@@ -299,6 +299,11 @@ floci:
       imds-port: 9169
       ssh-port-range-start: 2200
       ssh-port-range-end: 2299
+      publish-security-group-ports: true
+      app-port-range-start: 30000
+      app-port-range-end: 30999
+      max-published-ports-per-instance: 20
+      socat-image: alpine/socat
       mock: false
     ecs:
       enabled: true
