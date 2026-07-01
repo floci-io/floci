@@ -26,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v6.0.2
 
-      - uses: graalvm/setup-graalvm@bef4b0e916c7dd079bf60fb95d49139f67e32c5f # v1
+      - uses: graalvm/setup-graalvm@6f3fa030c4b8f77c1f554a860f593a654538fa38 # v1
         with:
           java-version: '25'
           distribution: 'mandrel'
