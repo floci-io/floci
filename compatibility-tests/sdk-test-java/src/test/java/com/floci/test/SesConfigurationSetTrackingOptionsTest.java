@@ -30,6 +30,9 @@ import software.amazon.awssdk.services.sesv2.model.DeleteEmailIdentityRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetRequest;
 import software.amazon.awssdk.services.sesv2.model.GetConfigurationSetResponse;
 
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -45,6 +48,8 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @DisplayName("SES v1 ConfigurationSet Tracking & Reputation Options")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class SesConfigurationSetTrackingOptionsTest {
+
+    private static final Logger LOG = Logger.getLogger(SesConfigurationSetTrackingOptionsTest.class.getName());
 
     private static final String CS = "compat-cs-v1-tracking";
     private static final String DOMAIN = "track.compat.floci.test";
@@ -74,11 +79,19 @@ class SesConfigurationSetTrackingOptionsTest {
             try {
                 sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
                         .emailIdentity(DOMAIN).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                LOG.log(Level.WARNING,
+                        String.format("Could not delete SES identity %s during cleanup: %s", DOMAIN, e.getMessage()),
+                        e);
+            }
             try {
                 sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
                         .emailIdentity(DOMAIN_2).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                LOG.log(Level.WARNING,
+                        String.format("Could not delete SES identity %s during cleanup: %s", DOMAIN_2, e.getMessage()),
+                        e);
+            }
             sesV2.close();
         }
     }
