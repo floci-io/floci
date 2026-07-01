@@ -622,6 +622,19 @@ public class ApiGatewayController {
         return Response.ok(root.toString()).type(MediaType.APPLICATION_JSON).build();
     }
 
+    @GET
+    @Path("/apikeys/{apiKeyId}")
+    public Response getApiKey(@Context HttpHeaders headers,
+                              @PathParam("apiKeyId") String apiKeyId,
+                              @QueryParam("includeValue") boolean includeValue) {
+        String region = regionResolver.resolveRegion(headers);
+        ObjectNode node = toApiKeyNode(service.getApiKey(region, apiKeyId));
+        if (!includeValue) {
+            node.remove("value");
+        }
+        return Response.ok(node.toString()).type(MediaType.APPLICATION_JSON).build();
+    }
+
     @POST
     @Path("/usageplans")
     public Response createUsagePlan(@Context HttpHeaders headers, String body) {
@@ -1642,6 +1655,10 @@ public class ApiGatewayController {
         node.put("name", k.getName());
         node.put("value", k.getValue());
         node.put("enabled", k.isEnabled());
+        if (k.getTags() != null && !k.getTags().isEmpty()) {
+            ObjectNode tags = node.putObject("tags");
+            k.getTags().forEach(tags::put);
+        }
         return node;
     }
 
