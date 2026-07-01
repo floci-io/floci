@@ -22,7 +22,7 @@ import static org.hamcrest.Matchers.*;
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class ApiGatewayApiKeyIntegrationTest {
 
-    private static String apiKeyId;
+    private static String apiKeyId = "uninitialized";
 
     @Test @Order(1)
     void createApiKeyPersistsTags() {
@@ -78,6 +78,9 @@ class ApiGatewayApiKeyIntegrationTest {
         given()
                 .when().get("/apikeys/doesnotexist")
                 .then()
-                .statusCode(404);
+                .statusCode(404)
+                .contentType(ContentType.JSON)
+                .body("__type", equalTo("NotFoundException"))
+                .body("message", equalTo("API Key not found"));
     }
 }
