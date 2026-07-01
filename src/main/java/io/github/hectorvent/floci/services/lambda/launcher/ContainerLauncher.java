@@ -132,6 +132,15 @@ public class ContainerLauncher {
         // Start Runtime API server first so container can connect on boot
         RuntimeApiServer runtimeApiServer = runtimeApiServerFactory.create();
 
+        // Everything after the runtime-api server is allocated runs inside one try/catch: a failure
+        // ANYWHERE below — image/host resolve, the code-volume populate (ensureCodeVolume), the spec
+        // build, or the create/copy/start — must release that runtime-api port (and reap any
+        // half-built container). Otherwise a cold-start burst that trips the Docker daemon leaks one
+        // runtime-api port per failed attempt and eventually exhausts the pool, so launches keep
+        // failing even after the daemon recovers.
+        String containerId = null;
+        try {
+
         // Resolve image
         String image = "Image".equals(fn.getPackageType()) && fn.getImageUri() != null
                 ? fn.getImageUri()
@@ -255,8 +264,6 @@ public class ContainerLauncher {
 
         // Create container without starting — provided.* runtimes exec
         // /var/runtime/bootstrap on start, so code must be copied first.
-        String containerId = null;
-        try {
         containerId = lifecycleManager.create(spec);
         LOG.infov("Created container {0} for function {1}", containerId, fn.getFunctionName());
 
@@ -306,18 +313,6 @@ public class ContainerLauncher {
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
-        } catch (RuntimeException e) {
-            // Launch failed (e.g. a code/layer tar copy failed under Docker load). Reap the
-            // half-built container and free the runtime-api port so neither leaks — leaked
-            // "Created" containers were bogging the daemon and starving reuse.
-            LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
-                    fn.getFunctionName(), e.getMessage());
-            if (containerId != null) {
-                try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
-            }
-            try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
-            throw e;
-        }
 
         ContainerHandle handle = new ContainerHandle(containerId, fn.getFunctionName(), runtimeApiServer, ContainerState.WARM, fn.isHotReload());
 
@@ -327,6 +322,21 @@ public class ContainerLauncher {
         handle.setLogStream(logHandle);
 
         return handle;
+        } catch (RuntimeException e) {
+            // Launch failed somewhere after the runtime-api server was allocated — image/host
+            // resolve, the code-volume populate, the spec build, a create/copy/start under Docker
+            // load, or the log-stream attach. Free the runtime-api port (else a cold-start burst
+            // leaks one per attempt and exhausts the pool) and reap any half-built container (leaked
+            // "Created" containers bog the daemon and starve reuse). containerId is null when we
+            // failed before the container was created (e.g. an ensureCodeVolume populate failure).
+            LOG.errorv("Container launch failed for function {0}; cleaning up: {1}",
+                    fn.getFunctionName(), e.getMessage());
+            if (containerId != null) {
+                try { lifecycleManager.stopAndRemove(containerId, null); } catch (Exception ignore) { /* best effort */ }
+            }
+            try { runtimeApiServerFactory.release(runtimeApiServer); } catch (Exception ignore) { /* best effort */ }
+            throw e;
+        }
     }
 
     public void stop(ContainerHandle handle) {

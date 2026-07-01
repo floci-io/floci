@@ -34,6 +34,7 @@ import java.util.Optional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -90,11 +91,13 @@ class ContainerLauncherTest {
         when(runtimeApiServer.getPort()).thenReturn(9000);
         when(dockerHostResolver.resolve()).thenReturn("127.0.0.1");
 
-        when(lifecycleManager.create(any())).thenReturn("container-123");
+        // lenient: the failure-path test (populate fails before any container is created) never
+        // reaches these, but every success-path test does — they must not trip strict-stubs.
+        lenient().when(lifecycleManager.create(any())).thenReturn("container-123");
         ContainerLifecycleManager.ContainerInfo info =
                 new ContainerLifecycleManager.ContainerInfo("container-123", Map.of());
-        when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
-        when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
+        lenient().when(lifecycleManager.startCreated(eq("container-123"), any())).thenReturn(info);
+        lenient().when(lifecycleManager.getDockerClient()).thenReturn(dockerClient);
 
         // Stub the Docker copy chain so copyDirToContainer / copyFileToContainer
         // don't throw when the mock DockerClient is used. Each invocation
@@ -521,5 +524,40 @@ class ContainerLauncherTest {
         verify(lifecycleManager, times(1)).stopAndRemove(any(), any()); // the helper only
         // Old code-version volumes are NOT eagerly deleted (race fix); they are label-pruned instead.
         verify(lifecycleManager, never()).removeVolume(any());
+    }
+
+    @Test
+    void launchFunction_releasesRuntimeApiServer_whenCodeVolumePopulateFails() throws Exception {
+        // Regression for the runtime-api port leak: the volume path allocates a runtime-api server
+        // up front (before the code-volume populate). If the populate then fails — the exact
+        // cold-start-burst scenario this PR targets, where the Docker daemon rejects the helper work
+        // under load — the launch must STILL release that port. Otherwise every failed attempt leaks
+        // one port and the pool eventually exhausts, so launches keep failing after the daemon recovers.
+        Path codePath = Files.createDirectory(tempDir.resolve("leak-code"));
+        Files.write(codePath.resolve("bundle.bin"), new byte[8 * 1024]); // 8 KiB
+
+        LambdaFunction fn = new LambdaFunction();
+        fn.setFunctionName("leak-fn");
+        fn.setRuntime("nodejs20.x");
+        fn.setHandler("index.handler");
+        fn.setCodeLocalPath(codePath.toString());
+        fn.setCodeSha256("leak-fn-sha-v1");
+
+        // The code-volume populate fails (daemon under load), before any container is created.
+        doThrow(new RuntimeException("docker daemon busy")).when(lifecycleManager).ensureVolume(any());
+
+        long original = ContainerLauncher.CODE_VOLUME_MIN_BYTES;
+        try {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = 4 * 1024; // force the volume path without a 32 MiB file
+            assertThrows(RuntimeException.class, () -> launcher.launch(fn));
+        } finally {
+            ContainerLauncher.CODE_VOLUME_MIN_BYTES = original;
+        }
+
+        // The runtime-api port allocated before the populate is released on this failure path...
+        verify(runtimeApiServerFactory).release(runtimeApiServer);
+        // ...and we bailed before creating or starting any container (nothing to reap).
+        verify(lifecycleManager, never()).create(any());
+        verify(lifecycleManager, never()).startCreated(any(), any());
     }
 }
