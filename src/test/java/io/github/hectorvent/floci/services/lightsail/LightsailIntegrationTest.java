@@ -276,5 +276,27 @@ class LightsailIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("UnsupportedOperation"))
                 .body("message", equalTo("Operation CreateContainerService is recognized by Amazon Lightsail but is not implemented in Floci."));
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "NotARealAction")
+                .contentType(CONTENT_TYPE)
+                .body("{}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(404)
+                .body("__type", equalTo("UnknownOperationException"))
+                .body("message", equalTo("Unknown operation NotARealAction"));
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "GetKeyPair")
+                .contentType(CONTENT_TYPE)
+                .body("{}")
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidInputException"))
+                .body("message", equalTo("keyPairName is required"));
     }
 }

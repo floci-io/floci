@@ -160,7 +160,7 @@ public class LightsailJsonHandler {
             throw new AwsException("UnsupportedOperation",
                     "Operation " + action + " is recognized by Amazon Lightsail but is not implemented in Floci.", 400);
         }
-        throw new AwsException("UnknownOperationException", "Unknown operation " + action, 400);
+        throw new AwsException("UnknownOperationException", "Unknown operation " + action, 404);
     }
 
     private static Response ok(JsonNode response) {
@@ -174,7 +174,7 @@ public class LightsailJsonHandler {
     private static String required(JsonNode request, String field) {
         String value = request.path(field).asText(null);
         if (value == null || value.isBlank()) {
-            throw new AwsException("MissingParameter", field + " is required", 400);
+            throw new AwsException("InvalidInputException", field + " is required", 400);
         }
         return value;
     }

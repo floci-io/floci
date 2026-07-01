@@ -157,7 +157,7 @@ public class LightsailService {
             portInfos = mapper.createArrayNode().add(request.path("portInfo"));
         }
         if (portInfos.isMissingNode() || !portInfos.isArray()) {
-            throw new AwsException("MissingParameter", "portInfo or portInfos is required", 400);
+            throw new AwsException("InvalidInputException", "portInfo or portInfos is required", 400);
         }
         for (JsonNode portInfo : portInfos) {
             ports.add(portInfo.deepCopy());
@@ -172,7 +172,7 @@ public class LightsailService {
         ObjectNode instance = requireResource(region, RESOURCE_INSTANCE, name);
         JsonNode target = request.path("portInfo");
         if (target.isMissingNode()) {
-            throw new AwsException("MissingParameter", "portInfo is required", 400);
+            throw new AwsException("InvalidInputException", "portInfo is required", 400);
         }
         ArrayNode remaining = mapper.createArrayNode();
         for (JsonNode port : instance.path("networking").path("ports")) {
@@ -413,7 +413,7 @@ public class LightsailService {
         ObjectNode resource = requireAnyResource(region, name, arn);
         JsonNode tagKeys = request.path("tagKeys");
         if (!tagKeys.isArray()) {
-            throw new AwsException("MissingParameter", "tagKeys is required", 400);
+            throw new AwsException("InvalidInputException", "tagKeys is required", 400);
         }
         ArrayNode tags = mapper.createArrayNode();
         for (JsonNode tag : resource.path("tags")) {
@@ -518,7 +518,7 @@ public class LightsailService {
                     .orElseThrow(() -> new AwsException("NotFoundException", "Resource " + arn + " was not found", 400));
         }
         if (name == null || name.isBlank()) {
-            throw new AwsException("MissingParameter", "resourceName is required", 400);
+            throw new AwsException("InvalidInputException", "resourceName is required", 400);
         }
         return listResources(region, null).stream()
                 .filter(resource -> name.equals(resource.path("name").asText()))
@@ -745,20 +745,20 @@ public class LightsailService {
     private static String requireText(JsonNode request, String field) {
         String value = request.path(field).asText(null);
         if (value == null || value.isBlank()) {
-            throw new AwsException("MissingParameter", field + " is required", 400);
+            throw new AwsException("InvalidInputException", field + " is required", 400);
         }
         return value;
     }
 
     private static void requireArray(JsonNode request, String field) {
         if (!request.has(field) || !request.path(field).isArray() || request.path(field).isEmpty()) {
-            throw new AwsException("MissingParameter", field + " is required", 400);
+            throw new AwsException("InvalidInputException", field + " is required", 400);
         }
     }
 
     private static void requireName(String name, String field) {
         if (name == null || name.isBlank()) {
-            throw new AwsException("MissingParameter", field + " is required", 400);
+            throw new AwsException("InvalidInputException", field + " is required", 400);
         }
     }
 
