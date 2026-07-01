@@ -204,7 +204,9 @@ public class Ec2Service {
                 instances.put(key, instance);
                 restored++;
                 // Container is running: re-reserve host ports and recreate any missing socat sidecars.
-                portForwardManager.restore(instance);
+                if (portForwardManager != null) {
+                    portForwardManager.restore(instance);
+                }
             }
         }
         if (restored > 0) {

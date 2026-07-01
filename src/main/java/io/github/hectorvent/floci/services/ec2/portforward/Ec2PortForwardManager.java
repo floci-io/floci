@@ -146,6 +146,10 @@ public class Ec2PortForwardManager {
                         instance.getInstanceId(), appPort);
                 if (!publishOn(instance, appPort, hostPort)) {
                     portAllocator.release(hostPort);
+                    // Drop the stale mapping so a later reconcile can re-publish the port
+                    // instead of seeing it as already published.
+                    instance.getPublishedPorts().remove(appPort);
+                    persist(instance);
                 }
             } else {
                 LOG.infov("Restored port-forward for EC2 instance {0}: app port {1} -> host port {2}",

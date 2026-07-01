@@ -1,5 +1,11 @@
 package io.github.hectorvent.floci.services.ec2.portforward;
 
+import com.github.dockerjava.api.DockerClient;
+import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
+import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
+import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
@@ -7,12 +13,18 @@ import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.UserIdGroupPair;
 import org.junit.jupiter.api.Test;
 
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 class Ec2PortForwardManagerTest {
 
@@ -126,6 +138,41 @@ class Ec2PortForwardManagerTest {
     void forwardContainerNameIsDeterministic() {
         assertEquals("floci-ec2-fwd-i-123-80",
                 Ec2PortForwardManager.forwardContainerName("i-123", 80));
+    }
+
+    @Test
+    void restoreDropsMappingWhenSidecarRecreationFails() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.inspectContainerCmd(anyString())).thenThrow(new RuntimeException("docker down"));
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        when(lifecycleManager.findByName(anyString())).thenReturn(Optional.empty());
+        PortAllocator portAllocator = mock(PortAllocator.class);
+
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.Ec2ServiceConfig ec2 = mock(EmulatorConfig.Ec2ServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.ec2()).thenReturn(ec2);
+        when(ec2.publishSecurityGroupPorts()).thenReturn(true);
+        when(ec2.mock()).thenReturn(false);
+
+        Ec2PortForwardManager manager = new Ec2PortForwardManager(
+                dockerClient, mock(ContainerBuilder.class), lifecycleManager, portAllocator, config);
+        List<String> persisted = new ArrayList<>();
+        manager.setPersister(inst -> persisted.add(inst.getInstanceId()));
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-1");
+        instance.setDockerContainerId("c1");
+        instance.getPublishedPorts().put(8080, 30000);
+
+        manager.restore(instance);
+
+        assertTrue(instance.getPublishedPorts().isEmpty(),
+                "failed recreation must not leave a stale published-port entry");
+        verify(portAllocator).markReserved(30000);
+        verify(portAllocator).release(30000);
+        assertEquals(List.of("i-1"), persisted);
     }
 
     private static Set<Integer> extract(SecurityGroup sg) {
