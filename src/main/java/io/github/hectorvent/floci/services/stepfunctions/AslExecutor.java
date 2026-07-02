@@ -1099,7 +1099,12 @@ public class AslExecutor {
             ObjectNode mapCtx = objectMapper.createObjectNode();
             ObjectNode mapItem = objectMapper.createObjectNode();
             mapItem.put("Index", index);
-            mapItem.set("Value", item);
+            if (isItemReaderObjectEntry(item)) {
+                mapItem.put("Key", item.path("Key").asText());
+                mapItem.set("Value", item.get("Value"));
+            } else {
+                mapItem.set("Value", item);
+            }
             mapCtx.set("Item", mapItem);
             iterContext.set("Map", mapCtx);
 
@@ -1169,10 +1174,13 @@ public class AslExecutor {
         try {
             S3Object object = s3Service.getObject(bucket, key);
             JsonNode items = objectMapper.readTree(object.getData());
+            if (items.isObject()) {
+                return applyMaxItems(itemReader, normalizeObjectItems(items));
+            }
             if (!items.isArray()) {
                 throw new FailStateException("States.ItemReaderFailed", "ItemReader JSON input must be an array");
             }
-            return items;
+            return applyMaxItems(itemReader, items);
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         } catch (FailStateException e) {
@@ -1181,6 +1189,34 @@ public class AslExecutor {
             throw new FailStateException("States.ItemReaderFailed",
                     e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
         }
+    }
+
+    private boolean isItemReaderObjectEntry(JsonNode item) {
+        return item.isObject() && item.has("Key") && item.has("Value");
+    }
+
+    private ArrayNode normalizeObjectItems(JsonNode items) {
+        ArrayNode normalized = objectMapper.createArrayNode();
+        items.fields().forEachRemaining(entry -> {
+            ObjectNode objectItem = objectMapper.createObjectNode();
+            objectItem.put("Key", entry.getKey());
+            objectItem.set("Value", entry.getValue());
+            normalized.add(objectItem);
+        });
+        return normalized;
+    }
+
+    private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {
+        int maxItems = itemReader.path("ReaderConfig").path("MaxItems").asInt(0);
+        if (maxItems <= 0 || !items.isArray() || items.size() <= maxItems) {
+            return items;
+        }
+
+        ArrayNode limited = objectMapper.createArrayNode();
+        for (int i = 0; i < maxItems; i++) {
+            limited.add(items.get(i));
+        }
+        return limited;
     }
 
     private JsonNode executeBranch(String startAt, JsonNode states, JsonNode input, StateMachine sm,
