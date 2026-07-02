@@ -135,18 +135,19 @@ public class CloudTrailLogWriter {
             return;
         }
 
-        byte[] payload = serializeAndGzip(records);
-        String accountId = regionResolver.getAccountId();
-        String objectKey = buildObjectKey(trail, accountId, key.region());
-
         try {
+            byte[] payload = serializeAndGzip(records);
+            String accountId = regionResolver.getAccountId();
+            String objectKey = buildObjectKey(trail, accountId, key.region());
             s3Service.putObject(trail.s3BucketName(), objectKey, payload,
                     "application/x-gzip", Map.of());
             LOG.debugv("CloudTrail wrote {0} records to s3://{1}/{2}",
                     records.size(), trail.s3BucketName(), objectKey);
         } catch (RuntimeException e) {
-            LOG.warnv(e, "CloudTrail failed to write log file s3://{0}/{1} ({2} records)",
-                    trail.s3BucketName(), objectKey, records.size());
+            // Re-queue so records survive the failed flush and are retried next cycle.
+            cloudTrailService.requeueRecords(key.region(), key.trailName(), records);
+            LOG.warnv(e, "CloudTrail flush failed for trail {0} ({1} records re-queued)",
+                    key.trailName(), records.size());
             throw e;
         }
     }

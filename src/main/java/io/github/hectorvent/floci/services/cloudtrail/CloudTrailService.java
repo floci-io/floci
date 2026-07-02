@@ -222,6 +222,12 @@ public class CloudTrailService {
     }
 
     /** Drain pending records for a specific trail (used by the log-file writer + tests). */
+    public void requeueRecords(String region, String trailName, List<ObjectNode> records) {
+        if (!records.isEmpty()) {
+            queueFor(new TrailKey(region, trailName)).addAll(records);
+        }
+    }
+
     public List<ObjectNode> drainPendingRecords(String region, String trailName) {
         ConcurrentLinkedQueue<ObjectNode> q = pendingRecordsByTrail.get(new TrailKey(region, trailName));
         if (q == null) return List.of();
