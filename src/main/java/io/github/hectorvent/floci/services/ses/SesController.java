@@ -269,10 +269,11 @@ public class SesController {
         try {
             String configurationSetName = null;
             if (body != null && !body.isEmpty()) {
-                // Only a truly empty body is "no body" (clears). A non-empty body must be a JSON
-                // object; a whitespace-only or otherwise unparseable body is a serialization error.
-                // Verified against real AWS: a whitespace-only body returns SerializationException
-                // (and does not clear), while only an empty body / {} clears.
+                // Only a truly empty body is "no body". A non-empty body must be a JSON object; a
+                // whitespace-only or otherwise unparseable body is a serialization error (verified
+                // against real AWS: whitespace-only returns SerializationException and does not
+                // clear). Within a valid object, an omitted or explicit-null ConfigurationSetName
+                // clears the association (as does an empty body / {}).
                 JsonNode request = objectMapper.readTree(body);
                 if (request == null || !request.isObject()) {
                     throw new AwsException("SerializationException", null, 400);

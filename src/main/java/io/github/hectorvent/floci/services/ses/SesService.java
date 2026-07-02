@@ -765,12 +765,12 @@ public class SesService {
     }
 
     /**
-     * Resolves the configuration set a send should use: the one explicitly supplied by the
-     * caller takes precedence; otherwise the default configuration set associated with the
-     * sending identity (set via {@code PutEmailIdentityConfigurationSetAttributes}) is used,
-     * with the email-address identity taking precedence over its parent domain. A stale
-     * association whose configuration set no longer exists is ignored so it cannot fail an
-     * otherwise-valid send.
+     * Resolves the configuration set a send should use: a non-blank configuration set explicitly
+     * supplied by the caller takes precedence (a blank value is treated as absent); otherwise the
+     * default configuration set associated with the sending identity (set via
+     * {@code PutEmailIdentityConfigurationSetAttributes}) is used, with the email-address identity
+     * taking precedence over its parent domain. A stale association whose configuration set no
+     * longer exists is ignored so it cannot fail an otherwise-valid send.
      */
     private String resolveDefaultConfigurationSet(String configurationSetName, String source, String region) {
         if (configurationSetName != null && !configurationSetName.isBlank()) {
