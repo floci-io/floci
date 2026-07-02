@@ -42,7 +42,9 @@ public class ResourceGroupsTaggingService implements Resettable {
 
     // ─── TagResources ──────────────────────────────────────────────────────────
 
-    public void tagResources(List<String> resourceArns, Map<String, String> tags, String region) {
+    // Mutators are synchronized: StorageBackedMap has no atomic computeIfAbsent, so
+    // the get-mutate-put sequence would otherwise lose updates under concurrent calls.
+    public synchronized void tagResources(List<String> resourceArns, Map<String, String> tags, String region) {
         for (String arn : resourceArns) {
             String storeKey = key(region, arn);
             ResourceTagMapping mapping = store.get(storeKey);
@@ -57,7 +59,7 @@ public class ResourceGroupsTaggingService implements Resettable {
 
     // ─── UntagResources ────────────────────────────────────────────────────────
 
-    public void untagResources(List<String> resourceArns, List<String> tagKeys, String region) {
+    public synchronized void untagResources(List<String> resourceArns, List<String> tagKeys, String region) {
         for (String arn : resourceArns) {
             String storeKey = key(region, arn);
             ResourceTagMapping mapping = store.get(storeKey);
@@ -68,7 +70,7 @@ public class ResourceGroupsTaggingService implements Resettable {
         }
     }
 
-    public void deleteResources(List<String> resourceArns, String region) {
+    public synchronized void deleteResources(List<String> resourceArns, String region) {
         for (String arn : resourceArns) {
             store.remove(key(region, arn));
         }
