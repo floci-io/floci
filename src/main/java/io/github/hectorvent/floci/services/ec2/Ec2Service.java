@@ -1015,11 +1015,50 @@ public class Ec2Service {
 
     /**
      * Network interfaces owned by interface VPC endpoints (PrivateLink ENIs).
-     * Floci does not currently model per-endpoint ENIs, so this returns empty;
-     * flow log generation uses it as an optional enrichment seam.
+     * Floci does not persist per-endpoint ENIs; they are synthesized
+     * deterministically from the endpoint's subnets so flow-log generation can
+     * attribute AWS-service traffic to a stable endpoint address.
      */
     public List<NetworkInterface> endpointNetworkInterfaces(String region) {
-        return Collections.emptyList();
+        List<NetworkInterface> result = new ArrayList<>();
+        for (VpcEndpoint endpoint : vpcEndpoints.scan(k -> true)) {
+            if (!region.equals(endpoint.getRegion())
+                    || !"Interface".equalsIgnoreCase(endpoint.getVpcEndpointType())) {
+                continue;
+            }
+            for (String subnetId : endpoint.getSubnetIds()) {
+                Subnet subnet = subnets.get(key(region, subnetId)).orElse(null);
+                if (subnet == null) {
+                    continue;
+                }
+                NetworkInterface ni = new NetworkInterface();
+                ni.setNetworkInterfaceId(endpointEniId(endpoint.getVpcEndpointId(), subnetId));
+                ni.setSubnetId(subnetId);
+                ni.setVpcId(endpoint.getVpcId());
+                ni.setAvailabilityZone(subnet.getAvailabilityZone());
+                ni.setDescription("VPC Endpoint Interface " + endpoint.getVpcEndpointId());
+                ni.setInterfaceType("vpc_endpoint");
+                ni.setPrivateIpAddress(endpointPrivateIp(subnet, endpoint.getVpcEndpointId()));
+                result.add(ni);
+            }
+        }
+        return result;
+    }
+
+    private static String endpointEniId(String endpointId, String subnetId) {
+        String hex = java.util.UUID.nameUUIDFromBytes(
+                (endpointId + "|" + subnetId).getBytes(StandardCharsets.UTF_8))
+                .toString().replace("-", "");
+        return "eni-" + hex.substring(0, 17);
+    }
+
+    /** Stable host address near the top of the subnet range, clear of the instance counter (starts at 10). */
+    private static String endpointPrivateIp(Subnet subnet, String endpointId) {
+        String cidr = subnet.getCidrBlock();
+        String baseIp = cidr != null ? cidr.split("/")[0] : "172.31.0.0";
+        String[] parts = baseIp.split("\\.");
+        int host = 200 + Math.floorMod(endpointId.hashCode(), 50);
+        return parts[0] + "." + parts[1] + "." + parts[2] + "." + host;
     }
 
     private VpcEndpoint getRequiredVpcEndpoint(String region, String endpointId) {

@@ -94,6 +94,31 @@ class Ec2FlowLogIntegrationTest {
 
     @Test
     @Order(12)
+    void deleteFlowLogsInAnotherRegionLeavesTheLogIntact() {
+        given()
+            .formParam("Action", "DeleteFlowLogs")
+            .formParam("FlowLogId.1", flowLogId)
+            .header("Authorization",
+                    "AWS4-HMAC-SHA256 Credential=test/20260205/eu-west-1/ec2/aws4_request")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .contentType("application/xml");
+
+        given()
+            .formParam("Action", "DescribeFlowLogs")
+            .formParam("FlowLogId.1", flowLogId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeFlowLogsResponse.flowLogSet.item[0].flowLogId", equalTo(flowLogId));
+    }
+
+    @Test
+    @Order(13)
     void deleteFlowLogs() {
         given()
             .formParam("Action", "DeleteFlowLogs")

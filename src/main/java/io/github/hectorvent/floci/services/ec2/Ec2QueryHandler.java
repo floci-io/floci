@@ -750,7 +750,7 @@ public class Ec2QueryHandler {
         if (ids.isEmpty()) {
             ids = getList(p, "FlowLogIds.member");
         }
-        flowLogService.deleteFlowLogs(ids);
+        flowLogService.deleteFlowLogs(region, ids);
         XmlBuilder xml = new XmlBuilder()
                 .start("DeleteFlowLogsResponse", AwsNamespaces.EC2)
                 .elem("requestId", UUID.randomUUID().toString())

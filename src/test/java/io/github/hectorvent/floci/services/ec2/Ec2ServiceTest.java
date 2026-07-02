@@ -7,8 +7,10 @@ import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
+import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -109,6 +111,37 @@ class Ec2ServiceTest {
         assertEquals(2, types.getFirst().get("vcpu"));
         assertEquals(8192, types.getFirst().get("memoryMib"));
         assertEquals(List.of("arm64"), types.getFirst().get("supportedArchitectures"));
+    }
+
+    @Test
+    void endpointNetworkInterfacesSynthesizesStableEnisForInterfaceEndpoints() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        String subnetId = service.describeSubnets("us-east-1", List.of(),
+                Map.of("vpc-id", List.of("vpc-default"))).getFirst().getSubnetId();
+        VpcEndpoint endpoint = service.createVpcEndpoint("us-east-1", "vpc-default",
+                "com.amazonaws.us-east-1.s3", "Interface",
+                List.of(), List.of(subnetId), List.of(), null, List.of());
+        service.createVpcEndpoint("us-east-1", "vpc-default",
+                "com.amazonaws.us-east-1.dynamodb", "Gateway",
+                List.of(), List.of(), List.of(), null, List.of());
+
+        List<NetworkInterface> enis = service.endpointNetworkInterfaces("us-east-1");
+
+        assertEquals(1, enis.size(), "only Interface endpoints have ENIs");
+        NetworkInterface eni = enis.getFirst();
+        assertEquals(subnetId, eni.getSubnetId());
+        assertEquals("vpc-default", eni.getVpcId());
+        assertEquals("VPC Endpoint Interface " + endpoint.getVpcEndpointId(), eni.getDescription());
+        assertTrue(eni.getNetworkInterfaceId().startsWith("eni-"));
+
+        NetworkInterface again = service.endpointNetworkInterfaces("us-east-1").getFirst();
+        assertEquals(eni.getNetworkInterfaceId(), again.getNetworkInterfaceId());
+        assertEquals(eni.getPrivateIpAddress(), again.getPrivateIpAddress());
+
+        assertTrue(service.endpointNetworkInterfaces("eu-west-1").isEmpty(),
+                "endpoints are regional");
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {

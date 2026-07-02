@@ -1,12 +1,16 @@
 package io.github.hectorvent.floci.services.ec2;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.AwsException;
+import io.github.hectorvent.floci.core.storage.StorageBackend;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.FlowLog;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.NetworkInterface;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
-import io.github.hectorvent.floci.services.ec2.model.Subnet;
+import io.github.hectorvent.floci.services.ec2.model.VpcEndpoint;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.quarkus.runtime.ShutdownEvent;
 import io.quarkus.runtime.StartupEvent;
@@ -25,7 +29,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ThreadLocalRandom;
@@ -66,8 +69,9 @@ public class FlowLogService {
     private static final DateTimeFormatter FILE_TS_FMT =
             DateTimeFormatter.ofPattern("yyyyMMdd'T'HHmm'Z'").withZone(ZoneOffset.UTC);
 
-    // flowLogId -> FlowLog
-    private final Map<String, FlowLog> flowLogs = new ConcurrentHashMap<>();
+    // flowLogId -> FlowLog (persisted via StorageFactory so flow logs survive a
+    // restart in persistent/hybrid/wal modes and generation resumes)
+    private final StorageBackend<String, FlowLog> flowLogs;
 
     private final EmulatorConfig config;
     private final Ec2Service ec2Service;
@@ -75,10 +79,19 @@ public class FlowLogService {
     private ScheduledExecutorService scheduler;
 
     @Inject
-    public FlowLogService(EmulatorConfig config, Ec2Service ec2Service, S3Service s3Service) {
+    public FlowLogService(EmulatorConfig config, Ec2Service ec2Service, S3Service s3Service,
+                          StorageFactory storageFactory) {
+        this(config, ec2Service, s3Service,
+                storageFactory.create("ec2", "ec2-flow-logs.json", new TypeReference<Map<String, FlowLog>>() {}));
+    }
+
+    // Package-private for hermetic tests (pass an in-memory StorageBackend directly).
+    FlowLogService(EmulatorConfig config, Ec2Service ec2Service, S3Service s3Service,
+                   StorageBackend<String, FlowLog> flowLogs) {
         this.config = config;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
+        this.flowLogs = flowLogs;
     }
 
     void onStart(@Observes StartupEvent ev) {
@@ -135,7 +148,7 @@ public class FlowLogService {
 
     public List<FlowLog> describeFlowLogs(String region, List<String> flowLogIds) {
         List<FlowLog> result = new ArrayList<>();
-        for (FlowLog fl : flowLogs.values()) {
+        for (FlowLog fl : flowLogs.scan(k -> true)) {
             if (region != null && fl.getRegion() != null && !region.equals(fl.getRegion())) {
                 continue;
             }
@@ -147,15 +160,21 @@ public class FlowLogService {
         return result;
     }
 
-    public List<String> deleteFlowLogs(List<String> flowLogIds) {
+    public List<String> deleteFlowLogs(String region, List<String> flowLogIds) {
         List<String> deleted = new ArrayList<>();
         if (flowLogIds == null) {
             return deleted;
         }
         for (String id : flowLogIds) {
-            if (flowLogs.remove(id) != null) {
-                deleted.add(id);
+            FlowLog fl = flowLogs.get(id).orElse(null);
+            if (fl == null) {
+                continue;
             }
+            if (region != null && fl.getRegion() != null && !region.equals(fl.getRegion())) {
+                continue;
+            }
+            flowLogs.delete(id);
+            deleted.add(id);
         }
         return deleted;
     }
@@ -163,7 +182,7 @@ public class FlowLogService {
     // ─── Generation ───────────────────────────────────────────────────────────
 
     private void generateForAll() {
-        for (FlowLog fl : flowLogs.values()) {
+        for (FlowLog fl : flowLogs.scan(k -> true)) {
             if (!"s3".equals(fl.getLogDestinationType()) || fl.getBucketName() == null) {
                 continue;
             }
@@ -223,7 +242,7 @@ public class FlowLogService {
                 continue;
             }
             endpointIps.add(ni.getPrivateIpAddress());
-            endpointService.put(ni.getPrivateIpAddress(), awsServiceFromEndpoint(ni));
+            endpointService.put(ni.getPrivateIpAddress(), awsServiceFromEndpoint(ni, fl.getRegion()));
         }
 
         int recordCount = 0;
@@ -356,11 +375,23 @@ public class FlowLogService {
         return null;
     }
 
-    /** Map an endpoint ENI's service name (com.amazonaws.us-east-1.s3) to a short tag (S3). */
-    private static String awsServiceFromEndpoint(NetworkInterface eni) {
+    /** Map an endpoint ENI to its service short tag (com.amazonaws.us-east-1.s3 -> S3). */
+    private String awsServiceFromEndpoint(NetworkInterface eni, String region) {
         String desc = eni.getDescription(); // "VPC Endpoint Interface vpce-..."
-        // The service short name isn't on the ENI; default to S3 for the sandbox.
-        // (The endpoint object carries the full ServiceName; the ENI only links by id.)
+        int marker = desc != null ? desc.indexOf("vpce-") : -1;
+        if (marker >= 0) {
+            String endpointId = desc.substring(marker).trim();
+            try {
+                for (VpcEndpoint endpoint : ec2Service.describeVpcEndpoints(region, List.of(endpointId), Map.of())) {
+                    String serviceName = endpoint.getServiceName();
+                    if (serviceName != null && serviceName.contains(".")) {
+                        return serviceName.substring(serviceName.lastIndexOf('.') + 1).toUpperCase();
+                    }
+                }
+            } catch (AwsException e) {
+                LOG.debugv("Endpoint {0} not resolvable for service tagging: {1}", endpointId, e.getMessage());
+            }
+        }
         return "S3";
     }
 
