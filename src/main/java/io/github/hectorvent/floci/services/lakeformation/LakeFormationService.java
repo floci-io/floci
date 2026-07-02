@@ -203,7 +203,9 @@ public class LakeFormationService {
     }
 
     public Map<String, Object> updateIdentityCenterConfiguration(String region, Map<String, Object> request) {
-        Map<String, Object> config = createIdentityCenterConfiguration(region, request);
+        Map<String, Object> config = new LinkedHashMap<>();
+        config.put("CatalogId", request.get("CatalogId"));
+        config.put("ExternalFilteringConfiguration", request.get("ExternalFilteringConfiguration"));
         identityCenterConfigStore.put(identityCenterConfigKey(region), config);
         return config;
     }
@@ -219,7 +221,7 @@ public class LakeFormationService {
         entry.put("PrincipalIdentifier", request.get("PrincipalIdentifier"));
         entries.add(entry);
         optInStore.put(optInKey(region), entries);
-        return Map.of("LakeFormationOptInsInfo", Map.of("OptIns", entries));
+        return entry;
     }
 
     public List<Map<String, Object>> listHybridOptIns(String region) {
@@ -234,8 +236,12 @@ public class LakeFormationService {
 
     public Map<String, Object> registerResource(String region, Map<String, Object> request) {
         List<Map<String, Object>> entries = readList(resourceStore, resourceKey(region, "resources"));
+        String arn = (String) request.get("ResourceArn");
+        if (entries.stream().anyMatch(existing -> Objects.equals(existing.get("ResourceArn"), arn))) {
+            throw new AwsException("AlreadyExistsException", "Resource with ARN " + arn + " already exists", 400);
+        }
         Map<String, Object> entry = new LinkedHashMap<>();
-        entry.put("ResourceArn", request.get("ResourceArn"));
+        entry.put("ResourceArn", arn);
         entry.put("RoleArn", request.get("RoleArn"));
         entry.put("UseServiceLinkedRole", request.get("UseServiceLinkedRole"));
         entries.add(entry);

@@ -120,13 +120,15 @@ class LakeFormationIntegrationTest {
                 .contentType(CONTENT_TYPE)
                 .body("""
                         {
-                          "DatabaseName": "db",
-                          "Name": "filter-1",
-                          "TableCatalogId": "123456789012",
-                          "TableName": "table1",
-                          "ColumnNames": ["id"],
-                          "RowFilter": {
-                            "FilterExpression": "id > 10"
+                          "TableData": {
+                            "DatabaseName": "db",
+                            "Name": "filter-1",
+                            "TableCatalogId": "123456789012",
+                            "TableName": "table1",
+                            "ColumnNames": ["id"],
+                            "RowFilter": {
+                              "FilterExpression": "id > 10"
+                            }
                           }
                         }
                         """)
@@ -187,8 +189,7 @@ class LakeFormationIntegrationTest {
         .when()
                 .post("/")
         .then()
-                .statusCode(200)
-                .body("PrincipalResourcePermissions", hasSize(1));
+                .statusCode(200);
 
         given()
                 .header("X-Amz-Target", TARGET_PREFIX + "ListPermissions")

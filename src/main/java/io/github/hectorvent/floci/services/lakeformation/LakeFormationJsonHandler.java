@@ -101,14 +101,18 @@ public class LakeFormationJsonHandler {
     }
 
     private Response putDataCellsFilter(JsonNode request, String region) {
-        DataCellsFilter dataCellsFilter = objectMapper.convertValue(request, DataCellsFilter.class);
+        JsonNode tableData = request.path("TableData");
+        DataCellsFilter dataCellsFilter = objectMapper.convertValue(tableData, DataCellsFilter.class);
         service.putDataCellsFilter(region, dataCellsFilter);
         return Response.ok().build();
     }
 
     private Response getDataCellsFilter(JsonNode request, String region) {
         DataCellsFilter dataCellsFilter = service.getDataCellsFilter(region, request.path("DatabaseName").asText(null), request.path("Name").asText(null), request.path("TableCatalogId").asText(null), request.path("TableName").asText(null));
-        return Response.ok(Map.of("DataCellsFilter", dataCellsFilter == null ? new DataCellsFilter() : dataCellsFilter)).build();
+        if (dataCellsFilter == null) {
+            throw new AwsException("EntityNotFoundException", "DataCellsFilter not found", 400);
+        }
+        return Response.ok(Map.of("DataCellsFilter", dataCellsFilter)).build();
     }
 
     private Response deleteDataCellsFilter(JsonNode request, String region) {
@@ -118,14 +122,14 @@ public class LakeFormationJsonHandler {
 
     private Response grantPermissions(JsonNode request, String region) {
         Map<String, Object> payload = objectMapper.convertValue(request, Map.class);
-        List<Map<String, Object>> permissions = service.grantPermissions(region, payload);
-        return Response.ok(Map.of("PrincipalResourcePermissions", permissions)).build();
+        service.grantPermissions(region, payload);
+        return Response.ok().build();
     }
 
     private Response revokePermissions(JsonNode request, String region) {
         Map<String, Object> payload = objectMapper.convertValue(request, Map.class);
-        List<Map<String, Object>> permissions = service.revokePermissions(region, payload);
-        return Response.ok(Map.of("PrincipalResourcePermissions", permissions)).build();
+        service.revokePermissions(region, payload);
+        return Response.ok().build();
     }
 
     private Response listPermissions(JsonNode request, String region) {
@@ -160,11 +164,12 @@ public class LakeFormationJsonHandler {
 
     private Response createHybridOptIn(JsonNode request, String region) {
         Map<String, Object> payload = objectMapper.convertValue(request, Map.class);
-        return Response.ok(service.createHybridOptIn(region, payload)).build();
+        Map<String, Object> optIn = service.createHybridOptIn(region, payload);
+        return Response.ok(Map.of("LakeFormationOptInsInfo", optIn)).build();
     }
 
     private Response listHybridOptIns(JsonNode request, String region) {
-        return Response.ok(Map.of("LakeFormationOptInsInfo", Map.of("OptIns", service.listHybridOptIns(region)))).build();
+        return Response.ok(Map.of("LakeFormationOptInsInfoList", service.listHybridOptIns(region))).build();
     }
 
     private Response deleteHybridOptIn(JsonNode request, String region) {
