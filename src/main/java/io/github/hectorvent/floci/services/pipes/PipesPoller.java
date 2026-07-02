@@ -159,7 +159,7 @@ public class PipesPoller implements Resettable {
         });
     }
 
-    private void pollSqs(Pipe pipe, String region) {
+    void pollSqs(Pipe pipe, String region) {
         String queueUrl = AwsArnUtils.arnToQueueUrl(pipe.getSource(), baseUrl);
         int batchSize = getBatchSize(pipe, "SqsQueueParameters");
         List<Message> messages = sqsService.receiveMessage(queueUrl, batchSize, 30, 0, region);
@@ -542,7 +542,13 @@ public class PipesPoller implements Resettable {
         try {
             String enriched = targetInvoker.applyEnrichment(pipe, eventsArray, region);
             if (enriched != null) {
-                targetInvoker.invoke(pipe, asEventArray(objectMapper, enriched), region);
+                // Only a Lambda target expects the batch (JSON array) shape; a Step Functions, SQS,
+                // SNS or EventBridge target must receive the raw enrichment response, matching the
+                // non-enrichment delivery path. Array-wrapping those would corrupt their input.
+                String targetPayload = isLambdaTarget(pipe)
+                        ? asEventArray(objectMapper, enriched)
+                        : enriched;
+                targetInvoker.invoke(pipe, targetPayload, region);
             }
             delivered = true;
         } catch (Exception e) {
