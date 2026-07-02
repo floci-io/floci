@@ -2,11 +2,11 @@ package io.github.hectorvent.floci.services.lambda.launcher;
 
 import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
-import io.github.hectorvent.floci.core.common.docker.ContainerReachableEndpoint;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.DockerHostResolver;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecr.registry.EcrRegistryManager;
 import io.github.hectorvent.floci.services.lambda.LambdaLayerService;
 import io.github.hectorvent.floci.services.lambda.model.ContainerState;
@@ -76,7 +76,7 @@ public class ContainerLauncher {
     private final EmulatorConfig config;
     private final EcrRegistryManager ecrRegistryManager;
     private final LambdaLayerService layerService;
-    private final ContainerReachableEndpoint reachableEndpoint;
+    private final LaunchedContainerAwsEnv awsEnv;
 
     /** Matches an AWS-shaped ECR image URI: {@code <account>.dkr.ecr.<region>.amazonaws.com/<repo>[:tag]}. */
     private static final java.util.regex.Pattern AWS_ECR_URI =
@@ -92,7 +92,7 @@ public class ContainerLauncher {
                              EmulatorConfig config,
                              EcrRegistryManager ecrRegistryManager,
                              LambdaLayerService layerService,
-                             ContainerReachableEndpoint reachableEndpoint) {
+                             LaunchedContainerAwsEnv awsEnv) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
@@ -102,7 +102,7 @@ public class ContainerLauncher {
         this.config = config;
         this.ecrRegistryManager = ecrRegistryManager;
         this.layerService = layerService;
-        this.reachableEndpoint = reachableEndpoint;
+        this.awsEnv = awsEnv;
     }
 
     /**
@@ -167,11 +167,6 @@ public class ContainerLauncher {
         String cwLogStream = LOG_STREAM_DATE_FMT.format(LocalDate.now()) + "/[$LATEST]" + shortId;
         String lambdaRegion = extractRegionFromArn(fn.getFunctionArn(), config.defaultRegion());
 
-        // Floci endpoint reachable from inside the container (shared with the CloudFormation
-        // custom-resource provisioner, which uses the same address for ResponseURL callbacks).
-        String flociEndpoint = reachableEndpoint.baseUrl();
-        String flociHostname = java.net.URI.create(flociEndpoint).getHost();
-
         // When TLS is on, the container must trust Floci's self-signed cert so HTTPS callbacks
         // to Floci succeed (e.g. a CDK custom resource's cfn-response, which hardcodes https://).
         // Short-circuit when TLS is off so cert-path/storage config isn't read needlessly.
@@ -191,27 +186,13 @@ public class ContainerLauncher {
         if (fn.getHandler() != null && !fn.getHandler().isBlank()) {
             env.add("_HANDLER=" + fn.getHandler());
         }
-        env.add("AWS_DEFAULT_REGION=" + lambdaRegion);
-        env.add("AWS_REGION=" + lambdaRegion);
+        // Region, credentials and the Floci endpoint the SDK should target — the same baseline
+        // Floci gives every launched container. When the host ~/.aws is mounted (awsConfigPath)
+        // the SDK discovers credentials from /opt/aws-config instead of the placeholders.
         Optional<String> awsConfigPath = config.services().lambda().awsConfigPath()
                 .filter(s -> !s.isBlank());
-        if (awsConfigPath.isPresent()) {
-            // ~/.aws will be mounted — don't inject credentials, let SDK discover them.
-            // Set explicit file paths so discovery works regardless of container HOME.
-            env.add("AWS_SHARED_CREDENTIALS_FILE=/opt/aws-config/credentials");
-            env.add("AWS_CONFIG_FILE=/opt/aws-config/config");
-        } else {
-            // Use Floci's own env vars, fallback to test/test/test
-            String ak = System.getenv("AWS_ACCESS_KEY_ID");
-            String sk = System.getenv("AWS_SECRET_ACCESS_KEY");
-            String st = System.getenv("AWS_SESSION_TOKEN");
-            env.add("AWS_ACCESS_KEY_ID=" + (ak != null ? ak : "test"));
-            env.add("AWS_SECRET_ACCESS_KEY=" + (sk != null ? sk : "test"));
-            env.add("AWS_SESSION_TOKEN=" + (st != null ? st : "test"));
-        }
-        env.add("FLOCI_HOSTNAME=" + flociHostname);
-        env.add("FLOCI_ENDPOINT=" + flociEndpoint);
-        env.add("AWS_ENDPOINT_URL=" + flociEndpoint);
+        env.addAll(awsEnv.sdkBaselineEnv(lambdaRegion,
+                awsConfigPath.isPresent() ? Optional.of("/opt/aws-config") : Optional.empty()));
         env.addAll(flociCaEnv(flociCaCert));
         if (fn.getEnvironment() != null) {
             fn.getEnvironment().forEach((k, v) -> env.add(k + "=" + v));

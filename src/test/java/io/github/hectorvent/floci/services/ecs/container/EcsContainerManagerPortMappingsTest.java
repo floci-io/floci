@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
 import io.github.hectorvent.floci.services.ecs.model.PortMapping;
@@ -71,9 +72,10 @@ class EcsContainerManagerPortMappingsTest {
         containerDetector = mock(ContainerDetector.class);
         EmulatorConfig config = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
         RegionResolver regionResolver = mock(RegionResolver.class);
+        LaunchedContainerAwsEnv awsEnv = mock(LaunchedContainerAwsEnv.class);
 
         manager = new EcsContainerManager(containerBuilder, lifecycleManager, logStreamer,
-                containerDetector, config, regionResolver);
+                containerDetector, config, regionResolver, awsEnv);
     }
 
     private void startWith(List<PortMapping> portMappings) {

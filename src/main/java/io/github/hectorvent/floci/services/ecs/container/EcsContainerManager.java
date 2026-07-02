@@ -8,6 +8,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager.ContainerInfo;
 import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
+import io.github.hectorvent.floci.core.common.docker.LaunchedContainerAwsEnv;
 import io.github.hectorvent.floci.services.ecs.model.Container;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
@@ -31,6 +32,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 /**
  * Manages Docker container lifecycle for ECS tasks.
@@ -47,6 +49,7 @@ public class EcsContainerManager {
     private final ContainerDetector containerDetector;
     private final EmulatorConfig config;
     private final RegionResolver regionResolver;
+    private final LaunchedContainerAwsEnv awsEnv;
 
     @Inject
     public EcsContainerManager(ContainerBuilder containerBuilder,
@@ -54,13 +57,15 @@ public class EcsContainerManager {
                                ContainerLogStreamer logStreamer,
                                ContainerDetector containerDetector,
                                EmulatorConfig config,
-                               RegionResolver regionResolver) {
+                               RegionResolver regionResolver,
+                               LaunchedContainerAwsEnv awsEnv) {
         this.containerBuilder = containerBuilder;
         this.lifecycleManager = lifecycleManager;
         this.logStreamer = logStreamer;
         this.containerDetector = containerDetector;
         this.config = config;
         this.regionResolver = regionResolver;
+        this.awsEnv = awsEnv;
     }
 
     /**
@@ -111,8 +116,14 @@ public class EcsContainerManager {
             // Build container spec
             ContainerBuilder.Builder specBuilder = containerBuilder.newContainer(def.getImage())
                     .withName(containerName)
-                    .withEnv(buildEnvVars(def, override))
+                    .withEnv(buildEnvVars(def, override, region))
                     .withDockerNetwork(config.services().ecs().dockerNetwork())
+                    // Resolve Floci's endpoint from inside the task container the same way Lambda
+                    // containers do: host.docker.internal on Linux, plus Floci's embedded DNS so the
+                    // reachable AWS_ENDPOINT_URL hostname resolves to Floci instead of the container's
+                    // own loopback.
+                    .withHostDockerInternalOnLinux()
+                    .withEmbeddedDns()
                     .withLogRotation();
 
             // Add memory limit if specified
@@ -309,9 +320,20 @@ public class EcsContainerManager {
         }
     }
 
-    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override) {
-        // Task-def environment first, then override environment (override wins on key conflict).
+    private List<String> buildEnvVars(ContainerDefinition def, ContainerOverride override, String region) {
+        // AWS SDK baseline (endpoint + region + credentials) so the task can reach the emulator,
+        // then the task-def environment, then the override environment — the task def and override
+        // win on key conflict, so an explicit task-def value is never clobbered.
         Map<String, String> envMap = new LinkedHashMap<>();
+        List<String> awsBaseline = awsEnv.sdkBaselineEnv(region, Optional.empty());
+        if (awsBaseline != null) {
+            for (String kv : awsBaseline) {
+                int eq = kv.indexOf('=');
+                if (eq > 0) {
+                    envMap.put(kv.substring(0, eq), kv.substring(eq + 1));
+                }
+            }
+        }
         if (def.getEnvironment() != null) {
             for (var kv : def.getEnvironment()) {
                 envMap.put(kv.name(), kv.value());
