@@ -92,6 +92,7 @@ floci:
       max-message-size: 1048576
     s3:
       enabled: true
+      enforce-auth: false
       default-presign-expiry-seconds: 3600
     dynamodb:
       enabled: true

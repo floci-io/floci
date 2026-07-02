@@ -642,6 +642,9 @@ public interface EmulatorConfig {
         @WithDefault("true")
         boolean enabled();
 
+        @WithDefault("false")
+        boolean enforceAuth();
+
         @WithDefault("3600")
         int defaultPresignExpirySeconds();
     }
