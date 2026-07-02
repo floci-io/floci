@@ -24,6 +24,12 @@ import static org.junit.jupiter.api.Assertions.*;
  * client (the default). Downstream stateless authorizers key their deny-list on
  * {@code origin_jti}, so it must stay identical across a refresh of the same session and
  * differ between independent logins.
+ * <p>
+ * Provisioning runs in an {@code @Order(1)} test rather than {@code @BeforeAll} because a
+ * {@code @QuarkusTest} HTTP endpoint is only guaranteed reachable inside test methods. The
+ * remaining ordered tests form a session lifecycle (login → refresh → revoke); each guards
+ * the shared state it depends on via {@link #requireSetup()} / {@link #requireInitialAuthState()}
+ * so a failure in an earlier step reports a clear cause instead of a misleading assertion.
  */
 @QuarkusTest
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
@@ -71,6 +77,19 @@ class OriginJtiIntegrationTest {
                 """.formatted(clientId, USERNAME, PASSWORD));
     }
 
+    /** Guards the pool/client provisioned by setupPoolAndUser so a setup failure reads clearly. */
+    private static void requireSetup() {
+        assertNotNull(poolId, "setupPoolAndUser (Order 1) must run first to create the user pool");
+        assertNotNull(clientId, "setupPoolAndUser (Order 1) must run first to create the app client");
+    }
+
+    /** Guards the state handed forward by the initial-auth test so an earlier failure reads clearly. */
+    private static void requireInitialAuthState() {
+        assertNotNull(refreshToken, "initialAuthEmitsJtiAndOriginJti (Order 2) must run first to set refreshToken");
+        assertFalse(refreshToken.isBlank(), "refreshToken from the initial authentication must not be blank");
+        assertNotNull(originJti1, "initialAuthEmitsJtiAndOriginJti (Order 2) must run first to set origin_jti");
+    }
+
     // ─── setup ──────────────────────────────────────────────────────────────
 
     @Test
@@ -104,6 +123,7 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(2)
     void initialAuthEmitsJtiAndOriginJti() throws Exception {
+        requireSetup();
         JsonNode auth = passwordLogin();
         JsonNode result = auth.path("AuthenticationResult");
 
@@ -130,6 +150,7 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(3)
     void describeClientReportsEnableTokenRevocation() throws Exception {
+        requireSetup();
         JsonNode described = cognitoJson("DescribeUserPoolClient", """
                 {"UserPoolId":"%s","ClientId":"%s"}
                 """.formatted(poolId, clientId));
@@ -141,6 +162,8 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(4)
     void refreshKeepsOriginJtiStableAndRotatesJti() throws Exception {
+        requireSetup();
+        requireInitialAuthState();
         JsonNode refreshed = cognitoJson("InitiateAuth", """
                 {
                   "ClientId": "%s",
@@ -160,6 +183,8 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(5)
     void getTokensFromRefreshTokenKeepsOriginJti() throws Exception {
+        requireSetup();
+        requireInitialAuthState();
         JsonNode refreshed = cognitoJson("GetTokensFromRefreshToken", """
                 {"ClientId":"%s","RefreshToken":"%s"}
                 """.formatted(clientId, refreshToken));
@@ -172,6 +197,8 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(6)
     void secondLoginUsesDifferentOriginJti() throws Exception {
+        requireSetup();
+        requireInitialAuthState();
         JsonNode auth = passwordLogin();
         JsonNode access = decodeJwtPayload(auth.path("AuthenticationResult").path("AccessToken").asText());
 
@@ -183,6 +210,7 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(7)
     void clientWithRevocationDisabledOmitsOriginJti() throws Exception {
+        requireSetup();
         JsonNode client = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
@@ -213,6 +241,7 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(8)
     void revokeTokenInvalidatesRefreshFamily() throws Exception {
+        requireSetup();
         JsonNode auth = passwordLogin();
         String freshRefresh = auth.path("AuthenticationResult").path("RefreshToken").asText();
 
@@ -243,6 +272,7 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(9)
     void revokeTokenRejectsNonRefreshToken() throws Exception {
+        requireSetup();
         JsonNode body = cognitoJsonAny("RevokeToken", """
                 {"ClientId":"%s","Token":"not-a-refresh-token"}
                 """.formatted(clientId));
@@ -253,6 +283,7 @@ class OriginJtiIntegrationTest {
     @Test
     @Order(10)
     void revokeTokenUnsupportedWhenRevocationDisabled() throws Exception {
+        requireSetup();
         JsonNode client = cognitoJson("CreateUserPoolClient", """
                 {
                   "UserPoolId": "%s",
@@ -277,5 +308,32 @@ class OriginJtiIntegrationTest {
                 """.formatted(disabledClientId, disabledRefresh));
         assertEquals("UnsupportedOperationException", body.path("__type").asText(),
                 "RevokeToken must be rejected when the client disables token revocation, body was: " + body);
+    }
+
+    @Test
+    @Order(11)
+    void revokeTokenChecksClientSecretBeforeRevocationConfig() throws Exception {
+        requireSetup();
+        // Confidential client with revocation disabled: an invalid secret must be rejected with
+        // NotAuthorizedException *before* the UnsupportedOperationException config check, so that
+        // revocation state is never disclosed to an unauthenticated caller (matches AWS ordering).
+        JsonNode client = cognitoJson("CreateUserPoolClient", """
+                {
+                  "UserPoolId": "%s",
+                  "ClientName": "confidential-disabled-client",
+                  "GenerateSecret": true,
+                  "ExplicitAuthFlows": ["ALLOW_USER_PASSWORD_AUTH", "ALLOW_REFRESH_TOKEN_AUTH"],
+                  "EnableTokenRevocation": false
+                }
+                """.formatted(poolId));
+        String confidentialClientId = client.path("UserPoolClient").path("ClientId").asText();
+        assertFalse(client.path("UserPoolClient").path("ClientSecret").asText().isBlank(),
+                "Confidential client must be issued a secret");
+
+        JsonNode body = cognitoJsonAny("RevokeToken", """
+                {"ClientId":"%s","Token":"any-token","ClientSecret":"wrong-secret"}
+                """.formatted(confidentialClientId));
+        assertEquals("NotAuthorizedException", body.path("__type").asText(),
+                "Caller identity must be validated before the revocation-enabled check, body was: " + body);
     }
 }

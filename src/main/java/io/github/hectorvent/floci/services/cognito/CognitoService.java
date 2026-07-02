@@ -1476,14 +1476,17 @@ public class CognitoService {
         }
 
         UserPoolClient client = findClientById(clientId);
-        if (!isTokenRevocationEnabled(client)) {
-            throw new AwsException("UnsupportedOperationException",
-                    "Please enable token revocation before revoking tokens for this client", 400);
-        }
 
+        // Authenticate the caller before disclosing configuration state: a confidential client must
+        // present a valid secret first, matching AWS which validates identity ahead of feature checks.
         String secret = client.getClientSecret();
         if (secret != null && !secret.isBlank() && !secret.equals(clientSecret)) {
             throw new AwsException("NotAuthorizedException", "Invalid client secret", 400);
+        }
+
+        if (!isTokenRevocationEnabled(client)) {
+            throw new AwsException("UnsupportedOperationException",
+                    "Please enable token revocation before revoking tokens for this client", 400);
         }
 
         String[] parts = parseRefreshToken(token);
