@@ -1074,6 +1074,13 @@ public class AslExecutor {
 
     private StateResult executeMapState(String name, JsonNode stateDef, JsonNode input, StateMachine sm,
                                          boolean jsonata, String topLevelQueryLanguage, JsonNode context) throws Exception {
+        if (stateDef.has("ItemReader")) {
+            String mode = stateDef.path("ItemProcessor").path("ProcessorConfig").path("Mode").asText("INLINE");
+            if (!"DISTRIBUTED".equals(mode)) {
+                throw new FailStateException("States.Runtime",
+                        "The ItemReader, ItemBatcher and ResultWriter fields are not supported for INLINE maps");
+            }
+        }
         JsonNode items = resolveMapItems(stateDef, input, jsonata, context);
 
         if (!items.isArray()) {
@@ -1139,7 +1146,7 @@ public class AslExecutor {
         }
 
         if (stateDef.has("ItemReader")) {
-            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context);
+            return resolveItemReaderItems(stateDef.get("ItemReader"), input, context, jsonata);
         }
 
         JsonNode itemsPath = stateDef.path("ItemsPath");
@@ -1147,7 +1154,7 @@ public class AslExecutor {
     }
 
     private JsonNode resolveItemReaderItems(JsonNode itemReader, JsonNode input,
-                                            JsonNode context) throws Exception {
+                                            JsonNode context, boolean jsonata) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
             throw new FailStateException("States.ItemReaderFailed",
@@ -1163,8 +1170,14 @@ public class AslExecutor {
                     "ItemReader InputType " + inputType + " is not yet implemented by the emulator");
         }
 
-        JsonNode parameters = itemReader.path("Parameters");
-        JsonNode resolvedParameters = resolveParameters(parameters, input, context);
+        JsonNode resolvedParameters;
+        if (jsonata && itemReader.has("Arguments")) {
+            JsonNode statesVar = buildStatesVar(input, null, context);
+            resolvedParameters = jsonataEvaluator.resolveTemplate(itemReader.get("Arguments"), statesVar);
+        } else {
+            JsonNode parameters = itemReader.path("Parameters");
+            resolvedParameters = resolveParameters(parameters, input, context);
+        }
         String bucket = resolvedParameters.path("Bucket").asText(null);
         String key = resolvedParameters.path("Key").asText(null);
         if (bucket == null || key == null) {

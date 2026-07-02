@@ -159,17 +159,14 @@ class StepFunctionsValidateStateMachineDefinitionIntegrationTest {
     }
 
     @Test
-    void itemReaderWithoutDistributedMode_returnsFailWithSchemaError() {
+    void itemReaderWithoutDistributedMode_isAcceptedAtDefinitionTime() {
         given().contentType(CT).header("X-Amz-Target", TARGET)
                 .body("{\"definition\":\"" + MAP_WITH_ITEM_READER_WITHOUT_DISTRIBUTED_MODE + "\"}")
                 .when().post("/")
                 .then().statusCode(200)
-                .body("result", equalTo("FAIL"))
-                .body("diagnostics", hasSize(1))
-                .body("diagnostics[0].severity", equalTo("ERROR"))
-                .body("diagnostics[0].code", equalTo("SCHEMA_VALIDATION_FAILED"))
-                .body("diagnostics[0].location",
-                        equalTo("/States/ProcessItems/ItemProcessor/ProcessorConfig/Mode"));
+                .body("result", equalTo("OK"))
+                .body("diagnostics", hasSize(0))
+                .body("truncated", is(false));
     }
 
     @Test

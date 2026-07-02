@@ -536,11 +536,5 @@ public class StepFunctionsService implements Resettable {
                     + "[MANIFEST, JSON, CSV, JSONL, PARQUET]"
                     + " at /States/" + stateName + "/ItemReader/ReaderConfig/InputType");
         }
-
-        String mode = stateDef.path("ItemProcessor").path("ProcessorConfig").path("Mode").asText(null);
-        if (!"DISTRIBUTED".equals(mode)) {
-            errors.add("The field 'Mode' should have value 'DISTRIBUTED' when ItemReader is specified"
-                    + " at /States/" + stateName + "/ItemProcessor/ProcessorConfig/Mode");
-        }
     }
 }
