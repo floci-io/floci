@@ -95,8 +95,7 @@ public class BackupController {
     // "not configured" signal rather than an empty 200 or a generic 400 they can't interpret.
     @GET
     @Path("/backup-vaults/{backupVaultName}/notification-configuration")
-    public Response getBackupVaultNotifications(@Context HttpHeaders headers,
-                                                @PathParam("backupVaultName") String vaultName) {
+    public Response getBackupVaultNotifications(@PathParam("backupVaultName") String vaultName) {
         throw new AwsException("ResourceNotFoundException",
                 "No notification configuration found for backup vault: " + vaultName, 400);
     }
@@ -107,8 +106,7 @@ public class BackupController {
     // see the documented "not configured" signal rather than an empty 200 or a generic 400.
     @GET
     @Path("/backup-vaults/{backupVaultName}/access-policy")
-    public Response getBackupVaultAccessPolicy(@Context HttpHeaders headers,
-                                               @PathParam("backupVaultName") String vaultName) {
+    public Response getBackupVaultAccessPolicy(@PathParam("backupVaultName") String vaultName) {
         throw new AwsException("ResourceNotFoundException",
                 "No access policy found for backup vault: " + vaultName, 400);
     }
