@@ -52,11 +52,17 @@ class SesEmailIdentityConfigurationSetTest {
             try {
                 sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder()
                         .emailIdentity(identity).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                System.err.println("[SesEmailIdentityConfigurationSetTest] cleanup warning – "
+                        + "deleteEmailIdentity: " + e.getMessage());
+            }
             try {
                 sesV2.deleteConfigurationSet(DeleteConfigurationSetRequest.builder()
                         .configurationSetName(configSet).build());
-            } catch (Exception ignored) {}
+            } catch (Exception e) {
+                System.err.println("[SesEmailIdentityConfigurationSetTest] cleanup warning – "
+                        + "deleteConfigurationSet: " + e.getMessage());
+            }
             sesV2.close();
         }
     }
