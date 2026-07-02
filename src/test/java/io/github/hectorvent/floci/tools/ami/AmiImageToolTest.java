@@ -62,6 +62,9 @@ class AmiImageToolTest {
         assertTrue(Files.readString(context.resolve("Dockerfile")).contains("FROM scratch"));
         assertTrue(Files.readString(context.resolve("Dockerfile")).contains("io.floci.ami.catalog-image-id"));
         assertTrue(Files.readString(context.resolve("Dockerfile")).contains("ADD ubuntu-root.tar.xz /"));
+        assertTrue(Files.readString(context.resolve("Dockerfile")).contains("useradd --uid 1000 --gid ubuntu"));
+        assertTrue(Files.readString(context.resolve("Dockerfile")).contains("systemd-networkd-wait-online.service.d/floci.conf"));
+        assertTrue(Files.readString(context.resolve("systemd-networkd-wait-online-floci.conf")).contains("ExecStart=/bin/true"));
         assertTrue(Files.readString(context.resolve("provenance.yaml")).contains("manifestSha256"));
 
         Path catalog = tempDir.resolve("image-catalog.yaml");

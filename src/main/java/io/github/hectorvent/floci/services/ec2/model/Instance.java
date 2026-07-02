@@ -5,7 +5,9 @@ import io.quarkus.runtime.annotations.RegisterForReflection;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 @RegisterForReflection
 @JsonIgnoreProperties(ignoreUnknown = true)
@@ -58,6 +60,10 @@ public class Instance {
     private String userData;
     private int sshHostPort;
     private long terminatedAt;
+
+    // Security-group ingress ports published on the host via socat sidecars:
+    // container app port -> allocated host port. Not part of the AWS wire format.
+    private Map<Integer, Integer> publishedPorts = new LinkedHashMap<>();
 
     public Instance() {}
 
@@ -171,6 +177,14 @@ public class Instance {
 
     public String getContainerBridgeIp() { return containerBridgeIp; }
     public void setContainerBridgeIp(String containerBridgeIp) { this.containerBridgeIp = containerBridgeIp; }
+
+    public Map<Integer, Integer> getPublishedPorts() {
+        if (publishedPorts == null) {
+            publishedPorts = new LinkedHashMap<>();
+        }
+        return publishedPorts;
+    }
+    public void setPublishedPorts(Map<Integer, Integer> publishedPorts) { this.publishedPorts = publishedPorts; }
 
     public String getRootVolumeId() { return rootVolumeId; }
     public void setRootVolumeId(String rootVolumeId) { this.rootVolumeId = rootVolumeId; }

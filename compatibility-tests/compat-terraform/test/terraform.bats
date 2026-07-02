@@ -193,3 +193,14 @@ setup() {
     assert_success
     assert_output --partial "compat-test"
 }
+
+@test "Terraform: Cognito user pool client created without optional blocks" {
+    POOL_ID=$(aws_cmd cognito-idp list-user-pools --max-results 10 \
+        --query "UserPools[?Name=='floci-compat-pool'].Id | [0]" --output text)
+    [ -n "$POOL_ID" ]
+    run aws_cmd cognito-idp list-user-pool-clients --user-pool-id "$POOL_ID" \
+        --query "UserPoolClients[?ClientName=='floci-compat-pool-client'].ClientId | [0]" --output text
+    assert_success
+    [ -n "$output" ]
+    [ "$output" != "None" ]
+}

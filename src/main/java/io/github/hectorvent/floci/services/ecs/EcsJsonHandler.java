@@ -281,9 +281,11 @@ public class EcsJsonHandler {
         String startedBy = req.has("startedBy") ? req.path("startedBy").asText() : null;
         List<ContainerOverride> containerOverrides =
                 parseContainerOverrides(req.path("overrides").path("containerOverrides"));
+        NetworkConfiguration networkConfiguration =
+                parseNetworkConfiguration(req.path("networkConfiguration"));
 
         List<EcsTask> launched = service.runTask(cluster, taskDefinition, count,
-                launchType, group, startedBy, containerOverrides, region);
+                launchType, group, startedBy, containerOverrides, networkConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
@@ -444,7 +446,10 @@ public class EcsJsonHandler {
         return result;
     }
 
-    private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
+    /** Parse an ECS {@code networkConfiguration} node (camelCase, as the data-plane API uses).
+     *  Public so the Step Functions ecs:runTask integration can reuse it after recasing its
+     *  PascalCase input, rather than duplicating the awsvpc parsing. */
+    public NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
         if (node == null || !node.isObject() || !node.hasNonNull("awsvpcConfiguration")) {
             return null;
         }
@@ -1033,7 +1038,9 @@ public class EcsJsonHandler {
         return n;
     }
 
-    private ObjectNode taskNode(EcsTask t) {
+    /** Renders an ECS task to its data-plane JSON shape. Reused by the Step Functions
+     *  ecs:runTask integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
+    public ObjectNode taskNode(EcsTask t) {
         ObjectNode n = objectMapper.createObjectNode();
         n.put("taskArn", t.getTaskArn());
         n.put("clusterArn", t.getClusterArn());
@@ -1358,7 +1365,9 @@ public class EcsJsonHandler {
         return result;
     }
 
-    private List<ContainerOverride> parseContainerOverrides(JsonNode node) {
+    /** Parses ECS container overrides from data-plane JSON. Reused by the Step Functions
+     *  ecs:runTask integration ({@link io.github.hectorvent.floci.services.stepfunctions.AslExecutor}). */
+    public List<ContainerOverride> parseContainerOverrides(JsonNode node) {
         List<ContainerOverride> result = new ArrayList<>();
         if (!node.isArray()) {
             return result;

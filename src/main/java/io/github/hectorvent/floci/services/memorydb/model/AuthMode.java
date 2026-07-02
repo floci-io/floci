@@ -1,5 +1,7 @@
 package io.github.hectorvent.floci.services.memorydb.model;
 
+import io.quarkus.runtime.annotations.RegisterForReflection;
+
 /**
  * Authentication type of a MemoryDB {@link User}. Mirrors the {@code Type} field of the
  * real API's {@code AuthenticationMode}/{@code Authentication} structures, whose wire
@@ -8,6 +10,7 @@ package io.github.hectorvent.floci.services.memorydb.model;
  * <p>A cluster does not carry an auth mode of its own — it references an ACL, and the
  * effective authentication is determined by the auth modes of the users in that ACL.
  */
+@RegisterForReflection
 public enum AuthMode {
     PASSWORD("password"),
     IAM("iam"),
