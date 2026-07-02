@@ -749,10 +749,15 @@ public class S3Controller {
             }
             if (hasQueryParam(uriInfo, "acl")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAcl", authorization);
-                String aclXml = s3Service.getObjectAcl(bucket, key, versionId);
-                emitCloudTrailEvent("GetObjectAcl", bucket, key, 0L,
-                        aclXml == null ? 0L : aclXml.length(), null, null);
-                return Response.ok(aclXml).build();
+                try {
+                    String aclXml = s3Service.getObjectAcl(bucket, key, versionId);
+                    emitCloudTrailEvent("GetObjectAcl", bucket, key, 0L,
+                            aclXml == null ? 0L : aclXml.length(), null, null);
+                    return Response.ok(aclXml).build();
+                } catch (AwsException e) {
+                    emitCloudTrailEvent("GetObjectAcl", bucket, key, 0L, 0L, e.getErrorCode(), e.getMessage());
+                    return xmlErrorResponse(e);
+                }
             }
             if (hasQueryParam(uriInfo, "attributes")) {
                 s3Service.authorizeObjectRead(bucket, key, versionId, "s3:GetObjectAttributes", authorization);
