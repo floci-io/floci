@@ -72,6 +72,19 @@ floci:
     persistent-path: ./data
     host-persistent-path: ./data
     prune-volumes-on-delete: false
+    # EFS access-point emulation for the shared local Docker volumes that stand in for EFS file
+    # systems. All opt-in; with the defaults below (and no owner/permission overrides) volumes are
+    # plain named volumes, so existing behaviour is unchanged. Emulates an access point's
+    # RootDirectory.CreationInfo (owner-uid/owner-gid/root-permissions/setgid) and PosixUser
+    # (mount-user/mount-group-add).
+    efs:
+      # owner-uid:            # RootDirectory.CreationInfo.OwnerUid applied to the volume root
+      # owner-gid:            # RootDirectory.CreationInfo.OwnerGid applied to the volume root
+      # root-permissions:     # e.g. "0777"; empty performs no chmod of the permission bits
+      setgid: false
+      init-image: busybox:stable
+      # mount-user:           # run mounting containers as "uid[:gid]" (access point PosixUser)
+      # mount-group-add:      # supplementary gid added to mounting containers
     wal:
       compaction-interval-ms: 30000
     services:

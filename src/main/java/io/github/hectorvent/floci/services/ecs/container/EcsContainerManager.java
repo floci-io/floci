@@ -182,6 +182,11 @@ public class EcsContainerManager {
                                 efsCfg.setgid(), efsCfg.initImage());
                         specBuilder.withNamedVolume(efsVolumeName(efs.fileSystemId()),
                                 mp.containerPath(), mp.readOnly());
+                        // Emulate the access point's PosixUser: run the container under the
+                        // configured uid[:gid] and/or add the supplementary group, so a non-root
+                        // image can read/write the shared volume owned by ownerUid/ownerGid.
+                        efsCfg.mountUser().ifPresent(specBuilder::withUser);
+                        efsCfg.mountGroupAdd().ifPresent(gid -> specBuilder.withGroupAdd(String.valueOf(gid)));
                     } else {
                         LOG.warnv("Skipping mountPoint with unresolved volume {0} on container {1}",
                                 mp.sourceVolume(), def.getName());

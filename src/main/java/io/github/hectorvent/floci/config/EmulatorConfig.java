@@ -189,8 +189,11 @@ public interface EmulatorConfig {
 
         /**
          * Octal permissions applied to the volume root (EFS {@code RootDirectory.CreationInfo.Permissions}),
-         * e.g. {@code "0777"}. Empty leaves the volume root untouched — no ownership initialisation
-         * is performed (plain named volume).
+         * e.g. {@code "0777"}. When empty, no {@code chmod} for the permission bits is performed; however
+         * the init helper container still runs if {@link #ownerUid()}, {@link #ownerGid()}, or
+         * {@link #setgid()} are set. Volume-root initialisation is skipped entirely only when all of
+         * {@code owner-uid}, {@code owner-gid}, {@code root-permissions}, and {@code setgid} are left at
+         * their defaults (plain named volume).
          */
         Optional<String> rootPermissions();
 

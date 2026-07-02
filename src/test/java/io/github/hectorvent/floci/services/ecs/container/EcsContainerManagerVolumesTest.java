@@ -177,4 +177,37 @@ class EcsContainerManagerVolumesTest {
         verify(lifecycleManager, times(1)).ensureSharedVolume("floci-efs-fs-abc",
                 OptionalInt.of(1001), OptionalInt.of(1001), Optional.of("0777"), true, "busybox:stable");
     }
+
+    @Test
+    void efsMountAppliesConfiguredPosixUserAndGroupToContainer() {
+        // Rebuild with an EFS config carrying a PosixUser (mount-user 1001:1001) and a supplementary
+        // group (mount-group-add 2000). A container mounting the EFS volume must run under that user
+        // and add that group, emulating the access point's PosixUser squashing — otherwise the
+        // container keeps its image USER and cannot write the volume owned by ownerUid/ownerGid.
+        EmulatorConfig cfg = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(cfg.storage().efs().mountUser()).thenReturn(Optional.of("1001:1001"));
+        when(cfg.storage().efs().mountGroupAdd()).thenReturn(OptionalInt.of(2000));
+        EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
+                mock(RegionResolver.class));
+
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setMountPoints(List.of(new MountPoint("customer-data", "/mnt/efs", false)));
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("efs-family");
+        taskDef.setContainerDefinitions(List.of(app));
+        taskDef.setVolumes(List.of(new Volume("customer-data", null,
+                new EfsVolumeConfiguration("fs-abc", "/dps", "ENABLED", null, null, null))));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/efsposix");
+
+        configured.startTask(task, taskDef, List.of(), "us-east-1");
+
+        verify(builder, times(1)).withUser("1001:1001");
+        verify(builder, times(1)).withGroupAdd("2000");
+    }
 }
