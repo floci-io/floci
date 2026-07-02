@@ -1,5 +1,6 @@
 package io.github.hectorvent.floci.services.iam;
 
+import io.github.hectorvent.floci.config.EmulatorConfig;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.AwsQueryController;
@@ -7,6 +8,7 @@ import io.github.hectorvent.floci.core.common.AwsQueryResponse;
 import io.github.hectorvent.floci.core.common.AccountResolver;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
+import io.github.hectorvent.floci.services.iam.model.IamRole;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.Context;
@@ -17,6 +19,7 @@ import org.jboss.logging.Logger;
 
 import java.time.Instant;
 import java.time.format.DateTimeFormatter;
+import java.util.Optional;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
@@ -33,15 +36,20 @@ public class StsQueryHandler {
     private final IamService iamService;
     private final AccountResolver accountResolver;
     private final RegionResolver regionResolver;
+    private final EmulatorConfig config;
+    private final AssumeRolePolicyEvaluator trustPolicyEvaluator;
 
     @Context
     HttpHeaders headers;
 
     @Inject
-    public StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver) {
+    public StsQueryHandler(IamService iamService, AccountResolver accountResolver, RegionResolver regionResolver,
+                           EmulatorConfig config, AssumeRolePolicyEvaluator trustPolicyEvaluator) {
         this.iamService = iamService;
         this.accountResolver = accountResolver;
         this.regionResolver = regionResolver;
+        this.config = config;
+        this.trustPolicyEvaluator = trustPolicyEvaluator;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params) {
@@ -79,6 +87,12 @@ public class StsQueryHandler {
                 : "UnknownRole";
         String callerAccountId = regionResolver.getAccountId();
         String accountId = AwsArnUtils.accountOrDefault(roleArn, callerAccountId);
+
+        Response trustDenied = enforceTrustPolicy(roleArn, roleName, accountId);
+        if (trustDenied != null) {
+            return trustDenied;
+        }
+
         String assumedRoleArn = AwsArnUtils.Arn.of("sts", "", accountId, "assumed-role/" + roleName + "/" + sessionName).toString();
         String assumedRoleId = "AROA" + randomId(16) + ":" + sessionName;
 
@@ -97,6 +111,32 @@ public class StsQueryHandler {
                 .elem("PackedPolicySize", "0")
                 .build();
         return Response.ok(AwsQueryResponse.envelope("AssumeRole", AwsNamespaces.STS, result)).build();
+    }
+
+    /**
+     * When IAM enforcement is enabled, denies AssumeRole if the target role's trust policy does not
+     * permit the caller. Returns {@code null} to allow — enforcement disabled, the role is unknown
+     * to Floci (permissive, backward-compatible), or the caller is permitted.
+     */
+    private Response enforceTrustPolicy(String roleArn, String roleName, String roleAccountId) {
+        if (!config.services().iam().enforcementEnabled()) {
+            return null;
+        }
+        Optional<IamRole> role = iamService.findRole(roleAccountId, roleName);
+        if (role.isEmpty()) {
+            return null;
+        }
+        String auth = headers == null ? null : headers.getHeaderString("Authorization");
+        String callerAccount = accountResolver.resolve(auth);
+        String callerArn = iamService.resolveCallerArn(
+                        auth == null ? null : accountResolver.extractAccessKeyId(auth))
+                .orElse(AwsArnUtils.Arn.of("iam", "", callerAccount, "root").toString());
+        if (trustPolicyEvaluator.allows(role.get().getAssumeRolePolicyDocument(), callerArn, callerAccount)) {
+            return null;
+        }
+        return AwsQueryResponse.error("AccessDenied",
+                "User: " + callerArn + " is not authorized to perform: sts:AssumeRole on resource: " + roleArn,
+                AwsNamespaces.STS, 403);
     }
 
     private Response handleGetCallerIdentity(MultivaluedMap<String, String> params) {
