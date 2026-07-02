@@ -798,6 +798,68 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithS3JsonArrayEntriesNamedKeyAndValue_keepsWholeElementAsMapItemValue() throws Exception {
+        createBucket("map-inputs-array-key-value");
+        putObject("map-inputs-array-key-value", "workers.json", """
+                [{"Key":"k1","Value":42},{"Key":"k2","Value":84}]
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-array-key-value",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemSelector": {
+                                "value.$": "$$.Map.Item.Value",
+                                "index.$": "$$.Map.Item.Index"
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-array-key-value-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"index\":0") || output.contains("\"index\": 0"));
+        assertTrue(output.contains("\"index\":1") || output.contains("\"index\": 1"));
+        assertTrue(output.contains("\"value\":{\"Key\":\"k1\",\"Value\":42}")
+                || output.contains("\"value\": {\"Key\": \"k1\", \"Value\": 42}")
+                || output.contains("\"value\": { \"Key\": \"k1\", \"Value\": 42 }"));
+        assertTrue(output.contains("\"value\":{\"Key\":\"k2\",\"Value\":84}")
+                || output.contains("\"value\": {\"Key\": \"k2\", \"Value\": 84}")
+                || output.contains("\"value\": { \"Key\": \"k2\", \"Value\": 84 }"));
+        assertFalse(output.contains("\"key\":\"k1\"") || output.contains("\"key\": \"k1\""));
+        assertFalse(output.contains("\"key\":\"k2\"") || output.contains("\"key\": \"k2\""));
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_invalidJsonFailsWithItemReaderError() throws Exception {
         createBucket("map-inputs-invalid");
         putObject("map-inputs-invalid", "workers.json", "not-json");

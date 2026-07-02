@@ -67,6 +67,15 @@ import java.util.function.BiConsumer;
 @ApplicationScoped
 public class AslExecutor {
 
+    private enum MapItemsSource {
+        DEFAULT,
+        ITEM_READER_ARRAY,
+        ITEM_READER_OBJECT
+    }
+
+    private record ResolvedMapItems(JsonNode items, MapItemsSource source) {
+    }
+
     private static final Logger LOG = Logger.getLogger(AslExecutor.class);
     private static final int MAX_WAIT_SECONDS = 30;
 
@@ -1347,7 +1356,8 @@ public class AslExecutor {
                         "The ItemReader, ItemBatcher and ResultWriter fields are not supported for INLINE maps");
             }
         }
-        JsonNode items = resolveMapItems(stateDef, input, jsonata, context);
+        ResolvedMapItems resolvedItems = resolveMapItems(stateDef, input, jsonata, context);
+        JsonNode items = resolvedItems.items();
 
         if (!items.isArray()) {
             throw new FailStateException("States.Runtime", "Items must reference an array");
@@ -1372,7 +1382,7 @@ public class AslExecutor {
             ObjectNode mapCtx = objectMapper.createObjectNode();
             ObjectNode mapItem = objectMapper.createObjectNode();
             mapItem.put("Index", index);
-            if (isItemReaderObjectEntry(item)) {
+            if (resolvedItems.source() == MapItemsSource.ITEM_READER_OBJECT) {
                 mapItem.put("Key", item.path("Key").asText());
                 mapItem.set("Value", item.get("Value"));
             } else {
@@ -1404,15 +1414,16 @@ public class AslExecutor {
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
 
-    private JsonNode resolveMapItems(JsonNode stateDef, JsonNode input,
-                                     boolean jsonata, JsonNode context) throws Exception {
+    private ResolvedMapItems resolveMapItems(JsonNode stateDef, JsonNode input,
+                                             boolean jsonata, JsonNode context) throws Exception {
         if (jsonata && stateDef.has("Items")) {
             JsonNode itemsNode = stateDef.get("Items");
             if (itemsNode.isTextual() && JsonataEvaluator.isExpression(itemsNode.asText())) {
                 JsonNode statesVar = buildStatesVar(input, null, context);
-                return jsonataEvaluator.evaluate(itemsNode.asText(), statesVar);
+                return new ResolvedMapItems(jsonataEvaluator.evaluate(itemsNode.asText(), statesVar),
+                        MapItemsSource.DEFAULT);
             }
-            return itemsNode;
+            return new ResolvedMapItems(itemsNode, MapItemsSource.DEFAULT);
         }
 
         if (stateDef.has("ItemReader")) {
@@ -1420,11 +1431,12 @@ public class AslExecutor {
         }
 
         JsonNode itemsPath = stateDef.path("ItemsPath");
-        return itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input);
+        return new ResolvedMapItems(itemsPath.isMissingNode() ? input : resolvePath(itemsPath.asText("$"), input),
+                MapItemsSource.DEFAULT);
     }
 
-    private JsonNode resolveItemReaderItems(JsonNode itemReader, JsonNode input,
-                                            JsonNode context, boolean jsonata) throws Exception {
+    private ResolvedMapItems resolveItemReaderItems(JsonNode itemReader, JsonNode input,
+                                                    JsonNode context, boolean jsonata) throws Exception {
         String resource = itemReader.path("Resource").asText(null);
         if ("arn:aws:states:::s3:listObjectsV2".equals(resource)) {
             throw new FailStateException("States.ItemReaderFailed",
@@ -1459,13 +1471,14 @@ public class AslExecutor {
             JsonNode items = objectMapper.readTree(object.getData());
             items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
-                return applyMaxItems(itemReader, normalizeObjectItems(items));
+                return new ResolvedMapItems(applyMaxItems(itemReader, normalizeObjectItems(items)),
+                        MapItemsSource.ITEM_READER_OBJECT);
             }
             if (!items.isArray()) {
                 throw new FailStateException("States.ItemReaderFailed",
                         "Attempting to map over non-iterable node.");
             }
-            return applyMaxItems(itemReader, items);
+            return new ResolvedMapItems(applyMaxItems(itemReader, items), MapItemsSource.ITEM_READER_ARRAY);
         } catch (AwsException e) {
             throw new FailStateException("States.ItemReaderFailed", e.getMessage());
         } catch (FailStateException e) {
@@ -1474,10 +1487,6 @@ public class AslExecutor {
             throw new FailStateException("States.ItemReaderFailed",
                     e.getMessage() != null ? e.getMessage() : "Failed to parse ItemReader input");
         }
-    }
-
-    private boolean isItemReaderObjectEntry(JsonNode item) {
-        return item.isObject() && item.has("Key") && item.has("Value");
     }
 
     private ArrayNode normalizeObjectItems(JsonNode items) {
