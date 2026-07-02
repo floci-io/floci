@@ -16,6 +16,7 @@ import com.github.dockerjava.api.model.StreamType;
 import java.nio.charset.StandardCharsets;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -105,7 +106,8 @@ class Ec2ContainerManagerTest {
                 dockerClient,
                 mock(PortAllocator.class),
                 mock(EmulatorConfig.class),
-                metadataServer);
+                metadataServer,
+                mock(Ec2PortForwardManager.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-restored");
@@ -402,7 +404,8 @@ class Ec2ContainerManagerTest {
                 dockerClient,
                 portAllocator,
                 config,
-                metadataServer);
+                metadataServer,
+                mock(Ec2PortForwardManager.class));
         return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder);
     }
 

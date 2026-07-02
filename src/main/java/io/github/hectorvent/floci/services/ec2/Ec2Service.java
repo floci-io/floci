@@ -30,6 +30,7 @@ import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.ec2.model.Address;
 import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.services.ec2.model.Image;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.InstanceNetworkInterface;
@@ -81,6 +82,7 @@ public class Ec2Service {
     private final String accountId;
     private final EmulatorConfig config;
     private final Ec2ContainerManager containerManager;
+    private final Ec2PortForwardManager portForwardManager;
     private final AmiImageResolver amiImageResolver;
     private final Ec2ImageCatalog imageCatalog;
     private final Ec2InstanceTypeCatalog instanceTypeCatalog;
@@ -111,9 +113,10 @@ public class Ec2Service {
 
     @Inject
     public Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+                      Ec2PortForwardManager portForwardManager,
                       AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                       Ec2InstanceTypeCatalog instanceTypeCatalog, StorageFactory storageFactory) {
-        this(config, containerManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
+        this(config, containerManager, portForwardManager, amiImageResolver, imageCatalog, instanceTypeCatalog,
                 storageFactory.create("ec2", "ec2-vpcs.json", new TypeReference<Map<String, Vpc>>() {}),
                 storageFactory.create("ec2", "ec2-subnets.json", new TypeReference<Map<String, Subnet>>() {}),
                 storageFactory.create("ec2", "ec2-security-groups.json", new TypeReference<Map<String, SecurityGroup>>() {}),
@@ -134,6 +137,7 @@ public class Ec2Service {
 
     // Package-private for hermetic tests (pass in-memory or temp-dir-backed StorageBackends directly).
     Ec2Service(EmulatorConfig config, Ec2ContainerManager containerManager,
+               Ec2PortForwardManager portForwardManager,
                AmiImageResolver amiImageResolver, Ec2ImageCatalog imageCatalog,
                Ec2InstanceTypeCatalog instanceTypeCatalog,
                StorageBackend<String, Vpc> vpcs,
@@ -155,6 +159,7 @@ public class Ec2Service {
         this.accountId = config.defaultAccountId();
         this.config = config;
         this.containerManager = containerManager;
+        this.portForwardManager = portForwardManager;
         this.amiImageResolver = amiImageResolver;
         this.imageCatalog = imageCatalog;
         this.instanceTypeCatalog = instanceTypeCatalog;
@@ -178,6 +183,13 @@ public class Ec2Service {
 
     @PostConstruct
     void restoreMetadataRegistrations() {
+        if (portForwardManager != null) {
+            portForwardManager.setPersister(inst -> {
+                if (inst != null && inst.getRegion() != null && inst.getInstanceId() != null) {
+                    instances.put(key(inst.getRegion(), inst.getInstanceId()), inst);
+                }
+            });
+        }
         if (config.services().ec2().mock()) {
             return;
         }
@@ -191,6 +203,10 @@ public class Ec2Service {
             if (containerManager.restoreMetadataRegistration(instance)) {
                 instances.put(key, instance);
                 restored++;
+                // Container is running: re-reserve host ports and recreate any missing socat sidecars.
+                if (portForwardManager != null) {
+                    portForwardManager.restore(instance);
+                }
             }
         }
         if (restored > 0) {
@@ -631,11 +647,57 @@ public class Ec2Service {
                         publicKey = kp.getPublicKey();
                     }
                 }
-                containerManager.launch(inst, dockerImage, publicKey, region);
+                containerManager.launch(inst, dockerImage, publicKey, region, desiredPublishedPorts(region, inst));
             }
         }
 
         return reservation;
+    }
+
+    /**
+     * Resolves the TCP ingress ports Floci should publish on the host for an instance, aggregated
+     * across its attached security groups. Empty when publishing is disabled or nothing is opened.
+     */
+    private Set<Integer> desiredPublishedPorts(String region, Instance inst) {
+        if (!config.services().ec2().publishSecurityGroupPorts()) {
+            return Set.of();
+        }
+        List<SecurityGroup> sgs = new ArrayList<>();
+        if (inst.getSecurityGroups() != null) {
+            for (GroupIdentifier gi : inst.getSecurityGroups()) {
+                securityGroups.get(key(region, gi.getGroupId())).ifPresent(sgs::add);
+            }
+        }
+        return Ec2PortForwardManager.extractPublishablePorts(
+                sgs, config.services().ec2().maxPublishedPortsPerInstance());
+    }
+
+    /**
+     * Re-publishes host forwards for every running instance attached to the given security group,
+     * so ports opened or closed via authorize/revoke ingress take effect on already-running
+     * instances. No-op in mock mode or when publishing is disabled.
+     */
+    private void reconcilePublishedPortsForGroup(String region, String groupId) {
+        if (!config.services().ec2().publishSecurityGroupPorts() || config.services().ec2().mock()) {
+            return;
+        }
+        String prefix = region + "::";
+        for (Instance inst : instances.scan(k -> k.startsWith(prefix))) {
+            if (inst.getSecurityGroups() == null || inst.getDockerContainerId() == null) {
+                continue;
+            }
+            boolean attached = inst.getSecurityGroups().stream()
+                    .anyMatch(g -> groupId.equals(g.getGroupId()));
+            if (!attached) {
+                continue;
+            }
+            String state = inst.getState() != null ? inst.getState().getName() : null;
+            if (!"running".equals(state)) {
+                continue;
+            }
+            portForwardManager.reconcile(inst, desiredPublishedPorts(region, inst));
+            instances.put(key(region, inst.getInstanceId()), inst);
+        }
     }
 
     public Subnet requireSubnet(String region, String subnetId) {
@@ -846,6 +908,34 @@ public class Ec2Service {
             case "ebsOptimized" -> inst.setEbsOptimized(Boolean.parseBoolean(value));
         }
         instances.put(key(region, instanceId), inst);
+    }
+
+    /**
+     * Replaces the security groups attached to an instance (ModifyInstanceAttribute with
+     * {@code GroupId.N}). Validates each group, updates the instance and its network interfaces,
+     * and re-publishes host forwards so ports opened by the newly attached groups take effect.
+     */
+    public void modifyInstanceGroups(String region, String instanceId, List<String> groupIds) {
+        ensureDefaultResources(region);
+        Instance inst = getRequiredInstance(region, instanceId);
+
+        List<GroupIdentifier> identifiers = new ArrayList<>();
+        for (String groupId : groupIds) {
+            SecurityGroup sg = getRequiredSecurityGroup(region, groupId);
+            identifiers.add(new GroupIdentifier(sg.getGroupId(), sg.getGroupName()));
+        }
+
+        inst.setSecurityGroups(new ArrayList<>(identifiers));
+        if (inst.getNetworkInterfaces() != null) {
+            inst.getNetworkInterfaces().forEach(eni -> eni.setGroups(new ArrayList<>(identifiers)));
+        }
+        instances.put(key(region, instanceId), inst);
+
+        if (config.services().ec2().publishSecurityGroupPorts() && !config.services().ec2().mock()
+                && inst.getDockerContainerId() != null
+                && inst.getState() != null && "running".equals(inst.getState().getName())) {
+            portForwardManager.reconcile(inst, desiredPublishedPorts(region, inst));
+        }
     }
 
     private Instance getRequiredInstance(String region, String instanceId) {
@@ -1151,6 +1241,7 @@ public class Ec2Service {
             rules.addAll(createRules(region, groupId, perm, false));
         }
         securityGroups.put(key(region, groupId), sg);
+        reconcilePublishedPortsForGroup(region, groupId);
         return rules;
     }
 
@@ -1206,6 +1297,7 @@ public class Ec2Service {
 
         sg.getIpPermissions().removeIf(p -> matchesAnyPermission(p, permissions));
         securityGroups.put(key(region, groupId), sg);
+        reconcilePublishedPortsForGroup(region, groupId);
     }
 
     public void revokeSecurityGroupEgress(String region, String groupId, List<IpPermission> permissions) {

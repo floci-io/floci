@@ -6,8 +6,12 @@ import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
+import io.github.hectorvent.floci.services.ec2.model.GroupIdentifier;
+import io.github.hectorvent.floci.services.ec2.model.Instance;
 import io.github.hectorvent.floci.services.ec2.model.LaunchTemplate;
 import io.github.hectorvent.floci.services.ec2.model.Reservation;
+import io.github.hectorvent.floci.services.ec2.model.SecurityGroup;
 import io.github.hectorvent.floci.services.ec2.model.Tag;
 import org.junit.jupiter.api.Test;
 
@@ -28,6 +32,7 @@ class Ec2ServiceTest {
     void mockModeTreatsExistingNonTerminatedInstanceAsRunningContainer() {
         Ec2ContainerManager containerManager = mock(Ec2ContainerManager.class);
         Ec2Service service = new Ec2Service(mockConfig(true), containerManager,
+                mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
         Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
@@ -43,6 +48,7 @@ class Ec2ServiceTest {
     @Test
     void runInstancesRequiresImageIdInsteadOfDefaulting() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
 
@@ -58,6 +64,7 @@ class Ec2ServiceTest {
     @Test
     void launchTemplateVersionInheritsOmittedFieldsFromRequestedSourceVersion() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
         LaunchTemplate template = service.createLaunchTemplate("us-east-1", "app-template",
@@ -87,6 +94,7 @@ class Ec2ServiceTest {
         Ec2ImageCatalog imageCatalog = new Ec2ImageCatalog();
         AmiImageResolver amiImageResolver = new AmiImageResolver(imageCatalog);
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
                 amiImageResolver, imageCatalog, new Ec2InstanceTypeCatalog(), new InMemoryStorageFactory());
 
         assertTrue(service.describeImages("us-east-1", List.of(), List.of()).stream()
@@ -101,6 +109,7 @@ class Ec2ServiceTest {
     @Test
     void describeInstanceTypesUsesExactCatalogMatches() {
         Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
                 mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
                 new InMemoryStorageFactory());
 
@@ -111,6 +120,41 @@ class Ec2ServiceTest {
         assertEquals(2, types.getFirst().get("vcpu"));
         assertEquals(8192, types.getFirst().get("memoryMib"));
         assertEquals(List.of("arm64"), types.getFirst().get("supportedArchitectures"));
+    }
+
+    @Test
+    void modifyInstanceGroupsReassignsSecurityGroupsOnInstanceAndEni() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        SecurityGroup web = service.createSecurityGroup("us-east-1", "web", "web sg", "vpc-default");
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        String instanceId = reservation.getInstances().getFirst().getInstanceId();
+
+        service.modifyInstanceGroups("us-east-1", instanceId, List.of(web.getGroupId()));
+
+        Instance inst = service.findInstanceById(instanceId);
+        assertEquals(List.of(web.getGroupId()),
+                inst.getSecurityGroups().stream().map(GroupIdentifier::getGroupId).toList());
+        assertEquals(web.getGroupId(),
+                inst.getNetworkInterfaces().getFirst().getGroups().getFirst().getGroupId());
+    }
+
+    @Test
+    void modifyInstanceGroupsRejectsUnknownSecurityGroup() {
+        Ec2Service service = new Ec2Service(mockConfig(true), mock(Ec2ContainerManager.class),
+                mock(Ec2PortForwardManager.class),
+                mock(AmiImageResolver.class), mock(Ec2ImageCatalog.class), new Ec2InstanceTypeCatalog(),
+                new InMemoryStorageFactory());
+        Reservation reservation = service.runInstances("us-east-1", "ami-1234567890abcdef0", "t3.micro",
+                1, 1, null, List.of(), null, null, List.of(), null, null);
+        String instanceId = reservation.getInstances().getFirst().getInstanceId();
+
+        AwsException error = assertThrows(AwsException.class,
+                () -> service.modifyInstanceGroups("us-east-1", instanceId, List.of("sg-doesnotexist")));
+        assertEquals("InvalidGroup.NotFound", error.getErrorCode());
     }
 
     private static EmulatorConfig mockConfig(boolean ec2Mock) {
