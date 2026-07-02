@@ -335,9 +335,12 @@ public class ContainerLauncher {
 
         // 4. Copy Floci's CA cert so the container trusts Floci's HTTPS endpoint (TLS mode).
         //    Placed before start so NODE_EXTRA_CA_CERTS et al. resolve at runtime init.
-        flociCaCert.ifPresent(certPath ->
-                copyFileToContainer(dockerClient, containerId, certPath,
-                        FLOCI_CA_DIR, FLOCI_CA_FILE_NAME, fn.getFunctionName()));
+        //    An if-block rather than ifPresent(...) because containerId is assigned along the
+        //    code-volume path and so is not effectively final for a lambda capture.
+        if (flociCaCert.isPresent()) {
+            copyFileToContainer(dockerClient, containerId, flociCaCert.get(),
+                    FLOCI_CA_DIR, FLOCI_CA_FILE_NAME, fn.getFunctionName());
+        }
 
         // Now start the container with code in place
         lifecycleManager.startCreated(containerId, spec);
@@ -582,7 +585,7 @@ public class ContainerLauncher {
     private void copyFileToContainer(DockerClient dockerClient, String containerId,
                                      Path sourceFile, String remotePath, String entryName, String functionName) {
         try (java.io.PipedOutputStream pos = new java.io.PipedOutputStream();
-             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos)) {
+             java.io.PipedInputStream pis = new java.io.PipedInputStream(pos, TAR_PIPE_BUFFER_BYTES)) {
 
             new Thread(() -> {
                 try (TarArchiveOutputStream tar = newTarStream(pos)) {

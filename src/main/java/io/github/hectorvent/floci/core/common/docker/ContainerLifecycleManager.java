@@ -279,12 +279,14 @@ public class ContainerLifecycleManager {
     }
 
     /**
-     * Returns whether the container is currently running. A missing container
-     * is treated as not-running; any other Docker error is treated as running
-     * so a transient daemon hiccup does not evict a healthy warm pool.
+     * Returns whether the container is currently running. A missing container is treated as
+     * not-running; any other Docker error (e.g. an inspect timeout under daemon overload) is also
+     * treated as not-running, so a hung/dead container is not reused from the warm pool — a false
+     * negative merely triggers a clean cold-start, which is far cheaper than blocking until the
+     * function timeout.
      *
      * @param containerId the container ID to inspect
-     * @return true if the container exists and is reported as running
+     * @return true only if the container exists and is reported as running; false on any error
      */
     public boolean isContainerRunning(String containerId) {
         try {
