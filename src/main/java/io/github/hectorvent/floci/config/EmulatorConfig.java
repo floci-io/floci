@@ -1342,6 +1342,23 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean selfSigned();
+
+        /**
+         * Additional port the TLS proxy binds for AWS-style HTTPS traffic, alongside the
+         * public Floci {@link EmulatorConfig#port()}.
+         *
+         * <p>CDK/CloudFormation custom resources send their {@code cfn-response} callback with
+         * bundled code that hardcodes {@code https://} and ignores the port in the ResponseURL,
+         * so the PUT lands on the conventional 443 regardless of Floci's configured port. Binding
+         * 443 here (with the same HTTP/HTTPS protocol detection used on the main port) lets those
+         * callbacks — and any other client that assumes AWS lives on 443 — reach Floci.
+         *
+         * <p>Default {@code 443}. Set to {@code 0} to disable the extra binding (e.g. when Floci
+         * runs unprivileged or another process owns 443). When equal to {@link EmulatorConfig#port()}
+         * only a single listener is started. Env: FLOCI_TLS_AWS_HTTPS_PORT
+         */
+        @WithDefault("443")
+        int awsHttpsPort();
     }
 
     /**
