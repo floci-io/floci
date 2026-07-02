@@ -1467,15 +1467,60 @@ public class CognitoService {
         return result;
     }
 
+    public void revokeToken(String clientId, String token, String clientSecret) {
+        if (token == null || token.isBlank()) {
+            throw new AwsException("InvalidParameterException", "Token is required", 400);
+        }
+        if (clientId == null || clientId.isBlank()) {
+            throw new AwsException("InvalidParameterException", "ClientId is required", 400);
+        }
+
+        UserPoolClient client = findClientById(clientId);
+        if (!isTokenRevocationEnabled(client)) {
+            throw new AwsException("UnsupportedOperationException",
+                    "Please enable token revocation before revoking tokens for this client", 400);
+        }
+
+        String secret = client.getClientSecret();
+        if (secret != null && !secret.isBlank() && !secret.equals(clientSecret)) {
+            throw new AwsException("NotAuthorizedException", "Invalid client secret", 400);
+        }
+
+        String[] parts = parseRefreshToken(token);
+        if (parts == null) {
+            throw new AwsException("UnsupportedTokenTypeException",
+                    "Only refresh tokens can be revoked", 400);
+        }
+
+        String poolId = parts[0];
+        String username = parts[1];
+        String tokenClientId = parts[2];
+        String familyId = parts.length > 4 && !parts[4].isEmpty() ? parts[4] : null;
+
+        if (!clientId.equals(tokenClientId)) {
+            throw new AwsException("NotAuthorizedException", "Refresh token was not issued to this client", 400);
+        }
+        if (familyId == null) {
+            return; // Nothing keyed to revoke (legacy token); revocation is idempotent.
+        }
+
+        long nowMs = System.currentTimeMillis();
+        long expiresAtSeconds = nowMs / 1000L + (365L * 24L * 60L * 60L);
+        RevokedTokenInfo info = new RevokedTokenInfo(familyId, "refresh", username, poolId, nowMs, expiresAtSeconds);
+        revokedTokenStore.put(revokedTokenKey(poolId, familyId), info);
+        LOG.infov("RevokeToken: revoked refresh token family {0} for user {1} in pool {2}", familyId, username, poolId);
+    }
+
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override) {
-        return generateAuthResult(user, pool, client, override, null);
+        String originJti = UUID.randomUUID().toString();
+        return generateAuthResult(user, pool, client, override, originJti);
     }
     
     Map<String, Object> generateAuthResult(CognitoUser user, UserPool pool, UserPoolClient client, ClaimsOverride override, String originJti) {
         Map<String, Object> auth = new HashMap<>();
         auth.put("AccessToken", generateSignedJwt(user, pool, "access", client, override, originJti));
         auth.put("IdToken", generateSignedJwt(user, pool, "id", client, override, originJti));
-        auth.put("RefreshToken", buildRefreshToken(pool.getId(), user.getUsername(), client.getClientId()));
+        auth.put("RefreshToken", buildRefreshToken(pool.getId(), user.getUsername(), client.getClientId(), originJti));
         auth.put("ExpiresIn", resolveAccessTokenLifetimeSeconds(client));
         auth.put("TokenType", "Bearer");
         return auth;
@@ -1508,8 +1553,7 @@ public class CognitoService {
         String jti = UUID.randomUUID().toString();
         claims.put("jti", jti);
         
-        // Add origin_jti for access and ID tokens derived from refresh tokens
-        if (("access".equals(type) || "id".equals(type)) && originJti != null) {
+        if (("access".equals(type) || "id".equals(type)) && originJti != null && isTokenRevocationEnabled(client)) {
             claims.put("origin_jti", originJti);
         }
         
@@ -2067,9 +2111,19 @@ public class CognitoService {
     }
 
     String buildRefreshToken(String poolId, String username, String clientId) {
+        return buildRefreshToken(poolId, username, clientId, null);
+    }
+
+    String buildRefreshToken(String poolId, String username, String clientId, String originJti) {
         long issuedAt = System.currentTimeMillis();
-        String raw = poolId + "|" + username + "|" + clientId + "|" + issuedAt + "|" + UUID.randomUUID();
+        String familyId = originJti != null ? originJti : UUID.randomUUID().toString();
+        String raw = poolId + "|" + username + "|" + clientId + "|" + issuedAt + "|" + familyId;
         return Base64.getEncoder().withoutPadding().encodeToString(raw.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private boolean isTokenRevocationEnabled(UserPoolClient client) {
+        return client == null || client.getEnableTokenRevocation() == null
+                || Boolean.TRUE.equals(client.getEnableTokenRevocation());
     }
 
     String[] parseRefreshToken(String refreshToken) {

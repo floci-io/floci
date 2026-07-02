@@ -91,6 +91,7 @@ public class CognitoJsonHandler {
             case "AdminRemoveUserFromGroup" -> handleAdminRemoveUserFromGroup(request);
             case "AdminListGroupsForUser" -> handleAdminListGroupsForUser(request);
             case "GetTokensFromRefreshToken" -> handleGetTokensFromRefreshToken(request);
+            case "RevokeToken" -> handleRevokeToken(request);
             case "ListUserPoolClientSecrets" -> handleListUserPoolClientSecrets(request);
             case "AddUserPoolClientSecret" -> handleAddUserPoolClientSecret(request);
             case "DeleteUserPoolClientSecret" -> handleDeleteUserPoolClientSecret(request);
@@ -448,6 +449,15 @@ public class CognitoJsonHandler {
                 request.path("RefreshToken").asText()
         );
         return Response.ok(objectMapper.valueToTree(result)).build();
+    }
+
+    private Response handleRevokeToken(JsonNode request) {
+        service.revokeToken(
+                request.path("ClientId").asText(null),
+                request.path("Token").asText(null),
+                request.path("ClientSecret").asText(null)
+        );
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleInitiateAuth(JsonNode request) {
