@@ -171,10 +171,30 @@ public class IamActionRegistry {
         if (!acl && !tagging) {
             return null;
         }
+        // /{bucket}?acl → bucket-level; /{bucket}/{key}?acl → object-level
+        String path = ctx.getUriInfo().getPath();
+        // Strip leading slash and check if there's a key segment after the bucket
+        String stripped = path.startsWith("/") ? path.substring(1) : path;
+        boolean isBucketLevel = !stripped.contains("/") || stripped.endsWith("/");
         if (acl) {
+            if (isBucketLevel) {
+                return switch (method) {
+                    case "GET" -> "s3:GetBucketAcl";
+                    case "PUT" -> "s3:PutBucketAcl";
+                    default -> null;
+                };
+            }
             return switch (method) {
                 case "GET" -> "s3:GetObjectAcl";
                 case "PUT" -> "s3:PutObjectAcl";
+                default -> null;
+            };
+        }
+        if (isBucketLevel) {
+            return switch (method) {
+                case "GET" -> "s3:GetBucketTagging";
+                case "PUT" -> "s3:PutBucketTagging";
+                case "DELETE" -> "s3:DeleteBucketTagging";
                 default -> null;
             };
         }
