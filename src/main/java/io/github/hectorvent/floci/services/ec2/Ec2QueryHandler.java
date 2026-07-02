@@ -327,6 +327,24 @@ public class Ec2QueryHandler {
             }
         }
 
+        LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
+        if (launchTemplateData != null) {
+            imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
+            instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
+            keyName = firstNonBlank(keyName, launchTemplateData.getKeyName());
+            userData = firstNonBlank(userData, launchTemplateData.getUserData());
+            iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn, launchTemplateData.getIamInstanceProfileArn());
+            if (sgIds.isEmpty()) {
+                sgIds = new ArrayList<>(launchTemplateData.getSecurityGroupIds());
+            }
+            if (!launchTemplateData.getInstanceTags().isEmpty()) {
+                Map<String, Tag> mergedTags = new LinkedHashMap<>();
+                launchTemplateData.getInstanceTags().forEach(tag -> mergedTags.put(tag.getKey(), tag));
+                instanceTags.forEach(tag -> mergedTags.put(tag.getKey(), tag));
+                instanceTags = new ArrayList<>(mergedTags.values());
+            }
+        }
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
 
@@ -343,6 +361,20 @@ public class Ec2QueryHandler {
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
         return xmlResponse(xml.build());
+    }
+
+    private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region) {
+        String id = p.getFirst("LaunchTemplate.LaunchTemplateId");
+        String name = p.getFirst("LaunchTemplate.LaunchTemplateName");
+        String version = p.getFirst("LaunchTemplate.Version");
+        if ((id == null || id.isBlank()) && (name == null || name.isBlank())) {
+            return null;
+        }
+        return service.resolveLaunchTemplateData(region, id, name, version);
+    }
+
+    private static String firstNonBlank(String first, String fallback) {
+        return first != null && !first.isBlank() ? first : fallback;
     }
 
     private Response handleDescribeIamInstanceProfileAssociations(MultivaluedMap<String, String> p, String region) {
@@ -1505,6 +1537,7 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseTagsForResource(p, "launch-template"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
@@ -1526,6 +1559,7 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
@@ -1823,11 +1857,15 @@ public class Ec2QueryHandler {
     }
 
     private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p) {
-        String arn = p.getFirst("IamInstanceProfile.Arn");
+        return resolveIamInstanceProfileArn(p, "IamInstanceProfile");
+    }
+
+    private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p, String prefix) {
+        String arn = p.getFirst(prefix + ".Arn");
         if (arn != null && !arn.isBlank()) {
             return arn;
         }
-        String name = p.getFirst("IamInstanceProfile.Name");
+        String name = p.getFirst(prefix + ".Name");
         if (name == null || name.isBlank()) {
             return null;
         }
@@ -2041,6 +2079,11 @@ public class Ec2QueryHandler {
         }
         if (launchTemplate.getUserData() != null) {
             xml.elem("userData", launchTemplate.getUserData());
+        }
+        if (launchTemplate.getIamInstanceProfileArn() != null) {
+            xml.start("iamInstanceProfile")
+                    .elem("arn", launchTemplate.getIamInstanceProfileArn())
+                    .end("iamInstanceProfile");
         }
         xml.start("securityGroupIdSet");
         for (String securityGroupId : launchTemplate.getSecurityGroupIds()) {
