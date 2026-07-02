@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.scheduler.model.EcsParameters;
 import io.github.hectorvent.floci.services.scheduler.model.Target;
 import io.github.hectorvent.floci.services.sns.SnsService;
 import io.github.hectorvent.floci.services.sqs.SqsService;
+import io.github.hectorvent.floci.services.sqs.model.MessageAttributeValue;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -168,8 +169,9 @@ public class ScheduleInvoker {
                 String subject = text(params, "Subject");
                 String messageGroupId = text(params, "MessageGroupId");
                 String messageDeduplicationId = text(params, "MessageDeduplicationId");
+                Map<String, MessageAttributeValue> messageAttributes = parseMessageAttributes(params);
                 String snsRegion = extractRegion(topicArn != null ? topicArn : targetArn, region);
-                snsService.publish(topicArn, targetArn, null, message, subject, null,
+                snsService.publish(topicArn, targetArn, null, message, subject, messageAttributes,
                         messageGroupId, messageDeduplicationId, snsRegion);
                 LOG.debugv("Scheduler delivered to SNS (universal target): {0}", topicArn);
             }
@@ -183,6 +185,20 @@ public class ScheduleInvoker {
             }
             default -> LOG.warnv("Scheduler: unsupported universal target action: {0}", serviceAction);
         }
+    }
+
+    private Map<String, MessageAttributeValue> parseMessageAttributes(JsonNode params) {
+        JsonNode attrsNode = params.path("MessageAttributes");
+        if (!attrsNode.isObject()) {
+            return null;
+        }
+        Map<String, MessageAttributeValue> attributes = new HashMap<>();
+        attrsNode.fields().forEachRemaining(entry -> {
+            String dataType = entry.getValue().path("DataType").asText("String");
+            String stringValue = entry.getValue().path("StringValue").asText(null);
+            attributes.put(entry.getKey(), new MessageAttributeValue(stringValue, dataType));
+        });
+        return attributes.isEmpty() ? null : attributes;
     }
 
     private static String text(JsonNode node, String field) {
