@@ -67,25 +67,51 @@ public class ElastiCacheService {
         LOG.infov("Creating replication group {0} with authMode={1} on proxy port {2}",
                 groupId, authMode, String.valueOf(proxyPort));
 
-        ElastiCacheContainerHandle handle = containerManager.start(groupId, image);
+        ElastiCacheContainerHandle handle = null;
+        try {
+            handle = containerManager.start(groupId, image);
 
-        String endpointHost = resolveEndpointHost();
-        Endpoint endpoint = new Endpoint(endpointHost, proxyPort);
-        ReplicationGroup group = new ReplicationGroup(
-                groupId, description, ReplicationGroupStatus.AVAILABLE,
-                authMode, endpoint, Instant.now(), proxyPort);
-        group.setContainerId(handle.getContainerId());
-        group.setContainerHost(handle.getHost());
-        group.setContainerPort(handle.getPort());
-        group.setAuthToken(authToken);
+            String endpointHost = resolveEndpointHost();
+            Endpoint endpoint = new Endpoint(endpointHost, proxyPort);
+            ReplicationGroup group = new ReplicationGroup(
+                    groupId, description, ReplicationGroupStatus.AVAILABLE,
+                    authMode, endpoint, Instant.now(), proxyPort);
+            group.setContainerId(handle.getContainerId());
+            group.setContainerHost(handle.getHost());
+            group.setContainerPort(handle.getPort());
+            group.setAuthToken(authToken);
 
-        proxyManager.startProxy(groupId, authMode, proxyPort,
-                handle.getHost(), handle.getPort(),
-                (username, password) -> validatePassword(groupId, username, password));
+            proxyManager.startProxy(groupId, authMode, proxyPort,
+                    handle.getHost(), handle.getPort(),
+                    (username, password) -> validatePassword(groupId, username, password));
 
-        groups.put(groupId, group);
-        LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
-        return group;
+            groups.put(groupId, group);
+            LOG.infov("Replication group {0} created, endpoint={1}:{2}", groupId, endpointHost, String.valueOf(proxyPort));
+            return group;
+        } catch (RuntimeException e) {
+            LOG.warnv("Replication group {0} provisioning failed, rolling back: {1}", groupId, e.getMessage());
+            rollbackReplicationGroup(groupId, handle, proxyPort);
+            throw e;
+        }
+    }
+
+    private void rollbackReplicationGroup(String groupId, ElastiCacheContainerHandle handle, int proxyPort) {
+        try {
+            if (handle != null) {
+                proxyManager.stopProxy(groupId);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping proxy for replication group {0}: {1}", groupId, e.getMessage());
+        }
+        try {
+            if (handle != null) {
+                containerManager.stop(handle);
+            }
+        } catch (RuntimeException e) {
+            LOG.warnv("Error stopping container for replication group {0}: {1}", groupId, e.getMessage());
+        } finally {
+            releaseProxyPort(proxyPort);
+        }
     }
 
     public ReplicationGroup getReplicationGroup(String groupId) {
