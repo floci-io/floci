@@ -1,8 +1,13 @@
 package io.github.hectorvent.floci.services.resourcegroupstagging;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import io.github.hectorvent.floci.core.storage.StorageBackedMap;
+import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.resourcegroupstagging.model.ResourceTagMapping;
 import io.github.hectorvent.floci.core.common.Resettable;
+import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
+import jakarta.inject.Inject;
 
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -12,8 +17,24 @@ import java.util.stream.Collectors;
 @ApplicationScoped
 public class ResourceGroupsTaggingService implements Resettable {
 
+    private final StorageFactory storageFactory;
+
     // region::arn → ResourceTagMapping
-    private final Map<String, ResourceTagMapping> store = new ConcurrentHashMap<>();
+    private Map<String, ResourceTagMapping> store = new ConcurrentHashMap<>();
+
+    @Inject
+    public ResourceGroupsTaggingService(StorageFactory storageFactory) {
+        this.storageFactory = storageFactory;
+    }
+
+    @PostConstruct
+    void initializeStorage() {
+        if (storageFactory == null) {
+            return; // keeps non-CDI unit tests working
+        }
+        this.store = new StorageBackedMap<>(storageFactory.create("tagging",
+                "tagging-resource-mappings.json", new TypeReference<Map<String, ResourceTagMapping>>() {}));
+    }
 
     private String key(String region, String arn) {
         return region + "::" + arn;
@@ -23,8 +44,14 @@ public class ResourceGroupsTaggingService implements Resettable {
 
     public void tagResources(List<String> resourceArns, Map<String, String> tags, String region) {
         for (String arn : resourceArns) {
-            store.computeIfAbsent(key(region, arn), k -> new ResourceTagMapping(arn))
-                    .getTags().putAll(tags);
+            String storeKey = key(region, arn);
+            ResourceTagMapping mapping = store.get(storeKey);
+            if (mapping == null) {
+                mapping = new ResourceTagMapping(arn);
+            }
+            mapping.getTags().putAll(tags);
+            // Re-put so StorageBackedMap routes the mutation through the backend
+            store.put(storeKey, mapping);
         }
     }
 
@@ -32,9 +59,11 @@ public class ResourceGroupsTaggingService implements Resettable {
 
     public void untagResources(List<String> resourceArns, List<String> tagKeys, String region) {
         for (String arn : resourceArns) {
-            ResourceTagMapping mapping = store.get(key(region, arn));
+            String storeKey = key(region, arn);
+            ResourceTagMapping mapping = store.get(storeKey);
             if (mapping != null) {
                 tagKeys.forEach(mapping.getTags()::remove);
+                store.put(storeKey, mapping);
             }
         }
     }

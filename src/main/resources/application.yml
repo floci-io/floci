@@ -109,6 +109,8 @@ floci:
         flush-interval-ms: 5000
       codedeploy:
         flush-interval-ms: 5000
+      tagging:
+        flush-interval-ms: 5000
       rds:
         # Override storage mode for RDS (memory = no Docker volumes; hybrid/persistent = named volume per instance)
         # mode: memory
