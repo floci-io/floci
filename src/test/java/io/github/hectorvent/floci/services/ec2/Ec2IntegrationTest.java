@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.ec2;
 
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.emptyOrNullString;
 import static org.hamcrest.Matchers.containsInAnyOrder;
 import static org.hamcrest.Matchers.everyItem;
 import static org.hamcrest.Matchers.greaterThan;
@@ -1328,6 +1329,23 @@ class Ec2IntegrationTest {
                     equalTo(instanceId))
             .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceState.name",
                     equalTo("running"));
+    }
+
+    @Test
+    @Order(81)
+    void describeInstanceAttributeGroupSet() {
+        given()
+            .formParam("Action", "DescribeInstanceAttribute")
+            .formParam("InstanceId", instanceId)
+            .formParam("Attribute", "groupSet")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstanceAttributeResponse.instanceId", equalTo(instanceId))
+            .body("DescribeInstanceAttributeResponse.groupSet.item.groupId", equalTo(securityGroupId))
+            .body("DescribeInstanceAttributeResponse.groupSet.item.groupName", not(emptyOrNullString()));
     }
 
     @Test

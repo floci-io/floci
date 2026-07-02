@@ -601,6 +601,15 @@ public class Ec2QueryHandler {
             xml.start("disableApiStop").elem("value", String.valueOf(inst.isDisableApiStop())).end("disableApiStop");
         } else if ("disableApiTermination".equals(attribute)) {
             xml.start("disableApiTermination").elem("value", String.valueOf(inst.isDisableApiTermination())).end("disableApiTermination");
+        } else if ("groupSet".equals(attribute)) {
+            xml.start("groupSet");
+            for (GroupIdentifier gi : inst.getSecurityGroups()) {
+                xml.start("item")
+                        .elem("groupId", gi.getGroupId())
+                        .elem("groupName", gi.getGroupName())
+                        .end("item");
+            }
+            xml.end("groupSet");
         }
         xml.end("DescribeInstanceAttributeResponse");
         return xmlResponse(xml.build());
