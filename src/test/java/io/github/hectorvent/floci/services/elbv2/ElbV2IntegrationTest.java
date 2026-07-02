@@ -20,6 +20,8 @@ class ElbV2IntegrationTest {
             "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/elasticloadbalancing/aws4_request";
     private static final String EC2_AUTH =
             "AWS4-HMAC-SHA256 Credential=test/20260427/us-east-1/ec2/aws4_request";
+    private static final String ELB_V2_XMLNS =
+            "https://elasticloadbalancing.amazonaws.com/doc/2015-12-01/";
 
     private static String lbArn;
     private static String tgArn;
@@ -222,6 +224,38 @@ class ElbV2IntegrationTest {
                 .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member[1].ZoneName",
                         equalTo("us-east-1b"));
     }
+
+    @Test
+    @Order(9)
+    void setSubnetsReturnsEmptyResultEnvelope() {
+        given()
+                .formParam("Action", "SetSubnets")
+                .formParam("LoadBalancerArn", lbArn)
+                .formParam("Subnets.member.1", "subnet-default-b")
+                .formParam("Subnets.member.2", "subnet-default-c")
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<SetSubnetsResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<SetSubnetsResult></SetSubnetsResult>"))
+                .body("SetSubnetsResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
+
+        given()
+                .formParam("Action", "DescribeLoadBalancers")
+                .formParam("LoadBalancerArns.member.1", lbArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .body("DescribeLoadBalancersResponse.DescribeLoadBalancersResult.LoadBalancers.member.AvailabilityZones.member.SubnetId",
+                        hasItems("subnet-default-b", "subnet-default-c"));
+    }
+
+    // ── Target Groups ─────────────────────────────────────────────────────────
 
     @Test
     @Order(10)
@@ -979,7 +1013,11 @@ class ElbV2IntegrationTest {
             .when()
                 .post("/")
             .then()
-                .statusCode(200);
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<DeleteListenerResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<DeleteListenerResult></DeleteListenerResult>"))
+                .body("DeleteListenerResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
 
         given()
                 .formParam("Action", "DescribeListeners")
@@ -990,6 +1028,20 @@ class ElbV2IntegrationTest {
             .then()
                 .statusCode(200)
                 .body("DescribeListenersResponse.DescribeListenersResult.Listeners.member.size()", equalTo(0));
+
+        given()
+                .formParam("Action", "DeleteTargetGroup")
+                .formParam("TargetGroupArn", tgArn)
+                .header("Authorization", AUTH)
+            .when()
+                .post("/")
+            .then()
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<DeleteTargetGroupResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<DeleteTargetGroupResult></DeleteTargetGroupResult>"))
+                .body("DeleteTargetGroupResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
+        tgArn = null;
     }
 
     @Test
@@ -1017,7 +1069,11 @@ class ElbV2IntegrationTest {
             .when()
                 .post("/")
             .then()
-                .statusCode(200);
+                .statusCode(200)
+                .contentType("application/xml")
+                .body(containsString("<DeleteLoadBalancerResponse xmlns=\"" + ELB_V2_XMLNS + "\">"))
+                .body(containsString("<DeleteLoadBalancerResult></DeleteLoadBalancerResult>"))
+                .body("DeleteLoadBalancerResponse.ResponseMetadata.RequestId", not(emptyOrNullString()));
 
         given()
                 .formParam("Action", "DescribeLoadBalancers")
