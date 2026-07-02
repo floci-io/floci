@@ -232,6 +232,111 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void sameMillisecondEventsSortByIngestionSequence() {
+        String group = "analytics/pipeline";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+
+        // Five events sharing ONE millisecond, ingested in a known order. Pre-fix the @timestamp
+        // comparator has no tie-break, so same-ms rows keep arbitrary hash-scan order; post-fix they
+        // are ordered by ingestion sequence. Five events => 120 permutations, so a pre-fix pass by luck
+        // is ~1/120.
+        long ts = BASE_MS + 7000;
+        putRaw(service, group, stream, ts, idLog("REQ-1", "first"));
+        putRaw(service, group, stream, ts, idLog("REQ-2", "second"));
+        putRaw(service, group, stream, ts, idLog("REQ-3", "third"));
+        putRaw(service, group, stream, ts, idLog("REQ-4", "fourth"));
+        putRaw(service, group, stream, ts, idLog("REQ-5", "fifth"));
+
+        String query = """
+                fields @message, params.id
+                | sort @timestamp asc
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(5, state.rows().size());
+        // Ascending @timestamp with a sequence tie-break => strict ingestion order.
+        assertEquals("REQ-1", state.rows().get(0).get("params.id"));
+        assertEquals("REQ-2", state.rows().get(1).get("params.id"));
+        assertEquals("REQ-3", state.rows().get(2).get("params.id"));
+        assertEquals("REQ-4", state.rows().get(3).get("params.id"));
+        assertEquals("REQ-5", state.rows().get(4).get("params.id"));
+    }
+
+    @Test
+    void sameMillisecondEventsSortDescendingReverseIngestion() {
+        String group = "metrics/collector";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+
+        // Same-ms events; descending sort must reverse the ingestion-order tie-break (newest-ingested
+        // first), consistent with reversing the whole @timestamp comparator.
+        long ts = BASE_MS + 8000;
+        putRaw(service, group, stream, ts, idLog("REQ-1", "first"));
+        putRaw(service, group, stream, ts, idLog("REQ-2", "second"));
+        putRaw(service, group, stream, ts, idLog("REQ-3", "third"));
+        putRaw(service, group, stream, ts, idLog("REQ-4", "fourth"));
+        putRaw(service, group, stream, ts, idLog("REQ-5", "fifth"));
+
+        String query = """
+                fields @message, params.id
+                | sort @timestamp desc
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(5, state.rows().size());
+        // Descending: reverse of ingestion order.
+        assertEquals("REQ-5", state.rows().get(0).get("params.id"));
+        assertEquals("REQ-4", state.rows().get(1).get("params.id"));
+        assertEquals("REQ-3", state.rows().get(2).get("params.id"));
+        assertEquals("REQ-2", state.rows().get(3).get("params.id"));
+        assertEquals("REQ-1", state.rows().get(4).get("params.id"));
+    }
+
+    @Test
+    void dedupWithoutSortKeepsNewestPerTupleByDefault() {
+        String group = "reporting/emitter";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+
+        // Two hosts, three events each at distinct timestamps. With NO explicit sort, AWS applies a
+        // default `sort @timestamp desc` before dedup, so the newest event per host survives. Ingestion
+        // order below is deliberately NOT newest-last, so a pre-fix run (dedup over raw hash-scan order)
+        // would keep an arbitrary — usually older — event and fail.
+        putRaw(service, group, stream, BASE_MS + 2000, hostLog("host-a", "a-old"));
+        putRaw(service, group, stream, BASE_MS + 6000, hostLog("host-a", "a-new"));
+        putRaw(service, group, stream, BASE_MS + 4000, hostLog("host-a", "a-mid"));
+        putRaw(service, group, stream, BASE_MS + 1000, hostLog("host-b", "b-old"));
+        putRaw(service, group, stream, BASE_MS + 5000, hostLog("host-b", "b-new"));
+        putRaw(service, group, stream, BASE_MS + 3000, hostLog("host-b", "b-mid"));
+
+        // dedup with no preceding sort => default @timestamp desc, keep newest per host.
+        String query = """
+                fields @message, params.host
+                | dedup params.host
+                """;
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(2, state.rows().size(), "one surviving row per unique host");
+
+        // Final order also follows the default desc sort: host-a's newest (6000) before host-b's newest (5000).
+        // @message resolves to the raw JSON line, so match by substring (the file's convention).
+        assertTrue(state.rows().get(0).get("@message").contains("a-new"), "newest host-a event survives dedup");
+        assertEquals("host-a", state.rows().get(0).get("params.host"));
+        assertTrue(state.rows().get(1).get("@message").contains("b-new"), "newest host-b event survives dedup");
+        assertEquals("host-b", state.rows().get(1).get("params.host"));
+    }
+
+    @Test
     void defaultProjectionReturnsTimestampAndMessage() {
         String group = "metrics/kpi-center";
         String stream = "s-1";
@@ -439,6 +544,12 @@ class CloudWatchLogsInsightsQueryTest {
         return String.format(
                 "{\"level\":\"INFO\",\"message\":\"%s\",\"params\":{\"id\":\"%s\"}}",
                 text, id);
+    }
+
+    private static String hostLog(String host, String text) {
+        return String.format(
+                "{\"level\":\"INFO\",\"message\":\"%s\",\"params\":{\"host\":\"%s\"}}",
+                text, host);
     }
 
     private static String artifactLog(String jobId, String group, String artifact, String version) {

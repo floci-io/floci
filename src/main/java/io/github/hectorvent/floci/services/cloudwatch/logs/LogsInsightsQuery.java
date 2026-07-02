@@ -161,6 +161,12 @@ final class LogsInsightsQuery {
         if (sortField != null) {
             Comparator<Row> cmp = comparatorFor(sortField);
             matched.sort(sortDesc ? cmp.reversed() : cmp);
+        } else if (dedupFields != null && !dedupFields.isEmpty()) {
+            // AWS: when dedup runs without an explicit preceding sort, results are ordered by the
+            // default descending @timestamp sort before duplicates are discarded, so the first
+            // (newest) row per tuple is the one kept. Reuse the @timestamp comparator reversed so
+            // the sequence/eventId tie-break stays consistent with an explicit `sort @timestamp desc`.
+            matched.sort(comparatorFor("@timestamp").reversed());
         }
 
         // dedup (keep first occurrence per tuple, after sorting)
@@ -213,10 +219,16 @@ final class LogsInsightsQuery {
 
     private Comparator<Row> comparatorFor(String field) {
         if ("@timestamp".equals(field)) {
-            return Comparator.comparingLong(r -> r.event.getTimestamp());
+            return Comparator.<Row>comparingLong(r -> r.event.getTimestamp())
+                    .thenComparingLong(r -> r.event.getSequence())
+                    .thenComparing(r -> r.event.getEventId());
         }
         if ("@ingestionTime".equals(field)) {
-            return Comparator.comparingLong(r -> r.event.getIngestionTime());
+            // ingestionTime is one wall-clock value per PutLogEvents batch, so whole batches tie on it;
+            // the sequence/eventId tie-break keeps same-batch events in a stable ingestion order.
+            return Comparator.<Row>comparingLong(r -> r.event.getIngestionTime())
+                    .thenComparingLong(r -> r.event.getSequence())
+                    .thenComparing(r -> r.event.getEventId());
         }
         return Comparator.comparing(r -> {
             String v = resolve(r, field);
