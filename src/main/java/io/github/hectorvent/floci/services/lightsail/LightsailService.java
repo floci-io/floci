@@ -286,6 +286,12 @@ public class LightsailService {
         String instanceName = requireText(request, "instanceName");
         ObjectNode ip = requireResource(region, RESOURCE_STATIC_IP, staticIpName);
         ObjectNode instance = requireResource(region, RESOURCE_INSTANCE, instanceName);
+        if (ip.path("isAttached").asBoolean(false)) {
+            throw new AwsException("InvalidInputException",
+                    "StaticIp " + staticIpName + " is already attached to instance "
+                            + ip.path("attachedTo").asText() + ".",
+                    400);
+        }
         ip.put("attachedTo", instanceName);
         ip.put("isAttached", true);
         instance.put("publicIpAddress", ip.path("ipAddress").asText());

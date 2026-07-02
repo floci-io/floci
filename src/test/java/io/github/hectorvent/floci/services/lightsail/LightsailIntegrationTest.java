@@ -432,6 +432,21 @@ class LightsailIntegrationTest {
                 .statusCode(200);
 
         given()
+                .header("X-Amz-Target", TARGET_PREFIX + "AttachStaticIp")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "staticIpName": "review-ip",
+                          "instanceName": "review-web-b"
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidInputException"));
+
+        given()
                 .header("X-Amz-Target", TARGET_PREFIX + "ReleaseStaticIp")
                 .contentType(CONTENT_TYPE)
                 .body("""
