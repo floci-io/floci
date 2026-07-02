@@ -122,8 +122,23 @@ public class StepFunctionsService implements Resettable {
     }
 
     public List<StateMachineVersion> listStateMachineVersions(String stateMachineArn) {
+        // AWS returns InvalidArn for a non-existent state machine here — StateMachineDoesNotExist is
+        // not one of ListStateMachineVersions' declared errors (Publish, which does declare it, keeps
+        // using describeStateMachine).
+        StateMachine sm = stateMachineStore.get(stateMachineArn)
+                .orElseThrow(() -> new AwsException("InvalidArn",
+                        "Invalid Arn: '" + stateMachineArn + "'", 400));
+        // AWS lists versions newest first (descending by creationDate). creationDate is only
+        // second-resolution, so tie-break on the version number (also descending) to keep the order
+        // correct when several versions are published within the same second — otherwise the
+        // Terraform provider can latch onto the wrong version ARN.
+        List<StateMachineVersion> versions = new ArrayList<>(sm.getVersions());
+        versions.sort(Comparator
+                .comparingDouble(StateMachineVersion::getCreationDate)
+                .thenComparingInt(StateMachineVersion::getVersion)
+                .reversed());
         // Defensive copy so callers can't mutate (or trip over concurrent mutation of) the stored list.
-        return List.copyOf(describeStateMachine(stateMachineArn).getVersions());
+        return List.copyOf(versions);
     }
 
     public void deleteStateMachineVersion(String stateMachineVersionArn) {

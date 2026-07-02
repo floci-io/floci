@@ -58,6 +58,37 @@ class StepFunctionsVersionsIntegrationTest {
     }
 
     @Test
+    void listVersionsAreReturnedNewestFirst() {
+        String name = "ver-order-" + System.currentTimeMillis();
+        String arn = call("CreateStateMachine",
+                "{\"name\":\"" + name + "\",\"definition\":\"" + DEF + "\",\"roleArn\":\"arn:aws:iam::000000000000:role/r\"}")
+                .then().statusCode(200).extract().jsonPath().getString("stateMachineArn");
+
+        // Publish three versions (1, 2, 3). AWS lists them newest first, and the Terraform provider
+        // reads the version ARN off this list, so the order must be descending — even though the three
+        // publishes land within the same (second-resolution) creationDate, the version-number tie-break
+        // keeps 3 ahead of 2 ahead of 1.
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
+        call("PublishStateMachineVersion", "{\"stateMachineArn\":\"" + arn + "\"}").then().statusCode(200);
+
+        call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + arn + "\"}")
+                .then().statusCode(200)
+                .body("stateMachineVersions[0].stateMachineVersionArn", is(arn + ":3"))
+                .body("stateMachineVersions[1].stateMachineVersionArn", is(arn + ":2"))
+                .body("stateMachineVersions[2].stateMachineVersionArn", is(arn + ":1"));
+    }
+
+    @Test
+    void listVersionsForMissingStateMachineReturnsInvalidArn() {
+        // AWS returns InvalidArn (not StateMachineDoesNotExist) when the state machine does not exist,
+        // since StateMachineDoesNotExist is not a declared error for ListStateMachineVersions.
+        String missing = "arn:aws:states:us-east-1:000000000000:stateMachine:missing-" + System.currentTimeMillis();
+        call("ListStateMachineVersions", "{\"stateMachineArn\":\"" + missing + "\"}")
+                .then().statusCode(400).body(containsString("InvalidArn"));
+    }
+
+    @Test
     void createWithPublishReturnsVersionArn() {
         String name = "ver-pub-" + System.currentTimeMillis();
         call("CreateStateMachine",
