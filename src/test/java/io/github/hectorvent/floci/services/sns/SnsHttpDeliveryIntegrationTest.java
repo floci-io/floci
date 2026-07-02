@@ -31,6 +31,8 @@ class SnsHttpDeliveryIntegrationTest {
     private static int httpPort;
     private static final List<ReceivedRequest> receivedRequests = new CopyOnWriteArrayList<>();
     private static final ObjectMapper objectMapper = new ObjectMapper();
+    private static final java.util.logging.Logger LOG =
+            java.util.logging.Logger.getLogger(SnsHttpDeliveryIntegrationTest.class.getName());
     record ReceivedRequest(String body, Map<String, List<String>> headers) {}
 
     @BeforeAll
@@ -49,13 +51,23 @@ class SnsHttpDeliveryIntegrationTest {
             byte[] bodyBytes = exchange.getRequestBody().readAllBytes();
             String body = new String(bodyBytes, StandardCharsets.UTF_8);
             Map<String, List<String>> headers = exchange.getRequestHeaders();
-            receivedRequests.add(new ReceivedRequest(body, headers));
+            ReceivedRequest received = new ReceivedRequest(body, headers);
             try {
+                // Confirm the subscription BEFORE recording the request, so a test that
+                // awaits this request observes it only once the subscription is actually
+                // confirmed. Recording first would let a subsequent publish race ahead of
+                // the confirmation and see a still-pending subscription (flaky delivery).
                 if ("SubscriptionConfirmation".equals(firstHeader(headers, "X-amz-sns-message-type"))) {
-                    confirmSubscription(new ReceivedRequest(body, headers));
+                    confirmSubscription(received);
                 }
+                receivedRequests.add(received);
                 exchange.sendResponseHeaders(200, 0);
             } catch (Exception e) {
+                // Record even on failure so awaitRequests unblocks and the assertion
+                // reports the real state instead of timing out opaquely.
+                receivedRequests.add(received);
+                LOG.log(java.util.logging.Level.SEVERE,
+                        "confirming-webhook: subscription confirmation failed", e);
                 exchange.sendResponseHeaders(500, 0);
             } finally {
                 exchange.close();
