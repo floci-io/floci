@@ -841,11 +841,37 @@ public class CognitoService {
     public void adminUserGlobalSignOut(String userPoolId, String username) {
         // Validate user exists
         CognitoUser user = adminGetUser(userPoolId, username);
-        
+
         // Revoke all tokens for this user
         revokeAllUserTokens(userPoolId, username);
-        
+
         LOG.infov("AdminUserGlobalSignOut: revoked all tokens for user {0} in pool {1}", username, userPoolId);
+    }
+
+    /**
+     * GlobalSignOut — the self-service counterpart to AdminUserGlobalSignOut, authenticated
+     * with the caller's access token instead of admin credentials. Invalidates the access,
+     * ID, and refresh tokens Cognito issued to the user, matching AWS behavior.
+     */
+    public void globalSignOut(String accessToken) {
+        String username = extractUsernameFromToken(accessToken);
+        String poolId = extractPoolIdFromToken(accessToken);
+        String jti = extractJtiFromToken(accessToken);
+
+        if (username == null || poolId == null) {
+            throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
+        }
+
+        // A token that was already revoked (or issued before an earlier sign-out) cannot
+        // authorize a fresh sign-out.
+        validateTokenNotRevoked(jti, poolId, "access");
+        Long iat = extractIatFromToken(accessToken);
+        validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
+
+        // Revoke all of the user's issued tokens (access, ID, refresh).
+        revokeAllUserTokens(poolId, username);
+
+        LOG.infov("GlobalSignOut: revoked all tokens for user {0} in pool {1}", username, poolId);
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {

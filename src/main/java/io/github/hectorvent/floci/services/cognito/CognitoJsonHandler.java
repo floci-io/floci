@@ -81,6 +81,7 @@ public class CognitoJsonHandler {
             case "GetUser" -> handleGetUser(request);
             case "UpdateUserAttributes" -> handleUpdateUserAttributes(request);
             case "DeleteUserAttributes" -> handleDeleteUserAttributes(request);
+            case "GlobalSignOut" -> handleGlobalSignOut(request);
             case "CreateGroup" -> handleCreateGroup(request);
             case "GetGroup" -> handleGetGroup(request);
             case "ListGroups" -> handleListGroups(request);
@@ -606,6 +607,11 @@ public class CognitoJsonHandler {
         String accessToken = request.path("AccessToken").asText();
         List<String> attributeNames = readStringList(request.path("UserAttributeNames"));
         service.deleteUserAttributes(accessToken, attributeNames);
+        return Response.ok(objectMapper.createObjectNode()).build();
+    }
+
+    private Response handleGlobalSignOut(JsonNode request) {
+        service.globalSignOut(request.path("AccessToken").asText());
         return Response.ok(objectMapper.createObjectNode()).build();
     }
 
