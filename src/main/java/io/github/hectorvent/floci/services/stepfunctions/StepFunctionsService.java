@@ -12,6 +12,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.ActivityTask;
 import io.github.hectorvent.floci.services.stepfunctions.model.Execution;
 import io.github.hectorvent.floci.services.stepfunctions.model.HistoryEvent;
 import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
+import io.github.hectorvent.floci.services.stepfunctions.model.StateMachineVersion;
 import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -105,6 +106,51 @@ public class StepFunctionsService implements Resettable {
     public List<StateMachine> listStateMachines(String region) {
         String prefix = "arn:aws:states:" + region + ":";
         return stateMachineStore.scan(k -> k.startsWith(prefix));
+    }
+
+    // ── State machine versions ──────────────────────────────────────────────
+
+    public StateMachineVersion publishStateMachineVersion(String stateMachineArn) {
+        StateMachine sm = describeStateMachine(stateMachineArn);
+        int next = sm.getVersionCounter() + 1;
+        sm.setVersionCounter(next);
+        StateMachineVersion version = new StateMachineVersion(
+                stateMachineArn + ":" + next, next, System.currentTimeMillis() / 1000.0);
+        sm.getVersions().add(version);
+        stateMachineStore.put(stateMachineArn, sm);
+        return version;
+    }
+
+    public List<StateMachineVersion> listStateMachineVersions(String stateMachineArn) {
+        // AWS returns InvalidArn for a non-existent state machine here — StateMachineDoesNotExist is
+        // not one of ListStateMachineVersions' declared errors (Publish, which does declare it, keeps
+        // using describeStateMachine).
+        StateMachine sm = stateMachineStore.get(stateMachineArn)
+                .orElseThrow(() -> new AwsException("InvalidArn",
+                        "Invalid Arn: '" + stateMachineArn + "'", 400));
+        // AWS lists versions newest first (descending by creationDate). creationDate is only
+        // second-resolution, so tie-break on the version number (also descending) to keep the order
+        // correct when several versions are published within the same second — otherwise the
+        // Terraform provider can latch onto the wrong version ARN.
+        List<StateMachineVersion> versions = new ArrayList<>(sm.getVersions());
+        versions.sort(Comparator
+                .comparingDouble(StateMachineVersion::getCreationDate)
+                .thenComparingInt(StateMachineVersion::getVersion)
+                .reversed());
+        // Defensive copy so callers can't mutate (or trip over concurrent mutation of) the stored list.
+        return List.copyOf(versions);
+    }
+
+    public void deleteStateMachineVersion(String stateMachineVersionArn) {
+        int lastColon = stateMachineVersionArn.lastIndexOf(':');
+        if (lastColon < 0) {
+            return;
+        }
+        String baseArn = stateMachineVersionArn.substring(0, lastColon);
+        stateMachineStore.get(baseArn).ifPresent(sm -> {
+            sm.getVersions().removeIf(v -> stateMachineVersionArn.equals(v.getStateMachineVersionArn()));
+            stateMachineStore.put(baseArn, sm);
+        });
     }
 
     public void deleteStateMachine(String arn) {

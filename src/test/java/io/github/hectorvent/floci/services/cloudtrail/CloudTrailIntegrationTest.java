@@ -166,6 +166,26 @@ class CloudTrailIntegrationTest {
     }
 
     @Test
+    void lookupEventsReturnsEmptyEventPage() {
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "LookupEvents")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                            "LookupAttributes": [
+                                {"AttributeKey": "EventName", "AttributeValue": "CreateBucket"}
+                            ],
+                            "MaxResults": 10
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("Events", hasSize(0));
+    }
+
+    @Test
     void trailProvisioningLifecycleWorksWithBucketNotificationsAndQueuePolicy() {
         String bucket = "cloudtrail-audit-feed-bucket";
         String bucket2 = "cloudtrail-audit-feed-bucket-2";

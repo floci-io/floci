@@ -77,6 +77,8 @@ class AslExecutorCatchTest {
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
                 mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
                 mock(io.github.hectorvent.floci.services.s3.S3Service.class),
+                mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
+                mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
                 objectMapper,
                 new JsonataEvaluator(objectMapper),
                 mock(Instance.class));
