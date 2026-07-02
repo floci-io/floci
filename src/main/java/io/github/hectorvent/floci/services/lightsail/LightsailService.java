@@ -243,7 +243,13 @@ public class LightsailService {
     }
 
     public ObjectNode deleteDisk(String region, String name) {
-        requireResource(region, RESOURCE_DISK, name);
+        ObjectNode disk = requireResource(region, RESOURCE_DISK, name);
+        if (disk.path("isAttached").asBoolean(false)) {
+            throw new AwsException("InvalidInputException",
+                    "Disk " + name + " is attached to instance " + disk.path("attachedTo").asText()
+                            + " and cannot be deleted. Detach the disk first and then try again.",
+                    400);
+        }
         resourceStore.delete(resourceKey(region, RESOURCE_DISK, name));
         return operations(region, RESOURCE_DISK, name, "DeleteDisk");
     }
@@ -300,8 +306,15 @@ public class LightsailService {
     }
 
     public ObjectNode releaseStaticIp(String region, String name) {
-        requireResource(region, RESOURCE_STATIC_IP, name);
-        detachStaticIp(region, name);
+        ObjectNode ip = requireResource(region, RESOURCE_STATIC_IP, name);
+        String instanceName = ip.path("attachedTo").asText(null);
+        if (instanceName != null) {
+            resourceStore.get(resourceKey(region, RESOURCE_INSTANCE, instanceName)).ifPresent(instance -> {
+                instance.put("isStaticIp", false);
+                instance.put("publicIpAddress", publicIpFor(instanceName));
+                resourceStore.put(resourceKey(region, RESOURCE_INSTANCE, instanceName), instance);
+            });
+        }
         resourceStore.delete(resourceKey(region, RESOURCE_STATIC_IP, name));
         return operations(region, RESOURCE_STATIC_IP, name, "ReleaseStaticIp");
     }
@@ -646,9 +659,20 @@ public class LightsailService {
 
     private ObjectNode hardware(String bundleId) {
         ObjectNode hardware = mapper.createObjectNode();
-        hardware.put("cpuCount", bundleId.startsWith("nano") ? 1 : 2);
+        int cpu = switch (bundleId) {
+            case "nano_3_0" -> 1;
+            default -> 2;
+        };
+        double ram = switch (bundleId) {
+            case "nano_3_0" -> 0.5;
+            case "micro_3_0" -> 1.0;
+            case "small_3_0" -> 2.0;
+            case "medium_3_0" -> 4.0;
+            default -> 1.0;
+        };
+        hardware.put("cpuCount", cpu);
         hardware.put("disks", mapper.createArrayNode());
-        hardware.put("ramSizeInGb", bundleId.startsWith("nano") ? 0.5 : 1.0);
+        hardware.put("ramSizeInGb", ram);
         return hardware;
     }
 

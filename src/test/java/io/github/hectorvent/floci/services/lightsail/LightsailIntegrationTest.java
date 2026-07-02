@@ -7,8 +7,11 @@ import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.equalTo;
+import static org.hamcrest.Matchers.hasItem;
+import static org.hamcrest.Matchers.hasItems;
 import static org.hamcrest.Matchers.hasSize;
 import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.not;
 import static org.hamcrest.Matchers.startsWith;
 
 @QuarkusTest
@@ -298,5 +301,128 @@ class LightsailIntegrationTest {
                 .statusCode(400)
                 .body("__type", equalTo("InvalidInputException"))
                 .body("message", equalTo("keyPairName is required"));
+    }
+
+    @Test
+    void diskStaticIpAndHardwareEdgeCasesMatchLightsailBehavior() {
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateInstances")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "instanceNames": ["review-web"],
+                          "availabilityZone": "us-east-1a",
+                          "blueprintId": "ubuntu_22_04",
+                          "bundleId": "medium_3_0"
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "GetInstance")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {"instanceName": "review-web"}
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("instance.hardware.cpuCount", equalTo(2))
+                .body("instance.hardware.ramSizeInGb", equalTo(4.0f));
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateDisk")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "diskName": "review-data",
+                          "availabilityZone": "us-east-1a",
+                          "sizeInGb": 8
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "AttachDisk")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "diskName": "review-data",
+                          "instanceName": "review-web"
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "DeleteDisk")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {"diskName": "review-data"}
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidInputException"));
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "AllocateStaticIp")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {"staticIpName": "review-ip"}
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "AttachStaticIp")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "staticIpName": "review-ip",
+                          "instanceName": "review-web"
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "ReleaseStaticIp")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {"staticIpName": "review-ip"}
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("operations[0].operationType", equalTo("ReleaseStaticIp"));
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "GetOperationsForResource")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {"resourceName": "review-ip"}
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200)
+                .body("operations.operationType", hasItems("AllocateStaticIp", "AttachStaticIp", "ReleaseStaticIp"))
+                .body("operations.operationType", not(hasItem("DetachStaticIp")));
     }
 }
