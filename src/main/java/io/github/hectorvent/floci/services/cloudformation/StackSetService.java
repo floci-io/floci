@@ -64,6 +64,13 @@ public class StackSetService {
             throw new AwsException("NameAlreadyExistsException",
                     "StackSet already exists: " + name, 409);
         }
+        // AWS rejects CreateStackSet with no template; the handler resolves TemplateBody/TemplateURL
+        // to null when neither is supplied. Without this guard a later CreateStackInstances would
+        // deploy empty ("{}") stacks into every target account.
+        if (templateBody == null || templateBody.isBlank()) {
+            throw new AwsException("ValidationError",
+                    "Either TemplateBody or TemplateURL must be specified", 400);
+        }
         StackSet ss = new StackSet();
         ss.setStackSetName(name);
         ss.setStackSetId(name + ":" + UUID.randomUUID());
@@ -313,6 +320,12 @@ public class StackSetService {
         try {
             future.get();
             return true;
+        } catch (InterruptedException e) {
+            // Restore the interrupt flag so a shutdown signal (e.g. Quarkus interrupting the backing
+            // ExecutorService) propagates instead of being swallowed and letting the thread run on.
+            Thread.currentThread().interrupt();
+            LOG.warnv("StackSet instance execution interrupted: {0}", e.getMessage());
+            return false;
         } catch (Exception e) {
             LOG.warnv("StackSet instance execution failed: {0}", e.getMessage());
             return false;

@@ -124,6 +124,20 @@ class CloudFormationStackSetsIntegrationTest {
     }
 
     @Test
+    void createStackSetWithoutTemplateIsRejected() {
+        // AWS rejects CreateStackSet when neither TemplateBody nor TemplateURL is supplied; otherwise
+        // a later CreateStackInstances would deploy empty stacks into every target account.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStackSet")
+            .formParam("StackSetName", "set-" + UUID.randomUUID().toString().substring(0, 8))
+            .header("Authorization", auth(ADMIN, "cloudformation"))
+        .when().post("/")
+        .then().statusCode(400)
+            .body(containsString("ValidationError"));
+    }
+
+    @Test
     void stackSetProvisionsInstancesIntoTargetAccounts() {
         String setName = "set-" + UUID.randomUUID().toString().substring(0, 8);
         String queue = "ss-" + UUID.randomUUID().toString().substring(0, 8);
