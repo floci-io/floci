@@ -45,14 +45,61 @@ public class FirehoseService {
     }
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags) {
+        return createDeliveryStream(name, s3Config, tags, null);
+    }
+
+    public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
+                                       String deliveryStreamType) {
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
         DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config);
         description.setAccountId(regionResolver.getAccountId());
         description.setTags(tags);
+        if (deliveryStreamType != null && !deliveryStreamType.isBlank()) {
+            description.setDeliveryStreamType(deliveryStreamType);
+        }
         streamStore.put(name, description);
         buffers.put(name, Collections.synchronizedList(new ArrayList<>()));
         LOG.infov("Created Firehose delivery stream: {0}", name);
         return arn;
+    }
+
+    public void updateDestination(String name, String currentVersionId, String destinationId, S3Destination update) {
+        DeliveryStreamDescription stream = describeDeliveryStream(name);
+        if (!stream.getVersionId().equals(currentVersionId)) {
+            throw new AwsException("ConcurrentModificationException",
+                    "Cannot update firehose: " + name + " since the current version id: " + stream.getVersionId()
+                            + " and specified version id: " + currentVersionId + " do not match", 400);
+        }
+        DeliveryStreamDescription.Destination destination = stream.getDestinations() != null && !stream.getDestinations().isEmpty()
+                ? stream.getDestinations().get(0)
+                : null;
+        if (destination == null || !destination.getDestinationId().equals(destinationId)) {
+            throw new AwsException("InvalidArgumentException",
+                    "Destination Id " + destinationId + " not found", 400);
+        }
+        if (update != null) {
+            S3Destination current = destination.getExtendedS3DestinationDescription();
+            if (current == null) {
+                update.applyDefaults();
+                destination.setExtendedS3DestinationDescription(update);
+            } else {
+                mergeDestination(current, update);
+            }
+        }
+        stream.setVersionId(String.valueOf(Long.parseLong(stream.getVersionId()) + 1));
+        stream.setLastUpdateTimestamp(java.time.Instant.now());
+        streamStore.put(name, stream);
+        LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
+    }
+
+    private static void mergeDestination(S3Destination current, S3Destination update) {
+        if (update.getRoleArn() != null) current.setRoleArn(update.getRoleArn());
+        if (update.getBucketArn() != null) current.setBucketArn(update.getBucketArn());
+        if (update.getPrefix() != null) current.setPrefix(update.getPrefix());
+        if (update.getErrorOutputPrefix() != null) current.setErrorOutputPrefix(update.getErrorOutputPrefix());
+        if (update.getCompressionFormat() != null) current.setCompressionFormat(update.getCompressionFormat());
+        if (update.getBufferingHints() != null) current.setBufferingHints(update.getBufferingHints());
+        if (update.getEncryptionConfiguration() != null) current.setEncryptionConfiguration(update.getEncryptionConfiguration());
     }
 
     public void tagDeliveryStream(String name, List<DeliveryStreamDescription.Tag> tagsToTag) {
@@ -105,9 +152,14 @@ public class FirehoseService {
     }
 
     public DeliveryStreamDescription describeDeliveryStream(String name) {
-        return streamStore.get(name)
+        DeliveryStreamDescription stream = streamStore.get(name)
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
                         "Delivery stream not found: " + name, 400));
+        // Normalizes streams persisted before required output members existed.
+        if (stream.s3Destination() != null) {
+            stream.s3Destination().applyDefaults();
+        }
+        return stream;
     }
 
     public void deleteDeliveryStream(String name) {
