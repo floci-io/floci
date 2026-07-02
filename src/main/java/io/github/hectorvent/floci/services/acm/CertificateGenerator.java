@@ -73,13 +73,33 @@ public class CertificateGenerator {
     ) {}
 
     /**
-     * Generates a self-signed X.509 certificate for local emulation.
+     * Generates a certificate for local emulation that mimics an ACM-issued certificate:
+     * the subject is {@code CN=<domainName>} but the issuer is a cosmetic Amazon CA DN, matching
+     * what real ACM returns. It is signed by its own key, so it is <em>not</em> verifiable as a
+     * trust anchor (the issuer DN does not match any certificate a client could hold). Use this
+     * for ACM responses; use {@link #generateSelfSignedCertificate} for a cert clients must trust.
      *
      * <p>Note: RSA key generation (especially 4096-bit) can take 100-500ms.
      * In production emulator usage, consider moving this to a worker thread
      * or using virtual threads for concurrent certificate generation.</p>
      */
     public GeneratedCertificate generateCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
+        return buildCertificate(domainName, sans, keyAlgorithm, ISSUER_DN, false);
+    }
+
+    /**
+     * Generates a genuinely self-signed certificate (issuer == subject, marked as a CA) suitable
+     * for use as a <em>trust anchor</em>: a client that adds this certificate to its CA store can
+     * verify a TLS connection that presents it. Used for Floci's own HTTPS server certificate so
+     * that containers (e.g. Lambdas making CDK {@code cfn-response} callbacks over HTTPS) can trust
+     * Floci once the certificate is installed in their CA bundle.
+     */
+    public GeneratedCertificate generateSelfSignedCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm) {
+        return buildCertificate(domainName, sans, keyAlgorithm, "CN=" + domainName, true);
+    }
+
+    private GeneratedCertificate buildCertificate(String domainName, List<String> sans, KeyAlgorithm keyAlgorithm,
+                                                  String issuerDn, boolean asCa) {
         try {
             KeyPair keyPair = generateKeyPair(keyAlgorithm);
 
@@ -90,7 +110,7 @@ public class CertificateGenerator {
             BigInteger serial = new BigInteger(128, SECURE_RANDOM);
             String subjectDn = "CN=" + domainName;
 
-            X500Name issuer = new X500Name(ISSUER_DN);
+            X500Name issuer = new X500Name(issuerDn);
             X500Name subject = new X500Name(subjectDn);
 
             String signatureAlgorithm = keyAlgorithm.getAlgorithm().equals("EC")
@@ -119,22 +139,20 @@ public class CertificateGenerator {
             GeneralNames generalNames = new GeneralNames(sanList.toArray(new GeneralName[0]));
             certBuilder.addExtension(Extension.subjectAlternativeName, false, generalNames);
 
-            // Add Key Usage
-            certBuilder.addExtension(
-                Extension.keyUsage,
-                true,
-                new KeyUsage(KeyUsage.digitalSignature | KeyUsage.keyEncipherment)
-            );
+            // Add Key Usage — a trust-anchor self-signed cert also needs keyCertSign so it can
+            // act as its own issuer; an ACM-style leaf only needs digitalSignature/keyEncipherment.
+            int keyUsageBits = KeyUsage.digitalSignature | KeyUsage.keyEncipherment;
+            if (asCa) {
+                keyUsageBits |= KeyUsage.keyCertSign;
+            }
+            certBuilder.addExtension(Extension.keyUsage, true, new KeyUsage(keyUsageBits));
 
-            // Add Basic Constraints (not a CA)
-            certBuilder.addExtension(
-                Extension.basicConstraints,
-                true,
-                new BasicConstraints(false)
-            );
+            // Add Basic Constraints — a trust anchor must be a CA so clients accept it as one.
+            certBuilder.addExtension(Extension.basicConstraints, true, new BasicConstraints(asCa));
 
-            // Self-signed certificate for local emulation - signed with subject's own private key
-            // Real AWS ACM certificates are signed by Amazon's CA hierarchy
+            // Signed with the subject's own private key. For generateCertificate() the issuer DN is
+            // a cosmetic Amazon DN (mimicking ACM); for generateSelfSignedCertificate() issuer ==
+            // subject, so the cert is a valid self-signed trust anchor.
             ContentSigner signer = new JcaContentSignerBuilder(signatureAlgorithm)
                 .setProvider(BouncyCastleProvider.PROVIDER_NAME)
                 .build(keyPair.getPrivate());
@@ -154,7 +172,7 @@ public class CertificateGenerator {
                 notBefore,
                 notAfter,
                 subjectDn,
-                ISSUER_DN,
+                issuerDn,
                 signatureAlgorithm
             );
 

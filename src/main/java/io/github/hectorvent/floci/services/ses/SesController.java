@@ -768,23 +768,15 @@ public class SesController {
                                                        String body) {
         String region = regionResolver.resolveRegion(headers);
         try {
-            JsonNode request = (body == null || body.isBlank())
-                    ? objectMapper.createObjectNode()
-                    : objectMapper.readTree(body);
-            requireJsonObject(request);
-            JsonNode enabledNode = request.path("SendingEnabled");
-            if (enabledNode.isMissingNode() || enabledNode.isNull() || !enabledNode.isBoolean()) {
-                throw new AwsException("BadRequestException",
-                        "SendingEnabled must be present and must be a boolean.", 400);
-            }
-            sesService.setConfigurationSetSendingEnabled(name, enabledNode.booleanValue(), region);
-            LOG.infov("SES V2 PutConfigurationSetSendingOptions: {0} on {1}",
-                    enabledNode.booleanValue(), name);
+            // Reuse the AWS-aligned SendingEnabled deserialization shared with CreateConfigurationSet:
+            // absent -> false, string -> true, null/number -> SerializationException. An empty body
+            // / {} therefore disables sending (200). Verified against real AWS.
+            boolean enabled = parseSendingEnabled(readOptionBody(body).path("SendingEnabled"));
+            sesService.setConfigurationSetSendingEnabled(name, enabled, region);
+            LOG.infov("SES V2 PutConfigurationSetSendingOptions: {0} on {1}", enabled, name);
             return Response.ok(objectMapper.createObjectNode()).build();
         } catch (AwsException e) {
             throw remapV1Exception(e);
-        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
-            throw new AwsException("BadRequestException", e.getMessage(), 400);
         }
     }
 

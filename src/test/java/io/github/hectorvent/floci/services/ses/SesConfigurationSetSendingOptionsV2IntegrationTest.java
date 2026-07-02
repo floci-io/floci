@@ -170,21 +170,31 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
 
     @Test
     @Order(12)
-    void putSendingOptions_missingSendingEnabled_returns400() {
+    void putSendingOptions_emptyBody_treatsSendingEnabledAsFalse() {
+        // AWS treats an absent SendingEnabled as false: a true empty body succeeds (200) and
+        // disables sending (verified against real AWS). Sending is enabled here from @Order(9).
         given()
                 .contentType("application/json")
                 .header("Authorization", SES_AUTH)
-                .body("{}")
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/sending")
         .then()
-                .statusCode(400)
-                .body("message", containsString("SendingEnabled"));
+                .statusCode(200);
+
+        given()
+                .header("Authorization", SES_AUTH)
+        .when()
+                .get("/v2/email/configuration-sets/" + CS)
+        .then()
+                .statusCode(200)
+                .body("SendingOptions.SendingEnabled", equalTo(false));
     }
 
     @Test
     @Order(13)
-    void putSendingOptions_nonBooleanSendingEnabled_returns400() {
+    void putSendingOptions_stringSendingEnabled_coercesToTrue() {
+        // Real AWS coerces any string to true (200), matching CreateConfigurationSet. Verify the
+        // persisted value, not just the status — CS was disabled by @Order(12).
         given()
                 .contentType("application/json")
                 .header("Authorization", SES_AUTH)
@@ -192,12 +202,35 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
         .when()
                 .put("/v2/email/configuration-sets/" + CS + "/sending")
         .then()
-                .statusCode(400)
-                .body("message", containsString("SendingEnabled"));
+                .statusCode(200);
+
+        given()
+                .header("Authorization", SES_AUTH)
+        .when()
+                .get("/v2/email/configuration-sets/" + CS)
+        .then()
+                .statusCode(200)
+                .body("SendingOptions.SendingEnabled", equalTo(true));
     }
 
     @Test
     @Order(14)
+    void putSendingOptions_nullSendingEnabled_returnsSerializationException() {
+        // Real AWS rejects an explicit JSON null for the boolean field with SerializationException,
+        // matching CreateConfigurationSet's deserialization.
+        given()
+                .contentType("application/json")
+                .header("Authorization", SES_AUTH)
+                .body("{\"SendingEnabled\":null}")
+        .when()
+                .put("/v2/email/configuration-sets/" + CS + "/sending")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("SerializationException"));
+    }
+
+    @Test
+    @Order(15)
     void putSendingOptions_unknownConfigSet_returns404_NotFoundException() {
         given()
                 .contentType("application/json")
@@ -212,7 +245,7 @@ class SesConfigurationSetSendingOptionsV2IntegrationTest {
     }
 
     @Test
-    @Order(15)
+    @Order(16)
     void v1_updateConfigurationSetSendingEnabled_nonBooleanEnabled_returnsInvalidParameterValue() {
         // parseRequiredBoolean enforces AWS-style "true"|"false". Anything else (e.g.
         // "yes") must surface as InvalidParameterValue instead of being silently
