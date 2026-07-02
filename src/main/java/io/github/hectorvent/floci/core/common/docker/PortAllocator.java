@@ -44,6 +44,15 @@ public class PortAllocator {
     }
 
     /**
+     * Marks a port as reserved without probing whether it is free. Used on restart to
+     * re-reserve host ports already held by surviving containers (e.g. persisted EC2
+     * port forwards) so the allocator does not hand them out again.
+     */
+    public synchronized void markReserved(int port) {
+        reserved.add(port);
+    }
+
+    /**
      * Releases a previously allocated port back to the pool.
      * Should be called when the Docker container that was using the port is removed.
      */

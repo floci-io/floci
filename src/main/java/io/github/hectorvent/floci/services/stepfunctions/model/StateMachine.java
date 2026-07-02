@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.services.stepfunctions.model;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import io.quarkus.runtime.annotations.RegisterForReflection;
 
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @RegisterForReflection
@@ -17,6 +19,8 @@ public class StateMachine {
     private String status = "ACTIVE";
     private double creationDate;
     private Map<String, String> tags = new HashMap<>();
+    private int versionCounter = 0;
+    private List<StateMachineVersion> versions = new ArrayList<>();
 
     public StateMachine() {
         this.creationDate = System.currentTimeMillis() / 1000.0;
@@ -45,4 +49,10 @@ public class StateMachine {
 
     public Map<String, String> getTags() { return tags; }
     public void setTags(Map<String, String> tags) { this.tags = tags; }
+
+    public int getVersionCounter() { return versionCounter; }
+    public void setVersionCounter(int versionCounter) { this.versionCounter = versionCounter; }
+
+    public List<StateMachineVersion> getVersions() { return versions; }
+    public void setVersions(List<StateMachineVersion> versions) { this.versions = versions; }
 }

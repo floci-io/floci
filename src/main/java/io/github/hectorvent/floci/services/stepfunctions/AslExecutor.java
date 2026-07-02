@@ -9,6 +9,14 @@ import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHan
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbService;
 import io.github.hectorvent.floci.services.ec2.Ec2Service;
+import io.github.hectorvent.floci.services.ecs.EcsJsonHandler;
+import io.github.hectorvent.floci.services.ecs.EcsService;
+import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
+import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
+import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
+import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
+import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.s3.S3Service;
 import io.github.hectorvent.floci.services.lambda.LambdaExecutorService;
 import io.github.hectorvent.floci.services.lambda.LambdaFunctionStore;
@@ -24,6 +32,7 @@ import io.github.hectorvent.floci.services.stepfunctions.model.StateMachine;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.MissingNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.quarkus.arc.Arc;
@@ -39,9 +48,11 @@ import org.jboss.logging.Logger;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
@@ -59,6 +70,10 @@ public class AslExecutor {
     private static final Logger LOG = Logger.getLogger(AslExecutor.class);
     private static final int MAX_WAIT_SECONDS = 30;
 
+    // ecs:runTask.sync polling — wait up to ~60s for the task to reach STOPPED.
+    private static final int ECS_SYNC_POLL_ATTEMPTS = 600;
+    private static final long ECS_SYNC_POLL_INTERVAL_MS = 100;
+
     private static final String QUERY_LANGUAGE_JSONATA = "JSONata";
 
     private final LambdaExecutorService lambdaExecutor;
@@ -69,6 +84,8 @@ public class AslExecutor {
     private final CloudFormationQueryHandler cloudFormationHandler;
     private final Ec2Service ec2Service;
     private final S3Service s3Service;
+    private final EcsService ecsService;
+    private final EcsJsonHandler ecsJsonHandler;
     private final ObjectMapper objectMapper;
     private final JsonataEvaluator jsonataEvaluator;
     private final Instance<StepFunctionsService> sfnService;
@@ -83,6 +100,7 @@ public class AslExecutor {
                        DynamoDbService dynamoDbService, DynamoDbJsonHandler dynamoDbJsonHandler,
                        SqsJsonHandler sqsJsonHandler, CloudFormationQueryHandler cloudFormationHandler,
                        Ec2Service ec2Service, S3Service s3Service,
+                       EcsService ecsService, EcsJsonHandler ecsJsonHandler,
                        ObjectMapper objectMapper, JsonataEvaluator jsonataEvaluator,
                        Instance<StepFunctionsService> sfnService) {
         this.lambdaExecutor = lambdaExecutor;
@@ -93,6 +111,8 @@ public class AslExecutor {
         this.cloudFormationHandler = cloudFormationHandler;
         this.ec2Service = ec2Service;
         this.s3Service = s3Service;
+        this.ecsService = ecsService;
+        this.ecsJsonHandler = ecsJsonHandler;
         this.objectMapper = objectMapper;
         this.jsonataEvaluator = jsonataEvaluator;
         this.sfnService = sfnService;
@@ -290,11 +310,14 @@ public class AslExecutor {
 
         JsonNode effectiveInput = applyInputPath(stateDef, input);
 
-        JsonNode result;
+        // Pass states transform their input through Parameters (with intrinsics), then a static
+        // Result overrides if present.
+        JsonNode result = effectiveInput;
+        if (stateDef.has("Parameters")) {
+            result = resolveParameters(stateDef.get("Parameters"), effectiveInput, context);
+        }
         if (stateDef.has("Result")) {
             result = stateDef.get("Result");
-        } else {
-            result = effectiveInput;
         }
 
         JsonNode output = mergeResult(stateDef, input, result);
@@ -345,6 +368,10 @@ public class AslExecutor {
             JsonNode output = applyJsonataOutput(stateDef, input, taskResult, context);
             return new StateResult(output, stateDef.path("Next").asText(null));
         } else {
+            // ResultSelector transforms the raw result before ResultPath merges it into the state input.
+            if (stateDef.has("ResultSelector")) {
+                taskResult = resolveParameters(stateDef.get("ResultSelector"), taskResult, context);
+            }
             JsonNode output = mergeResult(stateDef, input, taskResult);
             output = applyOutputPath(stateDef, input, output);
             return new StateResult(output, stateDef.path("Next").asText(null));
@@ -460,6 +487,21 @@ public class AslExecutor {
         if (resource.equals("arn:aws:states:::s3:putObject")
                 || resource.equals("arn:aws:states:::aws-sdk:s3:putObject")) {
             return invokeS3PutObject(input);
+        }
+
+        // ECS optimized integration: arn:aws:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
+        // The .waitForTaskToken suffix is already stripped by executeTaskState, so a waitForTaskToken
+        // variant arrives here as the bare runTask resource and simply launches the task while the token
+        // future blocks for SendTaskSuccess.
+        if (resource.startsWith("arn:aws:states:::ecs:runTask")) {
+            // A non-null taskToken means the original resource ended with .waitForTaskToken (stripped
+            // upstream). Its failure semantics match .sync — a task placement failure fails the state —
+            // whereas request-response returns the {Tasks,Failures} envelope without failing the state.
+            String mode = taskToken != null
+                    ? ".waitForTaskToken"
+                    : resource.substring("arn:aws:states:::ecs:runTask".length());
+            String region = extractRegionFromArn(sm.getStateMachineArn());
+            return invokeEcsRunTask(mode, input, region);
         }
 
         // Nested state machine integration
@@ -646,6 +688,223 @@ public class AslExecutor {
         }
         throw new FailStateException("States.TaskFailed",
                 "Nested execution timed out: " + execArn);
+    }
+
+    /**
+     * Optimized ECS RunTask integration. Step Functions passes PascalCase parameters
+     * ({@code Cluster}, {@code TaskDefinition}, {@code Overrides.ContainerOverrides}, …)
+     * and expects PascalCase results, whereas Floci's ECS handlers use the lowerCamelCase
+     * of the ECS data-plane API — {@link #recaseKeys} bridges the two ends.
+     *
+     * @param mode "" for request-response (returns the RunTask {@code {Tasks,Failures}} response
+     *             without failing on a placement failure), ".sync" to block until the task reaches
+     *             STOPPED, or ".waitForTaskToken" to launch and let the token future carry the result
+     *             (both ".sync" and ".waitForTaskToken" fail the state on a placement failure).
+     */
+    private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region) throws Exception {
+        String taskDefinition = input.path("TaskDefinition").asText(null);
+        if (taskDefinition == null || taskDefinition.isBlank()) {
+            throw new FailStateException("States.TaskFailed",
+                    "TaskDefinition is required for the ecs:runTask integration");
+        }
+        String cluster = input.hasNonNull("Cluster") ? input.path("Cluster").asText() : null;
+        int count = input.path("Count").asInt(1);
+
+        LaunchType launchType = null;
+        String launchTypeRaw = input.path("LaunchType").asText(null);
+        if (launchTypeRaw != null && !launchTypeRaw.isBlank()) {
+            try {
+                launchType = LaunchType.valueOf(launchTypeRaw);
+            } catch (IllegalArgumentException e) {
+                throw new FailStateException("States.TaskFailed", "Unsupported LaunchType: " + launchTypeRaw);
+            }
+        }
+        String group = input.path("Group").asText(null);
+        String startedBy = input.path("StartedBy").asText(null);
+
+        // Parameters are PascalCase; the ECS handler's parsers expect the camelCase of the
+        // data-plane API, so recase each sub-tree before reusing them.
+        JsonNode overridesNode = recaseKeys(objectMapper,
+                input.path("Overrides").path("ContainerOverrides"), false);
+        List<ContainerOverride> overrides = ecsJsonHandler.parseContainerOverrides(overridesNode);
+
+        // NetworkConfiguration (awsvpc) is threaded through so it is not dropped at the boundary;
+        // awsvpc ENI attachments themselves are not emulated in the local mock profile.
+        JsonNode networkConfigNode = recaseKeys(objectMapper, input.path("NetworkConfiguration"), false);
+        NetworkConfiguration networkConfiguration = ecsJsonHandler.parseNetworkConfiguration(networkConfigNode);
+
+        List<EcsTask> launched;
+        try {
+            launched = ecsService.runTask(cluster, taskDefinition, count, launchType, group, startedBy,
+                    overrides, networkConfiguration, region);
+        } catch (AwsException e) {
+            throw new FailStateException("ECS." + e.getErrorCode(), e.getMessage());
+        }
+        // A task placement failure (no task launched) fails the state only for the .sync and
+        // .waitForTaskToken patterns, and AWS surfaces it with the AmazonECS.Unknown error name.
+        // Request-response never fails on a placement failure — it returns the { Tasks, Failures }
+        // envelope (possibly with empty Tasks) so the caller can inspect Failures itself.
+        boolean callbackOrSync = ".sync".equals(mode) || ".waitForTaskToken".equals(mode);
+        if (launched.isEmpty() && callbackOrSync) {
+            throw new FailStateException("AmazonECS.Unknown", "ecs:runTask launched no tasks");
+        }
+
+        if (mode.isEmpty() || ".waitForTaskToken".equals(mode)) {
+            // Request-response: return the RunTask response shape { Tasks: [...], Failures: [] }.
+            // The .waitForTaskToken launch phase lands here too — its return value is discarded once
+            // the task token supplies the real result, so returning the envelope just completes the launch.
+            ObjectNode resp = objectMapper.createObjectNode();
+            ArrayNode tasks = resp.putArray("Tasks");
+            for (EcsTask t : launched) {
+                tasks.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(t), true));
+            }
+            resp.putArray("Failures");
+            return resp;
+        }
+
+        if (!".sync".equals(mode)) {
+            // Only request-response (""), .sync and .waitForTaskToken are valid; reject typos rather
+            // than silently treating an unknown suffix as .sync.
+            throw new FailStateException("States.TaskFailed", "Unsupported ecs:runTask mode: " + mode);
+        }
+
+        // .sync — wait until every launched task reaches STOPPED, then surface success or failure.
+        // All tasks must be polled (not just the first): with Count > 1, a failure in any task must
+        // fail the state, otherwise tasks beyond the first would run unmonitored.
+        List<String> taskArns = launched.stream().map(EcsTask::getTaskArn).toList();
+        for (int i = 0; i < ECS_SYNC_POLL_ATTEMPTS; i++) {
+            Thread.sleep(ECS_SYNC_POLL_INTERVAL_MS);
+            List<EcsTask> described = ecsService.describeTasks(cluster, taskArns, region);
+            boolean allStopped = described.size() == taskArns.size()
+                    && described.stream().allMatch(t -> "STOPPED".equals(t.getLastStatus()));
+            if (!allStopped) {
+                continue;
+            }
+            // All terminal. Like real Step Functions, fail the state if any task's essential
+            // container exited non-zero or a task never ran a container (e.g. it failed to start).
+            for (EcsTask task : described) {
+                String cause = ecsTaskFailureCause(task, nonEssentialContainerNames(task, region));
+                if (cause != null) {
+                    throw new FailStateException("States.TaskFailed", cause);
+                }
+            }
+            // Success: a single task returns its description; multiple tasks return the array.
+            if (described.size() == 1) {
+                return recaseKeys(objectMapper, ecsJsonHandler.taskNode(described.get(0)), true);
+            }
+            ArrayNode arr = objectMapper.createArrayNode();
+            for (EcsTask task : described) {
+                arr.add(recaseKeys(objectMapper, ecsJsonHandler.taskNode(task), true));
+            }
+            return arr;
+        }
+        throw new FailStateException("States.Timeout",
+                "ecs:runTask.sync timed out waiting for tasks to stop: " + taskArns);
+    }
+
+    /** A failure cause if the ECS task did not complete cleanly (non-zero exit or no container ran), or null on success. */
+    private static String ecsTaskFailureCause(EcsTask task, Set<String> nonEssentialNames) {
+        boolean ranAContainer = task.getContainers() != null && !task.getContainers().isEmpty();
+        Integer nonZeroExit = null;
+        boolean hasNullExitCode = false;
+        if (ranAContainer) {
+            for (var c : task.getContainers()) {
+                // Only essential containers decide the task outcome, like real Step Functions; a
+                // non-essential sidecar (log shipper, metrics agent) exiting non-zero is ignored.
+                // Anything not explicitly marked non-essential defaults to essential.
+                if (nonEssentialNames.contains(c.getName())) {
+                    continue;
+                }
+                if (c.getExitCode() == null) {
+                    // A STOPPED container with no exit code never completed (OOM-killed, failed to
+                    // start, force-stopped) — AWS treats that as a failure, not a clean exit.
+                    hasNullExitCode = true;
+                } else if (c.getExitCode() != 0) {
+                    nonZeroExit = c.getExitCode();
+                }
+            }
+        }
+        if (nonZeroExit == null && !hasNullExitCode && ranAContainer) {
+            return null;
+        }
+        if (task.getStoppedReason() != null) {
+            return task.getStoppedReason();
+        }
+        if (nonZeroExit != null) {
+            return "Essential container exited with code " + nonZeroExit;
+        }
+        if (hasNullExitCode) {
+            return "Essential container stopped without an exit code";
+        }
+        return "Task stopped without running a container";
+    }
+
+    /**
+     * Names of the task's containers that are explicitly {@code essential: false} in its task
+     * definition. Their exit status does not fail the state. Falls back to an empty set (treat all
+     * as essential) when the task definition can't be resolved, preserving the conservative default.
+     */
+    private Set<String> nonEssentialContainerNames(EcsTask task, String region) {
+        try {
+            TaskDefinition td = ecsService.describeTaskDefinition(task.getTaskDefinitionArn(), region);
+            Set<String> names = new HashSet<>();
+            if (td.getContainerDefinitions() != null) {
+                for (ContainerDefinition cd : td.getContainerDefinitions()) {
+                    if (!cd.isEssential()) {
+                        names.add(cd.getName());
+                    }
+                }
+            }
+            return names;
+        } catch (RuntimeException e) {
+            // Tolerated: if the task definition can't be resolved we conservatively treat every
+            // container as essential (empty non-essential set), but log it so the loss of the
+            // essential/non-essential distinction is diagnosable.
+            LOG.warnv("ecs:runTask: could not resolve task definition {0} to classify essential "
+                    + "containers; treating all as essential ({1})", task.getTaskDefinitionArn(), e.getMessage());
+            return Set.of();
+        }
+    }
+
+    /**
+     * Returns a deep copy of {@code node} with the first character of every object key
+     * recased. Step Functions optimized service integrations use PascalCase member names
+     * while Floci's ECS wire handlers use the lowerCamelCase of the data-plane API.
+     *
+     * @param upperFirst true to map lowerCamelCase → PascalCase (results handed back to the
+     *                   state machine); false to map PascalCase → lowerCamelCase (parameters
+     *                   handed to the ECS handlers).
+     */
+    static JsonNode recaseKeys(ObjectMapper mapper, JsonNode node, boolean upperFirst) {
+        if (node == null) {
+            return null;
+        }
+        if (node.isObject()) {
+            ObjectNode out = mapper.createObjectNode();
+            Iterator<Map.Entry<String, JsonNode>> fields = node.fields();
+            while (fields.hasNext()) {
+                Map.Entry<String, JsonNode> e = fields.next();
+                out.set(recaseKey(e.getKey(), upperFirst), recaseKeys(mapper, e.getValue(), upperFirst));
+            }
+            return out;
+        }
+        if (node.isArray()) {
+            ArrayNode out = mapper.createArrayNode();
+            for (JsonNode item : node) {
+                out.add(recaseKeys(mapper, item, upperFirst));
+            }
+            return out;
+        }
+        return node.deepCopy();
+    }
+
+    private static String recaseKey(String key, boolean upperFirst) {
+        if (key == null || key.isEmpty()) {
+            return key;
+        }
+        char first = key.charAt(0);
+        char recased = upperFirst ? Character.toUpperCase(first) : Character.toLowerCase(first);
+        return recased == first ? key : recased + key.substring(1);
     }
 
     private boolean isActivityArn(String resource) {
@@ -957,7 +1216,10 @@ public class AslExecutor {
         }
         if (rule.has("IsPresent")) {
             boolean expectPresent = rule.get("IsPresent").asBoolean();
-            return !value.isMissingNode() == expectPresent;
+            // A field that exists with an explicit null value still counts as present in AWS, so
+            // resolve without collapsing missing into null: only a truly absent path is "not present".
+            boolean present = !resolvePathNode(variable, input).isMissingNode();
+            return present == expectPresent;
         }
         if (rule.has("IsString")) {
             return value.isTextual() == rule.get("IsString").asBoolean();
@@ -1067,7 +1329,11 @@ public class AslExecutor {
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
-        JsonNode output = mergeResult(stateDef, input, results);
+        // ResultSelector transforms the raw branch results before ResultPath merges them in.
+        JsonNode selected = stateDef.has("ResultSelector")
+                ? resolveParameters(stateDef.get("ResultSelector"), results, context)
+                : results;
+        JsonNode output = mergeResult(stateDef, input, selected);
         output = applyOutputPath(stateDef, input, output);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
@@ -1129,7 +1395,11 @@ public class AslExecutor {
             return new StateResult(output, stateDef.path("Next").asText(null));
         }
 
-        JsonNode output = mergeResult(stateDef, input, results);
+        // ResultSelector transforms the raw iteration results before ResultPath merges them in.
+        JsonNode selected = stateDef.has("ResultSelector")
+                ? resolveParameters(stateDef.get("ResultSelector"), results, context)
+                : results;
+        JsonNode output = mergeResult(stateDef, input, selected);
         output = applyOutputPath(stateDef, input, output);
         return new StateResult(output, stateDef.path("Next").asText(null));
     }
@@ -1396,7 +1666,7 @@ public class AslExecutor {
         return resolvePath(path, output);
     }
 
-    private JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {
+    JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {
         if (parameters.isObject()) {
             ObjectNode resolved = objectMapper.createObjectNode();
             Iterator<Map.Entry<String, JsonNode>> fields = parameters.fields();
@@ -1427,39 +1697,116 @@ public class AslExecutor {
     }
 
     JsonNode resolvePath(String path, JsonNode root) {
+        JsonNode node = resolvePathNode(path, root);
+        // Most callers do not distinguish an absent path from an explicit null; collapse both to null.
+        return node.isMissingNode() ? NullNode.getInstance() : node;
+    }
+
+    /**
+     * Resolves a reference path while preserving the distinction between an explicit null value
+     * (returns a {@link NullNode}) and a missing/absent path (returns a {@link MissingNode}).
+     * {@link #resolvePath} collapses both to null; only callers that care about presence
+     * (e.g. {@code IsPresent}) should use this variant.
+     */
+    JsonNode resolvePathNode(String path, JsonNode root) {
         if (path == null || "$".equals(path)) {
             return root;
         }
         if (path.startsWith("States.")) {
             return evaluateIntrinsic(path, root);
         }
-        if (!path.startsWith("$.")) {
-            return NullNode.getInstance();
+        // Support dotted ($.a.b) and root-bracket ($[*], $[0]) forms; anything else is unsupported.
+        if (!path.startsWith("$.") && !path.startsWith("$[")) {
+            return MissingNode.getInstance();
         }
-        String[] parts = path.substring(2).split("\\.");
-        JsonNode current = root;
-        for (String part : parts) {
-            if (current == null || current.isMissingNode()) {
-                return NullNode.getInstance();
+        return walkPath(splitPathSegments(path), 0, root);
+    }
+
+    /**
+     * Splits a reference path into segments, normalizing bracket notation into dot segments so the
+     * AWS bracket forms reduce to the same walk as the dot forms:
+     * {@code $.Regions[*].RegionName} and {@code $.Regions.*.RegionName} both yield
+     * {@code [Regions, *, RegionName]}, and {@code $[*][*]} yields {@code [*, *]}.
+     *
+     * <p>Limitation: every literal dot is treated as a segment separator, so a field name that
+     * itself contains a dot is mis-split. AWS's bracket-quoted escape hatch ({@code $.a['b.c']})
+     * is not supported; this matches the prior behavior and is rare in ASL reference paths.
+     */
+    private String[] splitPathSegments(String path) {
+        String rest = path.substring(1);                  // drop leading '$'
+        rest = rest.replaceAll("\\[(\\*|\\d+)]", ".$1");  // [*] -> .*, [0] -> .0
+        rest = rest.replaceAll("\\.{2,}", ".");           // collapse ".[0]" -> "..0" -> ".0"
+        if (rest.startsWith(".")) {
+            rest = rest.substring(1);
+        }
+        return rest.isEmpty() ? new String[0] : rest.split("\\.");
+    }
+
+    /**
+     * Walks the remaining path segments from {@code idx}. A {@code *} segment projects the rest of
+     * the path over each element of the current array and collects the results into an array
+     * (e.g. {@code $.Regions[*].RegionName}). When the projected suffix contains a further wildcard,
+     * the nested projections are flattened one level so {@code $[*][*]} flattens an array of arrays.
+     * A purely numeric segment indexes into an array (e.g. {@code $.items[0]}).
+     */
+    private JsonNode walkPath(String[] parts, int idx, JsonNode current) {
+        for (int i = idx; i < parts.length; i++) {
+            if (current == null || current.isMissingNode() || current.isNull()) {
+                return MissingNode.getInstance();
             }
-            // Handle array index notation like field[0]
-            if (part.contains("[")) {
-                int bracketOpen = part.indexOf('[');
-                int bracketClose = part.indexOf(']');
-                String fieldName = part.substring(0, bracketOpen);
-                int index = Integer.parseInt(part.substring(bracketOpen + 1, bracketClose));
-                current = current.path(fieldName).path(index);
+            String part = parts[i];
+            if ("*".equals(part)) {
+                if (!current.isArray()) {
+                    return MissingNode.getInstance();
+                }
+                boolean flattenSub = false;
+                for (int j = i + 1; j < parts.length; j++) {
+                    if ("*".equals(parts[j])) {
+                        flattenSub = true;
+                        break;
+                    }
+                }
+                ArrayNode projected = objectMapper.createArrayNode();
+                for (JsonNode element : current) {
+                    JsonNode value = walkPath(parts, i + 1, element);
+                    // Only absent matches are skipped; an explicit null is a real value and is kept,
+                    // so $[*].field over [{"field":null},{"field":"x"}] yields [null,"x"].
+                    if (value == null || value.isMissingNode()) {
+                        continue;
+                    }
+                    if (flattenSub && value.isArray()) {
+                        value.forEach(projected::add);
+                    } else {
+                        projected.add(value);
+                    }
+                }
+                return projected;
+            }
+            if (current.isArray() && isArrayIndex(part)) {
+                current = current.path(Integer.parseInt(part));
             } else {
                 current = current.path(part);
             }
         }
-        return current.isMissingNode() ? NullNode.getInstance() : current;
+        return current;
+    }
+
+    private static boolean isArrayIndex(String segment) {
+        if (segment.isEmpty()) {
+            return false;
+        }
+        for (int i = 0; i < segment.length(); i++) {
+            if (!Character.isDigit(segment.charAt(i))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /**
      * Evaluate a JSONPath-mode intrinsic function (States.*).
      * Supports: States.StringToJson, States.JsonToString, States.Format,
-     *           States.Array, States.ArrayLength, States.MathAdd, States.UUID.
+     *           States.Array, States.ArrayLength, States.ArrayContains, States.MathAdd, States.UUID.
      * Throws FailStateException("States.Runtime") for unrecognized functions.
      */
     private JsonNode evaluateIntrinsic(String expr, JsonNode root) {
@@ -1534,6 +1881,28 @@ public class AslExecutor {
                 JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
                 JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
                 yield objectMapper.getNodeFactory().numberNode(a.asLong() + b.asLong());
+            }
+            case "States.ArrayContains" -> {
+                List<String> parts = splitIntrinsicArgs(argsStr);
+                if (parts.size() != 2) {
+                    throw new FailStateException("States.Runtime",
+                            "States.ArrayContains requires exactly 2 arguments");
+                }
+                JsonNode array = resolveIntrinsicArg(parts.get(0).trim(), root);
+                JsonNode value = resolveIntrinsicArg(parts.get(1).trim(), root);
+                if (!array.isArray()) {
+                    // AWS throws rather than silently returning false, matching States.ArrayLength.
+                    throw new FailStateException("States.Runtime",
+                            "States.ArrayContains: first argument must be an array");
+                }
+                boolean contains = false;
+                for (JsonNode element : array) {
+                    if (element.equals(value)) {
+                        contains = true;
+                        break;
+                    }
+                }
+                yield objectMapper.getNodeFactory().booleanNode(contains);
             }
             case "States.UUID" -> {
                 yield objectMapper.getNodeFactory().textNode(java.util.UUID.randomUUID().toString());
