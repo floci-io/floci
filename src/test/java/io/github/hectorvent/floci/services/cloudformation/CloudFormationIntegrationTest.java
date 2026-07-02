@@ -8,6 +8,8 @@ import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
@@ -1225,6 +1227,95 @@ class CloudFormationIntegrationTest {
             .get("/")
         .then()
             .statusCode(200);
+    }
+
+    // Regression: issue #1668. Deleting a stack that owns an AWS::SecretsManager::Secret which
+    // no longer exists (e.g. dropped by a persistent-state restore) must reach DELETE_COMPLETE,
+    // not DELETE_FAILED. A missing secret is already gone — AWS treats it as deleted.
+    @Test
+    void deleteStack_withAlreadyDeletedSecret_reachesDeleteComplete() throws Exception {
+        String secretName = "cfn-1668-already-deleted-secret";
+        String template = """
+            {
+              "Resources": {
+                "TestSecret": {
+                  "Type": "AWS::SecretsManager::Secret",
+                  "Properties": {
+                    "Name": "%s",
+                    "SecretString": "{\\"key\\":\\"value\\"}"
+                  }
+                }
+              }
+            }
+            """.formatted(secretName);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "cfn-1668-delete-stack")
+            .formParam("TemplateBody", template)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<StackId>"));
+
+        // Wait for CREATE_COMPLETE before deleting the secret out of band.
+        long createDeadline = System.currentTimeMillis() + 10_000;
+        String createStatus = "";
+        while (System.currentTimeMillis() < createDeadline) {
+            String xml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", "cfn-1668-delete-stack")
+            .when().post("/").then().statusCode(200).extract().asString();
+            if (xml.contains("<StackStatus>CREATE_COMPLETE</StackStatus>")) {
+                createStatus = "CREATE_COMPLETE";
+                break;
+            }
+            Thread.sleep(200);
+        }
+        assertEquals("CREATE_COMPLETE", createStatus, "Stack did not reach CREATE_COMPLETE within timeout");
+
+        // Simulate a persistent-state restore dropping the secret while the stack still tracks it.
+        given()
+            .contentType(SM_CONTENT_TYPE)
+            .header("X-Amz-Target", "secretsmanager.DeleteSecret")
+            .body("{\"SecretId\":\"" + secretName + "\",\"ForceDeleteWithoutRecovery\":true}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DeleteStack")
+            .formParam("StackName", "cfn-1668-delete-stack")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+
+        long deadline = System.currentTimeMillis() + 10_000;
+        while (System.currentTimeMillis() < deadline) {
+            String statusXml = given()
+                .contentType("application/x-www-form-urlencoded")
+                .formParam("Action", "DescribeStacks")
+                .formParam("StackName", "cfn-1668-delete-stack")
+            .when()
+                .post("/")
+            .then()
+                .extract().body().asString();
+
+            assertThat(statusXml, not(containsString("<StackStatus>DELETE_FAILED</StackStatus>")));
+
+            if (statusXml.contains("<StackStatus>DELETE_COMPLETE</StackStatus>")
+                    || statusXml.contains("does not exist")) {
+                return;
+            }
+            Thread.sleep(200);
+        }
+        throw new AssertionError("Stack did not reach DELETE_COMPLETE within timeout");
     }
 
     @Test
