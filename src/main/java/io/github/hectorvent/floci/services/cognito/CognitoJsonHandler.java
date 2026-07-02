@@ -1,12 +1,12 @@
 package io.github.hectorvent.floci.services.cognito;
 
-import io.github.hectorvent.floci.core.common.AwsErrorResponse;
-import io.github.hectorvent.floci.core.common.AwsException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cognito.model.CognitoGroup;
 import io.github.hectorvent.floci.services.cognito.model.CognitoUser;
 import io.github.hectorvent.floci.services.cognito.model.ResourceServer;
@@ -21,6 +21,7 @@ import jakarta.ws.rs.core.Response;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 @ApplicationScoped
 public class CognitoJsonHandler {
@@ -681,8 +682,8 @@ public class CognitoJsonHandler {
         c.getAllowedOAuthFlows().forEach(flows::add);
         ArrayNode scopes = node.putArray("AllowedOAuthScopes");
         c.getAllowedOAuthScopes().forEach(scopes::add);
-        node.set("AnalyticsConfiguration", objectMapper.valueToTree(
-                c.getAnalyticsConfiguration() != null ? c.getAnalyticsConfiguration() : new HashMap<>()));
+        Optional.ofNullable(c.getAnalyticsConfiguration())
+                .ifPresent(it -> node.set("AnalyticsConfiguration", objectMapper.valueToTree(it)));
         ArrayNode callbackUrls = node.putArray("CallbackURLs");
         c.getCallbackURLs().forEach(callbackUrls::add);
         if (c.getDefaultRedirectURI() != null) {
@@ -708,12 +709,12 @@ public class CognitoJsonHandler {
         }
         ArrayNode supportedIdentityProviders = node.putArray("SupportedIdentityProviders");
         c.getSupportedIdentityProviders().forEach(supportedIdentityProviders::add);
-        node.set("TokenValidityUnits", objectMapper.valueToTree(
-                c.getTokenValidityUnits() != null ? c.getTokenValidityUnits() : new HashMap<>()));
+        Optional.ofNullable(c.getTokenValidityUnits())
+                .ifPresent(it -> node.set("TokenValidityUnits", objectMapper.valueToTree(it)));
         ArrayNode writeAttributes = node.putArray("WriteAttributes");
         c.getWriteAttributes().forEach(writeAttributes::add);
-        node.set("RefreshTokenRotation", objectMapper.valueToTree(
-                c.getRefreshTokenRotation() != null ? c.getRefreshTokenRotation() : new HashMap<>()));
+        Optional.ofNullable(c.getRefreshTokenRotation())
+                .ifPresent(it -> node.set("RefreshTokenRotation", objectMapper.valueToTree(it)));
         if (c.getEnableTokenRevocation() != null) {
             node.put("EnableTokenRevocation", c.getEnableTokenRevocation());
         }

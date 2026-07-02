@@ -16,6 +16,7 @@ import com.github.dockerjava.api.model.StreamType;
 import java.nio.charset.StandardCharsets;
 import com.github.dockerjava.api.model.NetworkSettings;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.services.ec2.portforward.Ec2PortForwardManager;
 import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerDetector;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
@@ -49,6 +50,7 @@ import static org.mockito.Answers.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.withSettings;
@@ -105,7 +107,8 @@ class Ec2ContainerManagerTest {
                 dockerClient,
                 mock(PortAllocator.class),
                 mock(EmulatorConfig.class),
-                metadataServer);
+                metadataServer,
+                mock(Ec2PortForwardManager.class));
 
         Instance instance = new Instance();
         instance.setInstanceId("i-restored");
@@ -202,7 +205,7 @@ class Ec2ContainerManagerTest {
         harness.manager.launch(instance, "ubuntu:24.04", null, "us-west-2");
         awaitUntil(() -> "running".equals(instance.getState().getName()), Duration.ofSeconds(2));
 
-        verify(harness.logStreamer).streamToCloudWatchLogs(
+        verify(harness.logStreamer, timeout(2000)).streamToCloudWatchLogs(
             any(String.class), any(String.class), eq("us-west-2"), eq(TEST_USER_DATA_OUTPUT)
         );
     }
@@ -402,7 +405,8 @@ class Ec2ContainerManagerTest {
                 dockerClient,
                 portAllocator,
                 config,
-                metadataServer);
+                metadataServer,
+                mock(Ec2PortForwardManager.class));
         return new LaunchHarness(manager, dockerClient, metadataServer, logStreamer, builder);
     }
 
