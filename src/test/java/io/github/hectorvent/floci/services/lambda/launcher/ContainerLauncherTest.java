@@ -82,7 +82,7 @@ class ContainerLauncherTest {
         ContainerBuilder containerBuilder = new ContainerBuilder(config, dockerHostResolver, embeddedDnsServer);
         ContainerReachableEndpoint reachableEndpoint =
                 new ContainerReachableEndpoint(config, dockerHostResolver, embeddedDnsServer);
-        LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(config, reachableEndpoint);
+        LaunchedContainerAwsEnv awsEnv = new LaunchedContainerAwsEnv(reachableEndpoint);
         launcher = new ContainerLauncher(containerBuilder, lifecycleManager, logStreamer, imageResolver,
                 runtimeApiServerFactory, dockerHostResolver, config, ecrRegistryManager,
                 mock(io.github.hectorvent.floci.services.lambda.LambdaLayerService.class), awsEnv);

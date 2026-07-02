@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 
@@ -24,18 +23,11 @@ import java.util.Optional;
 @ApplicationScoped
 public class LaunchedContainerAwsEnv {
 
-    private final EmulatorConfig config;
     private final ContainerReachableEndpoint reachableEndpoint;
 
     @Inject
-    public LaunchedContainerAwsEnv(EmulatorConfig config, ContainerReachableEndpoint reachableEndpoint) {
-        this.config = config;
+    public LaunchedContainerAwsEnv(ContainerReachableEndpoint reachableEndpoint) {
         this.reachableEndpoint = reachableEndpoint;
-    }
-
-    // Alternate constructor kept for symmetry with other Floci docker helpers that expose one.
-    public LaunchedContainerAwsEnv(EmulatorConfig config) {
-        this(config, null);
     }
 
     /**

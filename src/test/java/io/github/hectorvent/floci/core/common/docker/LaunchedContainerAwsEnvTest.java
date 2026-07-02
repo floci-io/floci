@@ -1,6 +1,5 @@
 package io.github.hectorvent.floci.core.common.docker;
 
-import io.github.hectorvent.floci.config.EmulatorConfig;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -22,7 +21,7 @@ class LaunchedContainerAwsEnvTest {
     private LaunchedContainerAwsEnv awsEnvWithEndpoint(String baseUrl) {
         ContainerReachableEndpoint endpoint = mock(ContainerReachableEndpoint.class);
         when(endpoint.baseUrl()).thenReturn(baseUrl);
-        return new LaunchedContainerAwsEnv(mock(EmulatorConfig.class), endpoint);
+        return new LaunchedContainerAwsEnv(endpoint);
     }
 
     @Test

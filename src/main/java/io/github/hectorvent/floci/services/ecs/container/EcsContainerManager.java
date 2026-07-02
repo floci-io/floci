@@ -325,13 +325,10 @@ public class EcsContainerManager {
         // then the task-def environment, then the override environment — the task def and override
         // win on key conflict, so an explicit task-def value is never clobbered.
         Map<String, String> envMap = new LinkedHashMap<>();
-        List<String> awsBaseline = awsEnv.sdkBaselineEnv(region, Optional.empty());
-        if (awsBaseline != null) {
-            for (String kv : awsBaseline) {
-                int eq = kv.indexOf('=');
-                if (eq > 0) {
-                    envMap.put(kv.substring(0, eq), kv.substring(eq + 1));
-                }
+        for (String kv : awsEnv.sdkBaselineEnv(region, Optional.empty())) {
+            int eq = kv.indexOf('=');
+            if (eq > 0) {
+                envMap.put(kv.substring(0, eq), kv.substring(eq + 1));
             }
         }
         if (def.getEnvironment() != null) {
