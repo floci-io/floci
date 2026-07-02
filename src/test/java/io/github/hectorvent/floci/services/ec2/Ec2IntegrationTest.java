@@ -1332,7 +1332,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(81)
+    @Order(87)
     void describeInstanceAttributeGroupSet() {
         given()
             .formParam("Action", "DescribeInstanceAttribute")
@@ -1453,7 +1453,7 @@ class Ec2IntegrationTest {
     }
 
     @Test
-    @Order(87)
+    @Order(88)
     void describeInstancesByFilter() {
         given()
             .formParam("Action", "DescribeInstances")
