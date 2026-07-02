@@ -62,10 +62,11 @@ class Ec2ServiceTest {
                 new InMemoryStorageFactory());
         LaunchTemplate template = service.createLaunchTemplate("us-east-1", "app-template",
                 "ami-source", "t3.micro", "app-key", List.of("sg-source"),
-                "source-user-data", List.of(), List.of(new Tag("Role", "source")));
+                "source-user-data", "arn:aws:iam::000000000000:instance-profile/app-profile",
+                List.of(), List.of(new Tag("Role", "source")));
 
         service.createLaunchTemplateVersion("us-east-1", template.getLaunchTemplateId(), null,
-                "1", null, "t3.small", null, List.of(), null, List.of());
+                "1", null, "t3.small", null, List.of(), null, null, List.of());
 
         LaunchTemplate version = service.describeLaunchTemplateVersions(
                 "us-east-1", template.getLaunchTemplateId(), null, List.of("2")).getFirst();
@@ -74,6 +75,7 @@ class Ec2ServiceTest {
         assertEquals("app-key", version.getKeyName());
         assertEquals(List.of("sg-source"), version.getSecurityGroupIds());
         assertEquals("source-user-data", version.getUserData());
+        assertEquals("arn:aws:iam::000000000000:instance-profile/app-profile", version.getIamInstanceProfileArn());
         assertEquals("2", version.getLatestVersionNumber());
         assertEquals(1, version.getInstanceTags().size());
         assertEquals("Role", version.getInstanceTags().getFirst().getKey());

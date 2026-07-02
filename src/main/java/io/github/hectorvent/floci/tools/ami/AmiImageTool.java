@@ -23,6 +23,7 @@ import java.util.Objects;
 public final class AmiImageTool {
     public static final Path DEFAULT_METADATA = Path.of("docker/ec2/ami-images/image-build-metadata.yaml");
     public static final Path DEFAULT_OUTPUT = Path.of("target/ami-images");
+    private static final String NETWORKD_WAIT_ONLINE_DROP_IN = "systemd-networkd-wait-online-floci.conf";
     private static final ObjectMapper YAML = new ObjectMapper(new YAMLFactory());
     private static final HttpClient HTTP = HttpClient.newHttpClient();
 
@@ -100,6 +101,7 @@ public final class AmiImageTool {
             }
             if (write) {
                 Files.writeString(context.resolve("Dockerfile"), dockerfile(image), StandardCharsets.UTF_8);
+                Files.writeString(context.resolve(NETWORKD_WAIT_ONLINE_DROP_IN), networkdWaitOnlineDropIn(), StandardCharsets.UTF_8);
                 Files.writeString(context.resolve("README.md"), readme(image), StandardCharsets.UTF_8);
                 YAML.writerWithDefaultPrettyPrinter().writeValue(context.resolve("provenance.yaml").toFile(), provenance);
             }
@@ -162,10 +164,24 @@ public final class AmiImageTool {
                 LABEL io.floci.ami.catalog-image-id="%s"
                 LABEL io.floci.ami.architecture="%s"
                 ADD %s /
+                COPY %s /etc/systemd/system/systemd-networkd-wait-online.service.d/floci.conf
+                RUN set -eux; \\
+                    getent group ubuntu >/dev/null || groupadd --gid 1000 ubuntu; \\
+                    id ubuntu >/dev/null 2>&1 || useradd --uid 1000 --gid ubuntu --groups sudo --create-home --shell /bin/bash ubuntu; \\
+                    install -d -o ubuntu -g ubuntu /home/ubuntu
                 ENV container=docker
                 STOPSIGNAL SIGRTMIN+3
                 CMD ["/sbin/init"]
-                """.formatted(image.canonical.rootfsUrl(), image.catalogImageId, image.architecture, image.canonical.rootfs);
+                """.formatted(image.canonical.rootfsUrl(), image.catalogImageId, image.architecture, image.canonical.rootfs,
+                NETWORKD_WAIT_ONLINE_DROP_IN);
+    }
+
+    static String networkdWaitOnlineDropIn() {
+        return """
+                [Service]
+                ExecStart=
+                ExecStart=/bin/true
+                """;
     }
 
     static String readme(ImageSpec image) {

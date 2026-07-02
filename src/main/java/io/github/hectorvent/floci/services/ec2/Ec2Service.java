@@ -1372,6 +1372,7 @@ public class Ec2Service {
     public LaunchTemplate createLaunchTemplate(String region, String name, String imageId,
                                                String instanceType, String keyName,
                                                List<String> securityGroupIds, String userData,
+                                               String iamInstanceProfileArn,
                                                List<Tag> launchTemplateTags, List<Tag> instanceTags) {
         ensureDefaultResources(region);
         if (name == null || name.isBlank()) {
@@ -1394,6 +1395,7 @@ public class Ec2Service {
         launchTemplate.setInstanceType(instanceType);
         launchTemplate.setKeyName(keyName);
         launchTemplate.setUserData(userData);
+        launchTemplate.setIamInstanceProfileArn(iamInstanceProfileArn);
         if (securityGroupIds != null) {
             launchTemplate.setSecurityGroupIds(new ArrayList<>(securityGroupIds));
         }
@@ -1413,6 +1415,7 @@ public class Ec2Service {
                                                       String sourceVersion,
                                                       String imageId, String instanceType, String keyName,
                                                       List<String> securityGroupIds, String userData,
+                                                      String iamInstanceProfileArn,
                                                       List<Tag> instanceTags) {
         ensureDefaultResources(region);
         LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
@@ -1432,6 +1435,9 @@ public class Ec2Service {
         }
         if (userData != null && !userData.isBlank()) {
             data.setUserData(userData);
+        }
+        if (iamInstanceProfileArn != null && !iamInstanceProfileArn.isBlank()) {
+            data.setIamInstanceProfileArn(iamInstanceProfileArn);
         }
         if (securityGroupIds != null && !securityGroupIds.isEmpty()) {
             data.setSecurityGroupIds(securityGroupIds);
@@ -1498,6 +1504,16 @@ public class Ec2Service {
                 .filter(lt -> names.isEmpty() || names.contains(lt.getLaunchTemplateName()))
                 .filter(lt -> matchesFilters(lt, filters, region))
                 .collect(Collectors.toList());
+    }
+
+    public LaunchTemplateData resolveLaunchTemplateData(String region, String id, String name, String version) {
+        ensureDefaultResources(region);
+        LaunchTemplate launchTemplate = findLaunchTemplate(region, id, name);
+        String resolvedVersion = resolveLaunchTemplateVersion(
+                launchTemplate,
+                version,
+                launchTemplate.getDefaultVersionNumber());
+        return new LaunchTemplateData(versionData(launchTemplate, resolvedVersion));
     }
 
     public LaunchTemplate deleteLaunchTemplate(String region, String id, String name) {
@@ -1570,6 +1586,7 @@ public class Ec2Service {
         data.setInstanceType(launchTemplate.getInstanceType());
         data.setKeyName(launchTemplate.getKeyName());
         data.setUserData(launchTemplate.getUserData());
+        data.setIamInstanceProfileArn(launchTemplate.getIamInstanceProfileArn());
         data.setSecurityGroupIds(launchTemplate.getSecurityGroupIds());
         data.setInstanceTags(launchTemplate.getInstanceTags());
         return data;
@@ -1580,6 +1597,7 @@ public class Ec2Service {
         launchTemplate.setInstanceType(data.getInstanceType());
         launchTemplate.setKeyName(data.getKeyName());
         launchTemplate.setUserData(data.getUserData());
+        launchTemplate.setIamInstanceProfileArn(data.getIamInstanceProfileArn());
         launchTemplate.setSecurityGroupIds(new ArrayList<>(data.getSecurityGroupIds()));
         launchTemplate.setInstanceTags(data.getInstanceTags());
     }
