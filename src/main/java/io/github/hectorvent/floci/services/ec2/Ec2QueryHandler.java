@@ -29,11 +29,13 @@ public class Ec2QueryHandler {
 
     private final Ec2Service service;
     private final EmulatorConfig config;
+    private final FlowLogService flowLogService;
 
     @Inject
-    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config) {
+    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService) {
         this.service = service;
         this.config = config;
+        this.flowLogService = flowLogService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -62,6 +64,10 @@ public class Ec2QueryHandler {
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
+                // Flow Logs
+                case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
+                case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
+                case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
                 case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
@@ -327,6 +333,24 @@ public class Ec2QueryHandler {
             }
         }
 
+        LaunchTemplateData launchTemplateData = resolveRunInstancesLaunchTemplateData(p, region);
+        if (launchTemplateData != null) {
+            imageId = firstNonBlank(imageId, launchTemplateData.getImageId());
+            instanceType = firstNonBlank(instanceType, launchTemplateData.getInstanceType());
+            keyName = firstNonBlank(keyName, launchTemplateData.getKeyName());
+            userData = firstNonBlank(userData, launchTemplateData.getUserData());
+            iamInstanceProfileArn = firstNonBlank(iamInstanceProfileArn, launchTemplateData.getIamInstanceProfileArn());
+            if (sgIds.isEmpty()) {
+                sgIds = new ArrayList<>(launchTemplateData.getSecurityGroupIds());
+            }
+            if (!launchTemplateData.getInstanceTags().isEmpty()) {
+                Map<String, Tag> mergedTags = new LinkedHashMap<>();
+                launchTemplateData.getInstanceTags().forEach(tag -> mergedTags.put(tag.getKey(), tag));
+                instanceTags.forEach(tag -> mergedTags.put(tag.getKey(), tag));
+                instanceTags = new ArrayList<>(mergedTags.values());
+            }
+        }
+
         Reservation res = service.runInstances(region, imageId, instanceType, minCount, maxCount,
                 keyName, sgIds, subnetId, clientToken, instanceTags, userData, iamInstanceProfileArn);
 
@@ -343,6 +367,20 @@ public class Ec2QueryHandler {
         xml.end("instancesSet")
                 .end("RunInstancesResponse");
         return xmlResponse(xml.build());
+    }
+
+    private LaunchTemplateData resolveRunInstancesLaunchTemplateData(MultivaluedMap<String, String> p, String region) {
+        String id = p.getFirst("LaunchTemplate.LaunchTemplateId");
+        String name = p.getFirst("LaunchTemplate.LaunchTemplateName");
+        String version = p.getFirst("LaunchTemplate.Version");
+        if ((id == null || id.isBlank()) && (name == null || name.isBlank())) {
+            return null;
+        }
+        return service.resolveLaunchTemplateData(region, id, name, version);
+    }
+
+    private static String firstNonBlank(String first, String fallback) {
+        return first != null && !first.isBlank() ? first : fallback;
     }
 
     private Response handleDescribeIamInstanceProfileAssociations(MultivaluedMap<String, String> p, String region) {
@@ -580,6 +618,18 @@ public class Ec2QueryHandler {
                 break;
             }
         }
+        // Security group reassignment: --groups maps to GroupId.1, GroupId.2, ...
+        List<String> groupIds = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String groupId = p.getFirst("GroupId." + i);
+            if (groupId == null) {
+                break;
+            }
+            groupIds.add(groupId);
+        }
+        if (!groupIds.isEmpty()) {
+            service.modifyInstanceGroups(region, instanceId, groupIds);
+        }
         return booleanResponse("ModifyInstanceAttribute");
     }
 
@@ -672,6 +722,84 @@ public class Ec2QueryHandler {
                 .start("serviceDetailSet")
                 .end("serviceDetailSet")
                 .end("DescribeVpcEndpointServicesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    // ─── Flow Logs ────────────────────────────────────────────────────────────
+
+    private Response handleCreateFlowLogs(MultivaluedMap<String, String> p, String region) {
+        String resourceType = p.getFirst("ResourceType");
+        List<String> resourceIds = getList(p, "ResourceId");
+        String trafficType = p.getFirst("TrafficType");
+        String logDestinationType = p.getFirst("LogDestinationType");
+        String logDestination = p.getFirst("LogDestination");
+        if (logDestination == null) {
+            logDestination = p.getFirst("LogDestinationArn");
+        }
+        String logFormat = p.getFirst("LogFormat");
+        int maxAgg = parseIntParam(p, "MaxAggregationInterval", 600);
+
+        if (resourceIds.isEmpty()) {
+            // Some SDKs send ResourceIds.member.N — fall back to that prefix.
+            resourceIds = getList(p, "ResourceIds.member");
+        }
+        if (resourceIds.isEmpty()) {
+            return ec2Error("MissingParameter", "The request must contain at least one ResourceId.", 400);
+        }
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("flowLogIdSet");
+        for (String resourceId : resourceIds) {
+            FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
+                    logDestinationType, logDestination, logFormat, maxAgg);
+            xml.elem("item", fl.getFlowLogId());
+        }
+        xml.end("flowLogIdSet")
+                .start("unsuccessful").end("unsuccessful")
+                .end("CreateFlowLogsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeFlowLogs(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "FlowLogId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "FlowLogIds.member");
+        }
+        List<FlowLog> logs = flowLogService.describeFlowLogs(region, ids);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("flowLogSet");
+        for (FlowLog fl : logs) {
+            xml.start("item")
+                    .elem("flowLogId", fl.getFlowLogId())
+                    .elem("resourceId", fl.getResourceId())
+                    .elem("trafficType", fl.getTrafficType())
+                    .elem("logDestinationType", fl.getLogDestinationType())
+                    .elem("logDestination", fl.getLogDestination())
+                    .elem("flowLogStatus", fl.getFlowLogStatus())
+                    .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
+                    .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
+                    .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
+                    .end("item");
+        }
+        xml.end("flowLogSet").end("DescribeFlowLogsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteFlowLogs(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "FlowLogId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "FlowLogIds.member");
+        }
+        flowLogService.deleteFlowLogs(region, ids);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("unsuccessful").end("unsuccessful")
+                .end("DeleteFlowLogsResponse");
         return xmlResponse(xml.build());
     }
 
@@ -1505,6 +1633,7 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseTagsForResource(p, "launch-template"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
@@ -1526,6 +1655,7 @@ public class Ec2QueryHandler {
                 p.getFirst("LaunchTemplateData.KeyName"),
                 parseLaunchTemplateSecurityGroupIds(p),
                 decodeUserData(p.getFirst("LaunchTemplateData.UserData")),
+                resolveIamInstanceProfileArn(p, "LaunchTemplateData.IamInstanceProfile"),
                 parseLaunchTemplateDataTagsForResource(p, "instance"));
         XmlBuilder xml = new XmlBuilder()
                 .start("CreateLaunchTemplateVersionResponse", AwsNamespaces.EC2)
@@ -1823,11 +1953,15 @@ public class Ec2QueryHandler {
     }
 
     private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p) {
-        String arn = p.getFirst("IamInstanceProfile.Arn");
+        return resolveIamInstanceProfileArn(p, "IamInstanceProfile");
+    }
+
+    private String resolveIamInstanceProfileArn(MultivaluedMap<String, String> p, String prefix) {
+        String arn = p.getFirst(prefix + ".Arn");
         if (arn != null && !arn.isBlank()) {
             return arn;
         }
-        String name = p.getFirst("IamInstanceProfile.Name");
+        String name = p.getFirst(prefix + ".Name");
         if (name == null || name.isBlank()) {
             return null;
         }
@@ -2041,6 +2175,11 @@ public class Ec2QueryHandler {
         }
         if (launchTemplate.getUserData() != null) {
             xml.elem("userData", launchTemplate.getUserData());
+        }
+        if (launchTemplate.getIamInstanceProfileArn() != null) {
+            xml.start("iamInstanceProfile")
+                    .elem("arn", launchTemplate.getIamInstanceProfileArn())
+                    .end("iamInstanceProfile");
         }
         xml.start("securityGroupIdSet");
         for (String securityGroupId : launchTemplate.getSecurityGroupIds()) {

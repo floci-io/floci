@@ -6,7 +6,10 @@ import io.github.hectorvent.floci.core.common.XmlBuilder;
 import io.github.hectorvent.floci.services.cloudformation.model.ChangeSet;
 import io.github.hectorvent.floci.services.cloudformation.model.Stack;
 import io.github.hectorvent.floci.services.cloudformation.model.StackEvent;
+import io.github.hectorvent.floci.services.cloudformation.model.StackInstance;
 import io.github.hectorvent.floci.services.cloudformation.model.StackResource;
+import io.github.hectorvent.floci.services.cloudformation.model.StackSet;
+import io.github.hectorvent.floci.services.cloudformation.model.StackSetOperation;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import jakarta.ws.rs.core.MultivaluedMap;
@@ -32,10 +35,12 @@ public class CloudFormationQueryHandler {
     private static final String CF_NS = "http://cloudformation.amazonaws.com/doc/2010-05-15/";
 
     private final CloudFormationService cfnService;
+    private final StackSetService stackSetService;
 
     @Inject
-    public CloudFormationQueryHandler(CloudFormationService cfnService) {
+    public CloudFormationQueryHandler(CloudFormationService cfnService, StackSetService stackSetService) {
         this.cfnService = cfnService;
+        this.stackSetService = stackSetService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -59,8 +64,17 @@ public class CloudFormationQueryHandler {
             case "SetStackPolicy" -> Response.ok(emptyResult("SetStackPolicyResponse")).build();
             case "GetStackPolicy" -> Response.ok(emptyResult("GetStackPolicyResponse")).build();
             case "DescribeStackResource" -> describeStackResource(params, region);
-            case "ListStackSets", "DescribeStackSet", "CreateStackSet" ->
-                    Response.ok(emptyResult(action + "Response")).build();
+            case "CreateStackSet" -> createStackSet(params);
+            case "DescribeStackSet" -> describeStackSet(params);
+            case "ListStackSets" -> listStackSets();
+            case "UpdateStackSet" -> updateStackSet(params);
+            case "DeleteStackSet" -> deleteStackSet(params);
+            case "CreateStackInstances" -> createStackInstances(params, region);
+            case "ListStackInstances" -> listStackInstances(params);
+            case "DescribeStackInstance" -> describeStackInstance(params);
+            case "DeleteStackInstances" -> deleteStackInstances(params);
+            case "ListStackSetOperations" -> listStackSetOperations(params);
+            case "DescribeStackSetOperation" -> describeStackSetOperation(params);
             default -> xmlError("UnknownAction", "Action " + action + " is not supported.", 400);
         };
     }
@@ -563,6 +577,279 @@ public class CloudFormationQueryHandler {
                 .raw(AwsQueryResponse.responseMetadata())
                 .end(responseName)
                 .build();
+    }
+
+    // ── StackSets ─────────────────────────────────────────────────────────────
+
+    private Response createStackSet(MultivaluedMap<String, String> params) {
+        try {
+            StackSet ss = stackSetService.createStackSet(
+                    params.getFirst("StackSetName"),
+                    cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),
+                    extractParameters(params),
+                    extractList(params, "Capabilities.member."),
+                    extractTags(params),
+                    params.getFirst("Description"));
+            String xml = new XmlBuilder()
+                    .start("CreateStackSetResponse", CF_NS)
+                    .start("CreateStackSetResult")
+                    .elem("StackSetId", ss.getStackSetId())
+                    .end("CreateStackSetResult")
+                    .raw(AwsQueryResponse.responseMetadata())
+                    .end("CreateStackSetResponse")
+                    .build();
+            return Response.ok(xml).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response describeStackSet(MultivaluedMap<String, String> params) {
+        try {
+            StackSet ss = stackSetService.describeStackSet(params.getFirst("StackSetName"));
+            XmlBuilder xml = new XmlBuilder()
+                    .start("DescribeStackSetResponse", CF_NS)
+                    .start("DescribeStackSetResult")
+                    .start("StackSet")
+                    .elem("StackSetName", ss.getStackSetName())
+                    .elem("StackSetId", ss.getStackSetId())
+                    .elem("Status", ss.getStatus())
+                    .elem("Description", ss.getDescription())
+                    .elem("TemplateBody", ss.getTemplateBody())
+                    .elem("PermissionModel", ss.getPermissionModel());
+            appendCapabilities(xml, ss.getCapabilities());
+            appendParameters(xml, ss.getParameters());
+            xml.end("StackSet").end("DescribeStackSetResult")
+               .raw(AwsQueryResponse.responseMetadata())
+               .end("DescribeStackSetResponse");
+            return Response.ok(xml.build()).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response listStackSets() {
+        XmlBuilder xml = new XmlBuilder()
+                .start("ListStackSetsResponse", CF_NS)
+                .start("ListStackSetsResult")
+                .start("Summaries");
+        for (StackSet ss : stackSetService.listStackSets()) {
+            xml.start("member")
+               .elem("StackSetName", ss.getStackSetName())
+               .elem("StackSetId", ss.getStackSetId())
+               .elem("Status", ss.getStatus())
+               .elem("Description", ss.getDescription())
+               .end("member");
+        }
+        xml.end("Summaries").end("ListStackSetsResult")
+           .raw(AwsQueryResponse.responseMetadata())
+           .end("ListStackSetsResponse");
+        return Response.ok(xml.build()).type("text/xml").build();
+    }
+
+    private Response updateStackSet(MultivaluedMap<String, String> params) {
+        try {
+            StackSetOperation op = stackSetService.updateStackSet(
+                    params.getFirst("StackSetName"),
+                    cfnService.resolveTemplateBody(params.getFirst("TemplateBody"), params.getFirst("TemplateURL")),
+                    extractParameters(params),
+                    extractList(params, "Capabilities.member."),
+                    extractTags(params),
+                    params.getFirst("Description"));
+            return operationResponse("UpdateStackSet", op.getOperationId());
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response deleteStackSet(MultivaluedMap<String, String> params) {
+        try {
+            stackSetService.deleteStackSet(params.getFirst("StackSetName"));
+            return Response.ok(emptyResult("DeleteStackSetResponse")).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response createStackInstances(MultivaluedMap<String, String> params, String region) {
+        try {
+            StackSetOperation op = stackSetService.createStackInstances(
+                    params.getFirst("StackSetName"),
+                    extractList(params, "Accounts.member."),
+                    resolveRegions(params, region));
+            return operationResponse("CreateStackInstances", op.getOperationId());
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response listStackInstances(MultivaluedMap<String, String> params) {
+        try {
+            List<StackInstance> list = stackSetService.listStackInstances(
+                    params.getFirst("StackSetName"),
+                    params.getFirst("StackInstanceAccount"),
+                    params.getFirst("StackInstanceRegion"));
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListStackInstancesResponse", CF_NS)
+                    .start("ListStackInstancesResult")
+                    .start("Summaries");
+            for (StackInstance inst : list) {
+                xml.start("member")
+                   .elem("StackSetId", inst.getStackSetId())
+                   .elem("Account", inst.getAccount())
+                   .elem("Region", inst.getRegion())
+                   .elem("StackId", inst.getStackId())
+                   .elem("Status", inst.getStatus())
+                   .start("StackInstanceStatus")
+                     .elem("DetailedStatus", inst.getDetailedStatus())
+                   .end("StackInstanceStatus")
+                   .elem("StatusReason", inst.getStatusReason())
+                   .end("member");
+            }
+            xml.end("Summaries").end("ListStackInstancesResult")
+               .raw(AwsQueryResponse.responseMetadata())
+               .end("ListStackInstancesResponse");
+            return Response.ok(xml.build()).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response describeStackInstance(MultivaluedMap<String, String> params) {
+        try {
+            StackInstance inst = stackSetService.describeStackInstance(
+                    params.getFirst("StackSetName"),
+                    params.getFirst("StackInstanceAccount"),
+                    params.getFirst("StackInstanceRegion"));
+            String xml = new XmlBuilder()
+                    .start("DescribeStackInstanceResponse", CF_NS)
+                    .start("DescribeStackInstanceResult")
+                    .start("StackInstance")
+                      .elem("StackSetId", inst.getStackSetId())
+                      .elem("Account", inst.getAccount())
+                      .elem("Region", inst.getRegion())
+                      .elem("StackId", inst.getStackId())
+                      .elem("Status", inst.getStatus())
+                      .start("StackInstanceStatus")
+                        .elem("DetailedStatus", inst.getDetailedStatus())
+                      .end("StackInstanceStatus")
+                      .elem("StatusReason", inst.getStatusReason())
+                    .end("StackInstance")
+                    .end("DescribeStackInstanceResult")
+                    .raw(AwsQueryResponse.responseMetadata())
+                    .end("DescribeStackInstanceResponse")
+                    .build();
+            return Response.ok(xml).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response deleteStackInstances(MultivaluedMap<String, String> params) {
+        try {
+            StackSetOperation op = stackSetService.deleteStackInstances(
+                    params.getFirst("StackSetName"),
+                    extractList(params, "Accounts.member."),
+                    extractList(params, "Regions.member."),
+                    Boolean.parseBoolean(params.getFirst("RetainStacks")));
+            return operationResponse("DeleteStackInstances", op.getOperationId());
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response listStackSetOperations(MultivaluedMap<String, String> params) {
+        try {
+            List<StackSetOperation> ops = stackSetService.listStackSetOperations(params.getFirst("StackSetName"));
+            XmlBuilder xml = new XmlBuilder()
+                    .start("ListStackSetOperationsResponse", CF_NS)
+                    .start("ListStackSetOperationsResult")
+                    .start("Summaries");
+            for (StackSetOperation op : ops) {
+                xml.start("member")
+                   .elem("OperationId", op.getOperationId())
+                   .elem("Action", op.getAction())
+                   .elem("Status", op.getStatus())
+                   .elem("CreationTimestamp", ISO.format(op.getCreationTimestamp()));
+                if (op.getEndTimestamp() != null) {
+                    xml.elem("EndTimestamp", ISO.format(op.getEndTimestamp()));
+                }
+                xml.end("member");
+            }
+            xml.end("Summaries").end("ListStackSetOperationsResult")
+               .raw(AwsQueryResponse.responseMetadata())
+               .end("ListStackSetOperationsResponse");
+            return Response.ok(xml.build()).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response describeStackSetOperation(MultivaluedMap<String, String> params) {
+        try {
+            StackSetOperation op = stackSetService.describeStackSetOperation(
+                    params.getFirst("StackSetName"), params.getFirst("OperationId"));
+            XmlBuilder xml = new XmlBuilder()
+                    .start("DescribeStackSetOperationResponse", CF_NS)
+                    .start("DescribeStackSetOperationResult")
+                    .start("StackSetOperation")
+                      .elem("OperationId", op.getOperationId())
+                      .elem("Action", op.getAction())
+                      .elem("Status", op.getStatus())
+                      .elem("CreationTimestamp", ISO.format(op.getCreationTimestamp()));
+            if (op.getEndTimestamp() != null) {
+                xml.elem("EndTimestamp", ISO.format(op.getEndTimestamp()));
+            }
+            xml.end("StackSetOperation").end("DescribeStackSetOperationResult")
+               .raw(AwsQueryResponse.responseMetadata())
+               .end("DescribeStackSetOperationResponse");
+            return Response.ok(xml.build()).type("text/xml").build();
+        } catch (AwsException e) {
+            return xmlError(e.getErrorCode(), e.getMessage(), e.getHttpStatus());
+        }
+    }
+
+    private Response operationResponse(String action, String operationId) {
+        String xml = new XmlBuilder()
+                .start(action + "Response", CF_NS)
+                .start(action + "Result")
+                .elem("OperationId", operationId)
+                .end(action + "Result")
+                .raw(AwsQueryResponse.responseMetadata())
+                .end(action + "Response")
+                .build();
+        return Response.ok(xml).type("text/xml").build();
+    }
+
+    /** Falls back to the request region when no explicit Regions are supplied. */
+    private List<String> resolveRegions(MultivaluedMap<String, String> params, String region) {
+        List<String> regions = extractList(params, "Regions.member.");
+        return regions.isEmpty() ? List.of(region) : regions;
+    }
+
+    private void appendCapabilities(XmlBuilder xml, List<String> capabilities) {
+        if (capabilities == null || capabilities.isEmpty()) {
+            return;
+        }
+        xml.start("Capabilities");
+        for (String c : capabilities) {
+            xml.elem("member", c);
+        }
+        xml.end("Capabilities");
+    }
+
+    private void appendParameters(XmlBuilder xml, Map<String, String> parameters) {
+        if (parameters == null || parameters.isEmpty()) {
+            return;
+        }
+        xml.start("Parameters");
+        for (Map.Entry<String, String> e : parameters.entrySet()) {
+            xml.start("member")
+               .elem("ParameterKey", e.getKey())
+               .elem("ParameterValue", e.getValue())
+               .end("member");
+        }
+        xml.end("Parameters");
     }
 
     private void awaitExecution(Future<?> future) {

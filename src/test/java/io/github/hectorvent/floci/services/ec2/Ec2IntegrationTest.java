@@ -764,13 +764,14 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
             .formParam("LaunchTemplateData.InstanceType", "t3.micro")
             .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template\n"))
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:ClusterId")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "sample-template")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Key", "example:NodeType")
-            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Value", "COORDINATOR")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.2.Value", "PRIMARY")
             .formParam("TagSpecification.1.ResourceType", "launch-template")
             .formParam("TagSpecification.1.Tag.1.Key", "Name")
             .formParam("TagSpecification.1.Tag.1.Value", "sample-template")
@@ -822,12 +823,14 @@ class Ec2IntegrationTest {
                     equalTo("t3.micro"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
                     equalTo("#!/bin/sh\necho launch-template\n"))
+            .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.resourceType",
                     equalTo("instance"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:ClusterId' }.value",
                     equalTo("sample-template"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
-                    equalTo("COORDINATOR"));
+                    equalTo("PRIMARY"));
     }
 
     @Test
@@ -842,11 +845,12 @@ class Ec2IntegrationTest {
             .formParam("LaunchTemplateData.ImageId", "ami-0abcdef1234567890")
             .formParam("LaunchTemplateData.InstanceType", "t3.small")
             .formParam("LaunchTemplateData.KeyName", "test-key")
+            .formParam("LaunchTemplateData.IamInstanceProfile.Name", "sample-profile-v2")
             .formParam("LaunchTemplateData.SecurityGroupId.1", securityGroupId)
             .formParam("LaunchTemplateData.UserData", gzipBase64("#!/bin/sh\necho launch-template-version\n"))
             .formParam("LaunchTemplateData.TagSpecification.1.ResourceType", "instance")
             .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Key", "example:NodeType")
-            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "WORKER")
+            .formParam("LaunchTemplateData.TagSpecification.1.Tag.1.Value", "SECONDARY")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -862,8 +866,10 @@ class Ec2IntegrationTest {
                     equalTo("t3.small"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.userData",
                     equalTo("#!/bin/sh\necho launch-template-version\n"))
+            .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
             .body("CreateLaunchTemplateVersionResponse.launchTemplateVersion.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
-                    equalTo("WORKER"));
+                    equalTo("SECONDARY"));
 
         given()
             .formParam("Action", "DescribeLaunchTemplateVersions")
@@ -883,7 +889,7 @@ class Ec2IntegrationTest {
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.userData",
                     equalTo("#!/bin/sh\necho launch-template\n"))
             .body("DescribeLaunchTemplateVersionsResponse.launchTemplateVersionSet.item.launchTemplateData.tagSpecificationSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
-                    equalTo("COORDINATOR"));
+                    equalTo("PRIMARY"));
     }
 
     @Test
@@ -928,6 +934,55 @@ class Ec2IntegrationTest {
 
     @Test
     @Order(49)
+    void runInstancesResolvesLaunchTemplateDefaultsWithRequestOverrides() {
+        String launchedInstanceId = given()
+            .formParam("Action", "RunInstances")
+            .formParam("LaunchTemplate.LaunchTemplateId", launchTemplateId)
+            .formParam("LaunchTemplate.Version", "$Default")
+            .formParam("ImageId", "ami-sample-override")
+            .formParam("InstanceType", "c7g.large")
+            .formParam("MinCount", "1")
+            .formParam("MaxCount", "1")
+            .formParam("TagSpecification.1.ResourceType", "instance")
+            .formParam("TagSpecification.1.Tag.1.Key", "example:NodeType")
+            .formParam("TagSpecification.1.Tag.1.Value", "REQUEST")
+            .formParam("TagSpecification.1.Tag.2.Key", "sample-name")
+            .formParam("TagSpecification.1.Tag.2.Value", "sample-local")
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("RunInstancesResponse.instancesSet.item.imageId", equalTo("ami-sample-override"))
+            .body("RunInstancesResponse.instancesSet.item.instanceType", equalTo("c7g.large"))
+            .body("RunInstancesResponse.instancesSet.item.keyName", equalTo("test-key"))
+            .body("RunInstancesResponse.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"))
+            .body("RunInstancesResponse.instancesSet.item.groupSet.item.groupId", equalTo(securityGroupId))
+            .body("RunInstancesResponse.instancesSet.item.tagSet.item.find { it.key == 'example:NodeType' }.value",
+                    equalTo("REQUEST"))
+            .body("RunInstancesResponse.instancesSet.item.tagSet.item.findAll { it.key == 'example:NodeType' }.size()",
+                    equalTo(1))
+            .body("RunInstancesResponse.instancesSet.item.tagSet.item.find { it.key == 'sample-name' }.value",
+                    equalTo("sample-local"))
+            .extract().path("RunInstancesResponse.instancesSet.item.instanceId");
+
+        given()
+            .formParam("Action", "DescribeInstances")
+            .formParam("InstanceId.1", launchedInstanceId)
+            .header("Authorization", AUTH_HEADER)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.instanceId",
+                    equalTo(launchedInstanceId))
+            .body("DescribeInstancesResponse.reservationSet.item.instancesSet.item.iamInstanceProfile.arn",
+                    equalTo("arn:aws:iam::000000000000:instance-profile/sample-profile-v2"));
+    }
+
+    @Test
+    @Order(50)
     void deleteLaunchTemplate() {
         given()
             .formParam("Action", "DeleteLaunchTemplate")
@@ -1570,8 +1625,7 @@ class Ec2IntegrationTest {
             .post("/")
         .then()
             .statusCode(200)
-            .body("DescribeTagsResponse.tagSet.item.key", equalTo("Name"))
-            .body("DescribeTagsResponse.tagSet.item.value", equalTo("test-instance"));
+            .body("DescribeTagsResponse.tagSet.item.find { it.key == 'Name' }.value", equalTo("test-instance"));
     }
 
     @Test
