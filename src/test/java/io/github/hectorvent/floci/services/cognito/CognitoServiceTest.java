@@ -483,6 +483,25 @@ class CognitoServiceTest {
         assertEquals("InvalidParameterException", exception.getErrorCode());
     }
 
+    // Issue #1505: CreateUserPoolClient must not set optional block fields when they were not provided
+    @Test
+    void createUserPoolClientWithNoOptionalBlocksLeavesThemNull() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "MinimalPool"), "us-east-1");
+
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(),
+                "minimal-client",
+                false,
+                false,
+                List.of(),
+                List.of()
+        );
+
+        assertNull(client.getAnalyticsConfiguration(), "analyticsConfiguration must be null when not provided");
+        assertNull(client.getTokenValidityUnits(), "tokenValidityUnits must be null when not provided");
+        assertNull(client.getRefreshTokenRotation(), "refreshTokenRotation must be null when not provided");
+    }
+
     @Test
     void updateUserPoolClientAllowsClearingListFieldsWithEmptyArrays() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "ClientPool"), "us-east-1");

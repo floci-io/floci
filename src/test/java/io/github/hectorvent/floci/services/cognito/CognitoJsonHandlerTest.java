@@ -5,8 +5,8 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.core.common.AwsException;
-import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.common.ReservedTags;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import jakarta.ws.rs.core.Response;
 import org.junit.jupiter.api.BeforeEach;
@@ -360,10 +360,36 @@ class CognitoJsonHandlerTest {
         assertEquals("ValidationException", exception.getErrorCode());
     }
 
+    // Issue #1505: CreateUserPoolClient must not emit optional block fields
+    // as empty {} in the JSON response when they were not set
+    @Test
+    void createUserPoolClientDoesNotReturnOptionalBlockKeysWhenNotSet() {
+        ObjectNode poolReq = mapper.createObjectNode();
+        poolReq.put("PoolName", "minimal-pool");
+        JsonNode poolBody = (JsonNode) handler.handle("CreateUserPool", poolReq, "us-east-1").getEntity();
+        String poolId = poolBody.get("UserPool").get("Id").asText();
+
+        ObjectNode clientReq = mapper.createObjectNode();
+        clientReq.put("UserPoolId", poolId);
+        clientReq.put("ClientName", "minimal-client");
+
+        Response createResp = handler.handle("CreateUserPoolClient", clientReq, "us-east-1");
+        assertEquals(200, createResp.getStatus());
+        JsonNode createClient = ((JsonNode) createResp.getEntity()).get("UserPoolClient");
+
+        assertFalse(createClient.has("AnalyticsConfiguration"),
+                "CreateUserPoolClient must not return AnalyticsConfiguration when not set");
+        assertFalse(createClient.has("TokenValidityUnits"),
+                "CreateUserPoolClient must not return TokenValidityUnits when not set");
+        assertFalse(createClient.has("RefreshTokenRotation"),
+                "CreateUserPoolClient must not return RefreshTokenRotation when not set");
+    }
+
     private Set<String> schemaNames(JsonNode pool) {
         return StreamSupport.stream(
                         Spliterators.spliteratorUnknownSize(pool.get("SchemaAttributes").elements(), 0), false)
                 .map(n -> n.get("Name").asText())
                 .collect(Collectors.toSet());
     }
+
 }
