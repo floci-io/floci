@@ -1280,7 +1280,7 @@ public class AslExecutor {
         return resolvePath(path, output);
     }
 
-    private JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {
+    JsonNode resolveParameters(JsonNode parameters, JsonNode input, JsonNode context) throws Exception {
         if (parameters.isObject()) {
             ObjectNode resolved = objectMapper.createObjectNode();
             Iterator<Map.Entry<String, JsonNode>> fields = parameters.fields();
@@ -1297,9 +1297,12 @@ public class AslExecutor {
                     } else if ("$$".equals(path)) {
                         resolved.set(realKey, context);
                     } else {
-                        resolved.set(realKey, resolvePath(path, input));
+                        // Pass the Context Object through so a $$. reference nested inside an
+                        // intrinsic (e.g. States.Format(..., $$.Map.Item.Value.x)) can resolve it;
+                        // for a plain $. or States.* input reference, context is simply ignored.
+                        resolved.set(realKey, resolvePath(path, input, context));
                     }
-                } else if (val.isObject()) {
+                } else if (val.isObject() || val.isArray()) {
                     resolved.set(key, resolveParameters(val, input, context));
                 } else {
                     resolved.set(key, val);
@@ -1307,15 +1310,34 @@ public class AslExecutor {
             }
             return resolved;
         }
+        if (parameters.isArray()) {
+            // Payload templates resolve .$ references at any depth, including inside arrays
+            // (e.g. an ECS Overrides.ContainerOverrides[].Environment[].Value.$).
+            ArrayNode resolvedArray = objectMapper.createArrayNode();
+            for (JsonNode element : parameters) {
+                resolvedArray.add(resolveParameters(element, input, context));
+            }
+            return resolvedArray;
+        }
         return parameters;
     }
 
     JsonNode resolvePath(String path, JsonNode root) {
+        return resolvePath(path, root, null);
+    }
+
+    /**
+     * Resolve a JSONPath reference or {@code States.*} intrinsic. When {@code context} is
+     * non-null it is the Context Object ({@code $$}), letting intrinsic arguments reference it
+     * (e.g. a {@code $$.Map.Item.Value.x} argument nested inside {@code States.Format(...)}).
+     * It is null for ordinary input-only resolution, which preserves existing behavior.
+     */
+    JsonNode resolvePath(String path, JsonNode root, JsonNode context) {
         if (path == null || "$".equals(path)) {
             return root;
         }
         if (path.startsWith("States.")) {
-            return evaluateIntrinsic(path, root);
+            return evaluateIntrinsic(path, root, context);
         }
         if (!path.startsWith("$.")) {
             return NullNode.getInstance();
@@ -1346,7 +1368,7 @@ public class AslExecutor {
      *           States.Array, States.ArrayLength, States.MathAdd, States.UUID.
      * Throws FailStateException("States.Runtime") for unrecognized functions.
      */
-    private JsonNode evaluateIntrinsic(String expr, JsonNode root) {
+    private JsonNode evaluateIntrinsic(String expr, JsonNode root, JsonNode context) {
         int parenOpen = expr.indexOf('(');
         int parenClose = expr.lastIndexOf(')');
         if (parenOpen < 0 || parenClose < 0) {
@@ -1357,7 +1379,7 @@ public class AslExecutor {
 
         return switch (fnName) {
             case "States.StringToJson" -> {
-                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                JsonNode arg = resolveIntrinsicArg(argsStr, root, context);
                 try {
                     yield objectMapper.readTree(arg.asText());
                 } catch (Exception e) {
@@ -1366,7 +1388,7 @@ public class AslExecutor {
                 }
             }
             case "States.JsonToString" -> {
-                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                JsonNode arg = resolveIntrinsicArg(argsStr, root, context);
                 try {
                     yield objectMapper.getNodeFactory().textNode(objectMapper.writeValueAsString(arg));
                 } catch (Exception e) {
@@ -1386,7 +1408,7 @@ public class AslExecutor {
                         if (argIdx >= parts.size()) {
                             throw new FailStateException("States.Runtime", "States.Format: not enough arguments");
                         }
-                        JsonNode argVal = resolveIntrinsicArg(parts.get(argIdx++).trim(), root);
+                        JsonNode argVal = resolveIntrinsicArg(parts.get(argIdx++).trim(), root, context);
                         sb.append(argVal.isTextual() ? argVal.asText() : argVal.toString());
                         i++; // skip '}'
                     } else {
@@ -1399,12 +1421,12 @@ public class AslExecutor {
                 List<String> parts = splitIntrinsicArgs(argsStr);
                 ArrayNode arr = objectMapper.createArrayNode();
                 for (String part : parts) {
-                    arr.add(resolveIntrinsicArg(part.trim(), root));
+                    arr.add(resolveIntrinsicArg(part.trim(), root, context));
                 }
                 yield arr;
             }
             case "States.ArrayLength" -> {
-                JsonNode arg = resolveIntrinsicArg(argsStr, root);
+                JsonNode arg = resolveIntrinsicArg(argsStr, root, context);
                 if (!arg.isArray()) {
                     throw new FailStateException("States.Runtime", "States.ArrayLength requires an array");
                 }
@@ -1415,8 +1437,8 @@ public class AslExecutor {
                 if (parts.size() != 2) {
                     throw new FailStateException("States.Runtime", "States.MathAdd requires exactly 2 arguments");
                 }
-                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root);
-                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root);
+                JsonNode a = resolveIntrinsicArg(parts.get(0).trim(), root, context);
+                JsonNode b = resolveIntrinsicArg(parts.get(1).trim(), root, context);
                 yield objectMapper.getNodeFactory().numberNode(a.asLong() + b.asLong());
             }
             case "States.UUID" -> {
@@ -1431,10 +1453,19 @@ public class AslExecutor {
      * Resolve a single intrinsic argument: either a $.path reference, a quoted string literal,
      * or a numeric literal.
      */
-    private JsonNode resolveIntrinsicArg(String arg, JsonNode root) {
+    private JsonNode resolveIntrinsicArg(String arg, JsonNode root, JsonNode context) {
         arg = arg.trim();
+        // A $$.-prefixed argument references the Context Object; resolve it against context
+        // (as a $. path) so intrinsics can read e.g. $$.Map.Item.Value.x or $$.Execution.Id.
+        // When context is null (input-only resolution) these fall through unchanged.
+        if (context != null && arg.startsWith("$$.")) {
+            return resolvePath("$." + arg.substring(3), context);
+        }
+        if (context != null && "$$".equals(arg)) {
+            return context;
+        }
         if (arg.startsWith("$.") || "$".equals(arg)) {
-            return resolvePath(arg, root);
+            return resolvePath(arg, root, context);
         }
         if (arg.startsWith("'") && arg.endsWith("'")) {
             return objectMapper.getNodeFactory().textNode(arg.substring(1, arg.length() - 1));
@@ -1448,8 +1479,8 @@ public class AslExecutor {
             try {
                 return objectMapper.getNodeFactory().numberNode(Double.parseDouble(arg));
             } catch (NumberFormatException e2) {
-                // fall through: treat as bare path
-                return resolvePath(arg, root);
+                // fall through: treat as bare path (may itself be a nested States.* intrinsic)
+                return resolvePath(arg, root, context);
             }
         }
     }
