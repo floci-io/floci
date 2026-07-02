@@ -39,6 +39,8 @@ class AslExecutorPathIntrinsicsTest {
                 mock(io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler.class),
                 mock(io.github.hectorvent.floci.services.ec2.Ec2Service.class),
                 mock(io.github.hectorvent.floci.services.s3.S3Service.class),
+                mock(io.github.hectorvent.floci.services.ecs.EcsService.class),
+                mock(io.github.hectorvent.floci.services.ecs.EcsJsonHandler.class),
                 mapper,
                 new JsonataEvaluator(mapper),
                 mock(Instance.class));
