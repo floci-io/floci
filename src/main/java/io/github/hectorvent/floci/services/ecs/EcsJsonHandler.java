@@ -281,9 +281,11 @@ public class EcsJsonHandler {
         String startedBy = req.has("startedBy") ? req.path("startedBy").asText() : null;
         List<ContainerOverride> containerOverrides =
                 parseContainerOverrides(req.path("overrides").path("containerOverrides"));
+        NetworkConfiguration networkConfiguration =
+                parseNetworkConfiguration(req.path("networkConfiguration"));
 
         List<EcsTask> launched = service.runTask(cluster, taskDefinition, count,
-                launchType, group, startedBy, containerOverrides, region);
+                launchType, group, startedBy, containerOverrides, networkConfiguration, region);
 
         ObjectNode resp = objectMapper.createObjectNode();
         ArrayNode arr = objectMapper.createArrayNode();
@@ -444,7 +446,10 @@ public class EcsJsonHandler {
         return result;
     }
 
-    private NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
+    /** Parse an ECS {@code networkConfiguration} node (camelCase, as the data-plane API uses).
+     *  Public so the Step Functions ecs:runTask integration can reuse it after recasing its
+     *  PascalCase input, rather than duplicating the awsvpc parsing. */
+    public NetworkConfiguration parseNetworkConfiguration(JsonNode node) {
         if (node == null || !node.isObject() || !node.hasNonNull("awsvpcConfiguration")) {
             return null;
         }

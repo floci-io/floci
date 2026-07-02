@@ -14,6 +14,7 @@ import io.github.hectorvent.floci.services.ecs.EcsService;
 import io.github.hectorvent.floci.services.ecs.model.ContainerDefinition;
 import io.github.hectorvent.floci.services.ecs.model.ContainerOverride;
 import io.github.hectorvent.floci.services.ecs.model.EcsTask;
+import io.github.hectorvent.floci.services.ecs.model.NetworkConfiguration;
 import io.github.hectorvent.floci.services.ecs.model.TaskDefinition;
 import io.github.hectorvent.floci.services.ecs.model.LaunchType;
 import io.github.hectorvent.floci.services.s3.S3Service;
@@ -478,12 +479,17 @@ public class AslExecutor {
             return invokeS3PutObject(input);
         }
 
-        // ECS optimized integration: arn:aws:states:::ecs:runTask  (request-response and .sync).
-        // The .waitForTaskToken suffix is already stripped by executeTaskState, so a
-        // waitForTaskToken variant arrives here as the bare runTask resource and simply
-        // launches the task while the token future blocks for SendTaskSuccess.
+        // ECS optimized integration: arn:aws:states:::ecs:runTask (request-response, .sync, .waitForTaskToken).
+        // The .waitForTaskToken suffix is already stripped by executeTaskState, so a waitForTaskToken
+        // variant arrives here as the bare runTask resource and simply launches the task while the token
+        // future blocks for SendTaskSuccess.
         if (resource.startsWith("arn:aws:states:::ecs:runTask")) {
-            String mode = resource.substring("arn:aws:states:::ecs:runTask".length());
+            // A non-null taskToken means the original resource ended with .waitForTaskToken (stripped
+            // upstream). Its failure semantics match .sync — a task placement failure fails the state —
+            // whereas request-response returns the {Tasks,Failures} envelope without failing the state.
+            String mode = taskToken != null
+                    ? ".waitForTaskToken"
+                    : resource.substring("arn:aws:states:::ecs:runTask".length());
             String region = extractRegionFromArn(sm.getStateMachineArn());
             return invokeEcsRunTask(mode, input, region);
         }
@@ -680,8 +686,10 @@ public class AslExecutor {
      * and expects PascalCase results, whereas Floci's ECS handlers use the lowerCamelCase
      * of the ECS data-plane API — {@link #recaseKeys} bridges the two ends.
      *
-     * @param mode "" for request-response (returns the RunTask {@code {Tasks,Failures}}
-     *             response), ".sync" to block until the task reaches STOPPED.
+     * @param mode "" for request-response (returns the RunTask {@code {Tasks,Failures}} response
+     *             without failing on a placement failure), ".sync" to block until the task reaches
+     *             STOPPED, or ".waitForTaskToken" to launch and let the token future carry the result
+     *             (both ".sync" and ".waitForTaskToken" fail the state on a placement failure).
      */
     private JsonNode invokeEcsRunTask(String mode, JsonNode input, String region) throws Exception {
         String taskDefinition = input.path("TaskDefinition").asText(null);
@@ -704,25 +712,37 @@ public class AslExecutor {
         String group = input.path("Group").asText(null);
         String startedBy = input.path("StartedBy").asText(null);
 
-        // Parameters are PascalCase; the ECS handler's override parser expects the
-        // camelCase of the data-plane API, so recase the sub-tree before reusing it.
+        // Parameters are PascalCase; the ECS handler's parsers expect the camelCase of the
+        // data-plane API, so recase each sub-tree before reusing them.
         JsonNode overridesNode = recaseKeys(objectMapper,
                 input.path("Overrides").path("ContainerOverrides"), false);
         List<ContainerOverride> overrides = ecsJsonHandler.parseContainerOverrides(overridesNode);
 
+        // NetworkConfiguration (awsvpc) is threaded through so it is not dropped at the boundary;
+        // awsvpc ENI attachments themselves are not emulated in the local mock profile.
+        JsonNode networkConfigNode = recaseKeys(objectMapper, input.path("NetworkConfiguration"), false);
+        NetworkConfiguration networkConfiguration = ecsJsonHandler.parseNetworkConfiguration(networkConfigNode);
+
         List<EcsTask> launched;
         try {
             launched = ecsService.runTask(cluster, taskDefinition, count, launchType, group, startedBy,
-                    overrides, region);
+                    overrides, networkConfiguration, region);
         } catch (AwsException e) {
             throw new FailStateException("ECS." + e.getErrorCode(), e.getMessage());
         }
-        if (launched.isEmpty()) {
-            throw new FailStateException("States.TaskFailed", "ecs:runTask launched no tasks");
+        // A task placement failure (no task launched) fails the state only for the .sync and
+        // .waitForTaskToken patterns, and AWS surfaces it with the AmazonECS.Unknown error name.
+        // Request-response never fails on a placement failure — it returns the { Tasks, Failures }
+        // envelope (possibly with empty Tasks) so the caller can inspect Failures itself.
+        boolean callbackOrSync = ".sync".equals(mode) || ".waitForTaskToken".equals(mode);
+        if (launched.isEmpty() && callbackOrSync) {
+            throw new FailStateException("AmazonECS.Unknown", "ecs:runTask launched no tasks");
         }
 
-        if (mode.isEmpty()) {
+        if (mode.isEmpty() || ".waitForTaskToken".equals(mode)) {
             // Request-response: return the RunTask response shape { Tasks: [...], Failures: [] }.
+            // The .waitForTaskToken launch phase lands here too — its return value is discarded once
+            // the task token supplies the real result, so returning the envelope just completes the launch.
             ObjectNode resp = objectMapper.createObjectNode();
             ArrayNode tasks = resp.putArray("Tasks");
             for (EcsTask t : launched) {
@@ -733,8 +753,8 @@ public class AslExecutor {
         }
 
         if (!".sync".equals(mode)) {
-            // Only request-response ("") and ".sync" are valid; reject typos rather than
-            // silently treating an unknown suffix as .sync.
+            // Only request-response (""), .sync and .waitForTaskToken are valid; reject typos rather
+            // than silently treating an unknown suffix as .sync.
             throw new FailStateException("States.TaskFailed", "Unsupported ecs:runTask mode: " + mode);
         }
 
