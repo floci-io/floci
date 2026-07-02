@@ -335,6 +335,22 @@ class LightsailIntegrationTest {
                 .body("instance.hardware.ramSizeInGb", equalTo(4.0f));
 
         given()
+                .header("X-Amz-Target", TARGET_PREFIX + "CreateInstances")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "instanceNames": ["review-web-b"],
+                          "availabilityZone": "us-east-1a",
+                          "blueprintId": "ubuntu_22_04",
+                          "bundleId": "micro_3_0"
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(200);
+
+        given()
                 .header("X-Amz-Target", TARGET_PREFIX + "CreateDisk")
                 .contentType(CONTENT_TYPE)
                 .body("""
@@ -362,6 +378,21 @@ class LightsailIntegrationTest {
                 .post("/")
         .then()
                 .statusCode(200);
+
+        given()
+                .header("X-Amz-Target", TARGET_PREFIX + "AttachDisk")
+                .contentType(CONTENT_TYPE)
+                .body("""
+                        {
+                          "diskName": "review-data",
+                          "instanceName": "review-web-b"
+                        }
+                        """)
+        .when()
+                .post("/")
+        .then()
+                .statusCode(400)
+                .body("__type", equalTo("InvalidInputException"));
 
         given()
                 .header("X-Amz-Target", TARGET_PREFIX + "DeleteDisk")

@@ -223,6 +223,12 @@ public class LightsailService {
         String instanceName = requireText(request, "instanceName");
         ObjectNode disk = requireResource(region, RESOURCE_DISK, diskName);
         requireResource(region, RESOURCE_INSTANCE, instanceName);
+        if (disk.path("isAttached").asBoolean(false)) {
+            throw new AwsException("InvalidInputException",
+                    "Disk " + diskName + " is already attached to instance "
+                            + disk.path("attachedTo").asText() + ".",
+                    400);
+        }
         disk.put("attachedTo", instanceName);
         disk.put("isAttached", true);
         disk.put("attachmentState", "attached");
