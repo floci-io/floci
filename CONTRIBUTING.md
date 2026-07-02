@@ -229,9 +229,7 @@ hand-written and preserved across regeneration, keyed by action name.
   listed under `deferred_handlers`.
 - `make docs-test` runs the tooling's unit tests.
 
-Registering a new service is one entry in `tools/docs/services.yaml`; see
-[`ideas/auto-generated-action-tables.spec.md`](ideas/auto-generated-action-tables.spec.md)
-for the full design.
+Registering a new service is one entry in `tools/docs/services.yaml`.
 
 ## Reporting Security Issues
 

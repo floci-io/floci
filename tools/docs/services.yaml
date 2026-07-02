@@ -1,5 +1,4 @@
 # Registry of services whose Supported Actions tables are auto-generated.
-# Spec: ideas/auto-generated-action-tables.spec.md
 #
 # The action LIST comes from handler source (mode: switch|rest); the Description
 # column is hand-written and PRESERVED across regen, keyed by action name.

@@ -1,7 +1,7 @@
 # Floci repo tasks.
 #
 # Action-table docs: docs/services/*.md "Supported Actions" tables are generated
-# from handler source. See tools/docs/ and ideas/auto-generated-action-tables.spec.md.
+# from handler source. See tools/docs/.
 
 PYTHON ?= python3
 

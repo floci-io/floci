@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Regenerate the action tables in docs/services/*.md from handler source.
 
-Spec: ideas/auto-generated-action-tables.spec.md
-
 The action LIST is derived from handler source (never hand-edited, never drifts).
 The Description column is hand-written prose: regen PRESERVES existing descriptions
 keyed by action name and leaves a "-" placeholder for new/unknown actions. The
