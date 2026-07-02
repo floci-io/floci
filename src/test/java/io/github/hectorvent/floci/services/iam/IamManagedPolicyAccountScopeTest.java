@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.services.iam.model.CallerContext;
+import io.github.hectorvent.floci.services.iam.model.IamGroup;
 import io.github.hectorvent.floci.services.iam.model.IamPolicy;
 import io.github.hectorvent.floci.services.iam.model.IamRole;
 import io.github.hectorvent.floci.services.iam.model.IamUser;
@@ -215,6 +216,44 @@ class IamManagedPolicyAccountScopeTest {
         assertFalse(otherService.listPolicies("Local", null).stream()
                 .anyMatch(p -> customerArn.equals(p.getArn())));
         assertNotNull(otherService.getPolicy(managedArn));
+    }
+
+    @Test
+    void attachedManagedPolicyResolvesForGroupInNonDefaultAccount() {
+        // Symmetric with the user/role cases: a managed policy attached to a group owned by a
+        // non-default account must resolve from the global catalog (the resolvePolicy fix applied
+        // to listAttachedGroupPolicies), while a customer policy attached to the same group stays
+        // account-scoped.
+        Instance<RequestContext> ctx = requestContextFor(REQUEST_ACCT);
+        InMemoryStorage<String, IamGroup> rawGroups = new InMemoryStorage<>();
+        InMemoryStorage<String, IamPolicy> rawPolicies = new InMemoryStorage<>();
+        AccountAwareStorageBackend<IamGroup> groups = new AccountAwareStorageBackend<>(rawGroups, ctx, DEFAULT_ACCT);
+        AccountAwareStorageBackend<IamPolicy> policies =
+                new AccountAwareStorageBackend<>(rawPolicies, ctx, DEFAULT_ACCT);
+
+        String managedArn = AwsManagedPolicies.ARN_PREFIX + "/service-role/AWSLambdaBasicExecutionRole";
+        String customerArn = "arn:aws:iam::" + REQUEST_ACCT + ":policy/group-policy";
+        policies.putForAccount(REQUEST_ACCT, customerArn,
+                new IamPolicy("ANPAGRP000000001", "group-policy", "/", customerArn,
+                        "grp", AwsManagedPolicies.PERMISSIVE_DOCUMENT));
+
+        IamGroup group = new IamGroup("AGPAGROUP0000001", "app-group", "/",
+                "arn:aws:iam::" + REQUEST_ACCT + ":group/app-group");
+        group.getAttachedPolicyArns().add(managedArn);
+        group.getAttachedPolicyArns().add(customerArn);
+        groups.putForAccount(REQUEST_ACCT, "app-group", group);
+
+        IamService service = new IamService(
+                new InMemoryStorage<>(), groups, new InMemoryStorage<>(),
+                policies,
+                new InMemoryStorage<>(), new InMemoryStorage<>(), new InMemoryStorage<>(),
+                new RegionResolver("us-east-1", DEFAULT_ACCT));
+
+        // ListAttachedGroupPolicies returns both the managed (catalog) and customer (scoped) policies.
+        List<IamPolicy> attached = service.listAttachedGroupPolicies("app-group", null);
+        assertEquals(2, attached.size());
+        assertTrue(attached.stream().anyMatch(p -> managedArn.equals(p.getArn())));
+        assertTrue(attached.stream().anyMatch(p -> customerArn.equals(p.getArn())));
     }
 
     @Test
