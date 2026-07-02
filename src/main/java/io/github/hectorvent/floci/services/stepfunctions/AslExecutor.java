@@ -1174,11 +1174,13 @@ public class AslExecutor {
         try {
             S3Object object = s3Service.getObject(bucket, key);
             JsonNode items = objectMapper.readTree(object.getData());
+            items = applyItemsPointer(itemReader, items);
             if (items.isObject()) {
                 return applyMaxItems(itemReader, normalizeObjectItems(items));
             }
             if (!items.isArray()) {
-                throw new FailStateException("States.ItemReaderFailed", "ItemReader JSON input must be an array");
+                throw new FailStateException("States.ItemReaderFailed",
+                        "Attempting to map over non-iterable node.");
             }
             return applyMaxItems(itemReader, items);
         } catch (AwsException e) {
@@ -1204,6 +1206,20 @@ public class AslExecutor {
             normalized.add(objectItem);
         });
         return normalized;
+    }
+
+    private JsonNode applyItemsPointer(JsonNode itemReader, JsonNode items) {
+        String itemsPointer = itemReader.path("ReaderConfig").path("ItemsPointer").asText(null);
+        if (itemsPointer == null || itemsPointer.isEmpty()) {
+            return items;
+        }
+
+        JsonNode pointedItems = items.at(itemsPointer);
+        if (pointedItems.isMissingNode()) {
+            throw new FailStateException("States.ItemReaderFailed",
+                    "The provided ReaderConfig.ItemsPointer does not match any valid path in the JSON structure.");
+        }
+        return pointedItems;
     }
 
     private JsonNode applyMaxItems(JsonNode itemReader, JsonNode items) {

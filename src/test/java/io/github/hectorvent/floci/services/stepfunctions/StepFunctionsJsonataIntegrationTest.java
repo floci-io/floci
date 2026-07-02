@@ -376,6 +376,276 @@ class StepFunctionsJsonataIntegrationTest {
     }
 
     @Test
+    void distributedMapWithS3JsonItemReader_itemsPointerSelectsArrayDataset() throws Exception {
+        createBucket("map-inputs-pointer-array");
+        putObject("map-inputs-pointer-array", "workers.json", """
+                {"records":[{"workerId":"w1"},{"workerId":"w2"}]}
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "ItemsPointer": "/records"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-pointer-array",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-pointer-array-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+        assertFalse(output.contains("\"records\""));
+    }
+
+    @Test
+    void distributedMapWithS3JsonItemReader_itemsPointerSelectsObjectDataset() throws Exception {
+        createBucket("map-inputs-pointer-object");
+        putObject("map-inputs-pointer-object", "workers.json", """
+                {"records":{"a":{"x":1},"b":{"x":2}}}
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "ItemsPointer": "/records"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-pointer-object",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemSelector": {
+                                "key.$": "$$.Map.Item.Key",
+                                "index.$": "$$.Map.Item.Index",
+                                "value.$": "$$.Map.Item.Value"
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-pointer-object-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"key\":\"a\"") || output.contains("\"key\": \"a\""));
+        assertTrue(output.contains("\"key\":\"b\"") || output.contains("\"key\": \"b\""));
+        assertTrue(output.contains("\"index\":0") || output.contains("\"index\": 0"));
+        assertTrue(output.contains("\"index\":1") || output.contains("\"index\": 1"));
+        assertTrue(output.contains("\"value\":{\"x\":1}") || output.contains("\"value\": {\"x\": 1}")
+                || output.contains("\"value\": { \"x\": 1 }"));
+        assertTrue(output.contains("\"value\":{\"x\":2}") || output.contains("\"value\": {\"x\": 2}")
+                || output.contains("\"value\": { \"x\": 2 }"));
+    }
+
+    @Test
+    void distributedMapWithS3JsonItemReader_itemsPointerMissingPathFailsWithItemReaderError() throws Exception {
+        createBucket("map-inputs-pointer-missing");
+        putObject("map-inputs-pointer-missing", "workers.json", """
+                {"records":[{"workerId":"w1"}]}
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "ItemsPointer": "/missing"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-pointer-missing",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-pointer-missing-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertEquals("The provided ReaderConfig.ItemsPointer does not match any valid path in the JSON structure.",
+                failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void distributedMapWithS3JsonItemReader_itemsPointerScalarFailsWithNonIterableCause() throws Exception {
+        createBucket("map-inputs-pointer-scalar");
+        putObject("map-inputs-pointer-scalar", "workers.json", """
+                {"records":123}
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "ItemsPointer": "/records"
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-pointer-scalar",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-pointer-scalar-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        Response failure = waitForExecutionFailure(execArn);
+
+        assertEquals("FAILED", failure.jsonPath().getString("status"));
+        assertEquals("States.ItemReaderFailed", failure.jsonPath().getString("error"));
+        assertEquals("Attempting to map over non-iterable node.", failure.jsonPath().getString("cause"));
+    }
+
+    @Test
+    void distributedMapWithS3JsonItemReader_emptyItemsPointerBehavesLikeOmittedPointer() throws Exception {
+        createBucket("map-inputs-pointer-empty");
+        putObject("map-inputs-pointer-empty", "workers.json", """
+                [{"workerId":"w1"},{"workerId":"w2"}]
+                """);
+
+        String definition = """
+                {
+                    "StartAt": "ProcessWorkers",
+                    "States": {
+                        "ProcessWorkers": {
+                            "Type": "Map",
+                            "ItemReader": {
+                                "Resource": "arn:aws:states:::s3:getObject",
+                                "ReaderConfig": {
+                                    "InputType": "JSON",
+                                    "ItemsPointer": ""
+                                },
+                                "Parameters": {
+                                    "Bucket": "map-inputs-pointer-empty",
+                                    "Key": "workers.json"
+                                }
+                            },
+                            "ItemProcessor": {
+                                "ProcessorConfig": {
+                                    "Mode": "DISTRIBUTED",
+                                    "ExecutionType": "STANDARD"
+                                },
+                                "StartAt": "PassItem",
+                                "States": {
+                                    "PassItem": {
+                                        "Type": "Pass",
+                                        "End": true
+                                    }
+                                }
+                            },
+                            "End": true
+                        }
+                    }
+                }
+                """;
+
+        String smArn = createStateMachine("map-itemreader-s3-pointer-empty-test", definition);
+        String execArn = startExecution(smArn, "{}");
+        String output = waitForExecution(execArn);
+
+        assertTrue(output.contains("\"workerId\":\"w1\"") || output.contains("\"workerId\": \"w1\""));
+        assertTrue(output.contains("\"workerId\":\"w2\"") || output.contains("\"workerId\": \"w2\""));
+    }
+
+    @Test
     void distributedMapWithS3JsonItemReader_exposesMapItemContextInsideProcessor() throws Exception {
         createBucket("map-inputs-context");
         putObject("map-inputs-context", "workers.json", "[{\"workerId\":\"w1\"},{\"workerId\":\"w2\"}]");
