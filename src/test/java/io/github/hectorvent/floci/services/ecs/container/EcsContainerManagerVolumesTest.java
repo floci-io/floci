@@ -19,6 +19,8 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -139,5 +141,40 @@ class EcsContainerManagerVolumesTest {
         // EFS volumes are never bind-mounted as host paths.
         verify(builder, never()).withBind(any(), any());
         verify(builder, never()).withReadOnlyBind(any(), any());
+    }
+
+    @Test
+    void efsVolumesInitialiseSharedVolumeOwnershipFromConfig() {
+        // Rebuild the manager with an EFS config that emulates an access point's CreationInfo +
+        // PosixUser (owner 1001:1001, 0777, setgid). The EFS mount must initialise the shared
+        // volume root with exactly those values before mounting it.
+        EmulatorConfig cfg = mock(EmulatorConfig.class, RETURNS_DEEP_STUBS);
+        when(cfg.storage().efs().ownerUid()).thenReturn(OptionalInt.of(1001));
+        when(cfg.storage().efs().ownerGid()).thenReturn(OptionalInt.of(1001));
+        when(cfg.storage().efs().rootPermissions()).thenReturn(Optional.of("0777"));
+        when(cfg.storage().efs().setgid()).thenReturn(true);
+        when(cfg.storage().efs().initImage()).thenReturn("busybox:stable");
+        EcsContainerManager configured = new EcsContainerManager(containerBuilder, lifecycleManager,
+                mock(ContainerLogStreamer.class), mock(ContainerDetector.class), cfg,
+                mock(RegionResolver.class));
+
+        ContainerDefinition app = new ContainerDefinition();
+        app.setName("app");
+        app.setImage("app:latest");
+        app.setMountPoints(List.of(new MountPoint("customer-data", "/mnt/efs", false)));
+
+        TaskDefinition taskDef = new TaskDefinition();
+        taskDef.setFamily("efs-family");
+        taskDef.setContainerDefinitions(List.of(app));
+        taskDef.setVolumes(List.of(new Volume("customer-data", null,
+                new EfsVolumeConfiguration("fs-abc", "/dps", "ENABLED", null, null, null))));
+
+        EcsTask task = new EcsTask();
+        task.setTaskArn("arn:aws:ecs:us-east-1:000000000000:task/test-cluster/efsown");
+
+        configured.startTask(task, taskDef, List.of(), "us-east-1");
+
+        verify(lifecycleManager, times(1)).ensureSharedVolume("floci-efs-fs-abc",
+                OptionalInt.of(1001), OptionalInt.of(1001), Optional.of("0777"), true, "busybox:stable");
     }
 }

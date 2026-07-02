@@ -173,7 +173,13 @@ public class EcsContainerManager {
                         // EFS volume: a shared local Docker named volume, so every task
                         // container that mounts the same EFS file system shares persistent
                         // storage — the local stand-in for an EFS mount (Docker cannot mount
-                        // a real EFS file system).
+                        // a real EFS file system). Initialise the volume root's POSIX ownership
+                        // to emulate the EFS access point's RootDirectory.CreationInfo, so a
+                        // non-root task image USER can write to it (no-op unless configured).
+                        var efsCfg = config.storage().efs();
+                        lifecycleManager.ensureSharedVolume(efsVolumeName(efs.fileSystemId()),
+                                efsCfg.ownerUid(), efsCfg.ownerGid(), efsCfg.rootPermissions(),
+                                efsCfg.setgid(), efsCfg.initImage());
                         specBuilder.withNamedVolume(efsVolumeName(efs.fileSystemId()),
                                 mp.containerPath(), mp.readOnly());
                     } else {

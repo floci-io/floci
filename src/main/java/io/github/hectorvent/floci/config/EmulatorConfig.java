@@ -4,6 +4,7 @@ import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 @ConfigMapping(prefix = "floci")
 public interface EmulatorConfig {
@@ -162,6 +163,61 @@ public interface EmulatorConfig {
         WalConfig wal();
 
         ServiceStorageOverrides services();
+
+        EfsSharingConfig efs();
+    }
+
+    /**
+     * Emulates an Amazon EFS access point's POSIX ownership for the shared local Docker volumes
+     * that stand in for EFS file systems. A Docker named volume is created {@code root:root 0755},
+     * so a container whose image runs as a non-root {@code USER} (as ECS tasks and
+     * access-point-mounted workloads typically do) then cannot create files on it. Real EFS
+     * applies the access point's {@code PosixUser} to all I/O and initialises the root directory
+     * per {@code RootDirectory.CreationInfo}. These settings reproduce that: Floci initialises the
+     * shared volume root's owner/permissions once and can run the mounting containers under a
+     * fixed identity, so the emulated file system is writable by the intended uid/gid.
+     *
+     * <p>Every value is empty/false by default, so a shared volume behaves exactly as before —
+     * a plain named volume with no ownership change — unless explicitly configured.
+     */
+    interface EfsSharingConfig {
+        /** Owner uid applied to the volume root (EFS {@code RootDirectory.CreationInfo.OwnerUid}). */
+        OptionalInt ownerUid();
+
+        /** Owner gid applied to the volume root (EFS {@code RootDirectory.CreationInfo.OwnerGid}). */
+        OptionalInt ownerGid();
+
+        /**
+         * Octal permissions applied to the volume root (EFS {@code RootDirectory.CreationInfo.Permissions}),
+         * e.g. {@code "0777"}. Empty leaves the volume root untouched — no ownership initialisation
+         * is performed (plain named volume).
+         */
+        Optional<String> rootPermissions();
+
+        /**
+         * When {@code true}, also sets the setgid bit on the volume root so subdirectories created
+         * under it inherit the owner gid — the standard POSIX pattern for a group-shared tree.
+         */
+        @WithDefault("false")
+        boolean setgid();
+
+        /** Lightweight image used for the one-off {@code chown}/{@code chmod} of the volume root. */
+        @WithDefault("busybox:stable")
+        String initImage();
+
+        /**
+         * Run containers that mount a shared volume as this {@code "uid[:gid]"}, emulating the
+         * access point's {@code PosixUser} that squashes all file-system I/O to a fixed identity.
+         * Empty leaves the container's image {@code USER} in effect.
+         */
+        Optional<String> mountUser();
+
+        /**
+         * Supplementary group id added to containers that mount a shared volume, so a process
+         * running under a different primary uid can still write a group-shared tree owned by
+         * {@link #ownerGid()}. Empty adds no supplementary group.
+         */
+        OptionalInt mountGroupAdd();
     }
 
     interface ServiceStorageOverrides {

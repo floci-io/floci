@@ -12,7 +12,10 @@ import com.github.dockerjava.api.model.Container;
 import com.github.dockerjava.api.model.ContainerNetwork;
 import com.github.dockerjava.api.model.ExposedPort;
 import com.github.dockerjava.api.model.HostConfig;
+import com.github.dockerjava.api.model.Mount;
+import com.github.dockerjava.api.model.MountType;
 import com.github.dockerjava.api.model.Ports;
+import com.github.dockerjava.core.command.WaitContainerResultCallback;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
@@ -22,6 +25,10 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Manages Docker container lifecycle operations including create, start, stop, and remove.
@@ -36,6 +43,9 @@ public class ContainerLifecycleManager {
     private final ImageCacheService imageCacheService;
     private final ContainerDetector containerDetector;
     private final PortAllocator portAllocator;
+
+    /** Volumes whose shared-ownership root has already been initialised this process (run-once guard). */
+    private final Set<String> initializedSharedVolumes = ConcurrentHashMap.newKeySet();
 
     @Inject
     public ContainerLifecycleManager(DockerClient dockerClient,
@@ -81,6 +91,9 @@ public class ContainerLifecycleManager {
 
         if (spec.name() != null) {
             createCmd.withName(spec.name());
+        }
+        if (spec.user() != null && !spec.user().isBlank()) {
+            createCmd.withUser(spec.user());
         }
         if (spec.env() != null && !spec.env().isEmpty()) {
             createCmd.withEnv(spec.env());
@@ -186,6 +199,92 @@ public class ContainerLifecycleManager {
                     .withLabels(Map.of("floci", "true"))
                     .exec();
             LOG.debugv("Created volume {0}", volumeName);
+        }
+    }
+
+    /**
+     * Ensures the named volume exists (see {@link #ensureVolume}) and, when POSIX ownership is
+     * requested, initialises the volume root once to emulate an Amazon EFS access point's
+     * {@code RootDirectory.CreationInfo}. A Docker named volume is created {@code root:root 0755},
+     * so a container whose image runs as a non-root {@code USER} (as ECS tasks and
+     * access-point-mounted workloads typically do) cannot create files on it. This chowns/chmods
+     * the mount root — optionally setting the setgid bit so subdirectories inherit the owner gid,
+     * the standard pattern for a group-shared tree — inside a short-lived helper container.
+     *
+     * <p>The initialisation runs at most once per volume name per process. When no ownership is
+     * configured (all of {@code ownerUid}/{@code ownerGid}/{@code rootPermissions} empty and
+     * {@code setgid} false) this degrades to a plain {@link #ensureVolume}, so the default
+     * behaviour is unchanged.
+     *
+     * @param volumeName      the named volume
+     * @param ownerUid        owner uid for the volume root (EFS {@code CreationInfo.OwnerUid})
+     * @param ownerGid        owner gid for the volume root (EFS {@code CreationInfo.OwnerGid})
+     * @param rootPermissions octal permissions for the volume root (e.g. {@code "0777"}); empty skips init
+     * @param setgid          also set the setgid bit on the volume root
+     * @param initImage       lightweight image used for the one-off chown/chmod helper
+     */
+    public void ensureSharedVolume(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
+                                   Optional<String> rootPermissions, boolean setgid, String initImage) {
+        ensureVolume(volumeName);
+        if (rootPermissions.isEmpty() && ownerUid.isEmpty() && ownerGid.isEmpty() && !setgid) {
+            return;
+        }
+        if (!initializedSharedVolumes.add(volumeName)) {
+            return;
+        }
+        try {
+            initSharedVolumeRoot(volumeName, ownerUid, ownerGid, rootPermissions, setgid, initImage);
+        } catch (RuntimeException e) {
+            // Allow a retry on the next launch if the one-off init failed.
+            initializedSharedVolumes.remove(volumeName);
+            LOG.warnv("Failed to initialise shared volume {0} ownership: {1}", volumeName, e.getMessage());
+        }
+    }
+
+    private void initSharedVolumeRoot(String volumeName, OptionalInt ownerUid, OptionalInt ownerGid,
+                                      Optional<String> rootPermissions, boolean setgid, String initImage) {
+        String mount = "/floci-shared-volume";
+        StringBuilder script = new StringBuilder();
+        if (ownerUid.isPresent() || ownerGid.isPresent()) {
+            script.append("chown ")
+                    .append(ownerUid.isPresent() ? ownerUid.getAsInt() : "")
+                    .append(':')
+                    .append(ownerGid.isPresent() ? ownerGid.getAsInt() : "")
+                    .append(' ').append(mount).append(" && ");
+        }
+        rootPermissions.ifPresent(p -> script.append("chmod ").append(p).append(' ').append(mount).append(" && "));
+        if (setgid) {
+            script.append("chmod g+s ").append(mount).append(" && ");
+        }
+        script.append("true");
+
+        String image = (initImage != null && !initImage.isBlank()) ? initImage : "busybox:stable";
+        imageCacheService.ensureImageExists(image);
+
+        HostConfig hostConfig = HostConfig.newHostConfig().withMounts(List.of(
+                new Mount().withType(MountType.VOLUME).withSource(volumeName).withTarget(mount)));
+        CreateContainerResponse created = dockerClient.createContainerCmd(image)
+                .withHostConfig(hostConfig)
+                .withCmd("sh", "-c", script.toString())
+                .exec();
+        String helperId = created.getId();
+        try {
+            dockerClient.startContainerCmd(helperId).exec();
+            Integer status = dockerClient.waitContainerCmd(helperId)
+                    .exec(new WaitContainerResultCallback())
+                    .awaitStatusCode(60, TimeUnit.SECONDS);
+            if (status == null || status != 0) {
+                LOG.warnv("Shared-volume init for {0} exited with status {1} (cmd: {2})",
+                        volumeName, String.valueOf(status), script);
+            } else {
+                LOG.infov("Initialised shared volume {0} root (cmd: {1})", volumeName, script);
+            }
+        } finally {
+            try {
+                dockerClient.removeContainerCmd(helperId).withForce(true).exec();
+            } catch (Exception ignore) {
+                // best-effort cleanup of the one-off helper
+            }
         }
     }
 
@@ -364,6 +463,12 @@ public class ContainerLifecycleManager {
 
         if (spec.cgroupnsMode() != null && !spec.cgroupnsMode().isBlank()) {
             hostConfig.withCgroupnsMode(spec.cgroupnsMode());
+        }
+
+        // Supplementary groups (Docker --group-add), e.g. to give a process access to a
+        // group-shared volume without changing its primary uid/gid.
+        if (spec.groupAdd() != null && !spec.groupAdd().isEmpty()) {
+            hostConfig.withGroupAdd(spec.groupAdd());
         }
 
         // Memory limit
