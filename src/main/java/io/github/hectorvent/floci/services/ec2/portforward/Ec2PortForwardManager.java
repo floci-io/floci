@@ -89,6 +89,14 @@ public class Ec2PortForwardManager {
 
     void reconcileNow(Instance instance, Set<Integer> desiredPorts) {
         synchronized (instance) {
+            // A reconcile queued before a stop/terminate must not republish against the
+            // removed container: stop/terminate flip the state before their async
+            // unpublishAll, so a non-running state here means the forwards are (being)
+            // torn down and new sidecars would leak.
+            String state = instance.getState() != null ? instance.getState().getName() : null;
+            if (!"running".equals(state)) {
+                return;
+            }
             for (int port : desiredPorts) {
                 if (!instance.getPublishedPorts().containsKey(port)) {
                     publish(instance, port);

@@ -6,6 +6,7 @@ import io.github.hectorvent.floci.core.common.docker.ContainerBuilder;
 import io.github.hectorvent.floci.core.common.docker.ContainerLifecycleManager;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
 import io.github.hectorvent.floci.services.ec2.model.Instance;
+import io.github.hectorvent.floci.services.ec2.model.InstanceState;
 import io.github.hectorvent.floci.services.ec2.model.IpPermission;
 import io.github.hectorvent.floci.services.ec2.model.IpRange;
 import io.github.hectorvent.floci.services.ec2.model.Ipv6Range;
@@ -21,9 +22,11 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class Ec2PortForwardManagerTest {
@@ -173,6 +176,55 @@ class Ec2PortForwardManagerTest {
         verify(portAllocator).markReserved(30000);
         verify(portAllocator).release(30000);
         assertEquals(List.of("i-1"), persisted);
+    }
+
+    @Test
+    void reconcileNowSkipsNonRunningInstance() {
+        PortAllocator portAllocator = mock(PortAllocator.class);
+        ContainerLifecycleManager lifecycleManager = mock(ContainerLifecycleManager.class);
+        Ec2PortForwardManager manager = new Ec2PortForwardManager(
+                mock(DockerClient.class), mock(ContainerBuilder.class), lifecycleManager,
+                portAllocator, mock(EmulatorConfig.class));
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-1");
+        instance.setDockerContainerId("c1");
+        instance.setState(InstanceState.shuttingDown());
+
+        manager.reconcileNow(instance, Set.of(80));
+
+        assertTrue(instance.getPublishedPorts().isEmpty(),
+                "a reconcile racing a terminate must not republish against the removed container");
+        verifyNoInteractions(portAllocator, lifecycleManager);
+    }
+
+    @Test
+    void reconcileNowPublishesForRunningInstance() {
+        DockerClient dockerClient = mock(DockerClient.class);
+        when(dockerClient.inspectContainerCmd(anyString())).thenThrow(new RuntimeException("docker down"));
+        PortAllocator portAllocator = mock(PortAllocator.class);
+        when(portAllocator.allocate(anyInt(), anyInt())).thenReturn(30000);
+
+        EmulatorConfig config = mock(EmulatorConfig.class);
+        EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
+        EmulatorConfig.Ec2ServiceConfig ec2 = mock(EmulatorConfig.Ec2ServiceConfig.class);
+        when(config.services()).thenReturn(services);
+        when(services.ec2()).thenReturn(ec2);
+        when(ec2.appPortRangeStart()).thenReturn(30000);
+        when(ec2.appPortRangeEnd()).thenReturn(30999);
+
+        Ec2PortForwardManager manager = new Ec2PortForwardManager(
+                dockerClient, mock(ContainerBuilder.class), mock(ContainerLifecycleManager.class),
+                portAllocator, config);
+
+        Instance instance = new Instance();
+        instance.setInstanceId("i-1");
+        instance.setDockerContainerId("c1");
+        instance.setState(InstanceState.running());
+
+        manager.reconcileNow(instance, Set.of(80));
+
+        verify(portAllocator).allocate(30000, 30999);
     }
 
     private static Set<Integer> extract(SecurityGroup sg) {
