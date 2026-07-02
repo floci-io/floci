@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInstance;
 import org.junit.jupiter.api.TestMethodOrder;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -425,202 +427,34 @@ class ResourceExplorer2IntegrationTest {
     }
 
     @Nested
-    class LambdaResources {
-        @Test
-        void lambdaFunctionSurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:lambda"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'lambda' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'lambda:function' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
+    class ServiceResources {
 
-    @Nested
-    class SnsResources {
-        @Test
-        void snsTopicSurfacesViaListResources() {
+        @ParameterizedTest(name = "{1} surfaces via ListResources")
+        @CsvSource({
+            "lambda,      lambda:function",
+            "sns,         sns:topic",
+            "kms,         kms:key",
+            "sqs,         sqs:queue",
+            "ecr,         ecr:repository",
+            "states,      states:stateMachine",
+            "kafka,       kafka:cluster",
+            "pipes,       pipes:pipe",
+            "acm,         acm:certificate",
+            "cognito-idp, cognito-idp:userpool"
+        })
+        void resourceSurfacesViaListResources(String service, String resourceType) {
             given()
                 .header("Authorization", AUTH)
                 .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:sns"}}
-                    """)
+                .body("{\"Filters\": {\"FilterString\": \"service:" + service + "\"}}")
             .when()
                 .post("/ListResources")
             .then()
                 .statusCode(200)
                 .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'sns' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'sns:topic' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class KmsResources {
-        @Test
-        void kmsKeySurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:kms"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'kms' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'kms:key' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class SqsResources {
-        @Test
-        void sqsQueueSurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:sqs"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'sqs' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'sqs:queue' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class EcrResources {
-        @Test
-        void ecrRepositorySurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:ecr"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'ecr' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'ecr:repository' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class StepFunctionsResources {
-        @Test
-        void stateMachineSurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:states"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'states' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'states:stateMachine' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class MskResources {
-        @Test
-        void mskClusterSurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:kafka"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'kafka' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'kafka:cluster' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class PipesResources {
-        @Test
-        void pipeSurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:pipes"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'pipes' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'pipes:pipe' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class AcmResources {
-        @Test
-        void certificateSurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:acm"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'acm' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'acm:certificate' && it.Region == 'us-east-1' }.size()", greaterThan(0));
-        }
-    }
-
-    @Nested
-    class CognitoResources {
-        @Test
-        void userPoolSurfacesViaListResources() {
-            given()
-                .header("Authorization", AUTH)
-                .contentType("application/json")
-                .body("""
-                    {"Filters": {"FilterString": "service:cognito-idp"}}
-                    """)
-            .when()
-                .post("/ListResources")
-            .then()
-                .statusCode(200)
-                .body("Resources.size()", greaterThan(0))
-                .body("Resources.findAll { it.Service != 'cognito-idp' }.size()", equalTo(0))
-                .body("Resources.findAll { it.ResourceType == 'cognito-idp:userpool' && it.Region == 'us-east-1' }.size()", greaterThan(0));
+                .body("Resources.findAll { it.Service != '" + service + "' }.size()", equalTo(0))
+                .body("Resources.findAll { it.ResourceType == '" + resourceType
+                        + "' && it.Region == 'us-east-1' }.size()", greaterThan(0));
         }
     }
 
