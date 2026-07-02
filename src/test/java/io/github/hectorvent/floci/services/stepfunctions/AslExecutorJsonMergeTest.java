@@ -73,6 +73,17 @@ class AslExecutorJsonMergeTest {
     }
 
     @Test
+    void nonObjectArgumentsAreRejectedBeforeTheDeepMergeFlag() throws Exception {
+        // Two non-objects passed with deep=true must report the object-type error, not the
+        // "shallow merge only" error — AWS validates argument types before the deep-merge flag.
+        JsonNode root = mapper.readTree("{\"a\":[1,2],\"b\":[3,4]}");
+        RuntimeException ex = assertThrows(RuntimeException.class,
+                () -> executor.resolvePath("States.JsonMerge($.a, $.b, true)", root));
+        assertTrue(ex.getMessage().contains("requires two JSON objects"),
+                "expected the object-type error to take precedence, got: " + ex.getMessage());
+    }
+
+    @Test
     void wrongArgumentCountRejected() throws Exception {
         JsonNode root = mapper.readTree("{\"a\":{\"x\":1},\"b\":{\"y\":2}}");
         assertThrows(RuntimeException.class,

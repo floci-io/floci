@@ -1437,14 +1437,17 @@ public class AslExecutor {
                             "States.JsonMerge third argument must be a boolean");
                 }
                 boolean deep = deepArg.asBoolean();
+                // Validate argument types before rejecting the deep-merge flag, matching AWS error
+                // ordering: two non-objects passed with true yield "requires two JSON objects", not
+                // "shallow merge only".
+                if (!a.isObject() || !b.isObject()) {
+                    throw new FailStateException("States.Runtime",
+                            "States.JsonMerge requires two JSON objects");
+                }
                 if (deep) {
                     // AWS Step Functions only supports the shallow merge (third argument false).
                     throw new FailStateException("States.Runtime",
                             "States.JsonMerge supports only shallow merge (third argument must be false)");
-                }
-                if (!a.isObject() || !b.isObject()) {
-                    throw new FailStateException("States.Runtime",
-                            "States.JsonMerge requires two JSON objects");
                 }
                 // Shallow merge: second object's top-level fields override the first's.
                 var merged = objectMapper.createObjectNode();
