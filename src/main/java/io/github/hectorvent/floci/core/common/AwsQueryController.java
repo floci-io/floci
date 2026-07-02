@@ -33,8 +33,6 @@ import org.jboss.logging.Logger;
 
 import java.util.Set;
 import java.util.UUID;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 /**
  * Generic dispatcher for all AWS services that use the Query Protocol (form-encoded POST, XML response).
@@ -56,10 +54,6 @@ import java.util.regex.Pattern;
 public class AwsQueryController {
 
     private static final Logger LOG = Logger.getLogger(AwsQueryController.class);
-
-    // Extracts service name: Credential=AKID/20260227/us-east-1/iam/aws4_request → "iam"
-    private static final Pattern SERVICE_PATTERN =
-            Pattern.compile("Credential=\\S+/\\d{8}/[^/]+/([^/]+)/");
 
     private static final Set<String> STS_ACTIONS = Set.of(
             "AssumeRole", "AssumeRoleWithWebIdentity", "AssumeRoleWithSAML",
@@ -407,15 +401,11 @@ public class AwsQueryController {
     );
 
     private String resolveService(String authorization, String action) {
-        if (authorization != null && !authorization.isEmpty()) {
-            Matcher m = SERVICE_PATTERN.matcher(authorization);
-            if (m.find()) {
-                String scope = m.group(1).toLowerCase();
-                ServiceDescriptor descriptor = catalog.byCredentialScope(scope).orElse(null);
-                if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
-                    return descriptor.externalKey();
-                }
-            }
+        ServiceDescriptor descriptor = SigV4CredentialScope.serviceName(authorization)
+                .flatMap(catalog::byCredentialScope)
+                .orElse(null);
+        if (descriptor != null && descriptor.supportsProtocol(ServiceProtocol.QUERY)) {
+            return descriptor.externalKey();
         }
         return inferServiceFromAction(action);
     }

@@ -50,6 +50,14 @@ See [TLS / HTTPS](./tls.md) for SDK configuration examples and WebSocket (`wss:/
 
 ---
 
+## Wire Protocols
+
+| Variable | Default | Description |
+|---|---|---|
+| `FLOCI_PROTOCOLS_STRICT_CLAIMING` | `false` | Reject RPC-signaled requests that no supported wire protocol claims, per the [Smithy wire-protocol-selection guide](https://smithy.io/2.0/guides/wire-protocol-selection.html) (e.g. an unknown `Smithy-Protocol` header value or an unimplemented `rpc-v2-json` request). When disabled such requests are logged and pass through |
+
+---
+
 ## Storage
 
 | Variable | Default | Description |

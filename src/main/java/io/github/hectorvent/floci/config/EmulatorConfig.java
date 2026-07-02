@@ -72,6 +72,21 @@ public interface EmulatorConfig {
 
     TlsConfig tls();
 
+    ProtocolsConfig protocols();
+
+    interface ProtocolsConfig {
+        /**
+         * When enabled, requests carrying an RPC protocol signal that no
+         * supported wire protocol claims are rejected per the Smithy
+         * wire-protocol-selection guide (e.g. an unknown Smithy-Protocol header
+         * value, a recognized-but-unimplemented rpc-v2-json request, or an
+         * X-Amz-Target post with a foreign content type). When disabled such
+         * requests are only logged and pass through to JAX-RS matching.
+         */
+        @WithDefault("false")
+        boolean strictClaiming();
+    }
+
     interface DnsConfig {
         /**
          * Additional hostname suffixes the embedded DNS server will resolve to Floci's

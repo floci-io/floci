@@ -70,6 +70,9 @@ floci:
     enabled: false
     self-signed: true
 
+  protocols:
+    strict-claiming: false
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"

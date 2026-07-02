@@ -157,6 +157,9 @@ floci:
     self-signed: true                  # FLOCI_TLS_SELF_SIGNED — auto-generate a self-signed cert if no cert-path provided
     aws-https-port: 443                # FLOCI_TLS_AWS_HTTPS_PORT — also bind 443 so CDK cfn-response/AWS-on-443 callbacks reach Floci (0 disables)
 
+  protocols:
+    strict-claiming: false             # FLOCI_PROTOCOLS_STRICT_CLAIMING — reject RPC-signaled requests that no supported wire protocol claims
+
   docker:
     log-max-size: "10m"
     log-max-file: "3"
