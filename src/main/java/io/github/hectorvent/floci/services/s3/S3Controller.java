@@ -139,8 +139,8 @@ public class S3Controller {
                         }
                     }
                 }
-            } catch (Exception ignored) {
-                // Out-of-request context (e.g. tests) — fall through with nulls.
+            } catch (Exception e) {
+                LOG.tracev(e, "CloudTrail: could not extract request context for S3 event {0}/{1}", bucket, key);
             }
             String akid = accountResolver.extractAccessKeyId(authHeader);
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()

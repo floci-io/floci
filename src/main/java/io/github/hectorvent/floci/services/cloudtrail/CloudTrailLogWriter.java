@@ -92,7 +92,7 @@ public class CloudTrailLogWriter {
     void stop(@Observes ShutdownEvent event) {
         if (executor != null) {
             // Best-effort final flush so shutdown doesn't lose buffered events.
-            try { flushAll(); } catch (Exception ignored) { /* best effort */ }
+            try { flushAll(); } catch (Exception e) { LOG.warnv(e, "CloudTrail final flush on shutdown failed — some records may be lost"); }
             executor.shutdownNow();
             executor = null;
         }

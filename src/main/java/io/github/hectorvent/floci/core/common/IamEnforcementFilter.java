@@ -172,8 +172,8 @@ public class IamEnforcementFilter implements ContainerRequestFilter {
                         }
                     }
                 }
-            } catch (Exception ignored) {
-                // Out-of-request context — nulls are fine.
+            } catch (Exception e) {
+                LOG.tracev(e, "CloudTrail: could not extract request context for IAM denial {0} on {1}", action, resource);
             }
 
             cloudTrailService.emitS3DataEvent(CloudTrailService.S3EventInput.builder()

@@ -153,44 +153,47 @@ public class CloudTrailService {
 
     public List<EventSelector> putEventSelectors(String region, String trailNameOrArn, List<EventSelector> selectors) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        ConcurrentHashMap<String, List<EventSelector>> store = selectorsFor(region);
+        String homeRegion = trail.homeRegion();
         List<EventSelector> normalized = selectors == null ? List.of() : List.copyOf(selectors);
-        store.put(trail.name(), normalized);
-        // Mark hasCustomEventSelectors=true on the trail
-        trailsFor(region).put(trail.name(), new Trail(
+        selectorsFor(homeRegion).put(trail.name(), normalized);
+        // Mark hasCustomEventSelectors=true on the trail, stored under its home region
+        trailsFor(homeRegion).put(trail.name(), new Trail(
                 trail.name(), trail.trailArn(), trail.s3BucketName(), trail.s3KeyPrefix(),
                 trail.snsTopicArn(), trail.includeGlobalServiceEvents(), trail.isMultiRegionTrail(),
-                trail.homeRegion(), trail.logFileValidationEnabled(), true, trail.hasInsightSelectors(),
+                homeRegion, trail.logFileValidationEnabled(), true, trail.hasInsightSelectors(),
                 trail.isOrganizationTrail()));
         return normalized;
     }
 
     public List<EventSelector> getEventSelectors(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        ConcurrentHashMap<String, List<EventSelector>> store = selectorsByRegion.get(region);
+        ConcurrentHashMap<String, List<EventSelector>> store = selectorsByRegion.get(trail.homeRegion());
         if (store == null) return List.of();
         return store.getOrDefault(trail.name(), List.of());
     }
 
     public void startLogging(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        loggingFor(region).put(trail.name(), true);
-        startTimesFor(region).put(trail.name(), System.currentTimeMillis());
+        String homeRegion = trail.homeRegion();
+        loggingFor(homeRegion).put(trail.name(), true);
+        startTimesFor(homeRegion).put(trail.name(), System.currentTimeMillis());
     }
 
     public void stopLogging(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        loggingFor(region).put(trail.name(), false);
-        stopTimesFor(region).put(trail.name(), System.currentTimeMillis());
+        String homeRegion = trail.homeRegion();
+        loggingFor(homeRegion).put(trail.name(), false);
+        stopTimesFor(homeRegion).put(trail.name(), System.currentTimeMillis());
     }
 
     public TrailStatus getTrailStatus(String region, String trailNameOrArn) {
         Trail trail = findTrailOrThrow(region, trailNameOrArn);
-        boolean logging = loggingByRegion.getOrDefault(region, new ConcurrentHashMap<>())
+        String homeRegion = trail.homeRegion();
+        boolean logging = loggingByRegion.getOrDefault(homeRegion, new ConcurrentHashMap<>())
                 .getOrDefault(trail.name(), false);
-        Long start = startTimeByRegion.getOrDefault(region, new ConcurrentHashMap<>())
+        Long start = startTimeByRegion.getOrDefault(homeRegion, new ConcurrentHashMap<>())
                 .get(trail.name());
-        Long stop = stopTimeByRegion.getOrDefault(region, new ConcurrentHashMap<>())
+        Long stop = stopTimeByRegion.getOrDefault(homeRegion, new ConcurrentHashMap<>())
                 .get(trail.name());
         return new TrailStatus(logging, start, stop);
     }
