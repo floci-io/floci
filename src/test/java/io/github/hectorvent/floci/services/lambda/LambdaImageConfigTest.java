@@ -238,6 +238,9 @@ class LambdaImageConfigTest {
             when(docker.logMaxSize()).thenReturn("10m");
             when(docker.logMaxFile()).thenReturn("3");
             when(config.baseUrl()).thenReturn("http://localhost:4566");
+            EmulatorConfig.TlsConfig tls = mock(EmulatorConfig.TlsConfig.class);
+            when(config.tls()).thenReturn(tls);
+            lenient().when(tls.enabled()).thenReturn(false);
             lenient().when(config.hostname()).thenReturn(Optional.empty());
             when(embeddedDnsServer.getServerIp()).thenReturn(Optional.empty());
 
