@@ -10,6 +10,9 @@ import org.junit.jupiter.api.Order;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestMethodOrder;
 
+import java.util.Base64;
+import java.util.UUID;
+
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoAction;
 import static io.github.hectorvent.floci.services.cognito.CognitoRestAssuredUtils.cognitoJson;
 import static org.junit.jupiter.api.Assertions.*;
@@ -200,5 +203,36 @@ class GlobalSignOutIntegrationTest {
 
         assertEquals("NotAuthorizedException", body.path("__type").asText(),
                 "Old revoked refresh token must still be rejected after a new login");
+    }
+
+    @Test
+    @Order(10)
+    void globalSignOutFailsForNonexistentUser() throws Exception {
+        // A syntactically valid (but unverified) token whose username does not exist in the
+        // pool must be rejected — GlobalSignOut confirms the user exists before touching the
+        // revocation store, matching AdminUserGlobalSignOut and AWS behavior.
+        String forged = forgeAccessToken(poolId, "ghost");
+
+        JsonNode body = cognitoJsonAny("GlobalSignOut", """
+                {"AccessToken":"%s"}
+                """.formatted(forged));
+
+        assertEquals("UserNotFoundException", body.path("__type").asText(),
+                "GlobalSignOut for a nonexistent user must fail with UserNotFoundException, body was: " + body);
+    }
+
+    /** Build an unsigned JWT-shaped access token — the emulator decodes the payload without verifying the signature. */
+    private static String forgeAccessToken(String poolId, String username) {
+        long nowSeconds = System.currentTimeMillis() / 1000L;
+        String header = base64Url("{\"alg\":\"RS256\",\"typ\":\"JWT\"}");
+        String payload = base64Url(("""
+                {"username":"%s","iss":"https://cognito-idp.us-east-1.amazonaws.com/%s",\
+                "jti":"%s","iat":%d,"token_use":"access"}""")
+                .formatted(username, poolId, UUID.randomUUID(), nowSeconds));
+        return header + "." + payload + ".sig";
+    }
+
+    private static String base64Url(String value) {
+        return Base64.getUrlEncoder().withoutPadding().encodeToString(value.getBytes());
     }
 }

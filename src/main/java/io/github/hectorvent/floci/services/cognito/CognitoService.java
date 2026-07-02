@@ -858,7 +858,7 @@ public class CognitoService {
         String poolId = extractPoolIdFromToken(accessToken);
         String jti = extractJtiFromToken(accessToken);
 
-        if (username == null || poolId == null) {
+        if (username == null || poolId == null || jti == null) {
             throw new AwsException("NotAuthorizedException", "Invalid access token", 400);
         }
 
@@ -867,6 +867,10 @@ public class CognitoService {
         validateTokenNotRevoked(jti, poolId, "access");
         Long iat = extractIatFromToken(accessToken);
         validateUserNotGloballySignedOut(username, poolId, "access", iat != null ? iat : 0L);
+
+        // Confirm the pool and user actually exist before mutating the revocation store,
+        // matching the implicit validation AWS performs and the adminUserGlobalSignOut counterpart.
+        adminGetUser(poolId, username);
 
         // Revoke all of the user's issued tokens (access, ID, refresh).
         revokeAllUserTokens(poolId, username);
