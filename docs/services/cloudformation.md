@@ -25,9 +25,15 @@
 | `DeleteChangeSet` | Delete a change set |
 | `SetStackPolicy` | Accepted; no-op (stub — stack policies are not enforced) |
 | `GetStackPolicy` | Accepted; returns an empty policy (stub) |
-| `ListStackSets` | Accepted; returns an empty result (StackSets not implemented) |
-| `DescribeStackSet` | Accepted; returns an empty result (StackSets not implemented) |
-| `CreateStackSet` | Accepted; returns an empty result (StackSets not implemented) |
+| `CreateStackSet` | Create a stack set from a template |
+| `DescribeStackSet` | Get stack set details |
+| `ListStackSets` | List stack sets |
+| `UpdateStackSet` | Update the stack set and re-apply to existing instances |
+| `DeleteStackSet` | Delete an empty stack set |
+| `CreateStackInstances` | Provision instances into target accounts/regions |
+| `ListStackInstances` | List instances (optionally filtered by account/region) |
+| `DeleteStackInstances` | Remove instances and their resources |
+| `ListStackSetOperations` | List operations performed on a stack set |
 
 ## Supported Resource Types
 
@@ -80,6 +86,51 @@ All other resource types are accepted without error and assigned a synthetic phy
 - Code and mutable configuration changes update the existing function in place.
 - Replacement-only changes such as `FunctionName` or `PackageType` changes create a replacement function and remove the old one.
 - S3-backed code stays linked through `S3Bucket` / `S3Key`, so Lambda's reactive S3 sync continues to work for functions created by CloudFormation or CDK.
+
+## Account-Aware Provisioning
+
+Resources provisioned by `CreateStack` / `UpdateStack` land in the **caller's account** namespace
+(determined from the request's access key — see [Multi-Account Isolation](../configuration/multi-account.md)).
+Deleting the stack removes them from that same account.
+
+## StackSets
+
+StackSets deploy a single template into many target accounts and regions:
+
+```bash
+export AWS_ENDPOINT_URL=http://localhost:4566
+
+# 1. Create the stack set (in the administration account)
+aws cloudformation create-stack-set \
+  --stack-set-name my-set \
+  --template-body file://template.yml \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# 2. Create instances in two target accounts
+aws cloudformation create-stack-instances \
+  --stack-set-name my-set \
+  --accounts 222222222222 333333333333 \
+  --regions us-east-1 \
+  --endpoint-url $AWS_ENDPOINT_URL
+
+# 3. The resources materialize in each target account's namespace
+aws cloudformation list-stack-instances \
+  --stack-set-name my-set \
+  --endpoint-url $AWS_ENDPOINT_URL
+```
+
+`CreateStackInstances` drives the single-stack engine once per `(account, region)` pair, provisioning
+each instance's resources into that target account's namespace — so a queue named `orders` deployed
+into accounts `222222222222` and `333333333333` exists independently in each. The stack set, its
+instances, and its operation history are recorded in the administration (caller) account.
+
+`DeleteStackInstances` removes instances and their resources, unless `RetainStacks=true`, which
+detaches the instances from the stack set but leaves their underlying stacks and resources in place.
+A stack set must be empty before `DeleteStackSet`.
+
+A `CreateStackInstances` / `UpdateStackSet` operation reports `FAILED` if any of its instances fails
+to deploy (the instance is marked `INOPERABLE`), so polling `DescribeStackSetOperation` reflects real
+provisioning outcomes rather than always returning `SUCCEEDED`.
 
 ## Configuration
 

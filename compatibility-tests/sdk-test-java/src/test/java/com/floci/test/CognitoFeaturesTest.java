@@ -32,11 +32,12 @@ import static org.assertj.core.api.Assertions.*;
  *   #229 — InitiateAuth rejects auth when no password hash is set
  *   #233 — ListUsers respects Filter parameter
  *   #235 — AdminSetUserPassword(Permanent=false) changes the password
+ *   #1505 — CreateUserPoolClient must not return empty {} for unset optional blocks
  *
  * Note: Issue #234 (GetTokensFromRefreshToken) is tested in sdk-test-node/tests/cognito-features.test.ts
  * because GetTokensFromRefreshTokenCommand is not present in Java SDK 2.31.8.
  */
-@DisplayName("Cognito IDP — bug fixes #218 #220 #228 #229 #233 #235")
+@DisplayName("Cognito IDP — bug fixes #218 #220 #228 #229 #233 #235 #1505")
 @TestMethodOrder(MethodOrderer.OrderAnnotation.class)
 class CognitoFeaturesTest {
 
@@ -48,6 +49,7 @@ class CognitoFeaturesTest {
     private static CognitoIdentityProviderClient cognito;
 
     private static String poolId;
+    private static String userPoolClientId;
     private static String poolArn;
     private static String clientId;
     private static final String USERNAME = "compat-user-" + UUID.randomUUID() + "@example.com";
@@ -63,6 +65,12 @@ class CognitoFeaturesTest {
     static void cleanup() {
         if (cognito == null) return;
         try {
+            if (userPoolClientId != null) {
+                cognito.deleteUserPoolClient(b -> b
+                        .userPoolId(poolId)
+                        .clientId(userPoolClientId)
+                );
+            }
             if (poolId != null) {
                 cognito.deleteUserPool(b -> b.userPoolId(poolId));
             }
@@ -142,6 +150,26 @@ class CognitoFeaturesTest {
                 .findFirst()
                 .orElse(null);
         assertThat(userSub).isNotBlank();
+    }
+
+    @Test
+    @Order(6)
+    void createUserPoolClientDoesNotReturnEmptyOptionalBlocks() {
+        CreateUserPoolClientResponse resp = cognito.createUserPoolClient(b -> b
+                .userPoolId(poolId)
+                .clientName("user-pool-client"));
+        UserPoolClientType client = resp.userPoolClient();
+        userPoolClientId = client.clientId();
+
+        assertThat(client.analyticsConfiguration())
+                .as("analyticsConfiguration must be null when not set")
+                .isNull();
+        assertThat(client.tokenValidityUnits())
+                .as("tokenValidityUnits must be null when not set")
+                .isNull();
+        assertThat(client.refreshTokenRotation())
+                .as("refreshTokenRotation must be null when not set")
+                .isNull();
     }
 
     // ── Issue #229 — InitiateAuth rejects when no password hash is set ────────

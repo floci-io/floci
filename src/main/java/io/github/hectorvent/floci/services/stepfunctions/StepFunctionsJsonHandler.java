@@ -37,6 +37,9 @@ public class StepFunctionsJsonHandler {
             case "DescribeStateMachine" -> handleDescribeStateMachine(request);
             case "ListStateMachines" -> handleListStateMachines(request, region);
             case "DeleteStateMachine" -> handleDeleteStateMachine(request);
+            case "PublishStateMachineVersion" -> handlePublishStateMachineVersion(request);
+            case "ListStateMachineVersions" -> handleListStateMachineVersions(request);
+            case "DeleteStateMachineVersion" -> handleDeleteStateMachineVersion(request);
             case "ValidateStateMachineDefinition" -> handleValidateStateMachineDefinition(request);
             case "StartExecution" -> handleStartExecution(request, region);
             case "StartSyncExecution" -> handleStartSyncExecution(request, region);
@@ -73,7 +76,37 @@ public class StepFunctionsJsonHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("stateMachineArn", sm.getStateMachineArn());
         response.put("creationDate", sm.getCreationDate());
+        // Publishing a version on create is opt-in (publish=true).
+        if (request.path("publish").asBoolean(false)) {
+            var version = service.publishStateMachineVersion(sm.getStateMachineArn());
+            response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
+        }
         return Response.ok(response).build();
+    }
+
+    private Response handlePublishStateMachineVersion(JsonNode request) {
+        var version = service.publishStateMachineVersion(request.path("stateMachineArn").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        response.put("stateMachineVersionArn", version.getStateMachineVersionArn());
+        response.put("creationDate", version.getCreationDate());
+        return Response.ok(response).build();
+    }
+
+    private Response handleListStateMachineVersions(JsonNode request) {
+        var versions = service.listStateMachineVersions(request.path("stateMachineArn").asText());
+        ObjectNode response = objectMapper.createObjectNode();
+        ArrayNode array = response.putArray("stateMachineVersions");
+        for (var v : versions) {
+            ObjectNode item = array.addObject();
+            item.put("stateMachineVersionArn", v.getStateMachineVersionArn());
+            item.put("creationDate", v.getCreationDate());
+        }
+        return Response.ok(response).build();
+    }
+
+    private Response handleDeleteStateMachineVersion(JsonNode request) {
+        service.deleteStateMachineVersion(request.path("stateMachineVersionArn").asText());
+        return Response.ok(objectMapper.createObjectNode()).build();
     }
 
     private Response handleDescribeStateMachine(JsonNode request) {

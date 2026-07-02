@@ -98,6 +98,31 @@ class ContainerBuilderTest {
         assertEquals("host", spec.cgroupnsMode());
     }
 
+    @Test
+    void imageRegistryBasePrefixesEveryContainerImage() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.docker.imageRegistryBase()).thenReturn(Optional.of("ghcr.io/floci-io/mirror/"));
+
+        assertEquals(
+                "ghcr.io/floci-io/mirror/postgres:16-alpine",
+                fixture.builder.newContainer("postgres:16-alpine").build().image());
+        assertEquals(
+                "ghcr.io/floci-io/mirror/public.ecr.aws/docker/library/ubuntu:24.04",
+                fixture.builder.newContainer("public.ecr.aws/docker/library/ubuntu:24.04").build().image());
+    }
+
+    @Test
+    void imageRegistryBaseDoesNotDoublePrefixImagesAlreadyUnderBase() {
+        TestFixture fixture = new TestFixture();
+        when(fixture.docker.imageRegistryBase()).thenReturn(Optional.of("ghcr.io/floci-io/mirror"));
+
+        ContainerSpec spec = fixture.builder
+                .newContainer("ghcr.io/floci-io/mirror/floci/ami-ubuntu:24.04-arm64")
+                .build();
+
+        assertEquals("ghcr.io/floci-io/mirror/floci/ami-ubuntu:24.04-arm64", spec.image());
+    }
+
     private static class TestFixture {
         final EmulatorConfig config = mock(EmulatorConfig.class);
         final EmulatorConfig.ServicesConfig services = mock(EmulatorConfig.ServicesConfig.class);
@@ -116,6 +141,7 @@ class ContainerBuilderTest {
             when(config.docker()).thenReturn(docker);
             when(docker.logMaxSize()).thenReturn("10m");
             when(docker.logMaxFile()).thenReturn("3");
+            when(docker.imageRegistryBase()).thenReturn(Optional.empty());
             when(config.dns()).thenReturn(dns);
             when(dns.containerFallbackEnabled()).thenReturn(true);
             when(dns.containerFallbackServers()).thenReturn(List.of("8.8.8.8", "8.8.4.4"));
