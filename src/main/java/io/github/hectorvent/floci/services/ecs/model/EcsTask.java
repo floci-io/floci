@@ -29,6 +29,7 @@ public class EcsTask {
     private boolean protectionEnabled;
     private Instant protectedUntil;
     private Map<String, String> tags = new HashMap<>();
+    private NetworkConfiguration networkConfiguration;
 
     public String getTaskArn() { return taskArn; }
     public void setTaskArn(String taskArn) { this.taskArn = taskArn; }
@@ -68,6 +69,14 @@ public class EcsTask {
 
     public String getStartedBy() { return startedBy; }
     public void setStartedBy(String startedBy) { this.startedBy = startedBy; }
+
+    /** The awsvpc network configuration the task was launched with, or null. Carried through from
+     *  the RunTask request (including the ecs:runTask Step Functions integration) so it survives the
+     *  launch; awsvpc ENI attachments are not emulated in the local mock profile. */
+    public NetworkConfiguration getNetworkConfiguration() { return networkConfiguration; }
+    public void setNetworkConfiguration(NetworkConfiguration networkConfiguration) {
+        this.networkConfiguration = networkConfiguration;
+    }
 
     public String getStoppedReason() { return stoppedReason; }
     public void setStoppedReason(String stoppedReason) { this.stoppedReason = stoppedReason; }

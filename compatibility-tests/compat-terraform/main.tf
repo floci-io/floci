@@ -187,6 +187,12 @@ output "user_pool_arn" {
   value = aws_cognito_user_pool.pool.arn
 }
 
+# -- Cognito User Pool Client --------------------------------------------------
+resource "aws_cognito_user_pool_client" "client" {
+  name         = "floci-compat-pool-client"
+  user_pool_id = aws_cognito_user_pool.pool.id
+}
+
 # -- CloudWatch Alarms ---------------------------------------------------------
 resource "aws_cloudwatch_metric_alarm" "cpu" {
   alarm_name          = "floci-compat-cpu-alarm"
