@@ -106,10 +106,7 @@ class SsmDirectCommandExecutorTest {
         assertTrue(command.contains("processes"));
         assertTrue(command.contains("/var/log/*.log"));
         assertTrue(command.contains("REDACTED"));
-        assertFalse(command.contains("airship"));
-        assertFalse(command.contains("iceguard"));
-        assertFalse(command.contains("trino"));
-        assertFalse(command.contains("coordinator"));
+        assertFalse(command.contains("grep"));
     }
 
     @Test

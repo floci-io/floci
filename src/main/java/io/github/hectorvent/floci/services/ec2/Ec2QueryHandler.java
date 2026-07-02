@@ -29,11 +29,13 @@ public class Ec2QueryHandler {
 
     private final Ec2Service service;
     private final EmulatorConfig config;
+    private final FlowLogService flowLogService;
 
     @Inject
-    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config) {
+    public Ec2QueryHandler(Ec2Service service, EmulatorConfig config, FlowLogService flowLogService) {
         this.service = service;
         this.config = config;
+        this.flowLogService = flowLogService;
     }
 
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
@@ -62,6 +64,10 @@ public class Ec2QueryHandler {
                 case "CreateVpcEndpoint" -> handleCreateVpcEndpoint(params, region);
                 case "DescribeVpcEndpoints" -> handleDescribeVpcEndpoints(params, region);
                 case "DeleteVpcEndpoints" -> handleDeleteVpcEndpoints(params, region);
+                // Flow Logs
+                case "CreateFlowLogs" -> handleCreateFlowLogs(params, region);
+                case "DescribeFlowLogs" -> handleDescribeFlowLogs(params, region);
+                case "DeleteFlowLogs" -> handleDeleteFlowLogs(params, region);
                 case "DescribePrefixLists" -> handleDescribePrefixLists(params, region);
                 case "CreateDefaultVpc" -> handleCreateDefaultVpc(params, region);
                 case "AssociateVpcCidrBlock" -> handleAssociateVpcCidrBlock(params, region);
@@ -612,6 +618,18 @@ public class Ec2QueryHandler {
                 break;
             }
         }
+        // Security group reassignment: --groups maps to GroupId.1, GroupId.2, ...
+        List<String> groupIds = new ArrayList<>();
+        for (int i = 1; ; i++) {
+            String groupId = p.getFirst("GroupId." + i);
+            if (groupId == null) {
+                break;
+            }
+            groupIds.add(groupId);
+        }
+        if (!groupIds.isEmpty()) {
+            service.modifyInstanceGroups(region, instanceId, groupIds);
+        }
         return booleanResponse("ModifyInstanceAttribute");
     }
 
@@ -704,6 +722,84 @@ public class Ec2QueryHandler {
                 .start("serviceDetailSet")
                 .end("serviceDetailSet")
                 .end("DescribeVpcEndpointServicesResponse");
+        return xmlResponse(xml.build());
+    }
+
+    // ─── Flow Logs ────────────────────────────────────────────────────────────
+
+    private Response handleCreateFlowLogs(MultivaluedMap<String, String> p, String region) {
+        String resourceType = p.getFirst("ResourceType");
+        List<String> resourceIds = getList(p, "ResourceId");
+        String trafficType = p.getFirst("TrafficType");
+        String logDestinationType = p.getFirst("LogDestinationType");
+        String logDestination = p.getFirst("LogDestination");
+        if (logDestination == null) {
+            logDestination = p.getFirst("LogDestinationArn");
+        }
+        String logFormat = p.getFirst("LogFormat");
+        int maxAgg = parseIntParam(p, "MaxAggregationInterval", 600);
+
+        if (resourceIds.isEmpty()) {
+            // Some SDKs send ResourceIds.member.N — fall back to that prefix.
+            resourceIds = getList(p, "ResourceIds.member");
+        }
+        if (resourceIds.isEmpty()) {
+            return ec2Error("MissingParameter", "The request must contain at least one ResourceId.", 400);
+        }
+
+        XmlBuilder xml = new XmlBuilder()
+                .start("CreateFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("flowLogIdSet");
+        for (String resourceId : resourceIds) {
+            FlowLog fl = flowLogService.createFlowLog(region, resourceId, resourceType, trafficType,
+                    logDestinationType, logDestination, logFormat, maxAgg);
+            xml.elem("item", fl.getFlowLogId());
+        }
+        xml.end("flowLogIdSet")
+                .start("unsuccessful").end("unsuccessful")
+                .end("CreateFlowLogsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDescribeFlowLogs(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "FlowLogId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "FlowLogIds.member");
+        }
+        List<FlowLog> logs = flowLogService.describeFlowLogs(region, ids);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DescribeFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("flowLogSet");
+        for (FlowLog fl : logs) {
+            xml.start("item")
+                    .elem("flowLogId", fl.getFlowLogId())
+                    .elem("resourceId", fl.getResourceId())
+                    .elem("trafficType", fl.getTrafficType())
+                    .elem("logDestinationType", fl.getLogDestinationType())
+                    .elem("logDestination", fl.getLogDestination())
+                    .elem("flowLogStatus", fl.getFlowLogStatus())
+                    .elem("deliverLogsStatus", fl.getDeliverLogsStatus())
+                    .elem("maxAggregationInterval", String.valueOf(fl.getMaxAggregationInterval()))
+                    .elem("creationTime", ISO_FMT.format(fl.getCreationTime()))
+                    .end("item");
+        }
+        xml.end("flowLogSet").end("DescribeFlowLogsResponse");
+        return xmlResponse(xml.build());
+    }
+
+    private Response handleDeleteFlowLogs(MultivaluedMap<String, String> p, String region) {
+        List<String> ids = getList(p, "FlowLogId");
+        if (ids.isEmpty()) {
+            ids = getList(p, "FlowLogIds.member");
+        }
+        flowLogService.deleteFlowLogs(region, ids);
+        XmlBuilder xml = new XmlBuilder()
+                .start("DeleteFlowLogsResponse", AwsNamespaces.EC2)
+                .elem("requestId", UUID.randomUUID().toString())
+                .start("unsuccessful").end("unsuccessful")
+                .end("DeleteFlowLogsResponse");
         return xmlResponse(xml.build());
     }
 
