@@ -85,7 +85,32 @@ class ScheduleInvokerTest {
     }
 
     @Test
-    void universalSnsPublishWithNoMessageAttributesPassesNull() {
+    void universalSnsPublishForwardsBinaryMessageAttributes() {
+        Target target = new Target();
+        target.setArn("arn:aws:scheduler:::aws-sdk:sns:publish");
+        target.setRoleArn("arn:aws:iam::000000000000:role/x");
+        // "aGVsbG8=" is base64 for "hello"
+        target.setInput("{\"TopicArn\":\"" + TOPIC_ARN + "\","
+                + "\"Message\":\"payload\","
+                + "\"MessageAttributes\":{"
+                + "\"BinAttr\":{\"DataType\":\"Binary\",\"BinaryValue\":\"aGVsbG8=\"}"
+                + "}}");
+
+        invoker.invoke(target, "us-east-1");
+
+        verify(snsService).publish(
+                eq(TOPIC_ARN), isNull(), isNull(),
+                eq("payload"), isNull(),
+                argThat((Map<String, MessageAttributeValue> attrs) ->
+                        attrs != null
+                        && attrs.containsKey("BinAttr")
+                        && "Binary".equals(attrs.get("BinAttr").getDataType())
+                        && java.util.Arrays.equals("hello".getBytes(), attrs.get("BinAttr").getBinaryValue())),
+                isNull(), isNull(), eq("us-east-1"));
+    }
+
+    @Test
+    void universalSnsPublishWithNoMessageAttributesPassesNullOrEmpty() {
         Target target = new Target();
         target.setArn("arn:aws:scheduler:::aws-sdk:sns:publish");
         target.setRoleArn("arn:aws:iam::000000000000:role/x");
@@ -94,7 +119,8 @@ class ScheduleInvokerTest {
         invoker.invoke(target, "us-east-1");
 
         verify(snsService).publish(eq(TOPIC_ARN), isNull(), isNull(),
-                eq("hello"), isNull(), isNull(),
+                eq("hello"), isNull(),
+                argThat(attrs -> attrs == null || attrs.isEmpty()),
                 isNull(), isNull(), eq("us-east-1"));
     }
 
@@ -109,7 +135,8 @@ class ScheduleInvokerTest {
 
         // The real TopicArn from Input must be used, NOT the universal-target ARN.
         verify(snsService).publish(eq(TOPIC_ARN), isNull(), isNull(),
-                eq("scheduled-universal-target"), isNull(), isNull(),
+                eq("scheduled-universal-target"), isNull(),
+                argThat(attrs -> attrs == null || attrs.isEmpty()),
                 isNull(), isNull(), eq("us-east-1"));
         verify(snsService, never()).publish(eq("arn:aws:scheduler:::aws-sdk:sns:publish"),
                 any(), any(), any(), any());
