@@ -108,6 +108,17 @@ public class CloudFormationService {
         stackBackend.deleteForAccount(storageAccount, key(stackName, region));
     }
 
+    /**
+     * Sets a stack's termination protection (CloudFormation {@code UpdateTerminationProtection}).
+     * Returns the stack so the caller can echo its {@code StackId}.
+     */
+    public Stack updateTerminationProtection(String stackName, boolean enabled, String region) {
+        Stack stack = getStackOrThrow(stackName, region);
+        stack.setEnableTerminationProtection(enabled);
+        persistStack(stack);
+        return stack;
+    }
+
     // ── DescribeStacks ────────────────────────────────────────────────────────
 
     public List<Stack> describeStacks(String stackName, String region) {

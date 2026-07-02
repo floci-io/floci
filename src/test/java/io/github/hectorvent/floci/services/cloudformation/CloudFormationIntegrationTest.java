@@ -173,6 +173,51 @@ class CloudFormationIntegrationTest {
     }
 
     @Test
+    void updateTerminationProtection_togglesFlagAndReflectsInDescribeStacks() {
+        String template = """
+            { "Resources": { "Q": { "Type": "AWS::SQS::Queue",
+              "Properties": { "QueueName": "cf-tp-queue" } } } }
+            """;
+
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateStack")
+            .formParam("StackName", "tp-stack")
+            .formParam("TemplateBody", template)
+        .when().post("/")
+        .then().statusCode(200).body(containsString("<StackId>"));
+
+        // DescribeStacks reports protection off by default.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>false</EnableTerminationProtection>"));
+
+        // Enable termination protection — returns the StackId.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "UpdateTerminationProtection")
+            .formParam("StackName", "tp-stack")
+            .formParam("EnableTerminationProtection", "true")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<StackId>"))
+            .body(containsString("</UpdateTerminationProtectionResult>"));
+
+        // DescribeStacks now reflects it.
+        given()
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "DescribeStacks")
+            .formParam("StackName", "tp-stack")
+        .when().post("/")
+        .then().statusCode(200)
+            .body(containsString("<EnableTerminationProtection>true</EnableTerminationProtection>"));
+    }
+
+    @Test
     void createStack_lambdaWithS3Code() {
         byte[] zipBytes = buildHandlerZip();
 

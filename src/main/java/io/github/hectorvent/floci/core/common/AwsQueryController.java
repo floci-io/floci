@@ -356,7 +356,7 @@ public class AwsQueryController {
     );
 
     private static final Set<String> CLOUDFORMATION_ACTIONS = Set.of(
-            "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks",
+            "CreateStack", "DeleteStack", "UpdateStack", "DescribeStacks", "UpdateTerminationProtection",
             "ListStacks", "ListExports", "GetTemplate", "ValidateTemplate",
             "CreateChangeSet", "DeleteChangeSet", "DescribeChangeSet", "ExecuteChangeSet", "ListChangeSets",
             "DescribeStackEvents", "DescribeStackResources", "ListStackResources", "DescribeStackResource",

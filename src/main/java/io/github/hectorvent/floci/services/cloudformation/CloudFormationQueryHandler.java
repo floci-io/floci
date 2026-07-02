@@ -44,6 +44,7 @@ public class CloudFormationQueryHandler {
             case "CreateStack" -> createStack(params, region);
             case "UpdateStack" -> updateStack(params, region);
             case "DeleteStack" -> deleteStack(params, region);
+            case "UpdateTerminationProtection" -> updateTerminationProtection(params, region);
             case "CreateChangeSet" -> createChangeSet(params, region);
             case "DescribeChangeSet" -> describeChangeSet(params, region);
             case "ExecuteChangeSet" -> executeChangeSet(params, region);
@@ -147,6 +148,23 @@ public class CloudFormationQueryHandler {
                 .start("DeleteStackResponse", CF_NS)
                 .raw(AwsQueryResponse.responseMetadata())
                 .end("DeleteStackResponse")
+                .build();
+        return Response.ok(xml).type("text/xml").build();
+    }
+
+    // ── UpdateTerminationProtection ─────────────────────────────────────────────
+
+    private Response updateTerminationProtection(MultivaluedMap<String, String> params, String region) {
+        String stackName = params.getFirst("StackName");
+        boolean enabled = Boolean.parseBoolean(params.getFirst("EnableTerminationProtection"));
+        Stack stack = cfnService.updateTerminationProtection(stackName, enabled, region);
+        String xml = new XmlBuilder()
+                .start("UpdateTerminationProtectionResponse", CF_NS)
+                .start("UpdateTerminationProtectionResult")
+                .elem("StackId", stack.getStackId())
+                .end("UpdateTerminationProtectionResult")
+                .raw(AwsQueryResponse.responseMetadata())
+                .end("UpdateTerminationProtectionResponse")
                 .build();
         return Response.ok(xml).type("text/xml").build();
     }
@@ -457,6 +475,7 @@ public class CloudFormationQueryHandler {
                 .elem("StackId", s.getStackId())
                 .elem("StackName", s.getStackName())
                 .elem("StackStatus", s.getStatus())
+                .elem("EnableTerminationProtection", String.valueOf(s.isEnableTerminationProtection()))
                 .elem("CreationTime", ISO.format(s.getCreationTime()));
         if (s.getLastUpdatedTime() != null) {
             xml.elem("LastUpdatedTime", ISO.format(s.getLastUpdatedTime()));
