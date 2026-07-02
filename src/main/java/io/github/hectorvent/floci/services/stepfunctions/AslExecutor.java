@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.stepfunctions;
 import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.RequestContext;
 import io.github.hectorvent.floci.core.common.XmlParser;
 import io.github.hectorvent.floci.services.cloudformation.CloudFormationQueryHandler;
 import io.github.hectorvent.floci.services.dynamodb.DynamoDbJsonHandler;
@@ -30,6 +31,9 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.quarkus.arc.Arc;
+import io.quarkus.arc.ArcContainer;
+import io.quarkus.arc.ManagedContext;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.inject.Instance;
 import jakarta.inject.Inject;
@@ -46,6 +50,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -114,7 +119,7 @@ public class AslExecutor {
      */
     public void executeAsync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                              BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
-        executor.submit(() -> doExecute(sm, exec, history, onUpdate));
+        executor.submit(() -> runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
     }
 
     /**
@@ -123,7 +128,8 @@ public class AslExecutor {
     public void executeSync(StateMachine sm, Execution exec, List<HistoryEvent> history,
                             BiConsumer<Execution, List<HistoryEvent>> onUpdate) {
         try {
-            Future<?> f = executor.submit(() -> doExecute(sm, exec, history, onUpdate));
+            Future<?> f = executor.submit(() ->
+                    runUnderExecutionAccount(sm, () -> doExecute(sm, exec, history, onUpdate)));
             f.get(300, TimeUnit.SECONDS);
         } catch (java.util.concurrent.TimeoutException e) {
             exec.setStatus("TIMED_OUT");
@@ -131,6 +137,68 @@ public class AslExecutor {
             onUpdate.accept(exec, history);
         } catch (Exception e) {
             LOG.warnv("Sync execution wait failed for {0}: {1}", exec.getExecutionArn(), e.getMessage());
+        }
+    }
+
+    /**
+     * Runs {@code body} on this worker thread under a CDI request scope whose account is
+     * the one encoded in the state machine ARN, so service integrations (Lambda, DynamoDB,
+     * SQS, ECS, …) and the execution-store writes resolve to the execution's account rather
+     * than the configured default. Without this, an execution started under account B would
+     * have its integrations run against account A's resources.
+     *
+     * <p>Mirrors {@code CurEmissionScheduler#runUnderAccount}. Falls back to running the body
+     * directly when Arc is not running (e.g. plain unit tests that construct AslExecutor
+     * without a CDI container).
+     */
+    private void runUnderExecutionAccount(StateMachine sm, Runnable body) {
+        try {
+            callUnderExecutionAccount(sm, () -> {
+                body.run();
+                return null;
+            });
+        } catch (RuntimeException | Error e) {
+            throw e;
+        } catch (Exception e) {
+            // A Runnable cannot throw a checked exception, so this is unreachable in practice;
+            // wrap defensively to preserve the void signature.
+            throw new RuntimeException(e);
+        }
+    }
+
+    /**
+     * Callable variant of {@link #runUnderExecutionAccount} that returns the body's result. Used to
+     * run Parallel branches on their own worker threads under the execution's account: the request
+     * scope (and thus {@link RequestContext}) is thread-bound, so a branch submitted to the executor
+     * pool would otherwise run with no active scope and resolve its Task integrations against the
+     * default account instead of the execution's. Each branch thread therefore activates its own
+     * scope here, mirroring how {@link #executeAsync}/{@link #executeSync} wrap {@code doExecute}.
+     */
+    private <T> T callUnderExecutionAccount(StateMachine sm, Callable<T> body) throws Exception {
+        String accountId = AwsArnUtils.accountOrDefault(sm.getStateMachineArn(), null);
+        ArcContainer container = Arc.container();
+        if (accountId == null || accountId.isBlank() || container == null || !container.isRunning()) {
+            return body.call();
+        }
+        ManagedContext requestContext = container.requestContext();
+        boolean alreadyActive = requestContext.isActive();
+        if (!alreadyActive) {
+            requestContext.activate();
+        }
+        // Execution runs on a background worker that normally has no active scope. If it did run
+        // inside an already-active scope, restore its previous account afterwards so we don't leave
+        // the execution's account behind on a reused thread.
+        RequestContext ctx = container.instance(RequestContext.class).get();
+        String previousAccountId = alreadyActive ? ctx.getAccountId() : null;
+        try {
+            ctx.setAccountId(accountId);
+            return body.call();
+        } finally {
+            if (!alreadyActive) {
+                requestContext.terminate();
+            } else {
+                ctx.setAccountId(previousAccountId);
+            }
         }
     }
 
@@ -1194,7 +1262,11 @@ public class AslExecutor {
             JsonNode branchStates = branch.path("States");
             JsonNode capturedInput = input;
 
-            futures.add(executor.submit(() -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context)));
+            // Run each branch on its own worker thread under the execution's account: the request
+            // scope is thread-bound, so without this a branch's Task integrations would resolve to
+            // the default account rather than the execution's.
+            futures.add(executor.submit(() -> callUnderExecutionAccount(sm,
+                    () -> executeBranch(startAt, branchStates, capturedInput, sm, topLevelQueryLanguage, context))));
         }
 
         int timeoutSeconds = stateDef.path("TimeoutSeconds").asInt(0);
