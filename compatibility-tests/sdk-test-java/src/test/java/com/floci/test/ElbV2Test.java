@@ -84,6 +84,7 @@ class ElbV2Test {
     private static ElasticLoadBalancingV2Client elb;
 
     private static String lbArn;
+    private static String lbDnsName;
     private static String tgArn;
     private static String listenerArn;
     private static String ruleArn;
@@ -141,11 +142,24 @@ class ElbV2Test {
         LoadBalancer lb = resp.loadBalancers().get(0);
         assertThat(lb.loadBalancerName()).isEqualTo(LB_NAME);
         assertThat(lb.loadBalancerArn()).contains("elasticloadbalancing");
-        assertThat(lb.dnsName()).isNotBlank();
+        assertThat(lb.dnsName()).endsWith(expectedElbDnsSuffix());
         assertThat(lb.type()).isEqualTo(LoadBalancerTypeEnum.APPLICATION);
         assertThat(lb.scheme()).isEqualTo(LoadBalancerSchemeEnum.INTERNET_FACING);
         assertThat(lb.state().code()).isEqualTo(LoadBalancerStateEnum.PROVISIONING);
         lbArn = lb.loadBalancerArn();
+        lbDnsName = lb.dnsName();
+    }
+
+    private static String expectedElbDnsSuffix() {
+        String hostname = System.getenv("FLOCI_HOSTNAME");
+        if (hostname == null || hostname.isBlank()) {
+            hostname = TestFixtures.endpoint().getHost();
+        }
+        if (hostname == null || hostname.isBlank()
+                || "localhost".equals(hostname) || "127.0.0.1".equals(hostname)) {
+            hostname = "localhost.floci.io";
+        }
+        return ".elb." + hostname;
     }
 
     @Test
@@ -159,6 +173,7 @@ class ElbV2Test {
         LoadBalancer lb = resp.loadBalancers().get(0);
         assertThat(lb.loadBalancerArn()).isEqualTo(lbArn);
         assertThat(lb.loadBalancerName()).isEqualTo(LB_NAME);
+        assertThat(lb.dnsName()).isEqualTo(lbDnsName);
         assertThat(lb.state().code()).isEqualTo(LoadBalancerStateEnum.ACTIVE);
     }
 
@@ -171,6 +186,7 @@ class ElbV2Test {
 
         assertThat(resp.loadBalancers()).hasSize(1);
         assertThat(resp.loadBalancers().get(0).loadBalancerArn()).isEqualTo(lbArn);
+        assertThat(resp.loadBalancers().get(0).dnsName()).isEqualTo(lbDnsName);
     }
 
     @Test

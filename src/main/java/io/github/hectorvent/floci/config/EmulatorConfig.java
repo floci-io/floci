@@ -1227,6 +1227,34 @@ public interface EmulatorConfig {
         @WithDefault("2299")
         int sshPortRangeEnd();
 
+        /**
+         * When true, TCP ports opened by an instance's security-group ingress rules are
+         * published on the host via a socat sidecar container, both at launch and on later
+         * authorize-security-group-ingress. Set false to keep security groups as metadata only.
+         */
+        @WithDefault("true")
+        boolean publishSecurityGroupPorts();
+
+        /** Lowest host port in the range allocated for published security-group app ports. */
+        @WithDefault("30000")
+        int appPortRangeStart();
+
+        /** Highest host port in the range allocated for published security-group app ports. */
+        @WithDefault("30999")
+        int appPortRangeEnd();
+
+        /**
+         * Upper bound on app ports published per instance. Also bounds any single ingress
+         * rule's port span: wider ranges (e.g. an allow-all 0-65535 rule) are skipped so a
+         * single rule cannot spawn thousands of socat sidecars or exhaust the host-port range.
+         */
+        @WithDefault("20")
+        int maxPublishedPortsPerInstance();
+
+        /** Image used for the socat sidecar that forwards published security-group ports. */
+        @WithDefault("alpine/socat")
+        String socatImage();
+
         /** When true, instances go straight to RUNNING without launching Docker containers. */
         @WithDefault("false")
         boolean mock();
@@ -1342,6 +1370,23 @@ public interface EmulatorConfig {
          */
         @WithDefault("true")
         boolean selfSigned();
+
+        /**
+         * Additional port the TLS proxy binds for AWS-style HTTPS traffic, alongside the
+         * public Floci {@link EmulatorConfig#port()}.
+         *
+         * <p>CDK/CloudFormation custom resources send their {@code cfn-response} callback with
+         * bundled code that hardcodes {@code https://} and ignores the port in the ResponseURL,
+         * so the PUT lands on the conventional 443 regardless of Floci's configured port. Binding
+         * 443 here (with the same HTTP/HTTPS protocol detection used on the main port) lets those
+         * callbacks — and any other client that assumes AWS lives on 443 — reach Floci.
+         *
+         * <p>Default {@code 443}. Set to {@code 0} to disable the extra binding (e.g. when Floci
+         * runs unprivileged or another process owns 443). When equal to {@link EmulatorConfig#port()}
+         * only a single listener is started. Env: FLOCI_TLS_AWS_HTTPS_PORT
+         */
+        @WithDefault("443")
+        int awsHttpsPort();
     }
 
     /**
@@ -1366,6 +1411,14 @@ public interface EmulatorConfig {
         /** Unix socket or TCP URL for the Docker daemon (e.g. unix:///var/run/docker.sock). */
         @WithDefault("unix:///var/run/docker.sock")
         String dockerHost();
+
+        /**
+         * Optional registry/repository base for every Docker image Floci launches.
+         * When set, images such as {@code postgres:16-alpine} and
+         * {@code public.ecr.aws/docker/library/ubuntu:24.04} resolve under this
+         * base before the container is created.
+         */
+        Optional<String> imageRegistryBase();
 
         /**
          * Path to a directory containing Docker's config.json (e.g. /root/.docker).

@@ -7,6 +7,7 @@ import io.github.hectorvent.floci.core.storage.StorageFactory;
 import io.github.hectorvent.floci.services.transcribe.model.TranscriptionJob;
 import io.github.hectorvent.floci.services.transcribe.model.TranscriptionJobSummary;
 import io.github.hectorvent.floci.services.transcribe.model.VocabularyInfo;
+import io.github.hectorvent.floci.core.common.Resettable;
 import jakarta.annotation.PostConstruct;
 import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
@@ -24,7 +25,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * @see <a href="https://docs.aws.amazon.com/transcribe/latest/APIReference/Welcome.html">Transcribe API</a>
  */
 @ApplicationScoped
-public class TranscribeService {
+public class TranscribeService implements Resettable {
 
     private final StorageFactory storageFactory;
 
@@ -44,6 +45,11 @@ public class TranscribeService {
         }
         this.vocabularies = new StorageBackedMap<>(storageFactory.create("transcribe",
                 "transcribe-vocabularies.json", new TypeReference<Map<String, VocabularyInfo>>() {}));
+    }
+
+    public void clear() {
+        transcriptionJobs.clear();
+        vocabularies.clear();
     }
 
     public TranscriptionJob startTranscriptionJob(String jobName, String mediaFileUri,

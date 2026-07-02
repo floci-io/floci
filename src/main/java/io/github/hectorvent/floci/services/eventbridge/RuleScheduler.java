@@ -3,6 +3,7 @@ package io.github.hectorvent.floci.services.eventbridge;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import io.github.hectorvent.floci.config.EmulatorConfig;
+import io.github.hectorvent.floci.core.common.Resettable;
 import io.github.hectorvent.floci.services.eventbridge.model.Rule;
 import io.github.hectorvent.floci.services.eventbridge.model.RuleState;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
@@ -20,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 @ApplicationScoped
-public class RuleScheduler {
+public class RuleScheduler implements Resettable {
 
     private static final Logger LOG = Logger.getLogger(RuleScheduler.class);
 
@@ -46,6 +47,11 @@ public class RuleScheduler {
         scheduleContexts.values().forEach(ctx -> vertx.cancelTimer(ctx.timerId));
         scheduleContexts.clear();
         LOG.info("RuleScheduler shut down, all timers cancelled");
+    }
+
+    public void clear() {
+        scheduleContexts.values().forEach(ctx -> vertx.cancelTimer(ctx.timerId));
+        scheduleContexts.clear();
     }
 
     public void startScheduler(String ruleArn, String scheduleExpr, 

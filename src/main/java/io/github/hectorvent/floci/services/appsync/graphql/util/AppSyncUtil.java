@@ -19,6 +19,8 @@ public class AppSyncUtil {
     private final TransformUtil transformUtil;
     private final ListUtil listUtil;
     private final MapUtil mapUtil;
+    private List<Map<String, Object>> errorList;
+    private String authTypeValue;
 
     public AppSyncUtil(ObjectMapper objectMapper) {
         this.objectMapper = objectMapper;
@@ -29,6 +31,14 @@ public class AppSyncUtil {
         this.transformUtil = new TransformUtil(objectMapper);
         this.listUtil = new ListUtil();
         this.mapUtil = new MapUtil();
+    }
+
+    public void setErrorList(List<Map<String, Object>> errorList) {
+        this.errorList = errorList;
+    }
+
+    public void setAuthTypeValue(String authTypeValue) {
+        this.authTypeValue = authTypeValue;
     }
 
     public StrUtil getStr() { return strUtil; }
@@ -97,6 +107,17 @@ public class AppSyncUtil {
 
     public String toJson(Object o) {
         try {
+            if (o instanceof Map<?, ?> map && map.containsKey("fieldName")
+                    && map.containsKey("parentTypeName")) {
+                Map<String, Object> filtered = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> entry : map.entrySet()) {
+                    String key = entry.getKey().toString();
+                    if (!key.equals("selectionSetList") && !key.equals("selectionSetGraphQL")) {
+                        filtered.put(key, entry.getValue());
+                    }
+                }
+                return objectMapper.writeValueAsString(filtered);
+            }
             return objectMapper.writeValueAsString(o);
         } catch (JsonProcessingException e) {
             return "null";
@@ -107,12 +128,12 @@ public class AppSyncUtil {
         return UUID.randomUUID().toString();
     }
 
-    public String quiet(String s) {
+    public String quiet(Object o) {
         return "";
     }
 
-    public String qr(String s) {
-        return quiet(s);
+    public String qr(Object o) {
+        return quiet(o);
     }
 
     public boolean matches(String pattern, String value) {
@@ -177,7 +198,7 @@ public class AppSyncUtil {
     }
 
     public String authType() {
-        return null;
+        return authTypeValue;
     }
 
     public void error(String message) {
@@ -197,20 +218,30 @@ public class AppSyncUtil {
     }
 
     public void appendError(String message) {
-        // In VTL context, this adds to $context.error without halting
-        // For standalone usage, this is a no-op
+        appendErrorInternal(message, "Unknown", null, null);
     }
 
     public void appendError(String message, String errorType) {
-        // No-op for standalone usage
+        appendErrorInternal(message, errorType, null, null);
     }
 
     public void appendError(String message, String errorType, Object data) {
-        // No-op for standalone usage
+        appendErrorInternal(message, errorType, data, null);
     }
 
     public void appendError(String message, String errorType, Object data, Object errorInfo) {
-        // No-op for standalone usage
+        appendErrorInternal(message, errorType, data, errorInfo);
+    }
+
+    private void appendErrorInternal(String message, String errorType, Object data, Object errorInfo) {
+        if (errorList != null) {
+            Map<String, Object> error = new LinkedHashMap<>();
+            error.put("message", message);
+            error.put("type", errorType);
+            if (data != null) error.put("data", data);
+            if (errorInfo != null) error.put("errorInfo", errorInfo);
+            errorList.add(error);
+        }
     }
 
     public void unauthorized() {
@@ -218,7 +249,7 @@ public class AppSyncUtil {
     }
 
     public void validate(boolean condition, String message) {
-        validate(condition, message, "Unknown");
+        validate(condition, message, "CustomTemplateException");
     }
 
     public void validate(boolean condition, String message, String errorType) {
