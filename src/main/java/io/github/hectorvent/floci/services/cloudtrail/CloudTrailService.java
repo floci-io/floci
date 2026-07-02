@@ -60,9 +60,7 @@ public class CloudTrailService {
                              String snsTopicArn, boolean includeGlobalServiceEvents,
                              boolean isMultiRegionTrail, boolean enableLogFileValidation,
                              boolean isOrganizationTrail) {
-        if (name == null || name.isEmpty()) {
-            throw new AwsException("InvalidTrailNameException", "Trail name is required.", 400);
-        }
+        validateTrailName(name);
         if (s3BucketName == null || s3BucketName.isEmpty()) {
             throw new AwsException("S3BucketDoesNotExistException", "S3 bucket name is required.", 400);
         }
@@ -316,11 +314,14 @@ public class CloudTrailService {
     // Package-private for unit testing.
     static boolean matchesS3DataResourceArn(String configured, String bucketName, String key) {
         if (configured == null) return false;
+        // "arn:aws:s3" (bare, no ":::") is shorthand for all buckets + all objects.
+        if (configured.equals("arn:aws:s3")) return true;
         // Forms accepted:
         //   arn:aws:s3:::                    → all buckets, all keys
+        //   arn:aws:s3:::*                   → all buckets (wildcard)
         //   arn:aws:s3:::bucket/             → all keys in bucket
         //   arn:aws:s3:::bucket/prefix       → keys with the given prefix in bucket
-        //   arn:aws:s3:::bucket/prefix/key   → exact key match
+        //   arn:aws:s3:::*/*                 → all objects (wildcard bucket + any key)
         String prefix = "arn:aws:s3:::";
         if (!configured.startsWith(prefix)) return false;
         String tail = configured.substring(prefix.length());
@@ -329,13 +330,18 @@ public class CloudTrailService {
         }
         int slash = tail.indexOf('/');
         if (slash < 0) {
-            return tail.equals(bucketName);
+            // Bucket-only form: exact name or wildcard "*"
+            return tail.equals("*") || tail.equals(bucketName);
         }
         String configBucket = tail.substring(0, slash);
-        if (!configBucket.equals(bucketName)) return false;
+        if (!configBucket.equals("*") && !configBucket.equals(bucketName)) return false;
         String configKeyPart = tail.substring(slash + 1);
         if (configKeyPart.isEmpty()) {
             return true;
+        }
+        // Wildcard key parts ("*" or "*/*") match any non-null key
+        if (configKeyPart.equals("*") || configKeyPart.equals("*/*")) {
+            return key != null;
         }
         if (key == null) return false;
         return key.startsWith(configKeyPart);
@@ -487,6 +493,34 @@ public class CloudTrailService {
                     "Unknown trail: " + nameOrArn, 400);
         }
         return t;
+    }
+
+    private static void validateTrailName(String name) {
+        if (name == null || name.isEmpty()) {
+            throw new AwsException("InvalidTrailNameException", "Trail name is required.", 400);
+        }
+        if (name.length() < 3) {
+            throw new AwsException("InvalidTrailNameException",
+                    "Trail name too short. Minimum allowed length: 3 characters.", 400);
+        }
+        if (name.length() > 128) {
+            throw new AwsException("InvalidTrailNameException",
+                    "Trail name too long. Maximum allowed length: 128 characters.", 400);
+        }
+        if (!Character.isLetterOrDigit(name.charAt(0))) {
+            throw new AwsException("InvalidTrailNameException",
+                    "Trail name must starts with a letter or number.", 400);
+        }
+        if (!Character.isLetterOrDigit(name.charAt(name.length() - 1))) {
+            throw new AwsException("InvalidTrailNameException",
+                    "Trail name must end with a letter or number.", 400);
+        }
+        for (char c : name.toCharArray()) {
+            if (!Character.isLetterOrDigit(c) && c != '.' && c != '_' && c != '-') {
+                throw new AwsException("InvalidTrailNameException",
+                        "Trail name must only contain letters, numbers, periods, underscores, and hyphens.", 400);
+            }
+        }
     }
 
     private ConcurrentHashMap<String, Trail> trailsFor(String region) {

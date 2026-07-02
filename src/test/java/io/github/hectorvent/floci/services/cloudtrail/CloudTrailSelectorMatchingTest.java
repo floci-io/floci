@@ -89,6 +89,28 @@ class CloudTrailSelectorMatchingTest {
     }
 
     @Test
+    void bareS3Arn_matchesEverything() {
+        // "arn:aws:s3" without ":::" is the AWS Console / CLI "all objects" shorthand
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3", "any-bucket", "any/key.txt"));
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3", "any-bucket", null));
+    }
+
+    @Test
+    void wildcardBucketArn_matchesAnyBucket() {
+        // arn:aws:s3:::* matches all buckets (moto-style)
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3:::*", "any-bucket", null));
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3:::*", "another-bucket", "k.txt"));
+    }
+
+    @Test
+    void wildcardObjectArn_matchesAnyNonNullKey() {
+        // arn:aws:s3:::*/* matches all objects across all buckets (value moto uses in its tests)
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3:::*/*", "any-bucket", "k.txt"));
+        assertTrue(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3:::*/*", "another-bucket", "a/b/c.json"));
+        assertFalse(CloudTrailService.matchesS3DataResourceArn("arn:aws:s3:::*/*", "any-bucket", null));
+    }
+
+    @Test
     void nonS3Arn_neverMatches() {
         assertFalse(CloudTrailService.matchesS3DataResourceArn(
                 "arn:aws:lambda:us-east-1:000:function:foo", "audit-source", "k.txt"));

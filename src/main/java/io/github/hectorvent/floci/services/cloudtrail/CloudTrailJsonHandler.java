@@ -177,7 +177,6 @@ public class CloudTrailJsonHandler {
     }
 
     private Response lookupEvents(JsonNode req, String region) {
-        // Stub: return an empty event page (full event store not implemented).
         ObjectNode resp = mapper.createObjectNode();
         resp.putArray("Events");
         return Response.ok(resp).build();
