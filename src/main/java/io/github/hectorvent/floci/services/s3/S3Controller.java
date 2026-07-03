@@ -653,11 +653,11 @@ public class S3Controller {
                         "Request specific response headers cannot be used for anonymous GET requests.", 400));
             }
 
+            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
             if (rangeHeader != null && rangeHeader.startsWith("bytes=")) {
-                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides);
+                return handleRangeRequest(bucket, key, versionId, obj, rangeHeader, overrides, includeChecksum);
             }
 
-            boolean includeChecksum = "ENABLED".equalsIgnoreCase(checksumMode);
             return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
         } catch (AwsException e) {
             if ("NoSuchKey".equals(e.getErrorCode()) && isWebsiteRequest(httpHeaders)) {
@@ -695,7 +695,8 @@ public class S3Controller {
 
     private Response handleRangeRequest(String bucket, String key, String versionId,
                                         S3Object obj, String rangeHeader,
-                                        ResponseHeaderOverrides overrides) {
+                                        ResponseHeaderOverrides overrides,
+                                        boolean includeChecksum) {
         long totalSize = obj.getSize();
         String rangeSpec = rangeHeader.substring("bytes=".length()).trim();
 
@@ -727,7 +728,7 @@ public class S3Controller {
 
         if (start < 0 || start >= totalSize || start > end) {
             if (totalSize == 0 && rangeSpec.startsWith("-")) {
-                return fullObjectResponse(bucket, key, versionId, obj, overrides, false);
+                return fullObjectResponse(bucket, key, versionId, obj, overrides, includeChecksum);
             }
             return invalidRangeResponse(totalSize);
         }

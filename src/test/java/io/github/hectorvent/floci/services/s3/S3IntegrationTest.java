@@ -718,11 +718,42 @@ class S3IntegrationTest {
             .header("Content-Length", equalTo("0"))
             .header("Accept-Ranges", equalTo("bytes"))
             .header("x-amz-meta-kind", equalTo("empty"))
+            .header("x-amz-checksum-crc64nvme", nullValue())
             .body(equalTo(""));
 
         given()
         .when()
             .delete("/test-bucket/empty.txt")
+        .then()
+            .statusCode(204);
+    }
+
+    @Test
+    @Order(207)
+    void getObjectWithSuffixRangeForEmptyObjectAndChecksumModeIncludesChecksum() {
+        // The empty-object suffix-range path returns via fullObjectResponse (a full 200, not
+        // a 206), so it must honor x-amz-checksum-mode like any other full-object response.
+        given()
+            .header("x-amz-meta-kind", "empty")
+            .body(new byte[0])
+        .when()
+            .put("/test-bucket/empty-checksum.txt")
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("Range", "bytes=-13")
+            .header("x-amz-checksum-mode", "ENABLED")
+        .when()
+            .get("/test-bucket/empty-checksum.txt")
+        .then()
+            .statusCode(200)
+            .header("Content-Length", equalTo("0"))
+            .header("x-amz-checksum-crc64nvme", notNullValue());
+
+        given()
+        .when()
+            .delete("/test-bucket/empty-checksum.txt")
         .then()
             .statusCode(204);
     }
