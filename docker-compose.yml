@@ -26,7 +26,6 @@ services:
       # TLS proxy serves HTTP and HTTPS on the same port 4566 (first-byte sniffing),
       # so no extra port mapping is needed — this is what makes the TLS/HTTPS suites pass.
       FLOCI_TLS_ENABLED: "true"
-      FLOCI_SERVICES_EC2_MOCK: "true"
     networks:
       floci_default:
         aliases:
