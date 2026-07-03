@@ -130,6 +130,10 @@ public class ProtocolClaimer {
                 .orElseGet(() -> new ProtocolClaim(protocol, null, null, target));
     }
 
+    static boolean isRpcV2Path(String path) {
+        return path != null && RPC_V2_PATH.matcher(path).matches();
+    }
+
     private static boolean isRootPath(String path) {
         return path == null || path.isEmpty() || "/".equals(path);
     }

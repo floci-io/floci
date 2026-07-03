@@ -3,7 +3,9 @@ package io.github.hectorvent.floci.core.common;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.cbor.CBORFactory;
+import io.github.hectorvent.floci.testing.RestAssuredJsonUtils;
 import io.quarkus.test.junit.QuarkusTest;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 
 import static io.restassured.RestAssured.given;
@@ -26,6 +28,11 @@ class SmithyRpcV2RoutingIntegrationTest {
 
     private static final ObjectMapper CBOR_MAPPER = new ObjectMapper(new CBORFactory());
     private static final ObjectMapper JSON_MAPPER = new ObjectMapper();
+
+    @BeforeAll
+    static void configureContentTypes() {
+        RestAssuredJsonUtils.configureAwsContentTypes();
+    }
 
     @Test
     void dynamoDbRoutesViaTargetPrefixServiceName() throws Exception {
@@ -148,6 +155,23 @@ class SmithyRpcV2RoutingIntegrationTest {
         .then()
             .statusCode(200)
             .header("smithy-protocol", equalTo("rpc-v2-cbor"));
+    }
+
+    @Test
+    void straySmithyHeaderOutsideRpcV2PathDoesNotRewriteContentType() {
+        // A Smithy-Protocol header on a non-rpcv2 path must not trigger content
+        // type normalization: later filters (e.g. S3VirtualHostFilter) rely on
+        // seeing the original management content type, and the request must
+        // still reach its normal JSON controller.
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("Smithy-Protocol", "rpc-v2-cbor")
+            .header("X-Amz-Target", "AmazonSSM.DescribeParameters")
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
     }
 
     @Test
