@@ -22,6 +22,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 /**
  * Manages Docker container lifecycle operations including create, start, stop, and remove.
@@ -259,6 +260,27 @@ public class ContainerLifecycleManager {
         }
 
         return new ContainerInfo(containerId, endpoints);
+    }
+
+    /**
+     * Returns the host port a container's internal port is published on, independent of
+     * whether Floci itself runs inside a container. Unlike {@code adopt}'s endpoints —
+     * which switch to container-IP + internal port in container mode — this always reads
+     * the port binding, for URIs consumed by the host-side Docker daemon.
+     */
+    public OptionalInt publishedHostPort(String containerId, int containerPort) {
+        InspectContainerResponse inspect = dockerClient.inspectContainerCmd(containerId).exec();
+        Ports ports = inspect.getNetworkSettings().getPorts();
+        if (ports != null) {
+            Ports.Binding[] binding = ports.getBindings().get(ExposedPort.tcp(containerPort));
+            if (binding != null && binding.length > 0) {
+                try {
+                    return OptionalInt.of(Integer.parseInt(binding[0].getHostPortSpec()));
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+        return OptionalInt.empty();
     }
 
     /**

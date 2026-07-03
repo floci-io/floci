@@ -9,11 +9,15 @@ import io.github.hectorvent.floci.core.common.docker.ContainerLogStreamer;
 import io.github.hectorvent.floci.core.common.docker.CurrentContainerNetworkResolver;
 import io.github.hectorvent.floci.core.common.docker.ContainerSpec;
 import io.github.hectorvent.floci.core.common.docker.PortAllocator;
+import com.github.dockerjava.api.model.Container;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -99,5 +103,41 @@ class EcrRegistryManagerTest {
         when(containerDetector.isRunningInContainer()).thenReturn(true);
 
         assertEquals("http://" + REGISTRY_NAME + ":5000", manager.httpClient().baseUrl());
+    }
+
+    @Test
+    void adoptUsesPublishedHostPortEvenWhenRunningInsideDocker() {
+        // Regression: in container mode adopt()'s endpoint resolves to the registry's
+        // internal port (5000); the advertised proxy endpoint must use the published
+        // host binding instead, or docker login from the host daemon fails.
+        when(containerDetector.isRunningInContainer()).thenReturn(true);
+        Container existing = Mockito.mock(Container.class);
+        when(existing.getId()).thenReturn("0123456789abcdef");
+        when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef",
+                        Map.of(5000, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 5000))));
+        when(lifecycleManager.publishedHostPort("0123456789abcdef", 5000))
+                .thenReturn(OptionalInt.of(BASE_PORT + 1));
+
+        manager.ensureStarted();
+
+        assertEquals(BASE_PORT + 1, manager.effectivePort());
+        assertEquals("http://localhost:" + (BASE_PORT + 1), manager.getProxyEndpoint());
+    }
+
+    @Test
+    void adoptKeepsConfiguredPortWhenNoPublishedBindingExists() {
+        Container existing = Mockito.mock(Container.class);
+        when(existing.getId()).thenReturn("0123456789abcdef");
+        when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
+        when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
+                .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef", Map.of()));
+        when(lifecycleManager.publishedHostPort("0123456789abcdef", 5000))
+                .thenReturn(OptionalInt.empty());
+
+        manager.ensureStarted();
+
+        assertEquals(BASE_PORT, manager.effectivePort());
     }
 }
