@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.s3;
 
 import static io.github.hectorvent.floci.services.s3.S3RequestParser.hasQueryParam;
 
+import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.AwsNamespaces;
 import io.github.hectorvent.floci.core.common.XmlBuilder;
@@ -119,8 +120,16 @@ public class S3Controller {
         }
         MultivaluedMap<String, String> queryParams = uriInfo.getQueryParameters();
         String action = queryParams.getFirst("Action");
-        if ("ConfirmSubscription".equals(action)) {
-            String region = regionResolver.resolveRegion(httpHeaders);
+        // SNS emits SubscribeURL/UnsubscribeURL as plain GET links against the
+        // service root, which collides with the S3 ListBuckets endpoint. Delegate
+        // those confirmation/unsubscribe GETs to SNS before falling through to S3.
+        // The links are unsigned (no Authorization header), so the region must come
+        // from the region-bearing ARN they carry, not the request headers.
+        if ("ConfirmSubscription".equals(action) || "Unsubscribe".equals(action)) {
+            String snsArn = "Unsubscribe".equals(action)
+                    ? queryParams.getFirst("SubscriptionArn")
+                    : queryParams.getFirst("TopicArn");
+            String region = AwsArnUtils.regionOrDefault(snsArn, regionResolver.resolveRegion(httpHeaders));
             return snsQueryHandler.handle(action, queryParams, region);
         }
         // A browser hitting the root endpoint (Accept: text/html) gets the Floci

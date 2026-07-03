@@ -18,6 +18,7 @@ import java.util.Map;
 
 import static io.restassured.RestAssured.given;
 import static org.hamcrest.Matchers.containsString;
+import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
@@ -320,6 +321,83 @@ class SnsHttpDeliveryIntegrationTest {
         awaitRequests(1);
         assertEquals(1, receivedRequests.size());
         assertEquals("Notification", firstHeader(receivedRequests.get(0).headers(), "X-amz-sns-message-type"));
+    }
+
+    @Test
+    void unsubscribeUrl_getRoutesToSnsAndRemovesSubscription() throws Exception {
+        receivedRequests.clear();
+        String endpoint = "http://localhost:" + httpPort + "/webhook";
+        // Pin the subscription to a non-default region. The SubscribeURL/UnsubscribeURL
+        // links SNS emits are unsigned, so the delegation must recover this region from
+        // the ARN in the link, not from the (absent) request auth.
+        String snsAuth = "AWS4-HMAC-SHA256 Credential=000000000000/20260101/us-west-2/sns/aws4_request";
+
+        String topicArn = given()
+            .header("Authorization", snsAuth)
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "CreateTopic")
+            .formParam("Name", "http-unsubscribe-url-get-test")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .extract().xmlPath().getString("CreateTopicResponse.CreateTopicResult.TopicArn");
+        assertTrue(topicArn.contains(":us-west-2:"), "topic should live in us-west-2");
+
+        given()
+            .header("Authorization", snsAuth)
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "Subscribe")
+            .formParam("TopicArn", topicArn)
+            .formParam("Protocol", "http")
+            .formParam("Endpoint", endpoint)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SubscriptionArn>"));
+
+        awaitRequests(1);
+        assertEquals(1, receivedRequests.size());
+        JsonNode confirmation = objectMapper.readTree(receivedRequests.get(0).body());
+
+        // Confirm via the SubscribeURL GET (unsigned) to obtain a real SubscriptionArn.
+        // Region is recovered from the TopicArn, so the pending sub in us-west-2 is found.
+        String subscriptionArn = given()
+            .queryParam("Action", "ConfirmSubscription")
+            .queryParam("TopicArn", confirmation.get("TopicArn").asText())
+            .queryParam("Token", confirmation.get("Token").asText())
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("<SubscriptionArn>"))
+            .extract().xmlPath().getString("ConfirmSubscriptionResponse.ConfirmSubscriptionResult.SubscriptionArn");
+
+        // Following the UnsubscribeURL is a plain GET on the service root. It must
+        // reach SNS (UnsubscribeResponse), not fall through to S3 ListBuckets, and
+        // its region must come from the SubscriptionArn (us-west-2), not the default.
+        given()
+            .queryParam("Action", "Unsubscribe")
+            .queryParam("SubscriptionArn", subscriptionArn)
+        .when()
+            .get("/")
+        .then()
+            .statusCode(200)
+            .body(containsString("UnsubscribeResponse"))
+            .body(not(containsString("ListAllMyBucketsResult")));
+
+        // The unsubscribe took effect: the subscription is no longer listed.
+        given()
+            .header("Authorization", snsAuth)
+            .contentType("application/x-www-form-urlencoded")
+            .formParam("Action", "ListSubscriptionsByTopic")
+            .formParam("TopicArn", topicArn)
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body(not(containsString(subscriptionArn)));
     }
 
     @Test
