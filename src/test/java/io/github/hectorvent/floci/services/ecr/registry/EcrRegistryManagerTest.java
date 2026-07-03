@@ -17,7 +17,6 @@ import org.mockito.Mockito;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalInt;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -116,9 +115,8 @@ class EcrRegistryManagerTest {
         when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
         when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef",
-                        Map.of(5000, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 5000))));
-        when(lifecycleManager.publishedHostPort("0123456789abcdef", 5000))
-                .thenReturn(OptionalInt.of(BASE_PORT + 1));
+                        Map.of(5000, new ContainerLifecycleManager.EndpointInfo("172.17.0.5", 5000)),
+                        Map.of(5000, BASE_PORT + 1)));
 
         manager.ensureStarted();
 
@@ -133,8 +131,6 @@ class EcrRegistryManagerTest {
         when(lifecycleManager.findByName(REGISTRY_NAME)).thenReturn(Optional.of(existing));
         when(lifecycleManager.adopt("0123456789abcdef", List.of(5000)))
                 .thenReturn(new ContainerLifecycleManager.ContainerInfo("0123456789abcdef", Map.of()));
-        when(lifecycleManager.publishedHostPort("0123456789abcdef", 5000))
-                .thenReturn(OptionalInt.empty());
 
         manager.ensureStarted();
 
