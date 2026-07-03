@@ -1,6 +1,7 @@
 package io.github.hectorvent.floci.services.cloudwatch.logs;
 
 import io.github.hectorvent.floci.core.common.AwsErrorResponse;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogEvent;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogGroup;
 import io.github.hectorvent.floci.services.cloudwatch.logs.model.LogStream;
@@ -203,6 +204,15 @@ public class CloudWatchLogsHandler {
     // ──────────────────────────── Logs Insights Queries ────────────────────────────
 
     private Response handleStartQuery(JsonNode request, String region) {
+        // AWS requires exactly one of logGroupName / logGroupNames / logGroupIdentifiers.
+        // The zero-selector case is enforced by the service (it throws when the resolved group
+        // list is empty); here we reject the other invalid shape: more than one selector type.
+        if (presentSelectorCount(request) > 1) {
+            throw new AwsException("InvalidParameterException",
+                    "Exactly one of logGroupName, logGroupNames, or logGroupIdentifiers may be specified.",
+                    400);
+        }
+
         List<String> logGroupNames = new ArrayList<>();
         request.path("logGroupNames").forEach(n -> logGroupNames.add(extractLogGroupNameFromArn(n.asText())));
         if (request.has("logGroupName")) {
@@ -219,6 +229,28 @@ public class CloudWatchLogsHandler {
         ObjectNode response = objectMapper.createObjectNode();
         response.put("queryId", queryId);
         return Response.ok(response).build();
+    }
+
+    /**
+     * Counts how many of the three mutually exclusive StartQuery log-group selectors are present:
+     * {@code logGroupName} (a non-blank string), {@code logGroupNames} and {@code logGroupIdentifiers}
+     * (arrays with at least one element). An absent, blank, or empty-array selector does not count,
+     * so a client that sends {@code "logGroupNames": []} alongside a real {@code logGroupName} is not
+     * wrongly rejected.
+     */
+    private int presentSelectorCount(JsonNode request) {
+        int count = 0;
+        JsonNode name = request.path("logGroupName");
+        if (name.isTextual() && !name.asText().isBlank()) {
+            count++;
+        }
+        if (request.path("logGroupNames").isArray() && request.path("logGroupNames").size() > 0) {
+            count++;
+        }
+        if (request.path("logGroupIdentifiers").isArray() && request.path("logGroupIdentifiers").size() > 0) {
+            count++;
+        }
+        return count;
     }
 
     private Response handleGetQueryResults(JsonNode request, String region) {

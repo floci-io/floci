@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import io.github.hectorvent.floci.core.common.AwsException;
 import io.github.hectorvent.floci.core.common.RegionResolver;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import jakarta.ws.rs.core.Response;
@@ -15,6 +16,7 @@ import static org.hamcrest.Matchers.containsString;
 import static org.hamcrest.Matchers.is;
 import static org.hamcrest.Matchers.not;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -251,5 +253,24 @@ class CloudWatchLogsHandlerTest {
                 .path("logStreams").get(0).path("arn").asText();
         assertTrue(arn.contains(":log-stream:" + STREAM));
         assertThat(arn, not(containsString(":*")));
+    }
+
+    // ──────────────────────────── StartQuery selector validation ────────────────────────────
+
+    @Test
+    void startQueryWithMultipleSelectorTypesThrowsInvalidParameter() {
+        // AWS requires exactly one of logGroupName / logGroupNames / logGroupIdentifiers.
+        // Supplying two selector types (here: logGroupName + logGroupIdentifiers) must be rejected
+        // with InvalidParameterException rather than silently querying the union of both.
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", GROUP);
+        request.putArray("logGroupIdentifiers").add(GROUP_ARN);
+        request.put("startTime", 0L);
+        request.put("endTime", 1L);
+        request.put("queryString", "fields @message");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("StartQuery", request, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
     }
 }
