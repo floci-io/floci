@@ -91,7 +91,12 @@ class SesV2IntegrationTest {
             .body("EmailIdentities.find { it.IdentityName == 'v2sender@example.com' }.VerificationStatus",
                     equalTo("SUCCESS"))
             .body("EmailIdentities.find { it.IdentityName == 'v2example.com' }.VerificationStatus",
-                    equalTo("PENDING"));
+                    equalTo("PENDING"))
+            // SendingEnabled tracks verification: SUCCESS -> true, PENDING -> false (matches AWS).
+            .body("EmailIdentities.find { it.IdentityName == 'v2sender@example.com' }.SendingEnabled",
+                    equalTo(true))
+            .body("EmailIdentities.find { it.IdentityName == 'v2example.com' }.SendingEnabled",
+                    equalTo(false));
     }
 
     @Test

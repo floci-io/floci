@@ -139,7 +139,7 @@ public class SesController {
             ObjectNode item = objectMapper.createObjectNode();
             item.put("IdentityType", toV2IdentityType(current.getIdentityType()));
             item.put("IdentityName", current.getIdentity());
-            item.put("SendingEnabled", true);
+            item.put("SendingEnabled", "Success".equals(current.getVerificationStatus()));
             item.put("VerificationStatus", toV2Status(current.getVerificationStatus()));
             items.add(item);
         }

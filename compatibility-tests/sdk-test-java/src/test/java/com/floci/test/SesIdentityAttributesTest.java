@@ -190,6 +190,9 @@ class SesIdentityAttributesTest {
             // Regression: VerificationStatus used to be null in the list response.
             assertThat(emailIdentity.verificationStatus()).isEqualTo(VerificationStatus.SUCCESS);
             assertThat(domainIdentity.verificationStatus()).isEqualTo(VerificationStatus.PENDING);
+            // SendingEnabled tracks verification status on AWS: SUCCESS -> true, PENDING -> false.
+            assertThat(emailIdentity.sendingEnabled()).isTrue();
+            assertThat(domainIdentity.sendingEnabled()).isFalse();
         } finally {
             sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(email).build());
             sesV2.deleteEmailIdentity(DeleteEmailIdentityRequest.builder().emailIdentity(domain).build());
