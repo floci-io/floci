@@ -672,17 +672,16 @@ The [`compatibility-tests`](./compatibility-tests/) directory validates Floci ac
 
 | Module | Language / Tool | SDK / Client | Tests |
 |---|---|---|---:|
-| `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 899 |
-| `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 366 |
-| `sdk-test-python` | Python 3 | boto3 | 272 |
-| `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 145 |
-| `sdk-test-awscli` | Bash | AWS CLI v2 | 152 |
-| `sdk-test-rust` | Rust | AWS SDK for Rust | 90 |
-| `compat-terraform` | Terraform | v1.10+ | 14 |
-| `compat-opentofu` | OpenTofu | v1.9+ | 14 |
-| `compat-cdk` | AWS CDK | v2+ | 17 |
+| `sdk-test-java` | Java 17 | AWS SDK for Java v2 | 1,326 |
+| `sdk-test-node` | Node.js | AWS SDK for JavaScript v3 | 449 |
+| `sdk-test-python` | Python 3 | boto3 | 311 |
+| `sdk-test-go` | Go | AWS SDK for Go v2 + RDS Data API SDK v1 | 157 |
+| `sdk-test-awscli` | Bash | AWS CLI v2 | 205 |
+| `compat-terraform` | Terraform | v1.10+ | 22 |
+| `compat-opentofu` | OpenTofu | v1.9+ | 16 |
+| `compat-cdk` | AWS CDK | v2+ | 20 |
 
-**1,969 automated compatibility tests across 6 SDKs and 3 IaC tools.**
+**2,506 automated compatibility tests across 5 SDKs and 3 IaC tools.**
 
 ## Migrating from LocalStack
 

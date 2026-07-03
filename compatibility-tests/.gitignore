@@ -39,7 +39,6 @@ test-results/
 test-results.xml
 
 # Rust
-sdk-test-rust/target/
 
 # Go binaries
 sdk-test-go/floci-sdk-test-go
