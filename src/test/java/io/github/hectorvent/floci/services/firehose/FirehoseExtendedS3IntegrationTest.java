@@ -242,6 +242,66 @@ class FirehoseExtendedS3IntegrationTest {
 
     @Test
     @Order(8)
+    void updateDestinationRejectsPartialBufferingHintsAndDoesNotBumpVersion() {
+        // AWS requires SizeInMBs and IntervalInSeconds to be specified together
+        // (firehose service-2.json BufferingHints member docs).
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "UpdateDestination")
+            .body("""
+                    {
+                      "DeliveryStreamName": "%s",
+                      "CurrentDeliveryStreamVersionId": "2",
+                      "DestinationId": "destinationId-000000000001",
+                      "ExtendedS3DestinationUpdate": {
+                        "BufferingHints": { "SizeInMBs": 16 }
+                      }
+                    }
+                    """.formatted(STREAM_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + STREAM_NAME + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.VersionId", equalTo("2"))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.SizeInMBs", equalTo(128))
+            .body("DeliveryStreamDescription.Destinations[0].ExtendedS3DestinationDescription.BufferingHints.IntervalInSeconds", equalTo(60));
+    }
+
+    @Test
+    @Order(9)
+    void createDeliveryStreamRejectsPartialBufferingHints() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "CreateDeliveryStream")
+            .body("""
+                    {
+                      "DeliveryStreamName": "partial-hints-stream",
+                      "ExtendedS3DestinationConfiguration": {
+                        "RoleARN": "%s",
+                        "BucketARN": "%s",
+                        "BufferingHints": { "IntervalInSeconds": 60 }
+                      }
+                    }
+                    """.formatted(ROLE_ARN, BUCKET_ARN))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
+
+    @Test
+    @Order(10)
     void updateDestinationRejectsUnknownDestinationId() {
         given()
             .contentType(CONTENT_TYPE)

@@ -160,7 +160,16 @@ public class DeliveryStreamDescription {
                 encryptionConfiguration = EncryptionConfiguration.noEncryption();
             }
             if (bufferingHints == null) {
-                bufferingHints = new BufferingHints();
+                bufferingHints = BufferingHints.defaults();
+            } else {
+                // Self-heal legacy persisted state; validation keeps partial
+                // hints out of the create/update paths.
+                if (bufferingHints.getSizeInMBs() == null) {
+                    bufferingHints.setSizeInMBs(5);
+                }
+                if (bufferingHints.getIntervalInSeconds() == null) {
+                    bufferingHints.setIntervalInSeconds(300);
+                }
             }
         }
 
@@ -206,19 +215,33 @@ public class DeliveryStreamDescription {
         public void setAwsKmsKeyArn(String awsKmsKeyArn) { this.awsKmsKeyArn = awsKmsKeyArn; }
     }
 
+    /**
+     * Members stay boxed and null-honest so validation can tell "not specified"
+     * from a value: AWS requires SizeInMBs and IntervalInSeconds to be specified
+     * together, and the defaults (5 MiB / 300 s) apply only when the whole
+     * object is absent.
+     */
     @RegisterForReflection
     @JsonIgnoreProperties(ignoreUnknown = true)
     public static class BufferingHints {
         @JsonProperty("SizeInMBs")
-        private int sizeInMBs = 5;
+        private Integer sizeInMBs;
         @JsonProperty("IntervalInSeconds")
-        private int intervalInSeconds = 300;
+        private Integer intervalInSeconds;
 
         public BufferingHints() {}
-        public int getSizeInMBs() { return sizeInMBs; }
-        public void setSizeInMBs(int sizeInMBs) { this.sizeInMBs = sizeInMBs; }
-        public int getIntervalInSeconds() { return intervalInSeconds; }
-        public void setIntervalInSeconds(int intervalInSeconds) { this.intervalInSeconds = intervalInSeconds; }
+
+        public static BufferingHints defaults() {
+            BufferingHints hints = new BufferingHints();
+            hints.sizeInMBs = 5;
+            hints.intervalInSeconds = 300;
+            return hints;
+        }
+
+        public Integer getSizeInMBs() { return sizeInMBs; }
+        public void setSizeInMBs(Integer sizeInMBs) { this.sizeInMBs = sizeInMBs; }
+        public Integer getIntervalInSeconds() { return intervalInSeconds; }
+        public void setIntervalInSeconds(Integer intervalInSeconds) { this.intervalInSeconds = intervalInSeconds; }
     }
 
     public List<Tag> getTags() {

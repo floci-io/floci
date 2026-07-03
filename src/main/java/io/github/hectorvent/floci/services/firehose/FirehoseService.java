@@ -50,6 +50,7 @@ public class FirehoseService {
 
     public String createDeliveryStream(String name, S3Destination s3Config, List<DeliveryStreamDescription.Tag> tags,
                                        String deliveryStreamType) {
+        validateBufferingHints(s3Config);
         String arn = AwsArnUtils.Arn.of("firehose", regionResolver.getDefaultRegion(), regionResolver.getAccountId(), "deliverystream/" + name).toString();
         DeliveryStreamDescription description = new DeliveryStreamDescription(name, arn, s3Config);
         description.setAccountId(regionResolver.getAccountId());
@@ -81,6 +82,7 @@ public class FirehoseService {
             throw new AwsException("InvalidArgumentException",
                     "A destination update is required for UpdateDestination.", 400);
         }
+        validateBufferingHints(update);
         S3Destination current = destination.getExtendedS3DestinationDescription();
         if (current == null) {
             update.applyDefaults();
@@ -102,6 +104,25 @@ public class FirehoseService {
             return Long.parseLong(versionId);
         } catch (NumberFormatException e) {
             return 0L;
+        }
+    }
+
+    /**
+     * AWS requires SizeInMBs and IntervalInSeconds to be specified together:
+     * "This parameter is optional but if you specify a value for it, you must
+     * also specify a value for IntervalInSeconds, and vice versa" (firehose
+     * service-2.json). Rejecting partial hints here is what keeps the
+     * whole-object replacement in mergeDestination faithful to AWS.
+     */
+    private static void validateBufferingHints(S3Destination config) {
+        DeliveryStreamDescription.BufferingHints hints = config == null ? null : config.getBufferingHints();
+        if (hints == null) {
+            return;
+        }
+        if ((hints.getSizeInMBs() == null) != (hints.getIntervalInSeconds() == null)) {
+            throw new AwsException("InvalidArgumentException",
+                    "If you specify a value for SizeInMBs, you must also specify a value for IntervalInSeconds, and vice versa.",
+                    400);
         }
     }
 
