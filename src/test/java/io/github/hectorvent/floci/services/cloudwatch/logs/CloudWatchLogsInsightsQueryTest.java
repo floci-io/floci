@@ -194,6 +194,38 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void startQueryWithNoLogGroupThrowsInvalidParameter() {
+        long startSec = BASE_MS / 1000 - 10;
+        // No usable selector (empty list, or only blank names) is an invalid request, not an empty success.
+        AwsException empty = assertThrows(AwsException.class, () ->
+                service.startQuery(List.of(), startSec, startSec + 86400, APP_QUERY, null, REGION));
+        assertEquals("InvalidParameterException", empty.getErrorCode());
+
+        AwsException blank = assertThrows(AwsException.class, () ->
+                service.startQuery(List.of("  ", ""), startSec, startSec + 86400, APP_QUERY, null, REGION));
+        assertEquals("InvalidParameterException", blank.getErrorCode());
+    }
+
+    @Test
+    void filterValueContainingEqualsIsNotMisparsed() {
+        String group = "connectors/equals";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        putRaw(service, group, stream, BASE_MS + 1000, idLog("REQ==42", "eq"));
+        putRaw(service, group, stream, BASE_MS + 2000, idLog("REQ-1", "other"));
+
+        // '==' inside the quoted value must not be taken as the filter operator; the real '=' wins.
+        String query = "fields @message, params.id | filter params.id = 'REQ==42'";
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(1, state.rows().size(), "the value-embedded '==' did not break operator parsing");
+        assertEquals("REQ==42", state.rows().get(0).get("params.id"));
+    }
+
+    @Test
     void queryResolvesNestedJsonObjectsAndDeepPaths() {
         String group = "/app/build/publish-logs";
         String stream = "publisher-1";

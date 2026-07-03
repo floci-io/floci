@@ -511,6 +511,12 @@ public class CloudWatchLogsService {
                 .filter(g -> g != null && !g.isBlank())
                 .distinct()
                 .toList();
+        if (distinctGroups.isEmpty()) {
+            // AWS StartQuery requires a log-group selector; an empty or all-blank one is an invalid
+            // request, not a valid query that happens to match nothing.
+            throw new AwsException("InvalidParameterException",
+                    "StartQuery must specify at least one log group.", 400);
+        }
 
         List<LogEvent> gathered = new ArrayList<>();
         for (String groupName : distinctGroups) {

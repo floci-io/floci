@@ -142,13 +142,28 @@ final class LogsInsightsQuery {
     }
 
     private static Filter parseFilter(String expr) {
-        // '!=' must be checked before '=' so it is not mis-parsed as equality.
-        for (String op : new String[] {"!=", "==", "="}) {
-            int idx = expr.indexOf(op);
-            if (idx > 0) {
-                String field = expr.substring(0, idx).trim();
-                String value = unquote(expr.substring(idx + op.length()).trim());
-                return new Filter(field, op.equals("!="), value);
+        // Scan for the operator OUTSIDE any quoted value, taking the leftmost one and checking
+        // '!=' / '==' before '='. This avoids mistaking an operator inside a quoted literal
+        // (e.g. filter x = 'a==b') for the real one.
+        char quote = 0;
+        for (int i = 0; i < expr.length(); i++) {
+            char c = expr.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                }
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+            } else if (i > 0) {
+                String op = expr.startsWith("!=", i) ? "!="
+                        : expr.startsWith("==", i) ? "=="
+                        : c == '=' ? "="
+                        : null;
+                if (op != null) {
+                    String field = expr.substring(0, i).trim();
+                    String value = unquote(expr.substring(i + op.length()).trim());
+                    return new Filter(field, op.equals("!="), value);
+                }
             }
         }
         LOG.warnv("Ignoring unsupported Logs Insights filter: {0}", expr);
