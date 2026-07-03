@@ -383,6 +383,62 @@ class S3IntegrationTest {
 
     @Test
     @Order(21)
+    void copyObjectWithQuestionMarkInSourceKeySucceeds() {
+        String sourceBucket = "copy-question-source-bucket";
+        String destBucket = "copy-question-dest-bucket";
+        String srcKey = "folder/file with question ?.txt";
+        String encodedSrcKey = "folder/file%20with%20question%20%3F.txt";
+
+        given().put("/" + sourceBucket).then().statusCode(200);
+        given().put("/" + destBucket).then().statusCode(200);
+
+        given()
+            .contentType("text/plain")
+            .body("copy test")
+        .when()
+            .put("/" + sourceBucket + "/" + srcKey)
+        .then()
+            .statusCode(200);
+
+        given()
+            .header("x-amz-copy-source", "/" + sourceBucket + "/" + encodedSrcKey)
+        .when()
+            .put("/" + destBucket + "/copied/encoded.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+            .header("x-amz-copy-source", "/" + sourceBucket + "/" + srcKey)
+        .when()
+            .put("/" + destBucket + "/copied/raw.txt")
+        .then()
+            .statusCode(200)
+            .body(containsString("CopyObjectResult"));
+
+        given()
+        .when()
+            .get("/" + destBucket + "/copied/encoded.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("copy test"));
+
+        given()
+        .when()
+            .get("/" + destBucket + "/copied/raw.txt")
+        .then()
+            .statusCode(200)
+            .body(equalTo("copy test"));
+
+        given().delete("/" + sourceBucket + "/" + srcKey);
+        given().delete("/" + destBucket + "/copied/encoded.txt");
+        given().delete("/" + destBucket + "/copied/raw.txt");
+        given().delete("/" + sourceBucket);
+        given().delete("/" + destBucket);
+    }
+
+    @Test
+    @Order(22)
     void copyObjectWithMalformedEncodedSourceReturns400() {
         given()
             .header("x-amz-copy-source", "/test-bucket/%ZZinvalid")
@@ -394,7 +450,7 @@ class S3IntegrationTest {
     }
 
     @Test
-    @Order(22)
+    @Order(23)
     void copyObjectWithEmptyBucketReturns400() {
         given()
             .header("x-amz-copy-source", "/key-only-no-bucket")
