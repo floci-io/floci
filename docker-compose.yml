@@ -21,6 +21,12 @@ services:
       FLOCI_HOSTNAME: floci
       FLOCI_BASE_URL: http://floci:4566
       FLOCI_SERVICES_LAMBDA_HOT_RELOAD_ENABLED: "true"
+      # Match the compatibility workflow (.github/workflows/compatibility.yml) so the
+      # local Docker test run exercises the same Floci configuration as CI.
+      # TLS proxy serves HTTP and HTTPS on the same port 4566 (first-byte sniffing),
+      # so no extra port mapping is needed — this is what makes the TLS/HTTPS suites pass.
+      FLOCI_TLS_ENABLED: "true"
+      FLOCI_SERVICES_EC2_MOCK: "true"
     networks:
       floci_default:
         aliases:
