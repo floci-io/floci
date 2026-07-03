@@ -505,11 +505,20 @@ public class CloudWatchLogsService {
         long startMs = startTimeSeconds * 1000L;
         long endMs = endTimeSeconds * 1000L;
 
+        // De-duplicate the requested groups (the same group can arrive via multiple selectors, e.g.
+        // logGroupNames + logGroupIdentifiers) so it is scanned — and counted — once, not twice.
+        List<String> distinctGroups = logGroupNames.stream()
+                .filter(g -> g != null && !g.isBlank())
+                .distinct()
+                .toList();
+
         List<LogEvent> gathered = new ArrayList<>();
-        for (String groupName : logGroupNames) {
-            if (groupName == null || groupName.isBlank()) {
-                continue;
-            }
+        for (String groupName : distinctGroups) {
+            // Real AWS StartQuery returns ResourceNotFoundException for a log group that does not exist,
+            // rather than a successful empty query; mirror that instead of silently scanning nothing.
+            groupStore.get(groupKey(region, groupName)).orElseThrow(() ->
+                    new AwsException("ResourceNotFoundException",
+                            "The specified log group does not exist: " + groupName, 400));
             String prefix = region + "::" + groupName + "::";
             for (LogEvent e : eventStore.scan(k -> k.startsWith(prefix))) {
                 if (e.getTimestamp() >= startMs && e.getTimestamp() <= endMs) {
@@ -526,7 +535,7 @@ public class CloudWatchLogsService {
         long completeAtMs = clock.getAsLong() + queryCompletionDelayMs;
         insightsQueries.put(queryId, new QueryRecord(rows, gathered.size(), completeAtMs));
         LOG.infov("Logs Insights query {0}: scanned {1} event(s) across {2} group(s) -> {3} row(s)",
-                queryId, gathered.size(), logGroupNames.size(), rows.size());
+                queryId, gathered.size(), distinctGroups.size(), rows.size());
         return queryId;
     }
 

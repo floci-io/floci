@@ -147,6 +147,53 @@ class CloudWatchLogsInsightsQueryTest {
     }
 
     @Test
+    void startQueryDeduplicatesRepeatedLogGroups() {
+        String group = "reporting/dedup";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        put(group, stream, BASE_MS + 1000, "INFO", "JOB-1", "once");
+
+        // The same group passed twice must be scanned once. A non-dedup query is used so a double
+        // scan would surface as duplicate rows and an inflated recordsScanned.
+        String query = "fields @message | filter params.job_id = 'JOB-1'";
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group, group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(1, state.rows().size(), "a repeated group is scanned once, not duplicated");
+        assertEquals(1, state.recordsScanned(), "scan count is not inflated by the repeated group");
+    }
+
+    @Test
+    void startQueryUnknownLogGroupThrowsResourceNotFound() {
+        // The group is never created.
+        long startSec = BASE_MS / 1000 - 10;
+        AwsException ex = assertThrows(AwsException.class, () ->
+                service.startQuery(List.of("/app/missing"), startSec, startSec + 86400, APP_QUERY, null, REGION));
+        assertEquals("ResourceNotFoundException", ex.getErrorCode());
+    }
+
+    @Test
+    void filterValueContainingPipeIsNotSplit() {
+        String group = "connectors/webhook";
+        String stream = "s-1";
+        createGroupStream(service, group, stream);
+        putRaw(service, group, stream, BASE_MS + 1000, idLog("REQ|42", "piped"));
+        putRaw(service, group, stream, BASE_MS + 2000, idLog("REQ-99", "other"));
+
+        // The '|' inside the quoted value must not split the query; the filter matches the literal id.
+        String query = "fields @message, params.id | filter params.id = 'REQ|42'";
+        long startSec = BASE_MS / 1000 - 10;
+        String queryId = service.startQuery(List.of(group), startSec, startSec + 86400, query, null, REGION);
+
+        CloudWatchLogsService.QueryState state = service.getQueryResults(queryId);
+        assertEquals("Complete", state.status());
+        assertEquals(1, state.rows().size(), "the pipe-containing value matched exactly one event");
+        assertEquals("REQ|42", state.rows().get(0).get("params.id"));
+    }
+
+    @Test
     void queryResolvesNestedJsonObjectsAndDeepPaths() {
         String group = "/app/build/publish-logs";
         String stream = "publisher-1";

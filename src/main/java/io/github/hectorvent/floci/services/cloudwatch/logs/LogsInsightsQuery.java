@@ -30,8 +30,8 @@ import java.util.Set;
  * {@code @ptr}, or a dotted path into the JSON log message (e.g. {@code params.job_id}, {@code level}).
  *
  * <p>This is intentionally <em>not</em> a full Insights implementation: unsupported commands
- * (e.g. {@code stats}, {@code parse}) are ignored with a warning, and pipe ({@code |}) characters
- * inside string literals are not supported as they do not occur in the queries we target.
+ * (e.g. {@code stats}, {@code parse}) are ignored with a warning. Pipes ({@code |}) inside quoted
+ * filter values are respected and do not split the query into stages.
  */
 final class LogsInsightsQuery {
 
@@ -54,7 +54,7 @@ final class LogsInsightsQuery {
     static LogsInsightsQuery parse(String queryString) {
         LogsInsightsQuery q = new LogsInsightsQuery();
         if (queryString != null && !queryString.isBlank()) {
-            for (String rawStage : queryString.split("\\|")) {
+            for (String rawStage : splitStages(queryString)) {
                 String stage = rawStage.trim();
                 if (stage.isEmpty()) {
                     continue;
@@ -70,6 +70,35 @@ final class LogsInsightsQuery {
             q.fields.add("@message");
         }
         return q;
+    }
+
+    /**
+     * Split a query into pipeline stages on {@code |}, ignoring pipes inside single- or double-quoted
+     * values (so {@code filter x = 'a|b'} stays one stage). Escaped quotes are not interpreted.
+     */
+    private static List<String> splitStages(String query) {
+        List<String> stages = new ArrayList<>();
+        StringBuilder current = new StringBuilder();
+        char quote = 0;
+        for (int i = 0; i < query.length(); i++) {
+            char c = query.charAt(i);
+            if (quote != 0) {
+                if (c == quote) {
+                    quote = 0;
+                }
+                current.append(c);
+            } else if (c == '\'' || c == '"') {
+                quote = c;
+                current.append(c);
+            } else if (c == '|') {
+                stages.add(current.toString());
+                current.setLength(0);
+            } else {
+                current.append(c);
+            }
+        }
+        stages.add(current.toString());
+        return stages;
     }
 
     private void applyStage(String cmd, String args) {
