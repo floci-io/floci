@@ -273,4 +273,20 @@ class CloudWatchLogsHandlerTest {
                 () -> handler.handle("StartQuery", request, REGION));
         assertEquals("InvalidParameterException", ex.getErrorCode());
     }
+
+    @Test
+    void startQueryWithBlankSelectorAlongsideRealOneIsRejected() {
+        // A serialized-but-blank logGroupName next to a real logGroupNames is still two selector fields,
+        // which AWS rejects — the guard must count serialized fields, not treat the blank one as absent.
+        ObjectNode request = MAPPER.createObjectNode();
+        request.put("logGroupName", "");
+        request.putArray("logGroupNames").add(GROUP);
+        request.put("startTime", 0L);
+        request.put("endTime", 1L);
+        request.put("queryString", "fields @message");
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> handler.handle("StartQuery", request, REGION));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
 }

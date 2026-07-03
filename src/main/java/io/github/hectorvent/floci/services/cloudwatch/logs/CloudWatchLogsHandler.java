@@ -232,22 +232,23 @@ public class CloudWatchLogsHandler {
     }
 
     /**
-     * Counts how many of the three mutually exclusive StartQuery log-group selectors are present:
-     * {@code logGroupName} (a non-blank string), {@code logGroupNames} and {@code logGroupIdentifiers}
-     * (arrays with at least one element). An absent, blank, or empty-array selector does not count,
-     * so a client that sends {@code "logGroupNames": []} alongside a real {@code logGroupName} is not
-     * wrongly rejected.
+     * Counts how many of the three mutually exclusive StartQuery log-group selector <em>fields</em> the
+     * request carries: {@code logGroupName}, {@code logGroupNames}, {@code logGroupIdentifiers}. A field
+     * counts if it is present at all — even a blank string or empty array — using the same presence rule
+     * ({@code has}) as the merge path below, so a serialized-but-empty selector cannot slip past the
+     * mutual-exclusivity check. A single empty/blank selector yields no groups and is rejected downstream
+     * by the service. (The AWS SDK omits unset list fields, so a well-formed single-selector request
+     * still carries exactly one field.)
      */
     private int presentSelectorCount(JsonNode request) {
         int count = 0;
-        JsonNode name = request.path("logGroupName");
-        if (name.isTextual() && !name.asText().isBlank()) {
+        if (request.has("logGroupName")) {
             count++;
         }
-        if (request.path("logGroupNames").isArray() && request.path("logGroupNames").size() > 0) {
+        if (request.has("logGroupNames")) {
             count++;
         }
-        if (request.path("logGroupIdentifiers").isArray() && request.path("logGroupIdentifiers").size() > 0) {
+        if (request.has("logGroupIdentifiers")) {
             count++;
         }
         return count;
