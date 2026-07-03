@@ -212,6 +212,36 @@ class FirehoseExtendedS3IntegrationTest {
 
     @Test
     @Order(7)
+    void updateDestinationWithoutUpdatePayloadIsRejectedAndDoesNotBumpVersion() {
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "UpdateDestination")
+            .body("""
+                    {
+                      "DeliveryStreamName": "%s",
+                      "CurrentDeliveryStreamVersionId": "2",
+                      "DestinationId": "destinationId-000000000001"
+                    }
+                    """.formatted(STREAM_NAME))
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        given()
+            .contentType(CONTENT_TYPE)
+            .header("X-Amz-Target", TARGET_PREFIX + "DescribeDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + STREAM_NAME + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamDescription.VersionId", equalTo("2"));
+    }
+
+    @Test
+    @Order(8)
     void updateDestinationRejectsUnknownDestinationId() {
         given()
             .contentType(CONTENT_TYPE)

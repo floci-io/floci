@@ -77,19 +77,32 @@ public class FirehoseService {
             throw new AwsException("InvalidArgumentException",
                     "Destination Id " + destinationId + " not found", 400);
         }
-        if (update != null) {
-            S3Destination current = destination.getExtendedS3DestinationDescription();
-            if (current == null) {
-                update.applyDefaults();
-                destination.setExtendedS3DestinationDescription(update);
-            } else {
-                mergeDestination(current, update);
-            }
+        if (update == null) {
+            throw new AwsException("InvalidArgumentException",
+                    "A destination update is required for UpdateDestination.", 400);
         }
-        stream.setVersionId(String.valueOf(Long.parseLong(stream.getVersionId()) + 1));
+        S3Destination current = destination.getExtendedS3DestinationDescription();
+        if (current == null) {
+            update.applyDefaults();
+            destination.setExtendedS3DestinationDescription(update);
+        } else {
+            mergeDestination(current, update);
+        }
+        stream.setVersionId(String.valueOf(parseVersionId(stream.getVersionId()) + 1));
         stream.setLastUpdateTimestamp(java.time.Instant.now());
         streamStore.put(name, stream);
         LOG.infov("Updated destination {0} of Firehose delivery stream {1}", destinationId, name);
+    }
+
+    // A corrupt persisted version can only reach here when the caller echoed it
+    // (the equality check above passed), so self-heal instead of failing with a 500
+    // or blaming the client.
+    private static long parseVersionId(String versionId) {
+        try {
+            return Long.parseLong(versionId);
+        } catch (NumberFormatException e) {
+            return 0L;
+        }
     }
 
     private static void mergeDestination(S3Destination current, S3Destination update) {
