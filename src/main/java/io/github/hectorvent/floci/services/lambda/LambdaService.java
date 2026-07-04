@@ -558,8 +558,9 @@ public class LambdaService {
         if (s3Service != null) {
             try {
                 s3Service.deleteObject(tasksBucketName(region), codeObjectKey(fn));
-            } catch (Exception ignored) {
-                // best-effort cleanup
+            } catch (Exception e) {
+                LOG.warnv("Could not delete deployment package for {0}: {1}",
+                        functionName, e.getMessage());
             }
         }
         LOG.infov("Deleted Lambda function: {0}", functionName);
