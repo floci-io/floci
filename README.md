@@ -782,6 +782,33 @@ Without this, services may return URLs using `localhost`, which points to the wr
 
 Join the Floci community on [Slack](https://join.slack.com/t/floci/shared_invite/zt-3tjn02s3q-A00kEjJ1cZxsg_imTfy6Cw) or [GitHub Discussions](https://github.com/orgs/floci-io/discussions). Feature ideas, compatibility questions, design tradeoffs, and rough proposals are welcome.
 
+## Sponsors
+
+Floci is independent open source, funded by its users. If Floci saves you time,
+consider [sponsoring the project](https://github.com/sponsors/floci-io) — every
+tier keeps the emulators fast, light, and free.
+
+### 🥇 Gold
+
+Large logo with top placement, a dedicated support channel, input on roadmap
+priorities, and custom integration help.
+
+*Your logo here — [become a Gold sponsor](https://github.com/sponsors/floci-io).*
+
+### 🥈 Silver
+
+Logo in this README and on floci.io, priority issue support, and a mention in
+release notes.
+
+*Your logo here — [become a Silver sponsor](https://github.com/sponsors/floci-io).*
+
+### 🥉 Community
+
+Name in this README, a sponsor badge on GitHub, and our sincere thanks.
+
+- [Nexxion.ai](https://github.com/Nexxion-ai)
+- [Your name here](https://github.com/sponsors/floci-io)
+
 ## Star History
 
 <p align="center">
