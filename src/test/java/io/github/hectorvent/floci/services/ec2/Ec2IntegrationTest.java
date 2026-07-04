@@ -61,8 +61,14 @@ class Ec2IntegrationTest {
     @Test
     @Order(1)
     void describeDefaultVpc() {
+        // Filter to the default VPC rather than assuming it is item[0] of an unfiltered list:
+        // DescribeVpcs returns every VPC in the store's iteration order, so a VPC left behind by
+        // another test class sharing the in-memory EC2 store could otherwise land at item[0] and
+        // flake this assertion (mirrors the approach in describeDefaultSecurityGroup).
         given()
             .formParam("Action", "DescribeVpcs")
+            .formParam("Filter.1.Name", "is-default")
+            .formParam("Filter.1.Value.1", "true")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
@@ -77,8 +83,13 @@ class Ec2IntegrationTest {
     @Test
     @Order(2)
     void describeDefaultSubnets() {
+        // Filter to the default VPC's subnets rather than assuming a default subnet is item[0]:
+        // another test class sharing the in-memory EC2 store may leave subnets in this region, so
+        // an unfiltered list could otherwise flake on ordering.
         given()
             .formParam("Action", "DescribeSubnets")
+            .formParam("Filter.1.Name", "vpc-id")
+            .formParam("Filter.1.Value.1", "vpc-default")
             .header("Authorization", AUTH_HEADER)
         .when()
             .post("/")
