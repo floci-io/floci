@@ -1435,10 +1435,13 @@ class CognitoServiceTest {
                 Map.of("PoolName", "TestPool", "UsernameAttributes", List.of("email")),
                 "us-east-1"
         );
-        service.adminCreateUser(pool.getId(), "bob", Map.of("email", "bob@example.com"), null);
+        // UsernameAttributes=email pools mint a UUID username; the supplied email is the alias.
+        CognitoUser created = service.adminCreateUser(pool.getId(), "bob@example.com",
+                Map.of("email", "bob@example.com"), null);
 
         CognitoUser found = service.adminGetUser(pool.getId(), "bob@example.com");
-        assertEquals("bob", found.getUsername());
+        assertEquals(created.getUsername(), found.getUsername());
+        assertEquals(found.getAttributes().get("sub"), found.getUsername());
     }
 
     @Test
@@ -1447,10 +1450,12 @@ class CognitoServiceTest {
                 Map.of("PoolName", "TestPool", "UsernameAttributes", List.of("phone_number")),
                 "us-east-1"
         );
-        service.adminCreateUser(pool.getId(), "bob", Map.of("phone_number", "+15551234567"), null);
+        CognitoUser created = service.adminCreateUser(pool.getId(), "+15551234567",
+                Map.of("phone_number", "+15551234567"), null);
 
         CognitoUser found = service.adminGetUser(pool.getId(), "+15551234567");
-        assertEquals("bob", found.getUsername());
+        assertEquals(created.getUsername(), found.getUsername());
+        assertEquals(found.getAttributes().get("sub"), found.getUsername());
     }
 
     @Test
@@ -2064,5 +2069,181 @@ class CognitoServiceTest {
                 ));
         assertEquals("InvalidParameterException", ex.getErrorCode());
 
+    }
+
+    // ──────── UsernameAttributes=email: immutable UUID username + mutable email alias ────────
+
+    private UserPool createEmailAliasPool() {
+        Map<String, Object> req = new HashMap<>();
+        req.put("PoolName", "EmailAliasPool");
+        req.put("UsernameAttributes", List.of("email"));
+        return service.createUserPool(req, "us-east-1");
+    }
+
+    private static boolean isUuid(String value) {
+        try {
+            java.util.UUID.fromString(value);
+            return true;
+        } catch (RuntimeException e) {
+            return false;
+        }
+    }
+
+    @Test
+    void emailAliasPoolMintsUuidUsernameEqualToSub() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser user = service.adminCreateUser(pool.getId(), "ew@gmail.com",
+                new HashMap<>(Map.of("email", "ew@gmail.com")), null);
+
+        assertTrue(isUuid(user.getUsername()), "canonical username must be a generated UUID");
+        assertEquals(user.getAttributes().get("sub"), user.getUsername(), "username must equal sub");
+        assertNotEquals("ew@gmail.com", user.getUsername());
+        assertEquals("ew@gmail.com", user.getAttributes().get("email"));
+    }
+
+    @Test
+    void emailAliasPoolResolvesByUuidAndByEmail() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser created = service.adminCreateUser(pool.getId(), "a@b.com",
+                new HashMap<>(Map.of("email", "a@b.com")), null);
+        String uuid = created.getUsername();
+
+        assertEquals(uuid, service.adminGetUser(pool.getId(), uuid).getUsername());
+        assertEquals(uuid, service.adminGetUser(pool.getId(), "a@b.com").getUsername());
+    }
+
+    @Test
+    void emailAliasPoolListUsersReturnsUuidUsername() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser created = service.adminCreateUser(pool.getId(), "list@b.com",
+                new HashMap<>(Map.of("email", "list@b.com")), null);
+
+        List<CognitoUser> users = service.listUsers(pool.getId(), null);
+        assertEquals(1, users.size());
+        assertEquals(created.getUsername(), users.get(0).getUsername());
+        assertTrue(isUuid(users.get(0).getUsername()));
+    }
+
+    @Test
+    void emailAliasPoolRejectsDuplicateEmail() {
+        UserPool pool = createEmailAliasPool();
+        service.adminCreateUser(pool.getId(), "dup@b.com",
+                new HashMap<>(Map.of("email", "dup@b.com")), null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminCreateUser(pool.getId(), "dup@b.com",
+                        new HashMap<>(Map.of("email", "dup@b.com")), null));
+        assertEquals("UsernameExistsException", ex.getErrorCode());
+    }
+
+    @Test
+    void emailAliasPoolRejectsNonEmailUsername() {
+        UserPool pool = createEmailAliasPool();
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminCreateUser(pool.getId(), "not-an-email", new HashMap<>(), null));
+        assertEquals("InvalidParameterException", ex.getErrorCode());
+    }
+
+    @Test
+    void emailAliasPoolEmailChangeRebindsSignInAndKeepsSub() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser created = service.adminCreateUser(pool.getId(), "old@b.com",
+                new HashMap<>(Map.of("email", "old@b.com")), null);
+        String uuid = created.getUsername();
+        String sub = created.getAttributes().get("sub");
+
+        service.adminUpdateUserAttributes(pool.getId(), uuid, Map.of("email", "new@b.com"));
+
+        assertEquals(uuid, service.adminGetUser(pool.getId(), "new@b.com").getUsername());
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminGetUser(pool.getId(), "old@b.com"));
+        assertEquals("UserNotFoundException", ex.getErrorCode());
+
+        CognitoUser after = service.adminGetUser(pool.getId(), uuid);
+        assertEquals(uuid, after.getUsername());
+        assertEquals(sub, after.getAttributes().get("sub"));
+        assertEquals("new@b.com", after.getAttributes().get("email"));
+    }
+
+    @Test
+    void emailAliasPoolRejectsEmailChangeToTakenEmail() {
+        UserPool pool = createEmailAliasPool();
+        service.adminCreateUser(pool.getId(), "taken@b.com",
+                new HashMap<>(Map.of("email", "taken@b.com")), null);
+        CognitoUser second = service.adminCreateUser(pool.getId(), "mover@b.com",
+                new HashMap<>(Map.of("email", "mover@b.com")), null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminUpdateUserAttributes(pool.getId(), second.getUsername(),
+                        Map.of("email", "taken@b.com")));
+        assertEquals("AliasExistsException", ex.getErrorCode());
+    }
+
+    @Test
+    void classicPoolKeepsLiteralUsername() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClassicPool"), "us-east-1");
+        CognitoUser user = service.adminCreateUser(pool.getId(), "bob",
+                new HashMap<>(Map.of("email", "bob@example.com")), null);
+
+        assertEquals("bob", user.getUsername());
+        assertNotEquals(user.getAttributes().get("sub"), user.getUsername());
+        assertEquals("bob", service.adminGetUser(pool.getId(), "bob").getUsername());
+    }
+
+    @Test
+    void emailAliasPoolIgnoresCallerSuppliedSub() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser user = service.adminCreateUser(pool.getId(), "hijack@b.com",
+                new HashMap<>(Map.of("email", "hijack@b.com", "sub", "attacker-controlled")), null);
+
+        assertNotEquals("attacker-controlled", user.getUsername());
+        assertNotEquals("attacker-controlled", user.getAttributes().get("sub"));
+        assertTrue(isUuid(user.getUsername()));
+        assertEquals(user.getUsername(), user.getAttributes().get("sub"));
+    }
+
+    @Test
+    void phoneAliasPoolTokenDoesNotLeakUuidAsEmailClaim() {
+        UserPool pool = service.createUserPool(
+                Map.of("PoolName", "PhonePool", "UsernameAttributes", List.of("phone_number")),
+                "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminCreateUser(pool.getId(), "+15551234567",
+                new HashMap<>(Map.of("phone_number", "+15551234567")), null);
+
+        String idToken = service.generateSignedJwt(user, pool, "id", client, null, null);
+        String segment = idToken.split("\\.")[1];
+        int pad = (4 - segment.length() % 4) % 4;
+        segment += "=".repeat(pad);
+        String payload = new String(Base64.getUrlDecoder().decode(segment), StandardCharsets.UTF_8);
+
+        assertTrue(payload.contains("\"sub\":\"" + user.getUsername() + "\""));
+        assertFalse(payload.contains("\"email\""),
+                "no email claim must be emitted for a user without an email attribute: " + payload);
+    }
+
+    @Test
+    void accessTokenOmitsEmailWhileIdTokenIncludesIt() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ClaimsPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        CognitoUser user = service.adminCreateUser(pool.getId(), "claims@example.com",
+                new HashMap<>(Map.of("email", "claims@example.com", "email_verified", "true")), null);
+
+        // AWS emits user attributes only in the ID token, never in the access token.
+        assertFalse(jwtPayload(service.generateSignedJwt(user, pool, "access", client, null, null))
+                        .contains("\"email\""),
+                "access token must not carry the email claim (AWS parity)");
+        assertTrue(jwtPayload(service.generateSignedJwt(user, pool, "id", client, null, null))
+                        .contains("\"email\":\"claims@example.com\""),
+                "id token must carry the email claim");
+    }
+
+    private static String jwtPayload(String token) {
+        String segment = token.split("\\.")[1];
+        int pad = (4 - segment.length() % 4) % 4;
+        segment += "=".repeat(pad);
+        return new String(Base64.getUrlDecoder().decode(segment), StandardCharsets.UTF_8);
     }
 }

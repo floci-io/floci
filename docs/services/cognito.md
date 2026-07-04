@@ -124,6 +124,29 @@ Standalone `TagResource` rejects reserved `floci:*` keys. `ListTagsForResource` 
 - It validates requested OAuth scopes against the app client's `AllowedOAuthScopes` and the pool's registered resource-server scopes.
 - It advertises the prefixed token endpoint in `/{userPoolId}/.well-known/openid-configuration`.
 
+## Sign-in Identifiers (`UsernameAttributes`)
+
+Floci follows real Cognito semantics for pools created with `UsernameAttributes` (e.g.
+`--username-attributes email`):
+
+- `AdminCreateUser`/`SignUp` accept the email (or phone number) as the sign-in value, but the
+  **canonical `Username` is an auto-generated, immutable UUID equal to `sub`**. The supplied email is
+  stored as a mutable alias attribute.
+- `ListUsers`, `AdminGetUser`, tokens (`sub`/`username`/`cognito:username`) and Lambda trigger
+  `event.userName` all report the **UUID**, never the email. The email appears in the `email`
+  attribute, in the **ID token's** `email` claim (AWS omits user attributes such as `email` from the
+  **access** token), and in `event.request.userAttributes.email`.
+- Sign-in resolves by the **current** email alias **or** the UUID. `SECRET_HASH` is validated against
+  the exact `USERNAME` value sent: `Base64(HMAC-SHA256(USERNAME + clientId, clientSecret))`.
+- In `CUSTOM_AUTH` / SRP flows, `ChallengeParameters.USERNAME` echoes the **UUID** (as real AWS does);
+  the `RespondToAuthChallenge` `SECRET_HASH` is validated against the `USERNAME` sent that round.
+- `AdminUpdateUserAttributes` can change the email; afterwards sign-in works with the new email and
+  fails with the old one, while `Username`/`sub` stay fixed. A duplicate email is rejected with
+  `UsernameExistsException` (on create) or `AliasExistsException` (on update).
+
+Pools **without** `UsernameAttributes` (classic pools, and pools using `AliasAttributes`) keep the
+literal `Username` you supply, unchanged.
+
 ## Configuration
 
 | Variable                         | Default | Description                   |

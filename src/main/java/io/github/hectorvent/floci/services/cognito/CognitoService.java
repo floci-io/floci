@@ -766,13 +766,22 @@ public class CognitoService {
                                        Map<String, String> attributes,
                                        String temporaryPassword,
                                        String messageAction) {
-        describeUserPool(userPoolId);
-        String key = userKey(userPoolId, username);
+        UserPool pool = describeUserPool(userPoolId);
         boolean resend = "RESEND".equalsIgnoreCase(messageAction);
+        boolean aliasPool = usesAliasUsernames(pool);
+
+        Map<String, String> resolvedAttributes = attributes == null
+                ? new HashMap<>() : new HashMap<>(attributes);
+        String aliasAttribute = aliasPool ? aliasAttributeForValue(pool, username) : null;
+
+        CognitoUser existing = aliasPool
+                ? findUserByAlias(userPoolId, aliasAttribute, username)
+                : userStore.get(userKey(userPoolId, username)).orElse(null);
 
         if (resend) {
-            CognitoUser existing = userStore.get(key)
-                    .orElseThrow(() -> new AwsException("UserNotFoundException", "User not found", 404));
+            if (existing == null) {
+                throw new AwsException("UserNotFoundException", "User not found", 404);
+            }
             if (!"FORCE_CHANGE_PASSWORD".equals(existing.getUserStatus())) {
                 final String userStateExceptionMessage = """
                         User is in %s state and cannot be resent an invitation.
@@ -780,21 +789,26 @@ public class CognitoService {
                 throw new AwsException("UnsupportedUserStateException", userStateExceptionMessage, 400);
             }
             existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
-            userStore.put(key, existing);
-            LOG.infov("Resent invitation for user {0} in pool {1}", username, userPoolId);
+            userStore.put(userKey(userPoolId, existing.getUsername()), existing);
+            LOG.infov("Resent invitation for user {0} in pool {1}", existing.getUsername(), userPoolId);
             return existing;
         }
 
-        if (userStore.get(key).isPresent()) {
+        if (existing != null) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
 
-        CognitoUser user = new CognitoUser();
-        user.setUsername(username);
-        user.setUserPoolId(userPoolId);
-        if (attributes != null) {
-            user.getAttributes().putAll(attributes);
+       String canonicalUsername = username;
+        if (aliasPool) {
+            resolvedAttributes.put(aliasAttribute, username);
+            canonicalUsername = UUID.randomUUID().toString();
+            resolvedAttributes.put("sub", canonicalUsername);
         }
+
+        CognitoUser user = new CognitoUser();
+        user.setUsername(canonicalUsername);
+        user.setUserPoolId(userPoolId);
+        user.getAttributes().putAll(resolvedAttributes);
 
         // Ensure sub attribute is present
         if (!user.getAttributes().containsKey("sub")) {
@@ -807,22 +821,37 @@ public class CognitoService {
             user.setUserStatus("FORCE_CHANGE_PASSWORD");
         }
 
-        userStore.put(key, user);
-        LOG.infov("Created user {0} in pool {1}", username, userPoolId);
+        userStore.put(userKey(userPoolId, canonicalUsername), user);
+        LOG.infov("Created user {0} in pool {1}", canonicalUsername, userPoolId);
         return user;
     }
 
     void adminCreateMigratedUser(String userPoolId, String username, String password,
                                   Map<String, String> attributes, String finalUserStatus) {
-        describeUserPool(userPoolId);
-        String key = userKey(userPoolId, username);
+        UserPool pool = describeUserPool(userPoolId);
+        boolean aliasPool = usesAliasUsernames(pool);
 
-        CognitoUser user = userStore.get(key).orElseGet(CognitoUser::new);
-        user.setUsername(username);
-        user.setUserPoolId(userPoolId);
-        if (attributes != null) {
-            user.getAttributes().putAll(attributes);
+        Map<String, String> resolvedAttributes = attributes == null
+                ? new HashMap<>() : new HashMap<>(attributes);
+
+        CognitoUser existing;
+        String canonicalUsername;
+        if (aliasPool) {
+            String aliasAttribute = aliasAttributeForValue(pool, username);
+            resolvedAttributes.put(aliasAttribute, username);
+            existing = findUserByAlias(userPoolId, aliasAttribute, username);
+            canonicalUsername = existing != null ? existing.getUsername()
+                    : resolvedAttributes.computeIfAbsent("sub", k -> UUID.randomUUID().toString());
+        } else {
+            canonicalUsername = username;
+            existing = userStore.get(userKey(userPoolId, username)).orElse(null);
         }
+        String key = userKey(userPoolId, canonicalUsername);
+
+        CognitoUser user = existing != null ? existing : new CognitoUser();
+        user.setUsername(canonicalUsername);
+        user.setUserPoolId(userPoolId);
+        user.getAttributes().putAll(resolvedAttributes);
         if (!user.getAttributes().containsKey("sub")) {
             user.getAttributes().put("sub", UUID.randomUUID().toString());
         }
@@ -835,27 +864,29 @@ public class CognitoService {
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
 
         userStore.put(key, user);
-        LOG.infov("Migrated user {0} into pool {1} (status={2})", username, userPoolId, user.getUserStatus());
+        LOG.infov("Migrated user {0} into pool {1} (status={2})", canonicalUsername, userPoolId, user.getUserStatus());
     }
 
     public void adminUserGlobalSignOut(String userPoolId, String username) {
         // Validate user exists
         CognitoUser user = adminGetUser(userPoolId, username);
-        
+
         // Revoke all tokens for this user
-        revokeAllUserTokens(userPoolId, username);
-        
-        LOG.infov("AdminUserGlobalSignOut: revoked all tokens for user {0} in pool {1}", username, userPoolId);
+        revokeAllUserTokens(userPoolId, user.getUsername());
+
+        LOG.infov("AdminUserGlobalSignOut: revoked all tokens for user {0} in pool {1}", user.getUsername(), userPoolId);
     }
 
     public CognitoUser adminGetUser(String userPoolId, String username) {
         UserPool pool = poolStore.get(userPoolId).orElseThrow(
                 () -> new AwsException("ResourceNotFoundException", "User pool not found", 400));
-        LinkedHashSet<CognitoUser> matches = new LinkedHashSet<>();
-        userStore.get(userKey(userPoolId, username)).ifPresent(matches::add);
+        LinkedHashMap<String, CognitoUser> matches = new LinkedHashMap<>();
+        userStore.get(userKey(userPoolId, username))
+                .ifPresent(u -> matches.put(u.getUsername(), u));
         String prefix = userPoolId + "::";
-        matches.addAll(userStore.scan(k -> k.startsWith(prefix)).stream()
-                .filter(u -> matchesAliasOrUsernameAttribute(pool, u, username)).toList());
+        userStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(u -> matchesAliasOrUsernameAttribute(pool, u, username))
+                .forEach(u -> matches.putIfAbsent(u.getUsername(), u));
         if (matches.isEmpty()) {
             throw new AwsException("UserNotFoundException", "User not found", 400);
         }
@@ -863,7 +894,7 @@ public class CognitoService {
             throw new AwsException("InvalidParameterException",
                     "Multiple users found for the supplied username", 400);
         }
-        return matches.getFirst();
+        return matches.values().iterator().next();
     }
 
     public void adminDeleteUser(String userPoolId, String username) {
@@ -890,6 +921,20 @@ public class CognitoService {
 
     public void adminUpdateUserAttributes(String userPoolId, String username, Map<String, String> attributes) {
         CognitoUser user = adminGetUser(userPoolId, username);
+        UserPool pool = describeUserPool(userPoolId);
+        if (usesAliasUsernames(pool)) {
+            for (String aliasAttribute : pool.getUsernameAttributes()) {
+                String newValue = attributes.get(aliasAttribute);
+                if (newValue == null || newValue.equals(user.getAttributes().get(aliasAttribute))) {
+                    continue;
+                }
+                CognitoUser other = findUserByAlias(userPoolId, aliasAttribute, newValue);
+                if (other != null && !other.getUsername().equals(user.getUsername())) {
+                    throw new AwsException("AliasExistsException",
+                            "An account with the given " + aliasAttribute + " already exists.", 400);
+                }
+            }
+        }
         user.getAttributes().putAll(attributes);
         user.setLastModifiedDate(System.currentTimeMillis() / 1000L);
         userStore.put(userKey(userPoolId, user.getUsername()), user);
@@ -1089,19 +1134,30 @@ public class CognitoService {
         String userPoolId = client.getUserPoolId();
         UserPool pool = describeUserPool(userPoolId);
 
-        String key = userKey(userPoolId, username);
-        if (userStore.get(key).isPresent()) {
+        boolean aliasPool = usesAliasUsernames(pool);
+        Map<String, String> resolvedAttributes = attributes == null
+                ? new HashMap<>() : new HashMap<>(attributes);
+        String canonicalUsername = username;
+        if (aliasPool) {
+            String aliasAttribute = aliasAttributeForValue(pool, username);
+            if (findUserByAlias(userPoolId, aliasAttribute, username) != null) {
+                throw new AwsException("UsernameExistsException", "User already exists", 400);
+            }
+            resolvedAttributes.put(aliasAttribute, username);
+            canonicalUsername = UUID.randomUUID().toString();
+            resolvedAttributes.put("sub", canonicalUsername);
+        } else if (userStore.get(userKey(userPoolId, username)).isPresent()) {
             throw new AwsException("UsernameExistsException", "User already exists", 400);
         }
 
+        String key = userKey(userPoolId, canonicalUsername);
+
         CognitoUser user = new CognitoUser();
-        user.setUsername(username);
+        user.setUsername(canonicalUsername);
         user.setUserPoolId(userPoolId);
         updateUserPassword(user, password);
         user.setUserStatus("UNCONFIRMED");
-        if (attributes != null) {
-            user.getAttributes().putAll(attributes);
-        }
+        user.getAttributes().putAll(resolvedAttributes);
 
         // Ensure sub attribute is present (required by PreSignUp event)
         if (!user.getAttributes().containsKey("sub")) {
@@ -1492,7 +1548,6 @@ public class CognitoService {
 
         Map<String, Object> claims = new LinkedHashMap<>();
         String sub = user.getAttributes().getOrDefault("sub", user.getUsername());
-        String email = user.getAttributes().getOrDefault("email", user.getUsername());
         claims.put("sub", sub);
         claims.put("event_id", UUID.randomUUID().toString());
         claims.put("token_use", type);
@@ -1501,7 +1556,6 @@ public class CognitoService {
         claims.put("exp", now + lifetimeSeconds);
         claims.put("iat", now);
         claims.put("username", user.getUsername());
-        claims.put("email", email);
         claims.put("cognito:username", user.getUsername());
         
         // Add JWT ID (jti) claim for token revocation support
@@ -2436,6 +2490,55 @@ public class CognitoService {
                     user.getAttributes().getOrDefault("phone_number_verified", "false"));
             default -> true;
         };
+    }
+
+    /**
+     * True when the pool is configured with {@code UsernameAttributes} (email and/or
+     * phone_number). Such pools mint an immutable, opaque username (a UUID equal to
+     * {@code sub}) and treat the caller-supplied email/phone as a mutable sign-in alias.
+     * Classic pools (no {@code UsernameAttributes}) keep the caller-supplied username verbatim.
+     */
+    private boolean usesAliasUsernames(UserPool pool) {
+        List<String> attributes = pool.getUsernameAttributes();
+        return attributes != null && !attributes.isEmpty();
+    }
+
+    /**
+     * Resolves which alias attribute ("email"/"phone_number") a supplied sign-in value maps
+     * to for an alias-configured pool, mirroring AWS's format validation. Throws
+     * {@code InvalidParameterException} when the value matches none of the pool's
+     * {@code UsernameAttributes}.
+     */
+    private String aliasAttributeForValue(UserPool pool, String value) {
+        List<String> usernameAttributes = pool.getUsernameAttributes();
+        boolean allowsEmail = usernameAttributes.contains("email");
+        boolean allowsPhone = usernameAttributes.contains("phone_number");
+        if (value != null) {
+            if (allowsEmail && value.contains("@")) {
+                return "email";
+            }
+            if (allowsPhone && value.matches("\\+[0-9]{1,15}")) {
+                return "phone_number";
+            }
+        }
+        String expected;
+        if (allowsEmail && allowsPhone) {
+            expected = "Username should be either an email or a phone number.";
+        } else if (allowsPhone) {
+            expected = "Username should be a phone number.";
+        } else {
+            expected = "Username should be an email.";
+        }
+        throw new AwsException("InvalidParameterException", expected, 400);
+    }
+
+    /** Finds the single user in a pool whose {@code aliasAttr} equals {@code aliasValue}, or null. */
+    private CognitoUser findUserByAlias(String poolId, String aliasAttr, String aliasValue) {
+        String prefix = poolId + "::";
+        return userStore.scan(k -> k.startsWith(prefix)).stream()
+                .filter(u -> aliasValue.equals(u.getAttributes().get(aliasAttr)))
+                .findFirst()
+                .orElse(null);
     }
 
     private List<String> accountRecoveryMechanisms(UserPool pool) {
