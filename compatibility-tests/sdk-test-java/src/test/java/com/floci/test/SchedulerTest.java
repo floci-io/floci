@@ -43,6 +43,10 @@ class SchedulerTest {
             } catch (Exception ignored) {}
             try {
                 scheduler.deleteSchedule(DeleteScheduleRequest.builder()
+                        .name("ecs-schedule").build());
+            } catch (Exception ignored) {}
+            try {
+                scheduler.deleteSchedule(DeleteScheduleRequest.builder()
                         .name("grouped-schedule").groupName(GROUP_NAME).build());
             } catch (Exception ignored) {}
             try {
@@ -327,6 +331,52 @@ class SchedulerTest {
 
     @Test
     @Order(20)
+    @DisplayName("CreateSchedule - with ECS target parameters")
+    void createScheduleWithEcsParameters() {
+        CreateScheduleResponse resp = scheduler.createSchedule(CreateScheduleRequest.builder()
+                .name("ecs-schedule")
+                .scheduleExpression("rate(1 day)")
+                .flexibleTimeWindow(FlexibleTimeWindow.builder().mode(FlexibleTimeWindowMode.OFF).build())
+                .state(ScheduleState.DISABLED)
+                .target(Target.builder()
+                        .arn("arn:aws:ecs:us-east-1:000000000000:cluster/proof")
+                        .roleArn("arn:aws:iam::000000000000:role/scheduler-role")
+                        .ecsParameters(EcsParameters.builder()
+                                .taskDefinitionArn("arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1")
+                                .launchType(LaunchType.FARGATE)
+                                .taskCount(1)
+                                .networkConfiguration(NetworkConfiguration.builder()
+                                        .awsvpcConfiguration(AwsVpcConfiguration.builder()
+                                                .subnets("subnet-a")
+                                                .securityGroups("sg-a")
+                                                .assignPublicIp(AssignPublicIp.DISABLED)
+                                                .build())
+                                        .build())
+                                .build())
+                        .build())
+                .build());
+
+        assertThat(resp.scheduleArn()).isNotNull().contains("ecs-schedule");
+
+        GetScheduleResponse get = scheduler.getSchedule(GetScheduleRequest.builder()
+                .name("ecs-schedule").build());
+        assertThat(get.target().ecsParameters().taskDefinitionArn())
+                .isEqualTo("arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1");
+        assertThat(get.target().ecsParameters().launchType()).isEqualTo(LaunchType.FARGATE);
+        assertThat(get.target().ecsParameters().taskCount()).isEqualTo(1);
+        assertThat(get.target().ecsParameters().networkConfiguration().awsvpcConfiguration().subnets())
+                .containsExactly("subnet-a");
+        assertThat(get.target().ecsParameters().networkConfiguration().awsvpcConfiguration().securityGroups())
+                .containsExactly("sg-a");
+        assertThat(get.target().ecsParameters().networkConfiguration().awsvpcConfiguration().assignPublicIp())
+                .isEqualTo(AssignPublicIp.DISABLED);
+
+        scheduler.deleteSchedule(DeleteScheduleRequest.builder()
+                .name("ecs-schedule").build());
+    }
+
+    @Test
+    @Order(21)
     @DisplayName("CreateSchedule - with StartDate and EndDate")
     void createScheduleWithStartAndEndDate() {
         Instant start = Instant.parse("2026-06-01T00:00:00Z");

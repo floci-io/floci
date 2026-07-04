@@ -407,6 +407,59 @@ class SchedulerIntegrationTest {
 
     @Test
     @Order(21)
+    void createScheduleWithEcsParametersRoundTrips() {
+        given()
+            .contentType("application/json")
+            .body("""
+                {
+                    "ScheduleExpression": "rate(1 day)",
+                    "FlexibleTimeWindow": {"Mode": "OFF"},
+                    "State": "DISABLED",
+                    "Target": {
+                        "Arn": "arn:aws:ecs:us-east-1:000000000000:cluster/proof",
+                        "RoleArn": "arn:aws:iam::000000000000:role/scheduler-role",
+                        "EcsParameters": {
+                            "TaskDefinitionArn": "arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1",
+                            "LaunchType": "FARGATE",
+                            "TaskCount": 1,
+                            "NetworkConfiguration": {
+                                "awsvpcConfiguration": {
+                                    "Subnets": ["subnet-a"],
+                                    "SecurityGroups": ["sg-a"],
+                                    "AssignPublicIp": "DISABLED"
+                                }
+                            }
+                        }
+                    }
+                }
+                """)
+        .when()
+            .post("/schedules/ecs-schedule")
+        .then()
+            .statusCode(200);
+
+        given()
+        .when()
+            .get("/schedules/ecs-schedule")
+        .then()
+            .statusCode(200)
+            .body("State", equalTo("DISABLED"))
+            .body("Target.EcsParameters.TaskDefinitionArn", equalTo("arn:aws:ecs:us-east-1:000000000000:task-definition/proof:1"))
+            .body("Target.EcsParameters.LaunchType", equalTo("FARGATE"))
+            .body("Target.EcsParameters.TaskCount", equalTo(1))
+            .body("Target.EcsParameters.NetworkConfiguration.awsvpcConfiguration.Subnets", contains("subnet-a"))
+            .body("Target.EcsParameters.NetworkConfiguration.awsvpcConfiguration.SecurityGroups", contains("sg-a"))
+            .body("Target.EcsParameters.NetworkConfiguration.awsvpcConfiguration.AssignPublicIp", equalTo("DISABLED"));
+
+        given()
+        .when()
+            .delete("/schedules/ecs-schedule")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(22)
     void createScheduleInGroup() {
         // First create the group
         given()
@@ -441,7 +494,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(22)
+    @Order(23)
     void createScheduleDuplicateReturns409() {
         given()
             .contentType("application/json")
@@ -459,7 +512,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(23)
+    @Order(24)
     void getSchedule() {
         given()
         .when()
@@ -478,7 +531,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(24)
+    @Order(25)
     void getScheduleInGroup() {
         given()
             .queryParam("groupName", "sched-test-group")
@@ -493,7 +546,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(25)
+    @Order(26)
     void getScheduleNotFoundReturns404() {
         given()
         .when()
@@ -503,7 +556,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(26)
+    @Order(27)
     void listSchedules() {
         given()
         .when()
@@ -515,7 +568,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(27)
+    @Order(28)
     void listSchedulesInGroup() {
         given()
             .queryParam("ScheduleGroup", "sched-test-group")
@@ -528,7 +581,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(28)
+    @Order(29)
     void createScheduleWithDeadLetterConfig() {
         given()
             .contentType("application/json")
@@ -568,7 +621,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(29)
+    @Order(30)
     void createScheduleWithRetryPolicy() {
         given()
             .contentType("application/json")
@@ -608,7 +661,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(30)
+    @Order(31)
     void createScheduleWithStartAndEndDate() {
         given()
             .contentType("application/json")
@@ -646,7 +699,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(31)
+    @Order(32)
     void updateSchedule() {
         given()
             .contentType("application/json")
@@ -682,7 +735,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(32)
+    @Order(33)
     void updateScheduleNotFoundReturns404() {
         given()
             .contentType("application/json")
@@ -700,7 +753,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(33)
+    @Order(34)
     void deleteSchedule() {
         given()
         .when()
@@ -716,7 +769,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(34)
+    @Order(35)
     void deleteScheduleNotFoundReturns404() {
         given()
         .when()
@@ -726,7 +779,7 @@ class SchedulerIntegrationTest {
     }
 
     @Test
-    @Order(35)
+    @Order(36)
     void deleteScheduleInGroup() {
         given()
             .queryParam("groupName", "sched-test-group")
@@ -746,7 +799,7 @@ class SchedulerIntegrationTest {
     // ──────────────────────────── Tag validation tests ────────────────────────────
 
     @Test
-    @Order(36)
+    @Order(37)
     void tagResourceEntryMissingKeyOrValueReturns400() {
         // AWS Tag shape requires both Key and Value; entries with either missing
         // must surface as ValidationException, not be silently dropped.
