@@ -1383,12 +1383,11 @@ public class SesController {
             if (body != null && !body.isBlank()) {
                 requireJsonObject(objectMapper.readTree(body));
             }
-            List<Contact> contacts = sesService.listContacts(contactListName, region);
-            ContactList list = sesService.getContactList(contactListName, region);
+            SesService.ContactsWithList listed = sesService.listContacts(contactListName, region);
             ObjectNode result = objectMapper.createObjectNode();
             ArrayNode arr = result.putArray("Contacts");
-            for (Contact c : contacts) {
-                arr.add(contactJson(c, list, false));
+            for (Contact c : listed.contacts()) {
+                arr.add(contactJson(c, listed.list(), false));
             }
             return Response.ok(result).build();
         } catch (AwsException e) {
@@ -1404,9 +1403,8 @@ public class SesController {
                                @PathParam("contactListName") String contactListName,
                                @PathParam("emailAddress") String emailAddress) {
         String region = regionResolver.resolveRegion(headers);
-        Contact contact = sesService.getContact(contactListName, emailAddress, region);
-        ContactList list = sesService.getContactList(contactListName, region);
-        return Response.ok(contactJson(contact, list, true)).build();
+        SesService.ContactWithList result = sesService.getContact(contactListName, emailAddress, region);
+        return Response.ok(contactJson(result.contact(), result.list(), true)).build();
     }
 
     @PUT

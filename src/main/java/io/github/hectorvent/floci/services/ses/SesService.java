@@ -1537,20 +1537,31 @@ public class SesService {
         return contact;
     }
 
-    public Contact getContact(String listName, String emailAddress, String region) {
-        validateEmailAddress(emailAddress);
-        getContactList(listName, region);
-        return contactStore.get(contactKey(region, listName, emailAddress))
-                .orElseThrow(() -> contactNotFound(emailAddress));
+    // Read operations return the resolved ContactList alongside the contact(s) so the controller
+    // can render TopicDefaultPreferences without a second getContactList round-trip (which would
+    // open a TOCTOU window where a concurrent delete turns a successful read into "List not found").
+    public record ContactWithList(Contact contact, ContactList list) {
     }
 
-    public List<Contact> listContacts(String listName, String region) {
-        getContactList(listName, region);
+    public record ContactsWithList(List<Contact> contacts, ContactList list) {
+    }
+
+    public ContactWithList getContact(String listName, String emailAddress, String region) {
+        validateEmailAddress(emailAddress);
+        ContactList list = getContactList(listName, region);
+        Contact contact = contactStore.get(contactKey(region, listName, emailAddress))
+                .orElseThrow(() -> contactNotFound(emailAddress));
+        return new ContactWithList(contact, list);
+    }
+
+    public ContactsWithList listContacts(String listName, String region) {
+        ContactList list = getContactList(listName, region);
         String prefix = "contact::" + region + "::" + listName + "::";
-        return contactStore.scan(k -> k.startsWith(prefix)).stream()
+        List<Contact> contacts = contactStore.scan(k -> k.startsWith(prefix)).stream()
                 .sorted(Comparator.comparing(Contact::getEmailAddress,
                         Comparator.nullsFirst(Comparator.naturalOrder())))
                 .toList();
+        return new ContactsWithList(contacts, list);
     }
 
     public Contact updateContact(String listName, String emailAddress, List<TopicPreference> topicPreferences,
@@ -1580,11 +1591,12 @@ public class SesService {
 
     public void deleteContact(String listName, String emailAddress, String region) {
         validateEmailAddress(emailAddress);
-        getContactList(listName, region);
         String key = contactKey(region, listName, emailAddress);
-        // Existence check + delete under the lock so this can't race with updateContact's
-        // read-modify-write, which would otherwise put a just-deleted contact back (resurrecting it).
+        // List re-check + existence check + delete under the lock (matching create/update): a
+        // concurrent deleteContactList then surfaces "list not found" rather than "contact not
+        // found", and an updateContact can't put a just-deleted contact back (resurrecting it).
         synchronized (contactMutationLock) {
+            getContactList(listName, region);
             if (contactStore.get(key).isEmpty()) {
                 throw contactNotFound(emailAddress);
             }
