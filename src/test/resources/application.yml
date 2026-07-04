@@ -54,6 +54,8 @@ floci:
         flush-interval-ms: 60000
       tagging:
         flush-interval-ms: 60000
+      elasticbeanstalk:
+        flush-interval-ms: 60000
       cloudfront:
 
   auth:
