@@ -83,9 +83,9 @@ class Ec2IntegrationTest {
     @Test
     @Order(2)
     void describeDefaultSubnets() {
-        // Filter to the default VPC's subnets rather than assuming a default subnet is item[0]:
-        // another test class sharing the in-memory EC2 store may leave subnets in this region, so
-        // an unfiltered list could otherwise flake on ordering.
+        // Assert that default subnets are present rather than relying on position: filtering to
+        // vpc-default still returns any non-default subnet another test created there (e.g.
+        // ElbV2IntegrationTest), which could otherwise land at item[0] and flake this assertion.
         given()
             .formParam("Action", "DescribeSubnets")
             .formParam("Filter.1.Name", "vpc-id")
@@ -96,9 +96,10 @@ class Ec2IntegrationTest {
         .then()
             .statusCode(200)
             .contentType("application/xml")
-            .body("DescribeSubnetsResponse.subnetSet.item.size()", greaterThanOrEqualTo(3))
-            .body("DescribeSubnetsResponse.subnetSet.item[0].defaultForAz", equalTo("true"))
-            .body("DescribeSubnetsResponse.subnetSet.item[0].mapPublicIpOnLaunch", equalTo("true"));
+            .body("DescribeSubnetsResponse.subnetSet.item.findAll { it.defaultForAz == 'true' }.size()",
+                greaterThanOrEqualTo(3))
+            .body("DescribeSubnetsResponse.subnetSet.item.find { it.defaultForAz == 'true' }.mapPublicIpOnLaunch",
+                equalTo("true"));
     }
 
     @Test
