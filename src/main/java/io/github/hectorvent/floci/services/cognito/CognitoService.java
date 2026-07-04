@@ -259,7 +259,7 @@ public class CognitoService {
 
     public UserPool describeUserPool(String id) {
         UserPool pool = poolStore.get(id)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool not found", 400));
         if (ensureJwtSigningKeys(pool)) {
             poolStore.put(id, pool);
         }
@@ -442,9 +442,9 @@ public class CognitoService {
 
     public UserPoolClient describeUserPoolClient(String userPoolId, String clientId) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 404);
+            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
         }
         return client;
     }
@@ -454,7 +454,7 @@ public class CognitoService {
     }
 
     public void deleteUserPoolClient(String clientId) {
-        clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+        clientStore.get(clientId).orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
         clientStore.delete(clientId);
     }
 
@@ -620,18 +620,18 @@ public class CognitoService {
 
     public List<UserPoolClientSecret> listUserPoolClientSecrets(String userPoolId, String clientId) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 404);
+            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
         }
         return client.getUserPoolClientSecrets();
     }
 
     public UserPoolClientSecret addUserPoolClientSecret(String clientId, String clientSecret, String userPoolId) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 404);
+            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
         }
 
         if (client.getUserPoolClientSecrets().size() >= 2) {
@@ -658,16 +658,16 @@ public class CognitoService {
 
     public void deleteUserPoolClientSecret(String clientId, String clientSecretId, String userPoolId) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "User pool client not found", 400));
         if (!client.getUserPoolId().equals(userPoolId)) {
-            throw new AwsException("ResourceNotFoundException", "User pool client not found", 404);
+            throw new AwsException("ResourceNotFoundException", "User pool client not found", 400);
         }
 
         UserPoolClientSecret userPoolClientSecret = client.getUserPoolClientSecrets().stream()
                 .filter(s -> s.getClientSecretId().equals(clientSecretId))
                 .findFirst()
                 .orElseThrow(() -> new AwsException(
-                        "ResourceNotFoundException", "Client secret does not exist", 404));
+                        "ResourceNotFoundException", "Client secret does not exist", 400));
 
         if (client.getUserPoolClientSecrets().size() <= 1) {
             throw new AwsException(
@@ -712,7 +712,7 @@ public class CognitoService {
     public ResourceServer describeResourceServer(String userPoolId, String identifier) {
         describeUserPool(userPoolId);
         return resourceServerStore.get(resourceServerKey(userPoolId, identifier))
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource server not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Resource server not found", 400));
     }
 
     public List<ResourceServer> listResourceServers(String userPoolId) {
@@ -766,6 +766,15 @@ public class CognitoService {
                                        Map<String, String> attributes,
                                        String temporaryPassword,
                                        String messageAction) {
+        return adminCreateUser(userPoolId, username, attributes, temporaryPassword, messageAction, false);
+    }
+
+    public CognitoUser adminCreateUser(String userPoolId,
+                                       String username,
+                                       Map<String, String> attributes,
+                                       String temporaryPassword,
+                                       String messageAction,
+                                       boolean forceAliasCreation) {
         UserPool pool = describeUserPool(userPoolId);
         boolean resend = "RESEND".equalsIgnoreCase(messageAction);
         boolean aliasPool = usesAliasUsernames(pool);
@@ -780,7 +789,7 @@ public class CognitoService {
 
         if (resend) {
             if (existing == null) {
-                throw new AwsException("UserNotFoundException", "User not found", 404);
+                throw new AwsException("UserNotFoundException", "User not found", 400);
             }
             if (!"FORCE_CHANGE_PASSWORD".equals(existing.getUserStatus())) {
                 final String userStateExceptionMessage = """
@@ -795,7 +804,20 @@ public class CognitoService {
         }
 
         if (existing != null) {
-            throw new AwsException("UsernameExistsException", "User already exists", 400);
+            boolean incomingAliasVerified = aliasPool
+                    && "true".equalsIgnoreCase(resolvedAttributes.get(aliasAttribute + "_verified"));
+            if (incomingAliasVerified) {
+                if (!forceAliasCreation) {
+                    throw new AwsException("AliasExistsException",
+                            "An account with the given " + aliasAttribute + " already exists.", 400);
+                }
+                existing.getAttributes().remove(aliasAttribute);
+                existing.getAttributes().put(aliasAttribute + "_verified", "false");
+                existing.setLastModifiedDate(System.currentTimeMillis() / 1000L);
+                userStore.put(userKey(userPoolId, existing.getUsername()), existing);
+            } else {
+                throw new AwsException("UsernameExistsException", "User already exists", 400);
+            }
         }
 
        String canonicalUsername = username;
@@ -1043,7 +1065,7 @@ public class CognitoService {
         validateGroupName(groupName);
         return groupStore.get(groupKey(userPoolId, groupName))
                 .orElseThrow(() -> new AwsException("ResourceNotFoundException",
-                        "Group not found: " + groupName, 404));
+                        "Group not found: " + groupName, 400));
     }
 
     public List<CognitoGroup> listGroups(String userPoolId) {
@@ -1340,7 +1362,7 @@ public class CognitoService {
 
     public Map<String, Object> forgotPassword(String clientId, String username) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         UserPool pool = describeUserPool(client.getUserPoolId());
         ensureVerificationWiring();
@@ -1364,7 +1386,7 @@ public class CognitoService {
 
     public void confirmForgotPassword(String clientId, String username, String confirmationCode, String newPassword) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         CognitoUser user = adminGetUser(client.getUserPoolId(), username);
         ensureVerificationWiring();
         try {
@@ -1435,7 +1457,7 @@ public class CognitoService {
 
     public Map<String, Object> issueClientCredentialsToken(String clientId, String clientSecret, String scope) {
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         UserPool pool = describeUserPool(client.getUserPoolId());
         validateClientAllowsClientCredentials(client);
         validateClientSecret(client, clientSecret);
@@ -1476,7 +1498,7 @@ public class CognitoService {
 
     UserPoolClient findClientById(String clientId) {
         return clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
     }
 
     public Map<String, Object> getTokensFromRefreshToken(String clientId, String refreshToken) {
@@ -1484,7 +1506,7 @@ public class CognitoService {
             throw new AwsException("InvalidParameterException", "RefreshToken is required", 400);
         }
         UserPoolClient client = clientStore.get(clientId)
-                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 404));
+                .orElseThrow(() -> new AwsException("ResourceNotFoundException", "Client not found", 400));
         String[] parts = parseRefreshToken(refreshToken);
         if (parts == null) {
             throw new AwsException("NotAuthorizedException", "Invalid refresh token", 400);
@@ -1555,9 +1577,13 @@ public class CognitoService {
         claims.put("iss", getIssuer(pool.getId()));
         claims.put("exp", now + lifetimeSeconds);
         claims.put("iat", now);
-        claims.put("username", user.getUsername());
-        claims.put("cognito:username", user.getUsername());
-        
+        if ("access".equals(type)) {
+            claims.put("username", user.getUsername());
+            claims.put("scope", "aws.cognito.signin.user.admin");
+        } else if ("id".equals(type)) {
+            claims.put("cognito:username", user.getUsername());
+        }
+
         // Add JWT ID (jti) claim for token revocation support
         String jti = UUID.randomUUID().toString();
         claims.put("jti", jti);
@@ -1576,7 +1602,7 @@ public class CognitoService {
             claims.put("cognito:groups", new ArrayList<>(user.getGroupNames()));
         }
         if ("id".equals(type)) {
-            addUserAttributeClaims(claims, user);
+            addUserAttributeClaims(claims, user, client);
         }
 
         applyClaimsOverride(claims, override, type);
@@ -1584,12 +1610,18 @@ public class CognitoService {
         return signJwt(header, encodeJsonBase64Url(claims), getSigningPrivateKey(pool));
     }
 
-    private static void addUserAttributeClaims(Map<String, Object> claims, CognitoUser user) {
+    private static void addUserAttributeClaims(Map<String, Object> claims, CognitoUser user,
+            UserPoolClient client) {
+        // AWS: "Your user's ID token only contains claims that correspond to the readable
+        // attributes." An unset/empty ReadAttributes list means all attributes are readable.
+        List<String> readable = client == null ? null : client.getReadAttributes();
+        boolean filterByReadable = readable != null && !readable.isEmpty();
         for (Map.Entry<String, String> e : user.getAttributes().entrySet()) {
             String name = e.getKey();
             String value = e.getValue();
             if (name == null || name.isEmpty() || value == null) continue;
             if (claims.containsKey(name)) continue;
+            if (filterByReadable && !isReadableAttribute(name, readable)) continue;
             switch (name) {
                 case "email_verified", "phone_number_verified" -> claims.put(name, Boolean.parseBoolean(value));
                 case "updated_at" -> {
@@ -1602,6 +1634,18 @@ public class CognitoService {
                 default -> claims.put(name, value);
             }
         }
+    }
+
+    private static boolean isReadableAttribute(String name, List<String> readable) {
+        if (readable.contains(name)) {
+            return true;
+        }
+        // The verification flags travel with their base attribute's read permission.
+        return switch (name) {
+            case "email_verified" -> readable.contains("email");
+            case "phone_number_verified" -> readable.contains("phone_number");
+            default -> false;
+        };
     }
 
     private static void applyClaimsOverride(Map<String, Object> claims, ClaimsOverride override, String tokenType) {

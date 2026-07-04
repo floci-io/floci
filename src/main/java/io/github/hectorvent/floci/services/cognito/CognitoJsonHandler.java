@@ -349,7 +349,8 @@ public class CognitoJsonHandler {
                 request.path("Username").asText(),
                 attrs,
                 tempPassword,
-                messageAction
+                messageAction,
+                request.path("ForceAliasCreation").asBoolean(false)
         );
         ObjectNode response = objectMapper.createObjectNode();
         response.set("User", userToNode(user));

@@ -146,15 +146,19 @@ class CognitoAliasUsernameIntegrationTest {
         String accessToken = authResponse.jsonPath().getString("AuthenticationResult.AccessToken");
         String idToken = authResponse.jsonPath().getString("AuthenticationResult.IdToken");
 
+        // AWS token split: access token has `username` (not `cognito:username`, not `email`).
         JsonNode access = decodeJwtPayload(accessToken);
         assertEquals(uuidUsername, access.path("sub").asText());
         assertEquals(uuidUsername, access.path("username").asText());
-        assertEquals(uuidUsername, access.path("cognito:username").asText());
+        assertTrue(access.path("cognito:username").isMissingNode(),
+                "access token must not carry cognito:username (AWS emits it only in the id token)");
         assertTrue(access.path("email").isMissingNode(),
                 "access token must not carry the email claim (AWS emits it only in the id token)");
 
+        // ID token has `cognito:username` and `email` (not `username`).
         JsonNode id = decodeJwtPayload(idToken);
         assertEquals(uuidUsername, id.path("sub").asText());
+        assertEquals(uuidUsername, id.path("cognito:username").asText());
         assertEquals(EMAIL, id.path("email").asText());
     }
 

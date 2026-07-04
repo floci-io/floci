@@ -132,20 +132,35 @@ Floci follows real Cognito semantics for pools created with `UsernameAttributes`
 - `AdminCreateUser`/`SignUp` accept the email (or phone number) as the sign-in value, but the
   **canonical `Username` is an auto-generated, immutable UUID equal to `sub`**. The supplied email is
   stored as a mutable alias attribute.
-- `ListUsers`, `AdminGetUser`, tokens (`sub`/`username`/`cognito:username`) and Lambda trigger
-  `event.userName` all report the **UUID**, never the email. The email appears in the `email`
-  attribute, in the **ID token's** `email` claim (AWS omits user attributes such as `email` from the
-  **access** token), and in `event.request.userAttributes.email`.
+- `ListUsers`, `AdminGetUser` and Lambda trigger `event.userName` all report the **UUID**, never the
+  email; the email lives in the `email` attribute and in `event.request.userAttributes.email`.
 - Sign-in resolves by the **current** email alias **or** the UUID. `SECRET_HASH` is validated against
   the exact `USERNAME` value sent: `Base64(HMAC-SHA256(USERNAME + clientId, clientSecret))`.
 - In `CUSTOM_AUTH` / SRP flows, `ChallengeParameters.USERNAME` echoes the **UUID** (as real AWS does);
   the `RespondToAuthChallenge` `SECRET_HASH` is validated against the `USERNAME` sent that round.
 - `AdminUpdateUserAttributes` can change the email; afterwards sign-in works with the new email and
-  fails with the old one, while `Username`/`sub` stay fixed. A duplicate email is rejected with
-  `UsernameExistsException` (on create) or `AliasExistsException` (on update).
+  fails with the old one, while `Username`/`sub` stay fixed.
+- Duplicate email/phone on `AdminCreateUser`: `UsernameExistsException` when the incoming alias is
+  unverified, `AliasExistsException` when it is verified (`email_verified=true`); pass
+  `ForceAliasCreation=true` to migrate a verified alias off the previous owner. On
+  `AdminUpdateUserAttributes`, changing to an in-use alias throws `AliasExistsException`.
 
 Pools **without** `UsernameAttributes` (classic pools, and pools using `AliasAttributes`) keep the
 literal `Username` you supply, unchanged.
+
+### Token claims
+
+Floci mirrors AWS's access-token / ID-token split:
+
+- **Access token:** `sub`, `username` (the UUID), `scope` (`aws.cognito.signin.user.admin` for API
+  sign-in), `client_id`, `cognito:groups`, `jti`/`origin_jti`. It does **not** carry `cognito:username`
+  or user attributes like `email`.
+- **ID token:** `sub`, `cognito:username`, `aud`, and readable user attributes (`email`,
+  `email_verified`, `phone_number`, `custom:*`, ...). Attribute claims are filtered by the app client's
+  `ReadAttributes` (an unset/empty list means all attributes are readable).
+
+Not-found errors (`ResourceNotFoundException`, `UserNotFoundException`) return HTTP `400`, matching the
+Cognito JSON protocol.
 
 ## Configuration
 

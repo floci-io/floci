@@ -2224,20 +2224,68 @@ class CognitoServiceTest {
     }
 
     @Test
-    void accessTokenOmitsEmailWhileIdTokenIncludesIt() {
+    void accessAndIdTokensSplitClaimsLikeAws() {
         UserPool pool = service.createUserPool(Map.of("PoolName", "ClaimsPool"), "us-east-1");
         UserPoolClient client = service.createUserPoolClient(
                 pool.getId(), "c", false, false, List.of(), List.of());
         CognitoUser user = service.adminCreateUser(pool.getId(), "claims@example.com",
                 new HashMap<>(Map.of("email", "claims@example.com", "email_verified", "true")), null);
 
-        // AWS emits user attributes only in the ID token, never in the access token.
-        assertFalse(jwtPayload(service.generateSignedJwt(user, pool, "access", client, null, null))
-                        .contains("\"email\""),
-                "access token must not carry the email claim (AWS parity)");
-        assertTrue(jwtPayload(service.generateSignedJwt(user, pool, "id", client, null, null))
-                        .contains("\"email\":\"claims@example.com\""),
-                "id token must carry the email claim");
+        String access = jwtPayload(service.generateSignedJwt(user, pool, "access", client, null, null));
+        String id = jwtPayload(service.generateSignedJwt(user, pool, "id", client, null, null));
+
+        // Access token: `username` + reserved scope; no user attributes, no cognito:username.
+        assertTrue(access.contains("\"username\":\"" + user.getUsername() + "\""));
+        assertTrue(access.contains("\"scope\":\"aws.cognito.signin.user.admin\""));
+        assertFalse(access.contains("\"email\""), "access token must not carry email: " + access);
+        assertFalse(access.contains("\"cognito:username\""),
+                "access token must not carry cognito:username: " + access);
+
+        // ID token: `cognito:username` + email; no bare `username`.
+        assertTrue(id.contains("\"cognito:username\":\"" + user.getUsername() + "\""));
+        assertTrue(id.contains("\"email\":\"claims@example.com\""));
+        assertFalse(id.contains("\"username\""), "id token must not carry a bare username claim: " + id);
+    }
+
+    @Test
+    void emailAliasPoolVerifiedDuplicateThrowsAliasExists() {
+        UserPool pool = createEmailAliasPool();
+        service.adminCreateUser(pool.getId(), "dupe@b.com",
+                new HashMap<>(Map.of("email", "dupe@b.com", "email_verified", "true")), null);
+
+        AwsException ex = assertThrows(AwsException.class,
+                () -> service.adminCreateUser(pool.getId(), "dupe@b.com",
+                        new HashMap<>(Map.of("email", "dupe@b.com", "email_verified", "true")), null));
+        assertEquals("AliasExistsException", ex.getErrorCode());
+    }
+
+    @Test
+    void emailAliasPoolForceAliasCreationMigratesVerifiedAlias() {
+        UserPool pool = createEmailAliasPool();
+        CognitoUser first = service.adminCreateUser(pool.getId(), "move@b.com",
+                new HashMap<>(Map.of("email", "move@b.com", "email_verified", "true")), null);
+
+        CognitoUser second = service.adminCreateUser(pool.getId(), "move@b.com",
+                new HashMap<>(Map.of("email", "move@b.com", "email_verified", "true")), null, null, true);
+
+        assertNotEquals(first.getUsername(), second.getUsername());
+        // The alias now resolves to the new user; the previous user lost it.
+        assertEquals(second.getUsername(), service.adminGetUser(pool.getId(), "move@b.com").getUsername());
+        assertNull(service.adminGetUser(pool.getId(), first.getUsername()).getAttributes().get("email"));
+    }
+
+    @Test
+    void idTokenFiltersAttributesByReadAttributes() {
+        UserPool pool = service.createUserPool(Map.of("PoolName", "ReadAttrPool"), "us-east-1");
+        UserPoolClient client = service.createUserPoolClient(
+                pool.getId(), "c", false, false, List.of(), List.of());
+        client.setReadAttributes(List.of("email")); // readable: email only, not name
+        CognitoUser user = service.adminCreateUser(pool.getId(), "reader@example.com",
+                new HashMap<>(Map.of("email", "reader@example.com", "name", "Ada Lovelace")), null);
+
+        String id = jwtPayload(service.generateSignedJwt(user, pool, "id", client, null, null));
+        assertTrue(id.contains("\"email\":\"reader@example.com\""), "readable attribute present: " + id);
+        assertFalse(id.contains("\"name\""), "non-readable attribute must be filtered out: " + id);
     }
 
     private static String jwtPayload(String token) {
