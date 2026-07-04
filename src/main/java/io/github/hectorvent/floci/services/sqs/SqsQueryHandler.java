@@ -35,6 +35,20 @@ public class SqsQueryHandler {
     public Response handle(String action, MultivaluedMap<String, String> params, String region) {
         LOG.debugv("SQS action: {0}", action);
 
+        // Wrap like every other Query handler: without this, AwsExceptions escape to the
+        // global JAX-RS mapper, which renders a JSON error body on this XML protocol.
+        try {
+            return dispatch(action, params, region);
+        } catch (AwsException e) {
+            return AwsQueryResponse.error(e.getErrorCode(), e.getMessage(), AwsNamespaces.SQS, e.getHttpStatus());
+        } catch (Exception e) {
+            LOG.errorv(e, "Unexpected error in SQS {0}", action);
+            return AwsQueryResponse.error("InternalError",
+                    "Unexpected error: " + e.getMessage(), AwsNamespaces.SQS, 500);
+        }
+    }
+
+    private Response dispatch(String action, MultivaluedMap<String, String> params, String region) {
         return switch (action) {
             case "CreateQueue" -> handleCreateQueue(params, region);
             case "DeleteQueue" -> handleDeleteQueue(params, region);
