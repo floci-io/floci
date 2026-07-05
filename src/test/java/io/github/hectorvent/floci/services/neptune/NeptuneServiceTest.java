@@ -92,6 +92,30 @@ class NeptuneServiceTest {
     }
 
     @Test
+    void jvmErrorDuringProvisioningStillRollsBack() {
+        NeptuneContainerHandle handle = new NeptuneContainerHandle("cid", "c", "localhost", 8182);
+        when(containerManager.start(anyString(), anyString(), any(NeptuneDbType.class)))
+                .thenReturn(handle);
+
+        // A JVM Error (not a RuntimeException) escapes provisioning — a catch (RuntimeException)
+        // would miss it, so rollback must run from a finally instead.
+        doThrow(new StackOverflowError("boom"))
+                .when(proxyManager).startProxy(eq("c"), anyInt(), anyString(), anyInt());
+
+        assertThrows(StackOverflowError.class,
+                () -> service.createDbCluster("c", "1.3.2.1", false));
+
+        // Rollback still fired despite the Error: proxy and container stopped, port released.
+        verify(proxyManager).stopProxy("c");
+        verify(containerManager).stopByClusterId("c");
+
+        doNothing().when(proxyManager).startProxy(anyString(), anyInt(), anyString(), anyInt());
+        NeptuneCluster recovered = service.createDbCluster("c2", "1.3.2.1", false);
+        assertEquals(18182, recovered.getProxyPort(),
+                "Port from the failed create must be released even when the failure is an Error");
+    }
+
+    @Test
     void failedContainerStartupCleansUpContainerByIdAndReleasesPort() {
         // containerManager.start(...) throws — this models both a container that never started
         // and (crucially) a readiness timeout, where start() created + registered the container

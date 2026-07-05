@@ -78,6 +78,7 @@ public class NeptuneService {
                 id, String.valueOf(proxyPort), dbType, image);
 
         NeptuneContainerHandle handle = null;
+        boolean provisioned = false;
         try {
             handle = containerManager.start(id, image, dbType);
 
@@ -105,13 +106,20 @@ public class NeptuneService {
             proxyManager.startProxy(id, proxyPort, handle.getHost(), handle.getPort());
 
             clusters.put(id, cluster);
+            provisioned = true;
             LOG.infov("Neptune cluster {0} created ({1}), endpoint={2}:{3}",
                     id, dbType, endpointHost, String.valueOf(proxyPort));
             return cluster;
         } catch (RuntimeException e) {
             LOG.warnv("Neptune cluster {0} provisioning failed, rolling back: {1}", id, e.getMessage());
-            rollbackDbCluster(id, handle, proxyPort);
             throw e;
+        } finally {
+            // Roll back on ANY non-success exit — including a JVM Error, which a
+            // catch (RuntimeException) would miss — so a failed create never leaks the
+            // reserved port or leaves a container behind. Idempotent and a no-op on success.
+            if (!provisioned) {
+                rollbackDbCluster(id, handle, proxyPort);
+            }
         }
     }
 
