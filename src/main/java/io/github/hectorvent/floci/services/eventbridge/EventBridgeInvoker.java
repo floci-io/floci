@@ -7,6 +7,8 @@ import io.github.hectorvent.floci.core.common.AwsArnUtils;
 import io.github.hectorvent.floci.services.batch.BatchService;
 import io.github.hectorvent.floci.services.eventbridge.model.InputTransformer;
 import io.github.hectorvent.floci.services.eventbridge.model.Target;
+import io.github.hectorvent.floci.services.firehose.FirehoseService;
+import io.github.hectorvent.floci.services.firehose.model.Record;
 import io.github.hectorvent.floci.services.lambda.LambdaService;
 import io.github.hectorvent.floci.services.lambda.model.InvocationType;
 import io.github.hectorvent.floci.services.sns.SnsService;
@@ -15,6 +17,7 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.inject.Inject;
 import org.jboss.logging.Logger;
 
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
 
@@ -27,6 +30,7 @@ public class EventBridgeInvoker {
     private final SqsService sqsService;
     private final SnsService snsService;
     private final BatchService batchService;
+    private final FirehoseService firehoseService;
     private final ObjectMapper objectMapper;
     private final String baseUrl;
 
@@ -35,12 +39,14 @@ public class EventBridgeInvoker {
                               SqsService sqsService,
                               SnsService snsService,
                               BatchService batchService,
+                              FirehoseService firehoseService,
                               ObjectMapper objectMapper,
                               EmulatorConfig config) {
         this.lambdaService = lambdaService;
         this.sqsService = sqsService;
         this.snsService = snsService;
         this.batchService = batchService;
+        this.firehoseService = firehoseService;
         this.objectMapper = objectMapper;
         this.baseUrl = config.baseUrl();
     }
@@ -50,7 +56,7 @@ public class EventBridgeInvoker {
                        SnsService snsService,
                        ObjectMapper objectMapper,
                        EmulatorConfig config) {
-        this(lambdaService, sqsService, snsService, null, objectMapper, config);
+        this(lambdaService, sqsService, snsService, null, null, objectMapper, config);
     }
 
     public void invokeTarget(Target target, String eventJson, String region) {
@@ -97,6 +103,19 @@ public class EventBridgeInvoker {
                         targetRegion
                 );
                 LOG.debugv("EventBridge delivered to Batch: {0}", arn);
+            } else if (arn.contains(":firehose:") && arn.contains(":deliverystream/")) {
+                if (firehoseService == null) {
+                    LOG.warnv("EventBridge Firehose target missing Firehose service: {0}", arn);
+                    return;
+                }
+                String streamName = arn.substring(
+                        arn.indexOf(":deliverystream/") + ":deliverystream/".length());
+                // AWS puts the (input-transformed) event JSON as the record Data verbatim,
+                // without appending a newline; the delivery-side NDJSON flush handles separation.
+                Record record = new Record();
+                record.setData(payload.getBytes(StandardCharsets.UTF_8));
+                firehoseService.putRecord(streamName, record);
+                LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
             } else {
                 LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
             }
