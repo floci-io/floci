@@ -420,10 +420,10 @@ public class S3Controller {
             }
             if (v2) {
                 if (continuationToken != null) {
-                    xml.elem("ContinuationToken", maybeEncode(continuationToken, encodingType));
+                    xml.elem("ContinuationToken", continuationToken);
                 }
                 if (result.isTruncated()) {
-                    xml.elem("NextContinuationToken", maybeEncode(result.nextContinuationToken(), encodingType));
+                    xml.elem("NextContinuationToken", result.nextContinuationToken());
                 }
                 if (startAfter != null) {
                     xml.elem("StartAfter", maybeEncode(startAfter, encodingType));
