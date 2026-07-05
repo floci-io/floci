@@ -316,7 +316,7 @@ public class S3Controller {
                 return handleGetBucketVersioning(bucket);
             }
             if (hasQueryParam(uriInfo, "versions")) {
-                return handleListObjectVersions(bucket, prefix, maxKeys, keyMarker);
+                return handleListObjectVersions(bucket, prefix, maxKeys, keyMarker, encodingType);
             }
             if (hasQueryParam(uriInfo, "location")) {
                 return handleGetBucketLocation(bucket);
@@ -394,8 +394,8 @@ public class S3Controller {
                     .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                     .start("ListBucketResult", AwsNamespaces.S3)
                     .elem("Name", bucket)
-                    .elem("Prefix", prefix != null ? prefix : "")
-                    .elem("Delimiter", delimiter)
+                    .elem("Prefix", maybeEncode(prefix != null ? prefix : "", encodingType))
+                    .elem("Delimiter", maybeEncode(delimiter, encodingType))
                     .elem("MaxKeys", max);
             if (v2) {
                 xml.elem("KeyCount", objects.size() + commonPrefixes.size());
@@ -403,7 +403,7 @@ public class S3Controller {
             xml.elem("IsTruncated", result.isTruncated());
             for (S3Object obj : objects) {
                 xml.start("Contents")
-                   .elem("Key", obj.getKey())
+                   .elem("Key", maybeEncode(obj.getKey(), encodingType))
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .elem("ETag", obj.getETag())
                    .elem("Size", obj.getSize())
@@ -412,7 +412,7 @@ public class S3Controller {
             }
             for (String cp : commonPrefixes) {
                 xml.start("CommonPrefixes")
-                   .elem("Prefix", cp)
+                   .elem("Prefix", maybeEncode(cp, encodingType))
                    .end("CommonPrefixes");
             }
             if (encodingType != null) {
@@ -420,18 +420,18 @@ public class S3Controller {
             }
             if (v2) {
                 if (continuationToken != null) {
-                    xml.elem("ContinuationToken", continuationToken);
+                    xml.elem("ContinuationToken", maybeEncode(continuationToken, encodingType));
                 }
                 if (result.isTruncated()) {
-                    xml.elem("NextContinuationToken", result.nextContinuationToken());
+                    xml.elem("NextContinuationToken", maybeEncode(result.nextContinuationToken(), encodingType));
                 }
                 if (startAfter != null) {
-                    xml.elem("StartAfter", startAfter);
+                    xml.elem("StartAfter", maybeEncode(startAfter, encodingType));
                 }
             } else {
-                xml.elem("Marker", marker != null ? marker : "");
+                xml.elem("Marker", maybeEncode(marker != null ? marker : "", encodingType));
                 if (result.isTruncated() && result.nextContinuationToken() != null) {
-                    xml.elem("NextMarker", result.nextContinuationToken());
+                    xml.elem("NextMarker", maybeEncode(result.nextContinuationToken(), encodingType));
                 }
             }
             xml.end("ListBucketResult");
@@ -1152,31 +1152,31 @@ public class S3Controller {
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
     }
 
-    private Response handleListObjectVersions(String bucket, String prefix, Integer maxKeys, String keyMarker) {
+    private Response handleListObjectVersions(String bucket, String prefix, Integer maxKeys, String keyMarker, String encodingType) {
         int max = (maxKeys != null && maxKeys > 0) ? maxKeys : 1000;
         S3Service.ListVersionsResult result = s3Service.listObjectVersions(bucket, prefix, max, keyMarker);
         XmlBuilder xml = new XmlBuilder()
                 .raw("<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
                 .start("ListVersionsResult", AwsNamespaces.S3)
                 .elem("Name", bucket)
-                .elem("Prefix", prefix)
-                .elem("KeyMarker", keyMarker)
+                .elem("Prefix", maybeEncode(prefix, encodingType))
+                .elem("KeyMarker", maybeEncode(keyMarker, encodingType))
                 .elem("MaxKeys", max)
                 .elem("IsTruncated", result.isTruncated());
         if (result.isTruncated()) {
-            xml.elem("NextKeyMarker", result.nextKeyMarker());
+            xml.elem("NextKeyMarker", maybeEncode(result.nextKeyMarker(), encodingType));
         }
         for (S3Object obj : result.versions()) {
             if (obj.isDeleteMarker()) {
                 xml.start("DeleteMarker")
-                   .elem("Key", obj.getKey())
+                   .elem("Key", maybeEncode(obj.getKey(), encodingType))
                    .elem("VersionId", obj.getVersionId())
                    .elem("IsLatest", obj.isLatest())
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
                    .end("DeleteMarker");
             } else {
                 xml.start("Version")
-                   .elem("Key", obj.getKey())
+                   .elem("Key", maybeEncode(obj.getKey(), encodingType))
                    .elem("VersionId", obj.getVersionId() != null ? obj.getVersionId() : "null")
                    .elem("IsLatest", obj.isLatest())
                    .elem("LastModified", ISO_FORMAT.format(obj.getLastModified()))
@@ -1185,6 +1185,9 @@ public class S3Controller {
                    .elem("StorageClass", obj.getStorageClass())
                    .end("Version");
             }
+        }
+        if (encodingType != null) {
+            xml.elem("EncodingType", encodingType);
         }
         xml.end("ListVersionsResult");
         return Response.ok(xml.build()).type(MediaType.APPLICATION_XML).build();
@@ -1723,7 +1726,7 @@ public class S3Controller {
         // URL decode the entire source first, then split
         String decodedSource;
         try {
-            decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
+            decodedSource = URLDecoder.decode(source.replace("+", "%2B"), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
@@ -1784,7 +1787,7 @@ public class S3Controller {
         // URL decode the entire source first, then split.
         String decodedSource;
         try {
-            decodedSource = URLDecoder.decode(source, StandardCharsets.UTF_8);
+            decodedSource = URLDecoder.decode(source.replace("+", "%2B"), StandardCharsets.UTF_8);
         } catch (IllegalArgumentException e) {
             throw new AwsException("InvalidArgument", "Invalid copy source: " + copySource, 400);
         }
@@ -2518,7 +2521,7 @@ public class S3Controller {
             return uriInfo.getPathParameters().getFirst("key");
         }
         String rawKey = rawPath.substring(prefixIndex + bucketPrefix.length());
-        String key = URLDecoder.decode(rawKey, StandardCharsets.UTF_8);
+        String key = URLDecoder.decode(rawKey.replace("+", "%2B"), StandardCharsets.UTF_8);
         validateKeyNoTraversal(key);
         return key;
     }
@@ -2547,7 +2550,7 @@ public class S3Controller {
         String rawPath = queryIndex >= 0 ? rawUri.substring(0, queryIndex) : rawUri;
         String decodedPath;
         try {
-            decodedPath = URLDecoder.decode(rawPath, StandardCharsets.UTF_8);
+            decodedPath = URLDecoder.decode(rawPath.replace("+", "%2B"), StandardCharsets.UTF_8);
         }
         catch (IllegalArgumentException e) {
             throw new AwsException("BadRequest", null, 400);
@@ -2645,5 +2648,18 @@ public class S3Controller {
     }
 
     private record ParsedCopySource(String objectKey, String versionId) {
+    }
+
+    private String maybeEncode(String val, String encodingType) {
+        if (val == null) {
+            return null;
+        }
+        if ("url".equalsIgnoreCase(encodingType)) {
+            return java.net.URLEncoder.encode(val, StandardCharsets.UTF_8)
+                    .replace("+", "%20")
+                    .replace("*", "%2A")
+                    .replace("%7E", "~");
+        }
+        return val;
     }
 }

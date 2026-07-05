@@ -1825,6 +1825,60 @@ class S3IntegrationTest {
     }
 
     @Test
+    @Order(114)
+    void listObjectsV2PreservesPlusCharacter() {
+        String bucket = "plus-test-bucket";
+        given().when().put("/" + bucket).then().statusCode(200);
+        try {
+            // Put object with '+' in key (urlencoded to %2B in PUT request)
+            given()
+                .urlEncodingEnabled(false)
+                .body("data")
+            .when()
+                .put("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log")
+            .then()
+                .statusCode(200);
+
+            // 1. GET/HEAD object using %2B should succeed
+            given()
+                .urlEncodingEnabled(false)
+            .when()
+                .get("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log")
+            .then()
+                .statusCode(200)
+                .body(equalTo("data"));
+
+            // 2. list-objects-v2 without encoding-type should return key with literal '+'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>run_id=2026-06-26T00:00:00+00:00/f.log</Key>"));
+
+            // 3. list-objects-v2 with encoding-type=url should return key with '%2B'
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Key>run_id=2026-06-26T00:00:00%2B00:00/f.log</Key>"));
+
+            // 4. list-objects-v2 with encoding-type=url and prefix/delimiter with '+' should return encoded fields
+            given()
+            .when()
+                .get("/" + bucket + "?list-type=2&encoding-type=url&prefix=run_id=2026-06-26T00:00:00%2B00:00/&delimiter=%2B")
+            .then()
+                .statusCode(200)
+                .body(containsString("<Prefix>run_id=2026-06-26T00:00:00%2B00:00/</Prefix>"))
+                .body(containsString("<Delimiter>%2B</Delimiter>"));
+        } finally {
+            given().urlEncodingEnabled(false).when().delete("/" + bucket + "/run_id=2026-06-26T00:00:00%2B00:00/f.log");
+            given().when().delete("/" + bucket);
+        }
+    }
+
+    @Test
     @Order(113)
     void cleanupPaginationBucket() {
         given().when().delete("/pag-test-bucket/a.txt");
