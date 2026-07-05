@@ -112,9 +112,7 @@ public class EventBridgeInvoker {
                         arn.indexOf(":deliverystream/") + ":deliverystream/".length());
                 // AWS puts the (input-transformed) event JSON as the record Data verbatim,
                 // without appending a newline; the delivery-side NDJSON flush handles separation.
-                Record record = new Record();
-                record.setData(payload.getBytes(StandardCharsets.UTF_8));
-                firehoseService.putRecord(streamName, record);
+                firehoseService.putRecord(streamName, new Record(payload.getBytes(StandardCharsets.UTF_8)));
                 LOG.debugv("EventBridge delivered to Firehose: {0}", arn);
             } else {
                 LOG.warnv("EventBridge: unsupported target ARN type: {0}", arn);
