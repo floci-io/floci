@@ -85,18 +85,7 @@ public class SecretsManagerJsonHandler {
                         .build();
             }
         } else {
-            List<SecretsManagerService.Filter> filters = new ArrayList<>();
-            JsonNode filtersNode = request.path("Filters");
-            if (filtersNode.isArray()) {
-                for (JsonNode f : filtersNode) {
-                    String key = f.path("Key").asText();
-                    List<String> filterValues = new ArrayList<>();
-                    f.path("Values").forEach(v -> filterValues.add(v.asText()));
-                    filters.add(new SecretsManagerService.Filter(key, filterValues));
-                }
-            }
-            List<SecretsManagerService.BatchSecretValue> allFilteredValues = service.batchGetSecretValueByFilters(filters, region);
-
+            // Validate paging inputs before the service scans and filters the whole store.
             int maxResults = request.has("MaxResults") ? request.path("MaxResults").asInt() : 20;
             if (maxResults < 1 || maxResults > 20) {
                 return Response.status(400)
@@ -108,6 +97,9 @@ public class SecretsManagerJsonHandler {
             if (request.has("NextToken")) {
                 try {
                     startIndex = Integer.parseInt(request.path("NextToken").asText());
+                    if (startIndex < 0) {
+                        throw new NumberFormatException("negative NextToken");
+                    }
                 } catch (NumberFormatException e) {
                     return Response.status(400)
                             .entity(new AwsErrorResponse("InvalidNextTokenException", "The NextToken value is invalid."))
@@ -115,7 +107,10 @@ public class SecretsManagerJsonHandler {
                 }
             }
 
-            if (startIndex < 0 || startIndex > allFilteredValues.size()) {
+            List<SecretsManagerService.BatchSecretValue> allFilteredValues =
+                    service.batchGetSecretValueByFilters(parseFilters(request), region);
+
+            if (startIndex > allFilteredValues.size()) {
                 values = List.of();
             } else {
                 int endIndex = Math.min(startIndex + maxResults, allFilteredValues.size());
@@ -327,21 +322,23 @@ public class SecretsManagerJsonHandler {
         return Response.ok(response).build();
     }
 
-    private Response handleListSecrets(JsonNode request, String region) {
+    /** Parses the request's {@code Filters} array, shared by BatchGetSecretValue and ListSecrets. */
+    private List<SecretsManagerService.Filter> parseFilters(JsonNode request) {
         List<SecretsManagerService.Filter> filters = new ArrayList<>();
-        if (request.has("Filters")) {
-            JsonNode filtersNode = request.path("Filters");
-            if (filtersNode.isArray()) {
-                for (JsonNode f : filtersNode) {
-                    String key = f.path("Key").asText();
-                    List<String> filterValues = new ArrayList<>();
-                    f.path("Values").forEach(v -> filterValues.add(v.asText()));
-                    filters.add(new SecretsManagerService.Filter(key, filterValues));
-                }
+        JsonNode filtersNode = request.path("Filters");
+        if (filtersNode.isArray()) {
+            for (JsonNode f : filtersNode) {
+                String key = f.path("Key").asText();
+                List<String> filterValues = new ArrayList<>();
+                f.path("Values").forEach(v -> filterValues.add(v.asText()));
+                filters.add(new SecretsManagerService.Filter(key, filterValues));
             }
         }
+        return filters;
+    }
 
-        List<Secret> secrets = new ArrayList<>(service.listSecrets(region, filters));
+    private Response handleListSecrets(JsonNode request, String region) {
+        List<Secret> secrets = new ArrayList<>(service.listSecrets(region, parseFilters(request)));
         // AWS lists secrets by CreatedDate when SortBy is absent; sort on it (name as a
         // tiebreaker) for AWS-matching, stable pagination across calls.
         secrets.sort(Comparator.comparing(Secret::getCreatedDate, Comparator.nullsLast(Comparator.naturalOrder()))

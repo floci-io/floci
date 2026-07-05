@@ -310,9 +310,6 @@ public class SecretsManagerService {
         List<BatchSecretValue> result = new ArrayList<>();
         List<Secret> allSecrets = listSecrets(region);
         for (Secret secret : allSecrets) {
-            if (secret.getDeletedDate() != null) {
-                continue;
-            }
             if (matchesFilters(secret, filters, region)) {
                 SecretVersion version = findVersionByStage(secret, AWSCURRENT);
                 if (version != null) {

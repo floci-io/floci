@@ -358,6 +358,17 @@ class SecretsManagerJsonHandlerTest {
     }
 
     @Test
+    void batchGetSecretValueRejectsNegativeNextToken() {
+        // A negative offset is an invalid token, not a valid query with no results.
+        ObjectNode filterReq = MAPPER.createObjectNode();
+        filterReq.putArray("Filters").addObject().put("Key", "name").putArray("Values").add("any");
+        filterReq.put("NextToken", "-1");
+        Response response = handler.handle("BatchGetSecretValue", filterReq, REGION);
+        assertThat(response.getStatus(), is(400));
+        assertThat(((AwsErrorResponse) response.getEntity()).type(), containsString("InvalidNextTokenException"));
+    }
+
+    @Test
     void listSecretsWithFilters() {
         ObjectNode createReq1 = MAPPER.createObjectNode();
         createReq1.put("Name", "test-secret-a");
