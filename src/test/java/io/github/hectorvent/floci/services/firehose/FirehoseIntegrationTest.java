@@ -123,4 +123,147 @@ class FirehoseIntegrationTest {
             .statusCode(400)
             .body("__type", equalTo("ResourceNotFoundException"));
     }
+
+    @Test
+    @Order(10)
+    void createDuplicateDeliveryStreamReturnsResourceInUse() {
+        // Create first stream
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"duplicate-stream-test\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200)
+            .body("DeliveryStreamARN", notNullValue());
+
+        // Attempt to create duplicate → should fail with ResourceInUseException
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"duplicate-stream-test\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(409)
+            .body("__type", equalTo("ResourceInUseException"))
+            .body("message", containsString("already exists"));
+
+        // Cleanup
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"duplicate-stream-test\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(200);
+    }
+
+    @Test
+    @Order(11)
+    void deleteNonExistentDeliveryStreamReturnsNotFound() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.DeleteDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"non-existent-stream\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(12)
+    void putRecordToNonExistentStreamReturnsNotFound() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.PutRecord")
+            .body("{ \"DeliveryStreamName\": \"non-existent-stream\", \"Record\": { \"Data\": \"dGVzdA==\" } }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(13)
+    void tagNonExistentStreamReturnsNotFound() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.TagDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"non-existent-stream\", \"Tags\": [ { \"Key\": \"env\", \"Value\": \"test\" } ] }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(14)
+    void listTagsForNonExistentStreamReturnsNotFound() {
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.ListTagsForDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"non-existent-stream\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("ResourceNotFoundException"));
+    }
+
+    @Test
+    @Order(15)
+    void createDeliveryStreamWithInvalidNameReturnsInvalidArgument() {
+        // Test omitted DeliveryStreamName ({})
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{}")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        // Test name with spaces
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"my stream\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        // Test name with invalid character
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"stream$name\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+
+        // Test name too long (65 characters)
+        String longName = "a".repeat(65);
+        given()
+            .contentType("application/x-amz-json-1.1")
+            .header("X-Amz-Target", "Firehose_20150804.CreateDeliveryStream")
+            .body("{ \"DeliveryStreamName\": \"" + longName + "\" }")
+        .when()
+            .post("/")
+        .then()
+            .statusCode(400)
+            .body("__type", equalTo("InvalidArgumentException"));
+    }
 }
+
