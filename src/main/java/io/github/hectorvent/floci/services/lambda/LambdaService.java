@@ -81,6 +81,7 @@ public class LambdaService {
      * emulator workload.
      */
     private final ConcurrentHashMap<String, Object> concurrencyOpLocks = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Object> versionCounterLocks = new ConcurrentHashMap<>();
 
     /**
      * Package-private constructor for testing without CDI. Config defaults
@@ -850,14 +851,18 @@ public class LambdaService {
     // ──────────────────────────── Versions ────────────────────────────
 
     /**
-     * Synchronized get-increment-put: StorageBackedMap has no atomic merge, so the
+     * Locked get-increment-put: StorageBackedMap has no atomic merge, so the
      * sequence must not interleave or concurrent PublishVersion calls could issue
-     * duplicate version numbers.
+     * duplicate version numbers. The lock is per counter key (same pattern as
+     * {@code concurrencyOpLocks}) so publishes of unrelated functions do not
+     * serialize on the instance monitor for the storage round-trip.
      */
-    private synchronized int nextVersionNumber(String counterKey) {
-        int next = versionCounters.getOrDefault(counterKey, 0) + 1;
-        versionCounters.put(counterKey, next);
-        return next;
+    private int nextVersionNumber(String counterKey) {
+        synchronized (versionCounterLocks.computeIfAbsent(counterKey, k -> new Object())) {
+            int next = versionCounters.getOrDefault(counterKey, 0) + 1;
+            versionCounters.put(counterKey, next);
+            return next;
+        }
     }
 
     public LambdaFunction publishVersion(String region, String functionName, String description) {

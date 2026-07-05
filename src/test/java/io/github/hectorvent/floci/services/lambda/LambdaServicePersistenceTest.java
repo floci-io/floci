@@ -2,6 +2,7 @@ package io.github.hectorvent.floci.services.lambda;
 
 import com.fasterxml.jackson.core.type.TypeReference;
 import io.github.hectorvent.floci.core.common.RegionResolver;
+import io.github.hectorvent.floci.core.storage.AccountAwareStorageBackend;
 import io.github.hectorvent.floci.core.storage.InMemoryStorage;
 import io.github.hectorvent.floci.core.storage.StorageBackend;
 import io.github.hectorvent.floci.core.storage.StorageFactory;
@@ -28,6 +29,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 class LambdaServicePersistenceTest {
 
     private static final String REGION = "us-east-1";
+    private static final String ACCOUNT_ID = "000000000000";
 
     @Test
     void publishVersionContinuesNumberingAfterRestart() {
@@ -110,7 +112,10 @@ class LambdaServicePersistenceTest {
         public <V> StorageBackend<String, V> create(String serviceName,
                                                     String fileName,
                                                     TypeReference<Map<String, V>> typeReference) {
-            return (StorageBackend<String, V>) stores.computeIfAbsent(fileName, ignored -> new InMemoryStorage<>());
+            // Wrap like the production factory does so the tests exercise the
+            // account-prefixed key space, not a bare backend.
+            return (StorageBackend<String, V>) stores.computeIfAbsent(fileName,
+                    ignored -> new AccountAwareStorageBackend<V>(new InMemoryStorage<>(), null, ACCOUNT_ID));
         }
     }
 }
